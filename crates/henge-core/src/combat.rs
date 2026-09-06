@@ -36,14 +36,14 @@ impl State {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Intent {
     pub dx: i32,
     pub dy: i32,
     pub attack: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Fighter {
     pub actor: String,
     pub x: i32,

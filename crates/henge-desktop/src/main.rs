@@ -53,9 +53,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 Mode::Combat => {
                     let Some(w) = app.world.as_ref() else { break };
-                    format!("{:>5}  COMBAT  {:<8} player {:<6} hp{:>4}   foe {:<6} hp{:>4}",
-                        t, w.family(), format!("{:?}", w.player.state), w.player.health,
-                        format!("{:?}", w.foe.state), w.foe.health)
+                    let who: Vec<String> = w
+                        .bout
+                        .fighters
+                        .iter()
+                        .map(|f| format!("{:<6}{:>4}", format!("{:?}", f.state), f.health))
+                        .collect();
+                    format!("{:>5}  COMBAT  {:<8} {}", t, w.family(), who.join(" | "))
                 }
             };
             let key = line[7..].to_string();
@@ -171,6 +175,12 @@ fn key_index(c: KeyCode) -> usize {
         KeyCode::BracketLeft => 4,
         KeyCode::BracketRight => 5,
         KeyCode::Space => 6,
+        // Seat two shares the keyboard, which is how this game was played.
+        KeyCode::KeyW => 7,
+        KeyCode::KeyS => 8,
+        KeyCode::KeyA => 9,
+        KeyCode::KeyD => 10,
+        KeyCode::KeyF => 11,
         _ => 255,
     }
 }
@@ -224,8 +234,8 @@ impl App {
             eprintln!("no arena data: {status}");
         } else {
             println!("{status}");
-            println!("arrows travel and fight, space attacks, tab switches map/arena,");
-            println!("[ and ] change arena, R restarts the bout, escape quits");
+            println!("p1 arrows + space, p2 wasd + f, 1/2 set how many are playing,");
+            println!("tab switches map/arena, [ and ] change arena, R restarts, escape quits");
         }
 
         Ok(App {
@@ -249,6 +259,10 @@ impl App {
                     KeyCode::BracketLeft => self.world.as_mut().unwrap().step_arena(-1),
                     KeyCode::BracketRight => self.world.as_mut().unwrap().step_arena(1),
                     KeyCode::KeyR => self.world.as_mut().unwrap().reset(),
+                    // 1 and 2 set how many people are at the keyboard; the rest
+                    // of the four seats are filled by opponents.
+                    KeyCode::Digit1 => self.world.as_mut().unwrap().set_players(1),
+                    KeyCode::Digit2 => self.world.as_mut().unwrap().set_players(2),
                     // Tab flips between the overworld and the arena, which is
                     // how the arena browser stays reachable.
                     KeyCode::Tab => {
@@ -291,10 +305,18 @@ impl App {
             }
             Mode::Combat => {
                 if let Some(w) = self.world.as_mut() {
-                    w.update(Intent { dx, dy, attack: self.keys[6] });
+                    let seats = [
+                        Intent { dx, dy, attack: self.keys[6] },
+                        Intent {
+                            dx: self.keys[10] as i32 - self.keys[9] as i32,
+                            dy: self.keys[8] as i32 - self.keys[7] as i32,
+                            attack: self.keys[11],
+                        },
+                    ];
+                    w.update(&seats);
                     // A finished bout hands control back to the map, or restarts
                     // in place when there is no map to go back to.
-                    if w.over_for > 120 {
+                    if w.settled_for() > 120 {
                         w.reset();
                         if self.map.is_some() {
                             self.mode = Mode::Map;

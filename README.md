@@ -14,9 +14,12 @@ need your own copy of the original, which the engine reads and converts locally.
 - 57 combat arenas across four families, with real terrain, scenery and depth sorting
 - An overworld you travel across, with a day cycle and ambushes
 - Where a fight happens is decided by the terrain you are standing on
-- Knight against knight: movement, committed attacks, positional hit resolution, damage,
-  death
-- 29 tests, all of it verifiable headlessly with no display
+- **Up to four fighters in one arena**, the original's player count, in any mix of
+  people at the keyboard and opponents
+- Movement, committed attacks, positional hit resolution, damage, death
+- A deterministic simulation with a state fingerprint, proven by test to agree tick for
+  tick across independent runs and across a save/restore
+- 35 tests, all of it verifiable headlessly with no display
 
 ## Running it
 
@@ -27,8 +30,10 @@ cargo run --release -p henge-formats --bin henge-bake -- "path/to/Moonstone" pac
 cargo run --release
 ```
 
-Arrows travel and fight, space attacks, tab switches between the overworld and the
-arena, `[` and `]` change arena, `R` restarts the bout, escape quits.
+Player one uses the arrows and space. Player two uses `WASD` and `F`. `1` and `2` set
+how many people are playing; the remaining seats are filled by opponents. Tab switches
+between the overworld and the arena, `[` and `]` change arena, `R` restarts the bout,
+escape quits.
 
 The bake step converts your copy of the game into indexed PNGs, WAVs and JSON. **After
 it runs, the engine reads only PNG, WAV and JSON.** It has no knowledge that the original
@@ -101,6 +106,10 @@ in the actor's own space, and a swing connects when that line crosses the target
   of the swing rather than something bolted on beside it.
 
 All of it is data. Retuning the feel of the game is editing JSON, not editing Rust.
+
+A bout takes **one `Intent` per fighter and cannot tell where they came from**. A
+keyboard, an opponent and a network packet are interchangeable, which is the seam
+networked play plugs into without touching combat. See `docs/ROADMAP.md`.
 
 ## Documentation
 

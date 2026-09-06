@@ -4,10 +4,9 @@ Ordered by what the project is missing most, not by what is easiest.
 
 ## Now
 
-- [ ] **N fighters instead of two.** The arena hardcodes `player` and `foe`. Replace with a
-      `Vec<Fighter>` plus an input source per fighter (local device, AI, or remote).
-      This is the single highest-leverage change in the codebase: it delivers the
-      original's four-player mode *and* it is the exact seam networking plugs into later.
+- [x] **N fighters instead of two.** Done. Combat resolution moved out of the renderer
+      and into `henge-core` as `Bout`, which holds a `Vec<Fighter>` and takes one
+      `Intent` each. Four-player local works; a network peer slots into the same seam.
 - [ ] **Four knight colours.** `KN1`-`KN5` are separate banks, and the original recoloured
       knights per player with a palette remap (`COLOURENKNIGHT` in the symbol table).
 - [ ] **Audio.** All 49 samples are already baked to WAV and sitting unused. Write it behind
@@ -86,7 +85,8 @@ costs nothing today and cannot be retrofitted cheaply.
    input surface. A local keyboard, an AI, and a network packet are interchangeable.
    *Currently true. This is the network seam, and it already exists.*
 4. **All simulation state is serializable.** Needed for joining, resync and rollback
-   snapshots. *Not yet: `Fighter` and `Overworld` need `Serialize`/`Deserialize`.*
+   snapshots. *Done, and tested: a bout serialized, restored and simulated onward keeps
+   agreeing with the original.*
 5. **Randomness is explicit and seeded, never ambient.** `Overworld` already carries its
    own seeded generator. Combat has no randomness at all, and any that gets added must
    come from a seeded stream, not from the system.
@@ -94,16 +94,13 @@ costs nothing today and cannot be retrofitted cheaply.
 6. **The simulation performs no I/O and does no rendering.** `henge-core` depends only on
    serde. It compiles for a server, a browser and a headless test with no changes.
    *Currently true.*
-7. **Actors are a collection, not named fields.** *Not yet. This is the "Now" item above.*
+7. **Actors are a collection, not named fields.** *Done: `Bout` holds a `Vec<Fighter>`.*
 
 ## Order of work
 
-1. `Vec<Fighter>` with pluggable input sources. Four-player local falls out immediately.
-2. Derive `Serialize`/`Deserialize` across all simulation state; add a snapshot test that
-   proves a serialized-then-restored world simulates identically.
-3. A determinism test: run N ticks from a seed on two independent worlds, assert the state
-   hashes match. This is the guard rail that keeps 1 to 7 above honest, and it belongs in
-   CI before any network code exists.
+1. ~~`Vec<Fighter>` with pluggable input sources.~~ Done.
+2. ~~Serialization across simulation state, with a snapshot test.~~ Done.
+3. ~~A determinism test comparing state hashes across independent runs.~~ Done, and in CI.
 4. Local network play for one arena, deterministic lockstep, 2 to 4 players.
 5. Rollback on top of lockstep, once latency becomes the thing that hurts.
 6. The persistent overworld server, which is a separate program that shares `henge-core`

@@ -54,7 +54,7 @@ impl Sequence {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Player {
     pub frame: usize,
     pub ticks_in_frame: u8,

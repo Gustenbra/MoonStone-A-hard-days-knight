@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bounds {
     pub left: i32,
     pub right: i32,
@@ -34,7 +34,7 @@ impl Bounds {
 }
 
 /// One piece of scenery stamped onto the arena.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prop {
     pub sheet: u8,
     pub cell: u8,
