@@ -19,9 +19,11 @@
 //! turns "have we replaced everything yet" from a memory test into a check.
 
 pub mod manifest;
+pub mod recolour;
 pub mod registry;
 
 pub use manifest::{FrameRect, Manifest, Provenance, Sheet};
+pub use recolour::{player_colours, player_luts, Lut};
 pub use registry::{Coverage, Registry, Resolved};
 
 /// A decoded, palette-indexed image. Index 0 is transparent, as it is throughout

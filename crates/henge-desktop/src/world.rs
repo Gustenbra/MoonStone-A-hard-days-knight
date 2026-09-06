@@ -5,7 +5,7 @@
 //! the reference art is replaced by our own.
 
 use crate::framebuffer::Framebuffer;
-use henge_assets::Registry;
+use henge_assets::{player_colours, player_luts, recolour, Lut, Registry};
 use henge_core::arena::Bounds;
 use henge_core::bout::{Bout, HitEvent};
 use henge_core::combat::{simple_ai, Fighter, Intent};
@@ -33,6 +33,12 @@ pub struct World {
     pub control: Vec<Control>,
     /// Hits from the last tick, for whoever wants to play a sound.
     pub events: Vec<HitEvent>,
+    /// One colour substitution per seat, rebuilt when the arena changes because
+    /// each arena brings its own palette.
+    luts: [Lut; 4],
+    lut_arena: Option<usize>,
+    /// A representative colour per seat, for status bars.
+    seat_colours: [u8; 4],
 }
 
 impl World {
@@ -51,6 +57,9 @@ impl World {
             bout: Bout::new(bounds, Vec::new()),
             control: Vec::new(),
             events: Vec::new(),
+            luts: [henge_assets::recolour::IDENTITY; 4],
+            lut_arena: None,
+            seat_colours: [1; 4],
         };
         w.set_players(2);
         Ok(w)
@@ -102,6 +111,11 @@ impl World {
     }
 
     pub fn settled_for(&self) -> u32 { self.bout.settled_for }
+
+    /// How many visibly different knights this arena's palette can support.
+    pub fn distinct_players(&self, palette: &[u32]) -> usize {
+        recolour::max_distinct_players(palette)
+    }
 
     pub fn arena(&self) -> &ArenaData { &self.arenas[&self.order[self.index]] }
     pub fn name(&self) -> &str { &self.order[self.index] }
@@ -157,18 +171,19 @@ impl World {
         self.events = self.bout.step(&def, &intents);
     }
 
-    pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer) -> anyhow::Result<()> {
-        let arena = self.arena();
+    pub fn render(&mut self, reg: &mut Registry, fb: &mut Framebuffer) -> anyhow::Result<()> {
+        let family_name = self.arena().family.clone();
         let family = self
             .families
-            .get(&arena.family)
-            .ok_or_else(|| anyhow::anyhow!("unknown arena family {}", arena.family))?;
+            .get(&family_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown arena family {family_name}"))?;
         let (sheet_id, backdrop_id) = (family.sheet.clone(), family.backdrop.clone());
 
         // The backdrop owns the palette everything else is drawn in, which is how
         // the original recoloured the same creature per region for free.
         if let Some(p) = reg.palette(&format!("palette.{backdrop_id}")).map(|r| r.value.clone()) {
             fb.set_palette(&p);
+            self.refresh_luts(&p);
         }
         match reg.image(&backdrop_id) {
             Ok(img) if img.width == 320 && img.height == 200 => {
@@ -178,9 +193,8 @@ impl World {
         }
 
         enum Item<'a> { Prop(&'a henge_core::arena::Prop), Fighter(usize) }
-        let mut items: Vec<(i32, Item)> = arena
-            .terrain
-            .placements
+        let props: Vec<henge_core::arena::Prop> = self.arena().terrain.placements.clone();
+        let mut items: Vec<(i32, Item)> = props
             .iter()
             .map(|p| (p.y as i32 + CELL_H as i32, Item::Prop(p)))
             .collect();
@@ -217,6 +231,17 @@ impl World {
         fb.blit(&cell, CELL_W, CELL_H, p.x as i32, p.y as i32, false);
     }
 
+    /// Rebuild the seat colours when the arena, and therefore the palette,
+    /// changes. Recomputing every frame would be wasteful and pointless.
+    pub fn refresh_luts(&mut self, palette: &[u32]) {
+        if self.lut_arena == Some(self.index) {
+            return;
+        }
+        self.luts = player_luts(palette);
+        self.seat_colours = player_colours(palette);
+        self.lut_arena = Some(self.index);
+    }
+
     fn draw_fighter(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
         -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
@@ -242,26 +267,30 @@ impl World {
         let ox = if flip { -(rect.ox + w as i32) } else { rect.ox };
         let x = f.x + ox + frame.offset_x as i32;
         let y = f.y + rect.oy + frame.offset_y as i32;
-        fb.blit(&px, w, h, x, y, flip);
-
-        // Four knights in identical armour are impossible to tell apart. The
-        // original recoloured them per player; until that palette remap is
-        // written, a marker above the head does the same job honestly.
-        if f.alive() {
-            let shade = Self::marker_shade(fb, index);
-            fb.rect(f.x - 3, y - 6, 6, 2, shade);
-        }
+        fb.blit_lut(&px, w, h, x, y, flip, &self.luts[index % 4]);
         Ok(())
     }
 
-    /// Pick four shades that are as far apart as this arena's palette allows.
-    /// Arena palettes have no fixed slots, so anything hardcoded turns invisible
-    /// in one region and garish in the next.
-    fn marker_shade(fb: &Framebuffer, index: usize) -> u8 {
-        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        let mut ranked: Vec<usize> = (1..32).collect();
-        ranked.sort_by_key(|i| std::cmp::Reverse(luma(fb.palette[*i])));
-        ranked[(index * ranked.len() / 5).min(ranked.len() - 1)] as u8
+    /// The colour to fill this seat's status bar with: the hue that seat's
+    /// knight wears, taken from the same ranked hues the recolour uses.
+    fn seat_status_shade(&self, index: usize) -> u8 {
+        self.seat_colours[index % 4]
+    }
+
+    /// Whichever palette extreme stands out most against a given colour, so a
+    /// bar is readable whatever the arena and whatever the knight.
+    fn contrast_with(palette: &[u32], colour: u8) -> u8 {
+        let l = |i: usize| palette.get(i).map_or(0i32, |c| {
+            (((c >> 16 & 0xff) * 2 + (c >> 8 & 0xff) * 3 + (c & 0xff)) / 6) as i32
+        });
+        let n = palette.len().min(32);
+        let (mut dark, mut light) = (1usize, 1usize);
+        for i in 1..n {
+            if l(i) < l(dark) { dark = i; }
+            if l(i) > l(light) { light = i; }
+        }
+        let c = l(colour as usize);
+        if (c - l(dark)).abs() >= (c - l(light)).abs() { dark as u8 } else { light as u8 }
     }
 
     /// Arena palettes have no fixed slots, so pick the darkest and brightest
@@ -269,18 +298,16 @@ impl World {
     /// turning pink in one arena and vanishing in the next.
     /// One bar per fighter, each tinted to match the marker above its knight.
     fn draw_health(&self, fb: &mut Framebuffer) {
-        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        let mut dark = 0usize;
-        for i in 1..32 {
-            if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
-        }
+        let palette: Vec<u32> = fb.palette.to_vec();
         let n = self.bout.fighters.len().max(1) as i32;
         let w = (312 / n - 6).clamp(20, 82);
         for (i, f) in self.bout.fighters.iter().enumerate() {
             let x0 = 4 + i as i32 * (w + 6);
+            let fill = self.seat_status_shade(i);
+            let frame = Self::contrast_with(&palette, fill);
             let frac = f.health.max(0) * (w - 4) / f.max_health.max(1);
-            fb.rect(x0, 6, w, 8, dark as u8);
-            fb.rect(x0 + 2, 8, frac, 4, Self::marker_shade(fb, i));
+            fb.rect(x0, 6, w, 8, frame);
+            fb.rect(x0 + 2, 8, frac, 4, fill);
         }
     }
 }

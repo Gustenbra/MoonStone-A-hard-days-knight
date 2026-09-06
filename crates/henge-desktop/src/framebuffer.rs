@@ -42,6 +42,30 @@ impl Framebuffer {
     }
 
     /// Draws an indexed sprite, treating index 0 as transparent.
+    /// Draws a sprite through a colour substitution table, which is how four
+    /// knights in identical armour are told apart without adding a colour.
+    pub fn blit_lut(&mut self, src: &[u8], sw: usize, sh: usize, x: i32, y: i32,
+                    flip: bool, lut: &[u8; 32]) {
+        for sy in 0..sh {
+            let dy = y + sy as i32;
+            if dy < 0 || dy >= SCREEN_H as i32 {
+                continue;
+            }
+            let row = sy * sw;
+            let drow = dy as usize * SCREEN_W;
+            for sx in 0..sw {
+                let dx = if flip { x + (sw - 1 - sx) as i32 } else { x + sx as i32 };
+                if dx < 0 || dx >= SCREEN_W as i32 {
+                    continue;
+                }
+                let v = src[row + sx];
+                if v != 0 {
+                    self.pixels[drow + dx as usize] = lut[(v & 0x1f) as usize];
+                }
+            }
+        }
+    }
+
     pub fn blit(&mut self, src: &[u8], sw: usize, sh: usize, x: i32, y: i32, flip: bool) {
         for sy in 0..sh {
             let dy = y + sy as i32;

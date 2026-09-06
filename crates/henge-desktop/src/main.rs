@@ -356,7 +356,7 @@ impl App {
                 }
             }
         }
-        if let Some(w) = self.world.as_ref() {
+        if let Some(w) = self.world.as_mut() {
             if w.render(&mut self.reg, &mut self.fb).is_ok() {
                 return;
             }

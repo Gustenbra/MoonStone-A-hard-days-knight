@@ -15,11 +15,11 @@ need your own copy of the original, which the engine reads and converts locally.
 - An overworld you travel across, with a day cycle and ambushes
 - Where a fight happens is decided by the terrain you are standing on
 - **Up to four fighters in one arena**, the original's player count, in any mix of
-  people at the keyboard and opponents
+  people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
-- 35 tests, all of it verifiable headlessly with no display
+- 43 tests, all of it verifiable headlessly with no display
 
 ## Running it
 

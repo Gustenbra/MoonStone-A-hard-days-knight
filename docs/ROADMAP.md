@@ -7,10 +7,17 @@ Ordered by what the project is missing most, not by what is easiest.
 - [x] **N fighters instead of two.** Done. Combat resolution moved out of the renderer
       and into `henge-core` as `Bout`, which holds a `Vec<Fighter>` and takes one
       `Intent` each. Four-player local works; a network peer slots into the same seam.
-- [ ] **Four knight colours.** `KN1`-`KN5` are separate banks, and the original recoloured
-      knights per player with a palette remap (`COLOURENKNIGHT` in the symbol table).
+- [x] **Four knight colours.** Done, by palette substitution rather than by using the
+      separate banks. Arena palettes are fixed at 32 entries, so a recolour has to be a
+      substitution within the colours already present: preserve luminance, move hue, and
+      never touch greys, which carry the armour and the ground shadows. Status bars are
+      drawn from the same ranked hues, so a bar cannot drift from its knight.
+      *Limitation: a palette supports as many knights as it has hue groups. Three of the
+      four arena families have six; the glade has four, two of them thin, so its fourth
+      knight is washed out.*
 - [ ] **Audio.** All 49 samples are already baked to WAV and sitting unused. Write it behind
-      a trait from the start: native on desktop, Web Audio in a browser build.
+      a trait from the start: native on desktop, Web Audio in a browser build. `Bout::step`
+      already returns the hits that landed, so the hook it needs exists.
 - [ ] **Text.** `BOLD.F` and `SMALL.FON` decode, but the character lookup table lives in
       `MAIN.EXE` and is not recovered, so glyph order is unknown. Either recover it or map
       it by eye.
