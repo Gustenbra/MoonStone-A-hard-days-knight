@@ -1,0 +1,74 @@
+//! On-disk content types. These mirror what the baker writes and what our own
+//! content will eventually be authored as, so the game reads one shape either way.
+
+use crate::anim::Sequence;
+use crate::arena::{Bounds, Prop};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TerrainData {
+    pub left: u16,
+    pub right: u16,
+    pub bottom: u16,
+    pub top: u16,
+    pub placements: Vec<Prop>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ArenaData {
+    pub family: String,
+    pub terrain: TerrainData,
+}
+
+impl ArenaData {
+    pub fn bounds(&self) -> Bounds {
+        Bounds {
+            left: self.terrain.left as i32,
+            right: self.terrain.right as i32,
+            top: self.terrain.top as i32,
+            bottom: self.terrain.bottom as i32,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Family {
+    /// Asset id of the scenery sheet cells are cut from.
+    pub sheet: String,
+    /// Asset id of the full-screen backdrop.
+    pub backdrop: String,
+}
+
+pub type Arenas = BTreeMap<String, ArenaData>;
+pub type Families = BTreeMap<String, Family>;
+
+/// Everything the simulation needs to know about one kind of fighter. All of it
+/// is data, so retuning the feel of the game is editing JSON, not editing Rust.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ActorDef {
+    /// Asset id of the sprite sheet this actor's frames index into.
+    pub sheet: String,
+    pub health: i32,
+    /// Pixels per tick. Arenas are far wider than they are deep, so horizontal
+    /// movement is faster and vertical movement reads as depth.
+    pub speed_x: i32,
+    pub speed_y: i32,
+    /// How far a strike lands, used by the opponent to judge spacing.
+    pub reach: i32,
+    /// How closely depth must line up before a strike can connect.
+    pub depth_tolerance: i32,
+    pub attack_cooldown: i32,
+    /// Body box relative to the feet: [x_min, y_min, x_max, y_max], y upward.
+    pub body: [i16; 4],
+    pub sequences: BTreeMap<String, Sequence>,
+}
+
+impl ActorDef {
+    pub fn sequence(&self, name: &str) -> Option<&Sequence> {
+        self.sequences.get(name)
+    }
+}
+
+pub type Actors = BTreeMap<String, ActorDef>;
+pub type ActorData = Actors;

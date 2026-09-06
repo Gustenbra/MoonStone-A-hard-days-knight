@@ -1,0 +1,9 @@
+[package]
+name = "henge-core"
+description = "Game simulation. No rendering, no platform, no original-game assets."
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

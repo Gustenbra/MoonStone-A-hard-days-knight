@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # The simulation has no platform dependencies, so it must build and pass on
+      # every target. If this ever needs an OS-specific fix, something has leaked
+      # into henge-core that does not belong there.
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo fmt --all -- --check
+        if: matrix.os == 'ubuntu-latest'
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: henge-windows
+            bin: target/release/henge.exe
+          - os: ubuntu-latest
+            artifact: henge-linux
+            bin: target/release/henge
+          - os: macos-latest
+            artifact: henge-macos
+            bin: target/release/henge
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bin }}

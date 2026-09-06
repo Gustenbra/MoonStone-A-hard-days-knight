@@ -1,0 +1,4 @@
+# Every change needs the owner's review. Combined with branch protection on main
+# (require a pull request, require review, require CI to pass), nothing lands
+# without approval.
+*       @Fjord3D

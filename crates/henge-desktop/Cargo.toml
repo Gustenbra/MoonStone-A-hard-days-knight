@@ -1,0 +1,25 @@
+[package]
+name = "henge-desktop"
+description = "Desktop shell: window, input, and a palette-indexed software framebuffer."
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "henge"
+path = "src/main.rs"
+
+[features]
+default = []
+# Opt-in developer mode for studying the original game's data. Off by default so
+# that a release build cannot contain original assets even by accident.
+research = ["dep:henge-formats"]
+
+[dependencies]
+henge-core = { path = "../henge-core" }
+henge-assets = { path = "../henge-assets" }
+henge-formats = { path = "../henge-formats", optional = true }
+anyhow = "1"
+winit = "0.29"
+softbuffer = "0.4"
+png = "0.17"

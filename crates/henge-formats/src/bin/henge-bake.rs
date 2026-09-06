@@ -1,0 +1,334 @@
+//! Bakes the original 1991 game into a *reference pack*: ordinary indexed PNGs,
+//! WAV files and a manifest.
+//!
+//! This is the seam that makes incremental replacement work. After baking, the
+//! game engine only ever reads PNG, WAV and JSON. It has no idea the original
+//! formats exist. Replacing a character therefore means dropping new PNGs into
+//! the `original` pack, not touching a line of code.
+//!
+//! The pack it writes is marked `derived-from-original`, so a release build
+//! refuses to start while anything still resolves to it.
+//!
+//!   henge-bake <game-data-dir> <packs-dir>/reference
+
+use anyhow::Context;
+use henge_assets::{FrameRect, Manifest, Provenance, Sheet};
+use henge_formats::{piv, voc, Collide, Library, Sprite};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+/// Sprite banks grouped into the actors they actually belong to.
+const ACTORS: &[(&str, &[&str])] = &[
+    ("knight", &["KN1.OB", "KN2.OB", "KN3.OB", "KN4.OB", "KN5.OB"]),
+    ("hero", &["HE1.OB", "HE2.OB", "HE3.OB"]),
+    ("troll", &["TROLL1.CEL", "TROLL2.CEL"]),
+    ("trogg_axe", &["TROGGAX1.CEL", "TROGGAX2.CEL"]),
+    ("trogg_spear", &["TROGGSP1.CEL", "TROGGSP2.CEL"]),
+    ("ratmen", &["RATMEN1.CEL", "RATMEN2.CEL"]),
+    ("mudmen", &["MUDMEN1.CEL", "MUDMEN2.CEL"]),
+    ("demon", &["DEMON1.CEL", "DEMON2.CEL", "DEMON3.CEL", "DEMON4.CEL"]),
+    ("dragon", &["DRAGON1.CEL", "DRAGON2.CEL", "DRAGON5.CEL"]),
+    ("balok", &["BALOK1.CEL", "BALOK2.CEL", "BALOK3.CEL"]),
+    ("gore", &["BLO.CEL"]),
+];
+
+/// Arena families, each with its scenery sheet and full-screen backdrop.
+const ARENAS: &[(&str, &str, &str)] = &[
+    ("waste", "WA1.CMP", "WAB1.CMP"),
+    ("forest", "FO1.CMP", "FOB1.CMP"),
+    ("swamp", "SW1.CMP", "SWB1.CMP"),
+    ("glade", "FO2.CMP", "GLB1.CMP"),
+];
+
+fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    let src = args.next().unwrap_or_else(|| ".".into());
+    let out = args.next().unwrap_or_else(|| "packs/reference".into());
+    let out = Path::new(&out);
+
+    let lib = Library::open(&src).context("opening the original game data")?;
+    fs::create_dir_all(out.join("sheets"))?;
+    fs::create_dir_all(out.join("sounds"))?;
+
+    let mut m = Manifest::new("reference", Provenance::DerivedFromOriginal);
+
+    // Palettes, named after the arena family that owns them.
+    for (name, sheet, _) in ARENAS {
+        if let Ok(p) = lib.piv(sheet) {
+            m.palettes.insert(format!("palette.{name}"), p.palette);
+        }
+    }
+    let fallback = m
+        .palettes
+        .values()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| (0..32).map(|i: u32| (i * 8) << 16 | (i * 8) << 8 | i * 8).collect());
+
+    // One sheet per actor, all its banks packed together in bank order.
+    for (actor, banks) in ACTORS {
+        let mut frames: Vec<Sprite> = Vec::new();
+        for b in *banks {
+            if let Ok(c) = lib.cel(b) {
+                frames.extend(c.images);
+            }
+        }
+        if frames.is_empty() {
+            continue;
+        }
+        let id = format!("actor.{actor}");
+        let file = format!("sheets/{actor}.png");
+        let sheet = pack_sheet(&frames);
+        write_indexed(&out.join(&file), sheet.width, sheet.height, &sheet.pixels, &fallback)?;
+        m.sheets.insert(id, Sheet { file, frames: sheet.rects });
+    }
+
+    // Everything else that is a sprite bank, so nothing is silently dropped.
+    // The .C files (BE1, WI1, HEN1, MI) are banks too, in the same format.
+    let claimed: Vec<String> = ACTORS
+        .iter()
+        .flat_map(|(_, banks)| banks.iter().map(|b| b.to_string()))
+        .collect();
+    for name in lib.with_extension(&["cel", "ob", "c", "f", "fon"]) {
+        if claimed.contains(&name) {
+            continue;
+        }
+        let Ok(c) = lib.cel(&name) else { continue };
+        if c.images.is_empty() {
+            continue;
+        }
+        let stem = name.split('.').next().unwrap_or(&name).to_lowercase();
+        let file = format!("sheets/bank_{stem}.png");
+        let sheet = pack_sheet(&c.images);
+        write_indexed(&out.join(&file), sheet.width, sheet.height, &sheet.pixels, &fallback)?;
+        m.sheets.insert(format!("bank.{stem}"), Sheet { file, frames: sheet.rects });
+    }
+
+    // Full-screen images: towns, the map, intro art. .P files are PIVs too.
+    for name in lib.with_extension(&["piv", "cmp", "p"]) {
+        if let Ok(p) = lib.piv(&name) {
+            let stem = name.split('.').next().unwrap_or(&name).to_lowercase();
+            let file = format!("sheets/scene_{stem}.png");
+            write_indexed(&out.join(&file), piv::W, piv::H, &p.pixels, &p.palette)?;
+            m.sheets.insert(
+                format!("scene.{stem}"),
+                Sheet {
+                    file,
+                    frames: vec![FrameRect {
+                        x: 0, y: 0, w: piv::W as u32, h: piv::H as u32, ox: 0, oy: 0,
+                    }],
+                },
+            );
+            m.palettes.insert(format!("palette.scene.{stem}"), p.palette);
+        }
+    }
+
+    // Samples, converted to plain WAV so the engine never learns about VOC.
+    let mut sounds = 0;
+    for name in lib.names() {
+        let Ok(bytes) = lib.bytes(&name) else { continue };
+        if bytes.len() < 20 || &bytes[..19] != b"Creative Voice File" {
+            continue;
+        }
+        match voc::parse(&bytes) {
+            Ok(s) => {
+                let stem = name.split('.').next().unwrap_or(&name).to_lowercase();
+                let file = format!("sounds/{stem}.wav");
+                fs::write(out.join(&file), s.to_wav())?;
+                m.sounds.insert(format!("sfx.{stem}"), file);
+                sounds += 1;
+            }
+            Err(e) => eprintln!("  {name}: {e}"),
+        }
+    }
+
+    // Arena layouts, keyed by the family whose sheets they draw from.
+    fs::create_dir_all(out.join("data"))?;
+    let mut arenas = BTreeMap::new();
+    for name in lib.with_extension(&["t"]) {
+        let Ok(t) = lib.terrain(&name) else { continue };
+        // The F09/SW9 stubs carry garbage bounds and no usable placements.
+        let sane = t.left < t.right
+            && t.top < t.bottom
+            && t.right < 640
+            && t.bottom < 400;
+        if t.placements.is_empty() || !sane {
+            continue;
+        }
+        let stem = name.split('.').next().unwrap_or(&name).to_lowercase();
+        let family = ARENAS
+            .iter()
+            .find(|(f, _, _)| stem.starts_with(&f[..2]))
+            .map(|(f, _, _)| *f)
+            .unwrap_or("forest");
+        arenas.insert(stem, serde_json::json!({ "family": family, "terrain": t }));
+    }
+    fs::write(out.join("data/arenas.json"), serde_json::to_string(&arenas)?)?;
+    m.data.insert("data.arenas".into(), "data/arenas.json".into());
+
+    if let Ok(bytes) = lib.bytes("COLLIDE.HIT") {
+        let c = Collide::parse(&bytes)?;
+        fs::write(out.join("data/hitlines.json"), serde_json::to_string(&c)?)?;
+        m.data.insert("data.hitlines".into(), "data/hitlines.json".into());
+    }
+
+    // Which sheets each arena family draws from.
+    let families: BTreeMap<&str, serde_json::Value> = ARENAS
+        .iter()
+        .map(|(name, sheet, backdrop)| {
+            let key = |f: &str| format!("scene.{}", f.split('.').next().unwrap_or(f).to_lowercase());
+            (*name, serde_json::json!({ "sheet": key(sheet), "backdrop": key(backdrop) }))
+        })
+        .collect();
+    fs::write(out.join("data/families.json"), serde_json::to_string(&families)?)?;
+    m.data.insert("data.families".into(), "data/families.json".into());
+
+    fs::write(out.join("data/actors.json"), actor_definitions())?;
+    m.data.insert("data.actors".into(), "data/actors.json".into());
+
+    fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&m)?)?;
+    println!(
+        "baked {} sheets, {} sounds, {} palettes, {} data blobs into {}",
+        m.sheets.len(), sounds, m.palettes.len(), m.data.len(), out.display()
+    );
+    println!("marked derived-from-original: a release build will refuse to ship it.");
+    Ok(())
+}
+
+struct Packed {
+    width: usize,
+    height: usize,
+    pixels: Vec<u8>,
+    rects: Vec<FrameRect>,
+}
+
+/// Row packing: simple, stable, and the frame order stays the bank order, which
+/// matters because the animation tables index into it.
+fn pack_sheet(frames: &[Sprite]) -> Packed {
+    const MAX_W: usize = 1024;
+    const GAP: usize = 1;
+
+    let mut rects = Vec::with_capacity(frames.len());
+    let (mut x, mut y, mut row_h, mut width) = (0usize, 0usize, 0usize, 0usize);
+    for f in frames {
+        let (w, h) = (f.real_width.max(1), f.height.max(1));
+        if x + w > MAX_W && x > 0 {
+            x = 0;
+            y += row_h + GAP;
+            row_h = 0;
+        }
+        rects.push(FrameRect {
+            x: x as u32, y: y as u32, w: w as u32, h: h as u32,
+            // Anchor at the bottom centre: this game positions everything by feet.
+            ox: -((w / 2) as i32), oy: -(h as i32),
+        });
+        x += w + GAP;
+        row_h = row_h.max(h);
+        width = width.max(x);
+    }
+    let height = y + row_h;
+    let width = width.max(1);
+    let height = height.max(1);
+
+    let mut pixels = vec![0u8; width * height];
+    for (f, r) in frames.iter().zip(&rects) {
+        for row in 0..r.h as usize {
+            for col in 0..r.w as usize {
+                let v = f.pixels[row * f.width + col];
+                pixels[(r.y as usize + row) * width + r.x as usize + col] = v;
+            }
+        }
+    }
+    Packed { width, height, pixels, rects }
+}
+
+fn write_indexed(
+    path: &Path, w: usize, h: usize, pixels: &[u8], palette: &[u32],
+) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let file = fs::File::create(path)?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    enc.set_color(png::ColorType::Indexed);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut pal = Vec::with_capacity(palette.len() * 3);
+    for c in palette {
+        pal.extend_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, *c as u8]);
+    }
+    enc.set_palette(pal);
+    let mut alpha = vec![255u8; palette.len()];
+    if !alpha.is_empty() {
+        alpha[0] = 0;
+    }
+    enc.set_trns(alpha);
+    enc.write_header()?.write_image_data(pixels)?;
+    Ok(())
+}
+
+/// Animation and combat definitions for the knight, authored by reading the
+/// sprite bank frame by frame.
+///
+/// These are not recovered from the original. `MAIN.EXE` runs animations as
+/// scripts on a small task VM, and characters are composed of several sprite
+/// parts per frame, so the original's tables cannot be lifted without decoding
+/// that VM. Every number here was chosen by looking at the frames and by feel,
+/// which is what our own artwork will need anyway.
+///
+/// Frame indices only mean anything against the reference sheet, so this lands
+/// in the reference pack and is marked derived along with everything else in it.
+///
+/// Hit lines are in the actor's own space: x forward, y up from the feet.
+fn actor_definitions() -> String {
+    // KN1.OB, read off the bank:
+    //   10..17  an eight frame walk cycle, side on
+    //   34      guard, sword held across the body
+    //   43      the raise, striding in with the arm up
+    //   41      the downswing
+    //   40      the follow through
+    //   35      recoiling
+    //   49, 46, 48, 45  the death collapse
+    serde_json::json!({
+        "knight": {
+            "sheet": "actor.knight",
+            "health": 100,
+            "speed_x": 2,
+            "speed_y": 1,
+            "reach": 38,
+            "depth_tolerance": 6,
+            "attack_cooldown": 45,
+            "body": [-9, 0, 9, 50],
+            "sequences": {
+                "idle": { "name": "idle", "end": "Loop", "frames": [
+                    { "sprite": 10, "ticks": 10 }
+                ]},
+                "walk": { "name": "walk", "end": "Loop", "frames": [
+                    { "sprite": 10, "ticks": 4 }, { "sprite": 11, "ticks": 4 },
+                    { "sprite": 12, "ticks": 4 }, { "sprite": 13, "ticks": 4 },
+                    { "sprite": 14, "ticks": 4 }, { "sprite": 15, "ticks": 4 },
+                    { "sprite": 16, "ticks": 4 }, { "sprite": 17, "ticks": 4 }
+                ]},
+                // The swing carries the fighter forward through its own dx, so
+                // spacing is decided when you commit rather than while you swing.
+                "attack": { "name": "attack", "end": "HoldLast", "frames": [
+                    { "sprite": 34, "ticks": 4 },
+                    { "sprite": 43, "ticks": 3, "dx": 2 },
+                    { "sprite": 41, "ticks": 3, "dx": 3,
+                      "hit": [[14, 46], [34, 34], [40, 20]] },
+                    { "sprite": 40, "ticks": 4,
+                      "hit": [[16, 30], [38, 22], [44, 12]] },
+                    { "sprite": 34, "ticks": 6 }
+                ]},
+                "hurt": { "name": "hurt", "end": "HoldLast", "frames": [
+                    { "sprite": 35, "ticks": 10 }
+                ]},
+                "death": { "name": "death", "end": "HoldLast", "frames": [
+                    { "sprite": 49, "ticks": 4 }, { "sprite": 46, "ticks": 4 },
+                    { "sprite": 48, "ticks": 5 }, { "sprite": 45, "ticks": 200 }
+                ]}
+            }
+        }
+    })
+    .to_string()
+}
