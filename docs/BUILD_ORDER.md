@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 22 done, 55 remaining.**
+**77 items. 25 done, 52 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -43,23 +43,30 @@ The engine and a vertical slice. Roughly a quarter of the game.
 Research, not construction. **Could take a day or a month**; nothing makes that
 predictable. Everything in phases 2 and 4 waits on these.
 
-Item 20 turned out to be a negative result: the thing it asked for does not exist in the
-file. That is worth as much as a build, because it stops the next person spending days on
-it, and it forced 21 onto a route that can actually work.
+Item 20 was recorded as settled and negative. **It was wrong**, and 21 is what proved it:
+the search had been run against an image that was still packed, because `MAIN.EXE` is
+packed twice and the unpacker peeled only the outer layer. Peel both and the symbol table
+is plainly there. The correction is written up in `REVERSING.md`; it is left in the record
+rather than quietly deleted, because the failure mode is worth passing on.
 
-- [x] 20. ~~Reverse the debug info's symbol record format~~ **Settled: there is none.**
-      The appended region is fully accounted for as 488 bytes of padding, one 37,752-byte
-      line-number table, and 184 bytes of module records plus the name strings. No table
-      maps a name to an address, at any stride, anywhere in the file. Ruled out: names by
-      byte offset, names by index, records positioned before the strings, per-module symbol
-      counts, and a global scan for any run of 334 plausible offset/segment pairs
-- [ ] 21. Recover addresses the other way: **names are in link order, and so is the code.**
-      Find function entry points inside each module's known code range by disassembling,
-      then match the Nth entry point to the Nth name for that module. Cross-check against
-      the line table, which already maps line numbers to offsets, and against known string
-      references (file names, prompts) to anchor specific functions
-- [ ] 22. Locate the animation interpreter, using `_TASK.ASM`'s known code range
-- [ ] 23. Recover the task VM opcode set and operand widths
+That unblocked 22 almost for free, and most of the phase with it.
+
+- [x] 20. ~~Settled: there is no symbol address table~~ **Wrong; see 21.** The search was
+      sound but it was run against the EXEPACK'd image, where the table sits inside
+      RLE-compressed bytes and reads as loose name strings with junk between them
+- [x] 21. **Recovered: 2,223 symbols with addresses.** `MAIN.EXE` is PKLITE outside and
+      Microsoft EXEPACK inside; `tools/symbolmap.py` peels both and parses the eleven
+      per-module blocks of the TASM symbol table. Code addresses take a seven-step monotone
+      correction, derived and applied by the tool. 1,778 of the 2,223 corroborate
+      independently: code symbols by landing on called branch targets, data symbols by
+      being referenced from code, and several by content, with `CelFile1` pointing at
+      `KN1.OB` and `map` at `MAP.CMP`
+- [x] 22. **Located: `PerformCOMMAND` at 0x97fb**, `PerformLOOP` at 0x97f2. Confirmed by
+      disassembly as a bytecode fetch-and-dispatch loop, not by name alone. The command
+      table it indexes is `TaskComTable`, and the code's `mov bx, 0x9448` matches that
+      symbol's address exactly
+- [ ] 23. Recover the task VM opcode set and operand widths, by reading out
+      `TaskComTable` and disassembling each handler it points at
 - [ ] 24. Recover the per-frame sprite-part record. **Verify by compositing and looking**:
       if it does not make a coherent figure it is not decoded, however plausible it looks
 - [ ] 25. Write the VM in `henge-core` as a deterministic interpreter, integers only

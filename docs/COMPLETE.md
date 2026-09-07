@@ -5,10 +5,14 @@
 
 An exhaustive plan for a complete Rust reimplementation.
 
-This is built around the **334 symbols left in the original executable's debug info**, which
-is the closest thing to a definitive list of what the game actually does. Every symbol
-below is a real function or variable from the original build. Anything not covered by a
-symbol is marked as such, so you can tell recovered fact from design decision.
+This is built around the symbols left in the original executable's debug info, which is the
+closest thing to a definitive list of what the game actually does. Every symbol below is a
+real function or variable from the original build. Anything not covered by a symbol is
+marked as such, so you can tell recovered fact from design decision.
+
+The plan was originally written against the 334 `PUBLIC` names, which are all that is
+visible without unpacking the executable twice. **There are 2,223 symbols with addresses**
+(section 1.2), so the coverage below understates what is now recoverable.
 
 **Status key**
 
@@ -30,7 +34,7 @@ quest, the bestiary and every economy.
 Two things gate large parts of everything else. Nothing in sections 4, 6 or 7 can finish
 until these do.
 
-## 1.1 The animation task VM `blocked`
+## 1.1 The animation task VM `partial`
 
 The original runs animations as **bytecode on a small virtual machine**, and composes each
 character from **several sprite parts per frame**. 39 symbols implement it:
@@ -53,9 +57,15 @@ hooks. It is a small language, and the whole game's feel lives in it.
 
 **Steps**
 
-- [ ] Locate the interpreter in the unpacked image. `_TASK.ASM`'s code range is already
-      known from the module table, which narrows the search enormously
-- [ ] Recover the opcode set: one byte or word per operation, with operand widths
+- [x] **Locate the interpreter.** `PerformCOMMAND` at image offset 0x97fb, loop head
+      `PerformLOOP` at 0x97f2, inside `_TASK`'s range 993d-a385. Confirmed by disassembly
+      as a byte-at-a-time fetch and dispatch, not by name: `di` is the task record,
+      `[di+2]` the script pointer, 0xff ends, 0xfd and 0xfe reload the pointer from the
+      actor record, an op with bit 0x80 set calls through `TaskComTable`, and anything
+      else selects a bank with `op & 0x1f` and reads a frame record. The `mov bx, 0x9448`
+      that indexes the table matches the `TaskComTable` symbol address exactly
+- [ ] Recover the opcode set: one byte per operation, with operand widths. `TaskComTable`
+      at DS:0x9448 is a table of handler pointers; read it out and disassemble each
 - [ ] Recover the per-frame part record. Data is around `0x0e000`; the shape looks like a
       header, six-byte records, terminator, but the field meanings are wrong somewhere.
       **Test by compositing and looking**: if it does not produce a coherent figure, it is
@@ -66,37 +76,40 @@ hooks. It is a small language, and the whole game's feel lives in it.
 
 **Unlocks**: all eight creatures, correct combat timing, shadows, gore, correct sorting.
 
-## 1.2 Symbol name to address mapping `partial`
+## 1.2 Symbol name to address mapping `done`
 
-**The debug info contains no symbol address table.** This was tested rather than assumed.
-The appended region is fully accounted for:
+**2,223 symbols, with addresses, recovered by `tools/symbolmap.py`.**
 
-| Range | Size | Contents |
-|---|---|---|
-| 78294-78782 | 488 | padding |
-| 78782-116534 | 37752 | line-number table, 4-byte records |
-| 116542-116726 | 184 | module records, then the name strings |
+`MAIN.EXE` is packed twice: PKLITE outside, Microsoft EXEPACK inside. The tool runs both
+decompression stubs under emulation and writes the true 178,224-byte load image, then
+parses the eleven per-module blocks of the TASM symbol table it contains:
 
-Ruled out, each by a direct check: names referenced by byte offset into the string table;
-names referenced by index; records positioned immediately before the strings at any stride
-from 2 to 20 for both 334 and 345 entries; the trailing 8-byte records as per-module symbol
-counts (they sum to 171, not 334 or 345); and a global scan of the whole region for any run
-of 334 records whose fields look like an offset and a segment.
+```
+[u8 reclen][u8 kind][payload][u8 namelen][name]
 
-Two earlier "matches" were false positives worth recording, because they will fool the next
-person too: a stride-16 read of the line table makes fields 4, 8 and 12 all look like
-ascending code offsets at once, because the underlying structure is stride 4.
+kind 0x05   u16 offset, u16 segment, u16 type    data      addr = seg*16 + off, DGROUP 0x123b
+kind 0x0b   u16 offset, u8 0                     code      addr = image offset
+```
 
-**So addresses have to come from somewhere else.** The viable route:
+Code offsets take a seven-step monotone correction between 0 and -473, which the tool
+derives from branch targets rather than assuming. 1,778 of the 2,223 corroborate
+independently: code symbols by landing on a called branch target, data symbols by being
+referenced from code, and several by content (`CelFile1` at `KN1.OB`, `BloodFile` at
+`BLO.CEL`, `map` at `MAP.CMP`, `Enemy1Name` at `SIR BANNER`). The eleven code ranges come
+out contiguous and in link order.
 
-- [ ] Names are in link order and code is laid out in link order. Find function entry points
-      within each module's known code range by disassembling, then match the Nth entry point
-      to the Nth name belonging to that module
-- [ ] Anchor and cross-check using the line table, which already maps line numbers to code
-      offsets, and using string references such as the data file names and the disk prompts
+### This section previously said the opposite, and was wrong
 
-**What we already have without it**: the module table gives each of the eleven source
-modules an exact code range, which is most of what 1.1 needed this for.
+It recorded that no address table existed, with a table of the appended region fully
+accounted for and a list of everything ruled out. That search was real and honestly
+reported. It was also run **against the EXEPACK'd image**, where the symbol table sits
+inside RLE-compressed bytes and reads as loose name strings with junk between them. The
+error is kept in the record rather than deleted: a negative result about file structure is
+only as good as your confidence that you are looking at the file. `REVERSING.md` has the
+full account.
+
+The 327 `PUBLIC` names live in a separate appended blob and still carry no addresses. They
+are not needed; the 2,223 that do carry addresses already cover the code.
 
 ---
 
@@ -391,8 +404,8 @@ mostly recoverable only by playing the original or by design.
 Dependency order, not preference.
 
 **First, because everything waits on it**
-1. Symbol map (1.2)
-2. Animation task VM (1.1)
+1. ~~Symbol map (1.2)~~ **done**, 2,223 symbols with addresses
+2. Animation task VM (1.1), now interpreter-located and down to the opcode table
 
 **Then, in parallel**
 3. Creatures (3.2), which 1.1 unlocks all at once
