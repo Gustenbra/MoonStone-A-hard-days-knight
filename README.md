@@ -49,7 +49,27 @@ need your own copy of the original, which the engine reads and converts locally.
 
 ## Running it
 
-Two commands, once:
+You need [Rust](https://rustup.rs) and your own copy of the original game's data
+files. Put the folder holding `KN1.OB`, `MAP.CMP` and the rest next to this one, so
+that both sit side by side, then:
+
+```
+play.bat                 Windows
+./play.sh                Linux and macOS
+```
+
+That reads the original files once, builds, and starts the game. If your copy of the
+original lives somewhere else, say where:
+
+```
+play.bat --data "C:\path\to\Moonstone"
+./play.sh --data /path/to/Moonstone
+```
+
+Pass `--rebake` after changing anything about how the data is read. Anything else you
+pass goes straight to the game, so `play.bat --start select` opens on character select.
+
+The long way, if you would rather drive it yourself:
 
 ```sh
 cargo run --release -p henge-formats --bin henge-bake -- "path/to/Moonstone" packs/reference
