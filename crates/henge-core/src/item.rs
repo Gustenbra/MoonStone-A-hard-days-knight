@@ -23,21 +23,47 @@ use std::collections::BTreeMap;
 
 /// What using an item does.
 ///
-/// A closed set, and deliberately small. The original's `DRINKPOTIONHEAL` is
-/// the one virtue we can name with confidence, so it is the one that is real;
-/// everything else a merchant might stock is [`Virtue::Inert`] until the system
-/// that gives it meaning exists. An inert item is honest: it is carried, it is
-/// worth coin, and using it says so.
+/// A closed set. `_STATUS` owns the original's magic: a knight's magic record
+/// (`+0x44` on his record) is a row of byte counts indexed by slot, and
+/// `MagicCast` (image `0xcab6`) is a chain of `cmp bx, slot` on that index,
+/// so what each of the ten magic items does is read off the code rather than
+/// invented. `MagicName` (DS:`0xe38d`) pairs each slot with its name:
 ///
-/// Two of these are worn rather than used. `CalcDamage` adds a weapon's own
-/// number to every swing, and the routine at 0x28d adds an armour's to the
-/// health a knight can carry, so both are properties of the thing and belong
-/// beside its price. Using one does nothing: you are already wearing it.
+/// ```text
+/// slot 0x00  Potion of healing      health to full, or a life point       Restore
+/// slot 0x02  Gem of seeing          fly the map and come back             Sight
+/// slot 0x04  Sword of Sharpness     held: weapon 0x19, +5 a swing         Weapon
+/// slot 0x06  Ring of protection     worn: +20 health a ring               Ward
+/// slot 0x08  Talisman of the Wyrm   halves the dragon's fire, floor 5     Inert here
+/// slot 0x0a  Scroll of Haste        doubles the day's travel              Haste
+/// slot 0x0c  Scroll of the Hawk     fly; 16 in 128 it strands you         Sight
+/// slot 0x0e  Scroll of Aquisition   take a thing off another knight       Seize
+/// slot 0x10  Scroll of the Wyrm     sets the dragon on a rival            Inert here
+/// slot 0x12  Scroll of Protection   turns a challenger away, or backfires Protection
+/// ```
+///
+/// Three of these are worn or held rather than used. `CalcDamage` adds a
+/// weapon's own number to every swing, the routine at 0x28d adds an armour's
+/// to the health a knight can carry and twenty for every ring in the record,
+/// so all three are properties of the thing and belong beside its price.
+/// Using a worn thing puts it on.
+///
+/// The two marked inert are recovered and not built: `TalismanWrym` (image
+/// `0x43f4`) shifts the dragon's fire right once per talisman held and floors
+/// it at five, and the Scroll of the Wyrm sets `WyrmFLAG` and opens the
+/// knight picker so `KnightWyrm` can send the dragon after the chosen rival.
+/// Both need a dragon that flies, which is item 36's, so they are carried,
+/// worth coin, and say so when used.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "does", rename_all = "kebab-case")]
 pub enum Virtue {
-    /// Mends wounds on the spot, up to your full health.
+    /// Mends wounds on the spot, by a fixed amount, up to your full health.
+    /// Ours: the henge flask, which predates the recovered potion below.
     Heal { health: i32 },
+    /// The original's potion, from the routine at image `0xcad0`: health is
+    /// set to its maximum, and a man who is already whole gains a life point
+    /// instead, `inc byte [si+0x31]`, capped at five.
+    Restore,
     /// Held. What it adds to a swing, from `CalcDamage`: nothing for a long
     /// sword, two for a broad sword, three for a claymore, five for the sword of
     /// sharpness.
@@ -45,8 +71,40 @@ pub enum Virtue {
     /// Worn. What it adds to the health a knight can carry and to their stride,
     /// from the two derivation routines in `MOON`.
     Armour { health: i32, stride: i32 },
-    /// Carried and worth something, but it does nothing yet.
+    /// Worn, and it stacks: the routine at 0x28d does `ax = [magic+6]; mul 20`
+    /// and adds it into the maximum, so every ring carried is worth twenty
+    /// more health.
+    Ward { health: i32 },
+    /// Cast. `CastHaste` sets one flag and `_MAP:DistanceDONE` doubles the
+    /// day's step budget while it is up. It falls when the day turns.
+    Haste,
+    /// Cast or used. Fly the map from where you stand. The gem (`MagicCast`
+    /// slot 2) saves the position and sets the gem flag, and the flight ends
+    /// back where it began; the hawk (slot 0xc) rolls first, and on 16 of the
+    /// generator's 128 outcomes drops the knight at a random spot instead
+    /// (`(rnd & 0xff) + 0x20, (rnd & 0x7f) + 0x24`, image `0xa98a`).
+    /// `astray` is that count out of 128: zero for the gem, sixteen for the
+    /// hawk. `returns` is whether the flight ends where it began.
+    Sight { astray: u32, returns: bool },
+    /// Cast. `HGTakeMagic` moves one thing from another knight's record to
+    /// yours. There is one knight on this map, so it is carried, understood,
+    /// and has nobody to rob.
+    Seize,
+    /// Cast. A ward against the next challenge. `MOON:KnightProtection` asks
+    /// the challenged knight to cast it and, unless the cast backfired, the
+    /// fight is skipped; `MagicCast` slot 0x12 rolls and on 11 of 128
+    /// outcomes sets the backfire flag, which `ControlKnight` reads to reverse
+    /// the caster's joystick for that bout. `backfire` is that count.
+    Protection { backfire: u32 },
+    /// Carried and worth something, but it does nothing here.
     Inert,
+}
+
+impl Virtue {
+    /// Is this something you wear or hold rather than something you spend?
+    pub fn worn(&self) -> bool {
+        matches!(self, Virtue::Weapon { .. } | Virtue::Armour { .. } | Virtue::Ward { .. })
+    }
 }
 
 /// An item as it is authored in the pack.
@@ -62,6 +120,33 @@ pub struct ItemDef {
     /// Whether using it uses it up. A flask is emptied; a key is not.
     #[serde(default)]
     pub consumed: bool,
+}
+
+impl ItemDef {
+    /// The menu line for using this item, in the shape the original's status
+    /// screen gives its own (`st1`..`st9`): `Cast scroll of Haste`, `Cast
+    /// scroll of Protection`, with the scroll's own capital lowered after the
+    /// verb. Seven of the nine come out letter for letter; the original's
+    /// `Drink Healing potion` and `Use Gem of Seeing` are worded differently
+    /// from their item names, and the name is kept here rather than a second
+    /// string carried for two lines.
+    pub fn action_line(&self) -> String {
+        let verb = match &self.virtue {
+            Virtue::Heal { .. } | Virtue::Restore => "Drink",
+            Virtue::Weapon { .. } => "Wield",
+            Virtue::Armour { .. } | Virtue::Ward { .. } => "Wear",
+            Virtue::Sight { returns: true, .. } => "Use",
+            Virtue::Sight { .. } | Virtue::Haste | Virtue::Seize | Virtue::Protection { .. } => {
+                "Cast"
+            }
+            Virtue::Inert => "Use",
+        };
+        let mut name = self.name.clone();
+        if name.starts_with("Scroll") {
+            name.replace_range(0..1, "s");
+        }
+        format!("{verb} {name}")
+    }
 }
 
 /// Every item the packs declare, keyed by id. A `BTreeMap` so iteration order
@@ -281,6 +366,50 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<ItemDef>(&json).unwrap(), p);
         assert!(json.contains("\"does\":\"heal\""), "virtues are tagged in the data");
+    }
+
+    /// The original's own menu lines, `st5` and `st9`, come out of the name
+    /// and the virtue; what is worn is put on rather than spent.
+    #[test]
+    fn the_line_that_uses_a_thing_is_the_status_screens_own() {
+        let scroll = |name: &str, virtue| ItemDef {
+            name: name.into(),
+            price: 0,
+            virtue,
+            consumed: true,
+        };
+        assert_eq!(scroll("Scroll of Haste", Virtue::Haste).action_line(), "Cast scroll of Haste");
+        assert_eq!(
+            scroll("Scroll of Protection", Virtue::Protection { backfire: 11 }).action_line(),
+            "Cast scroll of Protection"
+        );
+        assert_eq!(
+            scroll("Scroll of the Hawk", Virtue::Sight { astray: 16, returns: false }).action_line(),
+            "Cast scroll of the Hawk"
+        );
+        assert_eq!(
+            scroll("Gem of seeing", Virtue::Sight { astray: 0, returns: true }).action_line(),
+            "Use Gem of seeing"
+        );
+        assert_eq!(scroll("Ring of protection", Virtue::Ward { health: 20 }).action_line(), "Wear Ring of protection");
+        assert!(Virtue::Ward { health: 20 }.worn());
+        assert!(!Virtue::Haste.worn());
+    }
+
+    #[test]
+    fn every_virtue_survives_serialization_under_its_own_tag() {
+        for (v, tag) in [
+            (Virtue::Restore, "restore"),
+            (Virtue::Ward { health: 20 }, "ward"),
+            (Virtue::Haste, "haste"),
+            (Virtue::Sight { astray: 16, returns: false }, "sight"),
+            (Virtue::Seize, "seize"),
+            (Virtue::Protection { backfire: 11 }, "protection"),
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            assert!(json.contains(&format!("\"does\":\"{tag}\"")), "{json}");
+            assert_eq!(serde_json::from_str::<Virtue>(&json).unwrap(), v);
+        }
     }
 
     #[test]

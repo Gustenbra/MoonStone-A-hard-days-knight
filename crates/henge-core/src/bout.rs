@@ -206,18 +206,23 @@ impl Bout {
         self.step_with(|_| def, intents)
     }
 
-    /// What one fighter's blow of one kind takes off: the fighter's own
-    /// figure, or the bout's where the actor leaves it at zero, scaled by
-    /// the attack's `*Dam` entry against the default attack's. The knight's
-    /// chop is doubled by `CalcDamage` and his rear thrust is half a swing;
-    /// what `CalcDamage` adds for strength and the sword is item 40's.
+    /// What one fighter's blow of one kind takes off: `CalcDamage`.
+    ///
+    /// The `*Dam` entry for the kind, which is the fighter's own figure, or
+    /// the bout's where the actor leaves it at zero, scaled by the attack's
+    /// entry against the default attack's; then the sheet's bonus, strength
+    /// and the sword, which `CalcDamage` adds before it doubles a chop. The
+    /// table already carries the chop doubled, so here the doubling is
+    /// applied to the bonus: `(4 + 1) * 2` comes out as `8 + 1 * 2`.
     fn blow(&self, attacker: usize, def: &ActorDef, attack: Attack) -> i32 {
-        let base = match self.fighters[attacker].damage {
+        let f = &self.fighters[attacker];
+        let base = match f.damage {
             0 => self.damage,
             d => d,
         };
         let (num, den) = def.blow_ratio(attack);
-        (base * num / den).max(1)
+        let bonus = if attack == Attack::Chop { f.bonus * 2 } else { f.bonus };
+        (base * num / den + bonus).max(1)
     }
 
     /// `KnifeThrow`: one dagger off the thrower, and a task of its own on
@@ -393,7 +398,10 @@ impl Bout {
             let attacker = blow.attacker;
             let a_def = def_of(&self.fighters[attacker].actor);
             let damage = blow.attack.map_or_else(
-                || match self.fighters[attacker].damage { 0 => self.damage, d => d },
+                || {
+                    let f = &self.fighters[attacker];
+                    (match f.damage { 0 => self.damage, d => d }) + f.bonus
+                },
                 |a| self.blow(attacker, a_def, a),
             );
             let mut connected = false;
@@ -543,6 +551,8 @@ impl Bout {
             }
             mix(f.evaded as i64);
             mix(f.restart as i64);
+            mix(f.bonus as i64);
+            mix(f.cursed as i64);
             mix(f.player.frame as i64);
             mix(f.player.ticks_in_frame as i64);
             mix(f.player.finished as i64);
@@ -893,6 +903,78 @@ mod depth {
         }
         let kinds: Vec<&str> = log.iter().map(|(_, k)| *k).collect();
         assert_eq!(kinds, ["evaded", "hit", "evaded"], "{log:?}");
+    }
+
+    /// `CalcDamage` in a bout: the swing's table entry plus the sheet's
+    /// strength and sword, and a chop doubled after the additions. At the
+    /// original's scale a starting knight's swing is `4 + 1`, his chop
+    /// `(4 + 1) * 2`; here the same with a bonus of three: seven, and
+    /// fourteen, against the chop table's `8 + 3 * 2`.
+    #[test]
+    fn strength_and_the_sword_are_added_to_every_blow_and_a_chop_doubles_them() {
+        let d = depth_def();
+        let land = |bonus: i32, attack: Intent| {
+            let mut b = pair(&d);
+            b.damage = 4;
+            b.fighters[0].bonus = bonus;
+            let mut dealt = None;
+            for _ in 0..8 {
+                let hits = b.step(&d, &[attack, Intent::default()]);
+                if let Some(h) = hits.first() {
+                    dealt = Some(h.damage);
+                    break;
+                }
+            }
+            dealt.expect("the blow landed")
+        };
+        let chop = Intent { dx: 0, dy: -1, attack: true };
+        assert_eq!(land(0, swing()), 4, "the table alone");
+        assert_eq!(land(1, swing()), 5, "a new knight: four and his strength of one");
+        assert_eq!(land(3, swing()), 7);
+        assert_eq!(land(0, chop), 8, "the chop is twice the swing");
+        assert_eq!(land(1, chop), 10, "(4 + 1) * 2, as CalcDamage doubles after adding");
+        assert_eq!(land(3, chop), 14);
+    }
+
+    /// Two bouts that differ only in a sheet's strength differ in their
+    /// fingerprint, so the sheet is part of what two machines agree on.
+    #[test]
+    fn the_bonus_is_part_of_the_fingerprint() {
+        let d = depth_def();
+        let (mut a, mut b) = (pair(&d), pair(&d));
+        b.fighters[0].bonus = 2;
+        assert_ne!(a.state_hash(), b.state_hash());
+        a.fighters[0].bonus = 2;
+        assert_eq!(a.state_hash(), b.state_hash());
+        b.fighters[1].cursed = true;
+        assert_ne!(a.state_hash(), b.state_hash());
+    }
+
+    /// `ControlKnight` on the cursed knight: left is right and up is down,
+    /// and fire is fire. A cursed knight told to walk away walks in; told
+    /// to block, back and down, he lunges, forward and down reversed.
+    #[test]
+    fn a_cursed_knights_joystick_is_reversed() {
+        let d = depth_def();
+        let mut b = pair(&d);
+        b.fighters[1].cursed = true;
+        let away = Intent { dx: 1, dy: 0, attack: false };
+        let before = b.fighters[1].x;
+        b.step(&d, &[Intent::default(), away]);
+        assert!(b.fighters[1].x < before, "told right, went left");
+        assert_eq!(b.fighters[1].facing, -1);
+
+        // Forward and up with fire is the up thrust; reversed it is back and
+        // down, the block.
+        let mut b = pair(&d);
+        b.fighters[1].cursed = true;
+        let up_thrust = Intent { dx: b.fighters[1].facing, dy: -1, attack: true };
+        b.step(&d, &[Intent::default(), up_thrust]);
+        assert_eq!(b.fighters[1].attack, Some(Attack::Block), "forward and up came out back and down");
+        assert_eq!(b.fighters[1].state, State::Guard);
+        let mut sound = pair(&d);
+        sound.step(&d, &[Intent::default(), up_thrust]);
+        assert_ne!(sound.fighters[1].state, State::Guard, "an uncursed knight does not");
     }
 
     /// The thrown dagger: `KnifeThrow` takes one off the belt and spawns a

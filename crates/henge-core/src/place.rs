@@ -15,8 +15,10 @@
 //! which it asks for is authored in the pack rather than decided here.
 
 use crate::item::{Items, Purchase};
+use crate::lair::Raid;
 use crate::overworld::{TOKEN_H, TOKEN_W};
 use crate::run::{Run, Used};
+use crate::service::{Gift, Rite, Sale, Wager};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -62,6 +64,26 @@ pub enum Effect {
     /// square. The place it names is normally `hidden`, so it exists only as
     /// somewhere you are already standing can send you.
     Go { place: String },
+    /// The tavern's table: a stake on three dice. `_TAVERN`, and the five
+    /// painted bets of `TAV.PIV`. The throw is shown in `room`, the dice
+    /// screen, which is a hidden place whose one option leads back.
+    Wager { stake: u32, room: String },
+    /// A donation to the town healer, `HEA.PIV`: ten mends, fifteen buys a
+    /// life point, and the pot is his whatever it bought.
+    Donate { gold: u32 },
+    /// A donation to the mystic, `MYS.PIV`: a point of an ability given or
+    /// taken, on a roll the size of the donation shifts.
+    Consult { gold: u32 },
+    /// Sell something to the temple for half its price.
+    Sell { item: String },
+    /// Ring the bell at the wizard's tower and take what Math gives.
+    Wizard,
+    /// Stand in the stone circle: the moonstone of the night ends the quest,
+    /// and short of that an offering buys a life point and a mending.
+    Offer,
+    /// Walk into a lair. The guardian is fought in the lair's own arena, and
+    /// its floor is yours once it is down. `lair` indexes the run's table.
+    Raid { lair: usize, arena: String, family: String, guardian: String, count: u32 },
     /// On the sign, not built yet. The game admits it rather than pretending.
     Closed { said: String },
     /// Back out onto the map.
@@ -87,7 +109,14 @@ impl Effect {
                 .get(item)
                 .is_some_and(|d| run.gold >= d.price && run.kit.room() > 0),
             Effect::Use { item, .. } => run.kit.count(item) > 0,
-            Effect::Go { .. } | Effect::Leave => true,
+            Effect::Wager { stake, .. } => run.gold >= *stake,
+            Effect::Donate { gold } | Effect::Consult { gold } => run.gold >= *gold,
+            Effect::Sell { item } => run.kit.count(item) > 0,
+            Effect::Go { .. }
+            | Effect::Wizard
+            | Effect::Offer
+            | Effect::Raid { .. }
+            | Effect::Leave => true,
         }
     }
 
@@ -97,6 +126,10 @@ impl Effect {
         match self {
             Effect::Buy { item, .. } => items.get(item).map(|d| d.price),
             Effect::Heal { gold, .. } if *gold > 0 => Some(*gold),
+            Effect::Wager { stake, .. } => Some(*stake),
+            Effect::Donate { gold } | Effect::Consult { gold } => Some(*gold),
+            // `GoldSell`: `shr ax, 1` on the price.
+            Effect::Sell { item } => items.get(item).map(|d| d.price / 2),
             _ => None,
         }
     }
@@ -140,6 +173,15 @@ pub struct PlaceDef {
     /// walking can never stumble into it.
     #[serde(default)]
     pub hidden: bool,
+    /// What the place says before anything is chosen: the wizard's bell, the
+    /// healer's greeting. Empty for a place that waits to be asked.
+    #[serde(default)]
+    pub intro: String,
+    /// The `MI.C` frame the map draws for this place, if the map draws one
+    /// at all: the towns and the stones are painted into `MAP.CMP`, a lair
+    /// is `DisplayLairs` blitting frame 0x14 wherever the table puts it.
+    #[serde(default)]
+    pub icon: Option<usize>,
 }
 
 impl PlaceDef {
@@ -221,6 +263,10 @@ pub struct Visit {
     pub cursor: usize,
     /// The last thing that happened here, for the renderer to show.
     pub said: String,
+    /// The last throw of the dice, faces zero based, for the dice screen to
+    /// draw from `DICE.CEL`. Carried through the door into that screen.
+    #[serde(default)]
+    pub dice: Option<[u8; 3]>,
 }
 
 /// What a choice did.
@@ -232,11 +278,25 @@ pub enum Answer {
     Went { place: String },
     /// Out onto the map.
     Left,
+    /// A guardian is waiting. The caller sets the bout up in `arena` with
+    /// `count` of `guardian` and comes back to `lair` with the outcome.
+    Fight { lair: usize, arena: String, family: String, guardian: String, count: u32 },
 }
 
 impl Visit {
     pub fn open(place: &str) -> Visit {
-        Visit { place: place.to_string(), cursor: 0, said: String::new() }
+        Visit { place: place.to_string(), cursor: 0, said: String::new(), dice: None }
+    }
+
+    /// Open, with what the place says on the way in.
+    pub fn open_at(place: &str, def: &PlaceDef) -> Visit {
+        Visit { said: def.intro.clone(), ..Visit::open(place) }
+    }
+
+    /// Step through a door, keeping what was just said and thrown: the dice
+    /// screen shows the throw the tavern made.
+    pub fn through(&self, place: &str) -> Visit {
+        Visit { place: place.to_string(), cursor: 0, said: self.said.clone(), dice: self.dice }
     }
 
     /// Move the highlight, wrapping. A menu this short reads better as a ring
@@ -306,7 +366,90 @@ impl Visit {
                 };
                 Answer::Stayed { days: 0 }
             }
+            Effect::Wager { stake, room } => match run.throw_dice(*stake) {
+                Wager::Threw(t) => {
+                    self.dice = Some(t.dice);
+                    self.said = t.describe(run.gold);
+                    Answer::Went { place: room.clone() }
+                }
+                Wager::TooPoor => {
+                    self.said = "Your purse will not cover that.".into();
+                    Answer::Stayed { days: 0 }
+                }
+                // `TavernOpenScene` turns an empty purse out of the door.
+                Wager::Skint => {
+                    self.said = "No coin, no game. Out.".into();
+                    Answer::Left
+                }
+            },
+            Effect::Donate { gold } => {
+                self.said = match run.donate_to_healer(*gold) {
+                    Some(healing) => healing.describe().to_string(),
+                    None => "Your purse will not stretch to that.".into(),
+                };
+                Answer::Stayed { days: 0 }
+            }
+            Effect::Consult { gold } => {
+                self.said = run.consult_the_mystic(*gold, items).describe().to_string();
+                Answer::Stayed { days: 0 }
+            }
+            Effect::Sell { item } => {
+                self.said = match run.sell_to_temple(item, items) {
+                    Sale::Sold { paid } => format!("The temple gives you {paid} gold for it."),
+                    Sale::HaveNone => "You have none to sell.".into(),
+                    Sale::NotWanted => "The temple has no use for that.".into(),
+                    Sale::Unknown => format!("No {item} here."),
+                };
+                Answer::Stayed { days: 0 }
+            }
+            Effect::Wizard => {
+                let n = run.day;
+                let gift = run.visit_the_wizard(items);
+                let mut said = gift.speech(n).to_string();
+                let after = gift.aftermath(items);
+                if !after.is_empty() {
+                    said.push(' ');
+                    said.push_str(&after);
+                }
+                if gift == Gift::Nothing {
+                    said = Gift::Nothing.speech(0).to_string();
+                }
+                self.said = said;
+                Answer::Stayed { days: 0 }
+            }
+            Effect::Offer => {
+                let rite = run.rite_at_the_stones(None, items);
+                self.said = rite.describe(items);
+                if matches!(rite, Rite::Won(_)) {
+                    return Answer::Left;
+                }
+                Answer::Stayed { days: 0 }
+            }
+            Effect::Raid { lair, arena, family, guardian, count } => match run.raid(*lair, items) {
+                Raid::Guardian => Answer::Fight {
+                    lair: *lair,
+                    arena: arena.clone(),
+                    family: family.clone(),
+                    guardian: guardian.clone(),
+                    count: *count,
+                },
+                Raid::Spoils(s) => {
+                    self.said = s.describe(items);
+                    Answer::Stayed { days: 0 }
+                }
+                Raid::Bare => {
+                    self.said = "Nothing but bones.".into();
+                    Answer::Stayed { days: 0 }
+                }
+            },
         }
+    }
+
+    /// The guardian is down and the floor is yours: what to say about it, and
+    /// the lair marked. The desktop calls this on the way back from the bout.
+    pub fn won_lair(&mut self, lair: usize, items: &Items, run: &mut Run) {
+        let spoils = run.lair_won(lair, items);
+        self.said = format!("The guardian is slain. {}", spoils.describe(items));
     }
 }
 
@@ -338,6 +481,8 @@ mod tests {
             w: 10,
             h: 10,
             hidden: false,
+            intro: String::new(),
+            icon: None,
             menu: [8, 8, 100, 100],
             options: vec![
                 Choice {
@@ -370,6 +515,8 @@ mod tests {
             w: 0,
             h: 0,
             hidden: true,
+            intro: String::new(),
+            icon: None,
             menu: [8, 8, 100, 100],
             options: vec![
                 Choice {
@@ -443,7 +590,7 @@ mod tests {
     fn the_towns_hold_the_spots_the_original_sends_a_knight_to() {
         let town = |x, y, w, h| PlaceDef {
             name: "t".into(), scene: "s".into(), x, y, w, h,
-            hidden: false, menu: [0, 0, 0, 0], options: vec![],
+            hidden: false, intro: String::new(), icon: None, menu: [0, 0, 0, 0], options: vec![],
         };
         // Highwood: icon 0x19 is 25x32, hung so that (94, 47) is in the middle.
         let highwood = town(86, 36, 25, 32);

@@ -24,6 +24,20 @@ pub enum Control {
     Ai { cooldown: i32, clock: i32 },
 }
 
+/// What the run's knight brings into the arena.
+#[derive(Clone, Copy, Debug)]
+pub struct Sheet {
+    /// `10 * constitution + armour + rings + 10`.
+    pub max_health: i32,
+    /// Strength and the sword, `CalcDamage`'s additions.
+    pub bonus: i32,
+    /// The same for a knight fresh off `SetKnightEquipment`, which is what
+    /// the other seats fight with: a strength of one and a long sword.
+    pub fresh_bonus: i32,
+    /// The backfire flag: the player's joystick reversed for this bout.
+    pub cursed: bool,
+}
+
 pub struct World {
     arenas: Arenas,
     families: Families,
@@ -43,13 +57,13 @@ pub struct World {
     /// What the player brings into the next bout. Wounds carry between fights,
     /// so this is not always full.
     player_health: Option<i32>,
-    /// The health every knight in the arena is worth, once a run has chosen one.
-    ///
-    /// A knight's health is `10 * constitution + armour + 10`, so a new one is
-    /// worth twenty, and the arenas here are authored against a hundred. Both
-    /// scales take four blows to settle a fight, so adopting the recovered one
-    /// means moving the damage with it and nothing else.
-    sheet_health: Option<i32>,
+    /// The player's sheet, once a run has chosen a knight: what he can bear
+    /// and what `CalcDamage` adds to his blows. With a sheet the fight is at
+    /// the original's own scale, a twenty point knight and a four point
+    /// swing, and the other knights are what `SetKnightEquipment` makes
+    /// them; without one the arena browser's hundred stands and everything
+    /// is scaled to it.
+    sheet: Option<Sheet>,
     /// Which knight is in which seat, so a fight is fought in the colours the
     /// select screen handed out.
     roster: Vec<usize>,
@@ -91,7 +105,7 @@ impl World {
             lut_arena: None,
             seat_colours: [1; 4],
             player_health: None,
-            sheet_health: None,
+            sheet: None,
             roster: (0..4).collect(),
             foe: "knight".into(),
             bestiary,
@@ -230,15 +244,27 @@ impl World {
         self.bout.finishing(|name| &actors[name])
     }
 
-    /// Fight at the chosen knight's scale rather than the arena's.
+    /// Fight on the chosen knight's sheet, at the original's scale.
     ///
-    /// Everyone in an arena is a knight, so one number does for all four. The
-    /// blow is moved by the same ratio, which keeps a bout the same number of
-    /// swings long as it was: without that, a knight worth twenty health would
-    /// be cut down by a single hit authored against a hundred.
-    pub fn set_sheet_health(&mut self, max_health: i32) {
-        self.sheet_health = Some(max_health.max(1));
+    /// The creatures' hit points and blows in the pack are at the scale of a
+    /// twenty point knight, so with a sheet in hand nothing is scaled: a
+    /// troll is forty, a swing is four plus the sheet's bonus, and buying
+    /// constitution makes the knight harder to kill without making the
+    /// troll harder to kill too.
+    pub fn set_sheet(&mut self, sheet: Sheet) {
+        self.sheet = Some(Sheet { max_health: sheet.max_health.max(1), ..sheet });
         self.reset();
+    }
+
+    /// The curse for the next bout. Takes effect on the next reset, as the
+    /// original's `[0x930]` is read by `ControlKnight` during the fight.
+    pub fn set_player_cursed(&mut self, cursed: bool) {
+        if let Some(s) = self.sheet.as_mut() {
+            s.cursed = cursed;
+        }
+        if let Some(f) = self.bout.fighters.first_mut() {
+            f.cursed = cursed;
+        }
     }
 
     /// Which knight sits in which seat. Colours follow it, so the knight chosen
@@ -287,30 +313,44 @@ impl World {
             .collect();
         self.bout = Bout::new(b, fighters);
         self.bout.bloodless = !self.gore;
-        // The scale every fight is at: a knight's health, and the blow that
-        // takes a quarter of it. Every knight in an arena is worth the same,
-        // so one number does for all of them, and the creatures, whose hit
-        // points and blows are at the original's scale of a twenty-point
-        // knight, are moved by the same ratio so a troll is as many swings
-        // deep at a hundred as it is at twenty.
-        let knight_max = self.sheet_health.unwrap_or(knight.health).max(1);
-        if let Some(max) = self.sheet_health {
-            let base = knight.health.max(1);
-            self.bout.damage = (self.bout.damage * max / base).max(1);
+        // The scale every fight is at. With a sheet it is the original's:
+        // the knight's swing is its `*Dam` entry and the creatures, whose
+        // hit points and blows are at the scale of a twenty point knight,
+        // are left as they are. Without one the arena browser's hundred
+        // point knight stands and everything is moved by the same ratio, so
+        // a troll is as many swings deep at a hundred as it is at twenty.
+        let scale_to = match self.sheet {
+            Some(_) => ORIGINAL_KNIGHT_HEALTH,
+            None => knight.health.max(1),
+        };
+        if self.sheet.is_some() {
+            self.bout.damage = knight.attacks.get(&knight.attack).map_or(4, |a| a.damage).max(1);
         }
-        for f in self.bout.fighters.iter_mut() {
+        for (i, f) in self.bout.fighters.iter_mut().enumerate() {
             if f.actor == "knight" {
-                f.max_health = knight_max;
-                f.health = knight_max;
+                // Seat zero fights on the run's sheet; every other knight is
+                // fresh off `SetKnightEquipment`, twenty health and one of
+                // strength, because nothing tracks what they have been through.
+                let (max, bonus) = match self.sheet {
+                    Some(s) if i == 0 => (s.max_health, s.bonus),
+                    Some(s) => (ORIGINAL_KNIGHT_HEALTH, s.fresh_bonus),
+                    None => (knight.health, 0),
+                };
+                f.max_health = max;
+                f.health = max;
+                f.bonus = bonus;
                 // `SetKnightEquipment`: ten daggers on the belt.
                 f.record.set(field::DAGGERS, 10);
             } else {
-                let scale = |v: i32| (v * knight_max / ORIGINAL_KNIGHT_HEALTH).max(1);
+                let scale = |v: i32| (v * scale_to / ORIGINAL_KNIGHT_HEALTH).max(1);
                 f.max_health = scale(f.max_health);
                 f.health = f.max_health;
                 f.damage = scale(f.damage);
                 f.record.set_health(f.health);
             }
+        }
+        if let (Some(s), Some(f)) = (self.sheet, self.bout.fighters.first_mut()) {
+            f.cursed = s.cursed;
         }
         if let (Some(h), Some(f)) = (self.player_health, self.bout.fighters.first_mut()) {
             f.health = h.clamp(1, f.max_health);
@@ -341,6 +381,17 @@ impl World {
             .enumerate()
             .filter(|(i, f)| *i != 0 && !f.alive())
             .map(|(_, f)| self.def_of(&f.actor).bounty)
+            .sum()
+    }
+
+    /// What the fallen were worth in experience, the same way.
+    pub fn experience(&self) -> u32 {
+        self.bout
+            .fighters
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != 0 && !f.alive())
+            .map(|(_, f)| self.def_of(&f.actor).experience)
             .sum()
     }
 
@@ -381,6 +432,17 @@ impl World {
             self.index = i;
         }
         self.reset();
+    }
+
+    /// Put the fight in one named arena, whatever family it belongs to.
+    ///
+    /// The lair layouts are not in any family's rotation, so a raid cannot ask
+    /// for one by turn counter the way the road does. It names it instead.
+    pub fn set_arena(&mut self, name: &str) -> bool {
+        let Some(i) = self.order.iter().position(|o| o == name) else { return false };
+        self.index = i;
+        self.reset();
+        true
     }
 
     pub fn family(&self) -> &str { &self.arena().family }

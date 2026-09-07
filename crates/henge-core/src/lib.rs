@@ -10,9 +10,12 @@ pub mod combat;
 pub mod content;
 pub mod item;
 pub mod knight;
+pub mod lair;
+pub mod moon;
 pub mod overworld;
 pub mod place;
 pub mod run;
+pub mod service;
 pub mod shell;
 pub mod taskvm;
 

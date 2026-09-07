@@ -21,12 +21,12 @@ use map::MapScene;
 use text::Font;
 use henge_core::combat::{Intent, State};
 use henge_core::item::{Items, Loss};
-use henge_core::knight::Knights;
+use henge_core::knight::{Ability, Knight, Knights, MAX_ABILITY};
 use henge_core::place::{Answer, Approach, Places};
-use henge_core::run::Run;
+use henge_core::run::{Cast, Challenge, Run};
 use henge_core::shell::Start;
 use henge_core::{SCREEN_H, SCREEN_W};
-use world::World;
+use world::{Sheet, World};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use winit::event::{ElementState, Event, WindowEvent};
@@ -259,10 +259,21 @@ fn main() -> anyhow::Result<()> {
                 Mode::Map => {
                     let Some(m) = app.map.as_ref() else { break };
                     let r = &app.run;
-                    format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {}",
+                    // The three abilities and the experience ride on the
+                    // line too, since what a level buys is checked by
+                    // watching them move.
+                    let k = &r.knight;
+                    let aloft = match app.flight {
+                        Some(Flight { returns: true, .. }) => " gem",
+                        Some(Flight { returns: false, .. }) => " hawk",
+                        None => "",
+                    };
+                    format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} s{}c{}e{} xp{}{}{}",
                         t, m.state.day, m.state.x, m.state.y, r.health, r.gold, carrying(r),
                         r.victories, r.fights,
-                        if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name())
+                        if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name(),
+                        k.strength, k.constitution, k.endurance, r.experience, aloft,
+                        if app.sheet { format!(" SHEET > {}", app.sheet_rows().get(app.sheet_cursor).map_or("", |r| r.0.as_str())) } else { String::new() })
                 }
                 Mode::Place => {
                     let Some(s) = app.visiting.as_ref() else { break };
@@ -488,6 +499,18 @@ struct App {
     robbed_for: u32,
     /// Ticks since the run ended, so the tally can be read before it restarts.
     run_over_for: u32,
+    /// Aloft on the gem or the hawk. Desktop state rather than the run's,
+    /// like the map position it belongs with: `GemXY` in the original is
+    /// beside the token, not on the knight record.
+    flight: Option<Flight>,
+    /// The highlighted line of the character sheet's menu.
+    sheet_cursor: usize,
+    /// The lair this bout is being fought for, if it is one. A raid returns to
+    /// the lair's own page rather than to the map, because the floor is only
+    /// yours once the guardian is down and the spoils are read there.
+    raiding: Option<usize>,
+    /// The place to reopen when a raid is over.
+    raid_place: String,
     /// A practice bout is not part of a run: nothing carries, nobody is slain,
     /// and it goes back to the title when it is over.
     practice: bool,
@@ -498,6 +521,22 @@ struct App {
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mode { Title, Select, Map, Combat, Place }
+
+/// A flight over the map, `EffectFLAG+2` and `+4` in `_MAP`: the gem's comes
+/// back to where it began, the hawk's lands where it is when fire is pressed.
+#[derive(Clone, Copy, Debug)]
+struct Flight {
+    returns: bool,
+    from: (i32, i32),
+}
+
+/// One line of the character sheet's menu: the original's `Increase`
+/// gadgets (`HGAbility`) and a cast for each thing carried (`MagicCast`).
+#[derive(Clone, Debug)]
+enum SheetAction {
+    Raise(Ability),
+    Use(String),
+}
 
 /// Load every sound the packs offer, and open a device if there is one.
 ///
@@ -646,6 +685,10 @@ impl App {
             robbed: String::new(),
             robbed_for: 0,
             run_over_for: 0,
+            flight: None,
+            sheet_cursor: 0,
+            raiding: None,
+            raid_place: String::new(),
             practice: false,
             status,
             #[cfg(feature = "research")]
@@ -744,11 +787,29 @@ impl App {
                     }
                     return;
                 }
+                // The sheet is the original's status screen: modal, and
+                // where the casting and the levelling are done.
+                if self.sheet {
+                    self.sheet_tick();
+                    return;
+                }
+                // Aloft, the map is crossed without steps, ambushes or slow
+                // ground: `MapMovement` skips its step count and `CheckSLOW`
+                // its grid while either flag is up.
+                if self.flight.is_some() {
+                    self.fly(dx, dy);
+                    return;
+                }
                 let mut start: Option<String> = None;
                 let mut day_before = 0;
                 let mut arrived: Option<String> = None;
                 if let Some(m) = self.map.as_mut() {
                     day_before = m.state.day;
+                    // `DistanceDONE`: the day is as long as the stride says,
+                    // sixteen steps to the point, doubled by haste.
+                    if self.run.knight.named() {
+                        m.state.steps_per_day = self.run.day_steps(&self.items);
+                    }
                     let step = m.update(dx, dy);
                     if step.encounter && !self.peaceful {
                         start = Some(m.last_terrain.family().to_string());
@@ -775,6 +836,8 @@ impl App {
                                     .map_or(id.clone(), |d| d.name.clone());
                                 self.robbed = format!("{what} taken");
                                 self.robbed_for = 180;
+                                // A ring taken is twenty health gone with it.
+                                self.run.refresh(&self.items);
                             }
                             None => {}
                         }
@@ -792,6 +855,28 @@ impl App {
                     if self.enter(&id) {
                         return;
                     }
+                }
+                // A scroll of protection hanging over the run answers the
+                // ambush first, the way `KnightProtection` is asked before
+                // `InitKnightBattle`.
+                let start = match start {
+                    Some(family) => match self.run.challenged() {
+                        Challenge::Averted => {
+                            self.notice("The scroll turns it away");
+                            None
+                        }
+                        Challenge::Backfired => {
+                            self.notice("The scroll turns on you");
+                            Some(family)
+                        }
+                        Challenge::Fight => Some(family),
+                    },
+                    None => None,
+                };
+                if start.is_some() {
+                    // The sheet as it stands now: constitution bought since
+                    // the last fight, a sword picked up, a curse to carry in.
+                    self.sync_sheet();
                 }
                 if let (Some(family), Some(w)) = (start, self.world.as_mut()) {
                     // Which arena of that family comes next is the family's own
@@ -814,6 +899,7 @@ impl App {
                 let mut leave = false;
                 let mut days = 0;
                 let mut door: Option<String> = None;
+                let mut raid: Option<(usize, String, String, String, u32)> = None;
                 if let Some(s) = self.visiting.as_mut() {
                     if let Some(def) = self.places.get(&s.visit.place) {
                         if up {
@@ -827,10 +913,38 @@ impl App {
                                 Answer::Left => leave = true,
                                 Answer::Stayed { days: d } => days = d,
                                 Answer::Went { place } => door = Some(place),
+                                Answer::Fight { lair, arena, family, guardian, count } => {
+                                    raid = Some((lair, arena, family, guardian, count));
+                                }
                             }
                         }
                     } else {
                         leave = true;
+                    }
+                }
+                // A guardian is waiting on the other side of the door. The bout
+                // is set up here rather than in `place.rs`, which knows nothing
+                // about arenas, and the lair is remembered so that winning
+                // comes back to its own page instead of to the map.
+                if let Some((lair, arena, family, guardian, count)) = raid {
+                    let here = self.visiting.as_ref().map(|s| s.visit.place.clone());
+                    if let Some(w) = self.world.as_mut() {
+                        w.set_player_health(self.run.health_for_fight());
+                        w.set_player_daggers(self.run.knight.daggers);
+                        w.set_foe(&guardian);
+                        // Name the layout if the pack has it; fall back to the
+                        // family so a raid is never fought on no ground at all.
+                        if !w.set_arena(&arena) {
+                            let pick = self.run.next_arena(&family, w.rotation_len(&family));
+                            w.set_family(&family, pick);
+                        }
+                        w.set_seats(self.title.state.players.max(1), count.max(1) as usize);
+                        self.raiding = Some(lair);
+                        self.raid_place = here.unwrap_or_default();
+                        self.visiting = None;
+                        self.voices.reset();
+                        self.mode = Mode::Combat;
+                        return;
                     }
                 }
                 // A door inside a place opens another place rather than putting
@@ -875,9 +989,11 @@ impl App {
                         let survivor = w.bout.fighters.first();
                         let health = survivor.map_or(0, |f| if f.alive() { f.health } else { 0 });
                         let won = w.bout.winner() == Some(0);
-                        // What the fallen were carrying. The run decides whether
-                        // it is collected; a corpse collects nothing.
-                        self.run.finished_fight(health, won, w.purse());
+                        // What the fallen were carrying, and what they were
+                        // worth. The run decides whether it is collected; a
+                        // corpse collects nothing.
+                        self.run.finished_fight_worth(health, won, w.purse(), w.experience());
+                        w.set_player_cursed(false);
                         // And what was thrown is gone: the sheet's daggers are
                         // whatever is left on the belt.
                         self.run.knight.daggers = w.daggers_left(0);
@@ -897,9 +1013,27 @@ impl App {
                             if self.run.alive() {
                                 w.set_player_health(self.run.health_for_fight());
                             }
+                            let won = w.bout.winner() == Some(0);
                             w.reset();
-                            if self.map.is_some() {
-                                self.mode = Mode::Map;
+                            // A raid won opens the floor. A raid lost leaves the
+                            // lair as it was, with the guardian still in it.
+                            match self.raiding.take() {
+                                Some(lair) if won && self.run.alive() => {
+                                    let spoils = self.run.lair_won(lair, &self.items);
+                                    let place = self.raid_place.clone();
+                                    if self.enter(&place) {
+                                        if let Some(s) = self.visiting.as_mut() {
+                                            s.visit.said = spoils.describe(&self.items);
+                                        }
+                                    } else if self.map.is_some() {
+                                        self.mode = Mode::Map;
+                                    }
+                                }
+                                _ => {
+                                    if self.map.is_some() {
+                                        self.mode = Mode::Map;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1043,6 +1177,9 @@ impl App {
         let humans = self.title.state.players.max(1);
         let gore = self.title.state.gore;
         let daggers = self.run.knight.daggers;
+        let sheet = self.sheet_of();
+        self.flight = None;
+        self.sheet_cursor = 0;
         if let Some(w) = self.world.as_mut() {
             // One opponent on the road. Ambushes are creatures in the original,
             // and until the bestiary lands they are knights standing in; three
@@ -1051,9 +1188,178 @@ impl App {
             w.set_gore(gore);
             w.set_seats(humans, 1);
             w.set_roster(roster);
-            w.set_sheet_health(self.run.max_health);
+            w.set_sheet(sheet);
             w.set_player_daggers(daggers);
         }
+    }
+
+    /// The run's sheet as the arena needs it: what the knight can bear,
+    /// what `CalcDamage` adds for him, what it adds for a fresh knight in
+    /// any other seat, and whether his joystick is reversed.
+    fn sheet_of(&self) -> Sheet {
+        let fresh = self
+            .knights
+            .get(self.run.knight.seat)
+            .map_or(1, |d| Knight::from_def(d, 0).damage_bonus(&self.items));
+        Sheet {
+            max_health: self.run.max_health,
+            bonus: self.run.knight.damage_bonus(&self.items),
+            fresh_bonus: fresh,
+            cursed: self.run.is_cursed(),
+        }
+    }
+
+    /// Push the sheet into the arena, after anything that changed it.
+    fn sync_sheet(&mut self) {
+        if !self.run.knight.named() {
+            return;
+        }
+        let sheet = self.sheet_of();
+        if let Some(w) = self.world.as_mut() {
+            w.set_sheet(sheet);
+        }
+    }
+
+    /// A line on the map's corner plate, where the cutpurse's notice goes.
+    fn notice(&mut self, line: impl Into<String>) {
+        self.robbed = line.into();
+        self.robbed_for = 180;
+    }
+
+    /// The character sheet's menu: the three `Increase` gadgets in the
+    /// original's own order (`ab1`..`ab3`), lit only while the experience
+    /// covers the cost and the ability is under five, as the status screen
+    /// at `0xd3a7` lights them; then a line for everything carried.
+    fn sheet_rows(&self) -> Vec<(String, bool, SheetAction)> {
+        let mut rows = Vec::new();
+        if !self.run.knight.named() {
+            return rows;
+        }
+        let cost = self.run.level_cost();
+        for a in [Ability::Strength, Ability::Endurance, Ability::Constitution] {
+            let lit = self.run.can_level() && self.run.knight.ability(a) < MAX_ABILITY;
+            rows.push((format!("{} ({cost} xp)", a.increase_line()), lit, SheetAction::Raise(a)));
+        }
+        for (id, n) in self.run.kit.iter() {
+            let line = self.items.get(id).map_or_else(|| format!("Use {id}"), |d| d.action_line());
+            let line = if n > 1 { format!("{line} x{n}") } else { line };
+            rows.push((line, true, SheetAction::Use(id.to_string())));
+        }
+        rows
+    }
+
+    /// One tick of the sheet as a menu.
+    fn sheet_tick(&mut self) {
+        let rows = self.sheet_rows();
+        if rows.is_empty() {
+            return;
+        }
+        if self.pressed[0] {
+            self.sheet_cursor = self.sheet_cursor.saturating_sub(1);
+        }
+        if self.pressed[1] {
+            self.sheet_cursor += 1;
+        }
+        self.sheet_cursor = self.sheet_cursor.min(rows.len() - 1);
+        if !self.takes() {
+            return;
+        }
+        let (_, lit, action) = rows[self.sheet_cursor].clone();
+        match action {
+            SheetAction::Raise(a) => {
+                if lit && self.run.spend_experience(a, &self.items) {
+                    self.notice(format!("{} {}", a.name(), self.run.knight.ability(a)));
+                    self.sync_sheet();
+                }
+            }
+            SheetAction::Use(id) => {
+                let cast = self.run.cast(&id, &self.items);
+                self.acted(cast);
+            }
+        }
+    }
+
+    /// What a cast did, made visible: a flight begun, a landing, a notice.
+    fn acted(&mut self, cast: Cast) {
+        match cast {
+            Cast::Healed => self.notice("You are whole"),
+            Cast::LifePoint => self.notice("A life point"),
+            Cast::Hastened => self.notice("The day is doubled"),
+            Cast::Warded => self.notice("A ward is up"),
+            Cast::Worn => {
+                self.sync_sheet();
+                self.notice("Worn");
+            }
+            Cast::Aloft { returns } => {
+                if let Some(m) = self.map.as_ref() {
+                    self.flight = Some(Flight { returns, from: (m.state.x, m.state.y) });
+                    self.sheet = false;
+                    self.notice(if returns { "Aloft on the gem" } else { "Aloft on the hawk" });
+                }
+            }
+            Cast::Astray { x, y } => {
+                if let Some(m) = self.map.as_mut() {
+                    use henge_core::overworld::{MAX_X, MAX_Y};
+                    m.state.x = x.clamp(0, MAX_X);
+                    m.state.y = y.clamp(0, MAX_Y);
+                }
+                self.sheet = false;
+                self.notice("The hawk drops you");
+            }
+            Cast::Pointless => self.notice("Nothing comes of it"),
+            Cast::HaveNone | Cast::Unknown => {}
+        }
+    }
+
+    /// A tick aloft. The token moves where it is steered, a pixel a tick,
+    /// inside `HawkBorders`; fire lands it: the gem's flight goes back to
+    /// where it began, the hawk's stays put. In the original a gem flight
+    /// ends only by looking into a lair, which restores the position on the
+    /// way out (`LairGEM`); with no lair to look into, fire does it here.
+    fn fly(&mut self, dx: i32, dy: i32) {
+        use henge_core::overworld::{MAX_X, MAX_Y};
+        let landing = self.takes();
+        let Some(m) = self.map.as_mut() else {
+            self.flight = None;
+            return;
+        };
+        m.state.x = (m.state.x + dx).clamp(0, MAX_X);
+        m.state.y = (m.state.y + dy).clamp(0, MAX_Y);
+        if landing {
+            if let Some(fl) = self.flight.take() {
+                if fl.returns {
+                    m.state.x = fl.from.0;
+                    m.state.y = fl.from.1;
+                }
+            }
+        }
+    }
+
+    /// The crystal or the hawk over the token while aloft: `_MAP:SHOW` draws
+    /// the token's frame plus five with the gem flag up and plus ten with the
+    /// hawk's, which in `MI.C` is the crystal row and the hawk row, one per
+    /// knight's colour.
+    fn draw_flight(&mut self) {
+        let Some(fl) = self.flight else { return };
+        let Some(m) = self.map.as_ref() else { return };
+        let (x, y) = (m.state.x, m.state.y);
+        let seat = self.run.knight.seat % 4;
+        let frame = if fl.returns { 10 + seat } else { 15 + seat };
+        let Some(rect) = self.reg.sheet("bank.mi").and_then(|r| r.value.frames.get(frame).copied()) else {
+            return;
+        };
+        let Ok(img) = self.reg.image("bank.mi") else { return };
+        let (w, h) = (rect.w as usize, rect.h as usize);
+        let mut px = vec![0u8; w * h];
+        for row in 0..h {
+            let src = (rect.y as usize + row) * img.width + rect.x as usize;
+            if src + w <= img.pixels.len() {
+                px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
+            }
+        }
+        // Over the token, which the map has already drawn, and lifted a
+        // little so it reads as above the ground rather than on it.
+        self.fb.blit(&px, w, h, x, y - 4, false);
     }
 
     /// Walk into a place and open its menu.
@@ -1237,8 +1543,13 @@ impl App {
             let seat = self.run.knight.seat;
             let colour = henge_assets::player_colours(&self.fb.palette)[seat % 4];
             let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
+            // The menu is live on the map, where the sheet is modal; in an
+            // arena the sheet is a card held up over the fight.
+            let rows: Vec<(String, bool)> =
+                self.sheet_rows().into_iter().map(|(l, lit, _)| (l, lit)).collect();
+            let cursor = (self.mode == Mode::Map && !rows.is_empty()).then_some(self.sheet_cursor);
             status::draw_sheet(
-                &mut self.reg, &mut self.fb, font, &self.run, &self.items, colour,
+                &mut self.reg, &mut self.fb, font, &self.run, &self.items, colour, &rows, cursor,
             );
         }
     }
@@ -1300,6 +1611,7 @@ impl App {
                     .is_ok();
                 self.map = Some(m);
                 if ok {
+                    self.draw_flight();
                     if !self.run.alive() {
                         self.draw_run_over();
                     }

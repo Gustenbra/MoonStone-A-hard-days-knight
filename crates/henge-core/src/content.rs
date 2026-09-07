@@ -130,6 +130,15 @@ pub struct ActorDef {
     /// without a line of Rust changing.
     #[serde(default)]
     pub bounty: u32,
+    /// What putting this kind of fighter down is worth in experience.
+    ///
+    /// The original pays one for a knight (`BKwon`), two for the dragon and
+    /// nothing for a creature met on the road, whose worth is the lair it
+    /// guards (`LairWon`, one). Here the road is where the fights are, so a
+    /// creature carries a figure of its own, and the baker says which are
+    /// the original's and which are ours.
+    #[serde(default)]
+    pub experience: u32,
     /// Body box relative to the feet: [x_min, y_min, x_max, y_max], y upward.
     pub body: [i16; 4],
     /// How much ground this fighter stands on, for keeping two of them apart.
@@ -245,6 +254,23 @@ pub struct ActorDef {
     /// `DragonStruck` and from nowhere else.
     #[serde(default)]
     pub bleeds: bool,
+    /// What the moon does to this actor, keyed by the phase
+    /// (`crate::moon::Phase::key`): the hit points and the blow it is
+    /// fielded with on that night instead of `health` and `damage`.
+    ///
+    /// **Recovered**, for the one creature that has it: `SetRatmenTables`
+    /// reads the phase and writes seven and three under 0x2d, twelve and
+    /// five under 0x31, over the five and one it wrote a moment before. On
+    /// the data so a pack can give the moon to any creature it likes.
+    #[serde(default)]
+    pub moon: BTreeMap<String, MoonStat>,
+}
+
+/// An actor's numbers on one night of the moon.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct MoonStat {
+    pub health: i32,
+    pub damage: i32,
 }
 
 /// One attack of an actor: the script it plays and what the `*Dam` table
@@ -282,6 +308,7 @@ impl Default for ActorDef {
             approach: 0,
             back_off: 0,
             bounty: 0,
+            experience: 0,
             body: [0; 4],
             girth: 0,
             sequences: BTreeMap::new(),
@@ -298,6 +325,7 @@ impl Default for ActorDef {
             blockable: false,
             finishes: BTreeMap::new(),
             bleeds: false,
+            moon: BTreeMap::new(),
         }
     }
 }
@@ -474,6 +502,12 @@ impl ActorDef {
     /// What an attack takes off against the default attack's figure: the
     /// `*Dam` table entry for it over the entry for [`ActorDef::attack`], so
     /// the knight's chop is twice his swing and his rear thrust half of it.
+    /// The hit points and blow this actor has under a given moon: the entry
+    /// for that phase, or its everyday numbers.
+    pub fn under_moon(&self, phase: &str) -> (i32, i32) {
+        self.moon.get(phase).map_or((self.health, self.damage), |m| (m.health, m.damage))
+    }
+
     /// One to one when the actor has no table to say otherwise.
     pub fn blow_ratio(&self, attack: crate::combat::Attack) -> (i32, i32) {
         let this = self.attacks.get(attack.name()).map_or(0, |a| a.damage);

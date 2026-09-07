@@ -1063,6 +1063,8 @@ fn actor_definitions(
         // against the prices. Three foes put down pays for a flask and leaves
         // change.
         bounty: 15,
+        // `BKwon`: a knight put down is one point of experience.
+        experience: 1,
         body: [-9, 0, 9, 50],
         // Wider than the hit box on purpose. The hit box is narrow so that a
         // strike has to be aimed; the girth is roughly the drawn figure, so
@@ -1171,6 +1173,15 @@ fn creature_definition(
         approach: c.approach,
         back_off: c.back_off,
         bounty: c.bounty,
+        // What it is worth in experience. The original pays two for the
+        // dragon (`_dragon_won`) and nothing for anything else met on the
+        // road, whose worth there is the lair it guards. Here the road is
+        // where the fights are, so every creature is worth one, the dragon
+        // and the demon two; the dragon's is the original's, the rest ours.
+        experience: match c.id {
+            "dragon" | "demon" => 2,
+            _ => 1,
+        },
         body,
         girth: if c.girth > 0 { c.girth } else { w * 3 / 4 },
         origin,
@@ -1409,13 +1420,30 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
             "hidden": true,
             "x": 0, "y": 0, "w": 0, "h": 0,
             "menu": menu,
+            // The goods are the original's merchant's own list, `pu1`..`pu17`,
+            // less what the quest is not ready for (the key and the moonstone
+            // are item 70's and 71's), and the henge flask and draught beside
+            // them. Casting is done on the character sheet, as the original
+            // does it on the status screen, so a stall only sells.
             "options": [
-                { "label": "Flask of healing", "effect": buy("potion") },
-                { "label": "Draught of life",  "effect": buy("elixir") },
-                { "label": "Iron key",         "effect": buy("key") },
-                { "label": "Drink a flask",    "effect": drink("potion") },
-                { "label": "Drink a draught",  "effect": drink("elixir") },
-                { "label": "Back",             "effect": go(back) }
+                { "label": "Flask of healing",      "effect": buy("potion") },
+                { "label": "Draught of life",       "effect": buy("elixir") },
+                { "label": "Potion of healing",     "effect": buy("healing_potion") },
+                { "label": "Broad sword",           "effect": buy("broad_sword") },
+                { "label": "Claymore sword",        "effect": buy("claymore") },
+                { "label": "Sword of Sharpness",    "effect": buy("sword_of_sharpness") },
+                { "label": "Chain mail",            "effect": buy("chain_mail") },
+                { "label": "Plate armour",          "effect": buy("plate_armour") },
+                { "label": "Battle armour",         "effect": buy("battle_armour") },
+                { "label": "Gem of seeing",         "effect": buy("gem") },
+                { "label": "Ring of protection",    "effect": buy("ring") },
+                { "label": "Scroll of Haste",       "effect": buy("haste") },
+                { "label": "Scroll of the Hawk",    "effect": buy("hawk") },
+                { "label": "Scroll of Protection",  "effect": buy("protection") },
+                { "label": "Iron key",              "effect": buy("key") },
+                { "label": "Drink a flask",         "effect": drink("potion") },
+                { "label": "Drink a draught",       "effect": drink("elixir") },
+                { "label": "Back",                  "effect": go(back) }
             ]
         })
     };
@@ -1486,17 +1514,23 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
 
 /// What there is to carry, and what a stall asks for it.
 ///
-/// None of this is recovered. The original's symbols name `DRINKPOTIONHEAL`,
-/// `TAKEFROMKNIGHT` and a `GOLD` readout on the status art, which is enough to
-/// know that potions, an inventory and a purse all existed, and not enough to
-/// know a single price or a single strength. Every number here was chosen
-/// against the others: a flask is about two won fights, a draught is about
-/// five, and a town healer is cheaper than either but costs you the week.
+/// The flask and the draught are ours: they predate the recovered potion
+/// and were chosen against each other, a flask about two won fights and a
+/// draught about five. The rest is the original's.
+///
+/// **The ten magic items are recovered**, names, prices and what they do.
+/// `MagicName` (DS:`0xe38d`) pairs each slot of a knight's magic record with
+/// its name, `pu9`..`pu17` are the merchant's own lines with the price in
+/// the text, and `MagicCast` in `_STATUS` is a chain of `cmp bx, slot` that
+/// says what each does; the three worn ones are read by the derivation
+/// routine at 0x28d and by `CalcDamage`. The two left inert are recovered
+/// too and wait on the dragon's set piece: `TalismanWrym` shifts the
+/// dragon's fire right once per talisman and floors it at five, and the
+/// Scroll of the Wyrm sets `WyrmFLAG` so `KnightWyrm` can send the dragon
+/// after a rival. The prices `se*` sells them back for are half.
 ///
 /// It lands in the reference pack for now because it is authored alongside the
-/// places that sell it, and those carry the original's own town art. Nothing in
-/// this file is derived from the original, so it moves to the shippable pack
-/// the moment there is a town screen of our own to sell it in.
+/// places that sell it, and those carry the original's own town art.
 fn item_definitions() -> String {
     serde_json::json!({
         "potion": {
@@ -1510,6 +1544,44 @@ fn item_definitions() -> String {
             "price": 70,
             "consumed": true,
             "virtue": { "does": "heal", "health": 100 }
+        },
+
+        // The original's own magic, slot by slot.
+        "healing_potion": {
+            "name": "Potion of healing", "price": 20, "consumed": true,
+            "virtue": { "does": "restore" }
+        },
+        "gem": {
+            "name": "Gem of seeing", "price": 32, "consumed": true,
+            "virtue": { "does": "sight", "astray": 0, "returns": true }
+        },
+        "ring": {
+            "name": "Ring of protection", "price": 50, "consumed": false,
+            "virtue": { "does": "ward", "health": 20 }
+        },
+        "talisman": {
+            "name": "Talisman of the Wyrm", "price": 52, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "haste": {
+            "name": "Scroll of Haste", "price": 36, "consumed": true,
+            "virtue": { "does": "haste" }
+        },
+        "aquisition": {
+            "name": "Scroll of Aquisition", "price": 52, "consumed": true,
+            "virtue": { "does": "seize" }
+        },
+        "hawk": {
+            "name": "Scroll of the Hawk", "price": 52, "consumed": true,
+            "virtue": { "does": "sight", "astray": 16, "returns": false }
+        },
+        "wyrm": {
+            "name": "Scroll of the Wyrm", "price": 40, "consumed": true,
+            "virtue": { "does": "inert" }
+        },
+        "protection": {
+            "name": "Scroll of Protection", "price": 24, "consumed": true,
+            "virtue": { "does": "protection", "backfire": 11 }
         },
         // Carried, worth coin, and honest about doing nothing yet: the lairs it
         // is for do not exist. An inert item is still a real item, and a thief

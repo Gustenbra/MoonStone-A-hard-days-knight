@@ -220,6 +220,17 @@ pub struct Fighter {
     /// the one tick between a blow and the recoil.
     #[serde(default)]
     pub restart: bool,
+    /// What the sheet adds to every blow: `CalcDamage`'s `cl = [si+0x2e]`,
+    /// the strength, plus two, three or five for the three better swords.
+    /// In the same units as `damage`, so a caller fighting at another scale
+    /// moves it with the rest. Zero for a creature, which has no sheet.
+    #[serde(default)]
+    pub bonus: i32,
+    /// The joystick reversed: `ControlKnight` on the knight `KnightCursed`
+    /// names while the backfire flag is up, `xor ax, 0xc` when up or down is
+    /// held and `xor ax, 3` when left or right is. Fire is left alone.
+    #[serde(default)]
+    pub cursed: bool,
 }
 
 impl Fighter {
@@ -254,6 +265,8 @@ impl Fighter {
             script: String::new(),
             evaded: false,
             restart: false,
+            bonus: 0,
+            cursed: false,
         };
         // Run the first frame of the standing script now, so a fighter is
         // visible before anything has ticked. Without it a screenshot taken at
@@ -375,6 +388,12 @@ impl Fighter {
         bloodless: bool,
     ) -> Vec<(i32, i32)> {
         self.effects.clear();
+        // The cursed knight's joystick, before anything reads it.
+        let intent = if self.cursed {
+            Intent { dx: -intent.dx, dy: -intent.dy, attack: intent.attack }
+        } else {
+            intent
+        };
         // The dead, and the dying. A scripted fighter whose hit points are
         // gone is still on his blow-taken script, whose own `TASKDEAD` picks
         // the death: the same recoil ends in a fall for a stab and a split

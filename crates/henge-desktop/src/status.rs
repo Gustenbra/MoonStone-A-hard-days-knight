@@ -157,19 +157,28 @@ pub fn draw_plates(reg: &mut Registry, fb: &mut Framebuffer, font: Option<&Font>
     }
 }
 
-/// The whole sheet, at `DisplayKnight`'s own coordinates.
+/// The whole sheet, at `DisplayKnight`'s own coordinates, and beside it the
+/// menu the original's status screen carries: the `Increase` gadgets and a
+/// line for each thing carried, which is where a scroll is cast.
 ///
 /// `run` supplies the numbers that move; the knight on it supplies the rest.
+/// `menu` is each line and whether it is lit; `cursor` the highlighted one,
+/// or none when the sheet is only being shown.
 pub fn draw_sheet(
     reg: &mut Registry, fb: &mut Framebuffer, font: Option<&Font>, run: &Run, items: &Items,
-    colour: u8,
+    colour: u8, menu: &[(String, bool)], cursor: Option<usize>,
 ) {
     let (dark, light) = extremes(fb);
     let faint = faint(fb);
-    fb.rect(20, 12, 212, 132, dark);
-    fb.rect(20, 12, 212, 1, colour);
-    fb.rect(20, 143, 212, 1, colour);
+    // The original's panel is a column; the menu takes the rest of the width,
+    // set to its own left edge so a long line never runs into the pips.
+    let wide = !menu.is_empty();
+    let width = if wide { 300 } else { 212 };
+    fb.rect(20, 12, width, 132, dark);
+    fb.rect(20, 12, width, 1, colour);
+    fb.rect(20, 143, width, 1, colour);
     let Some(font) = font else { return };
+    draw_menu(reg, fb, font, menu, cursor, light, faint, colour);
 
     let name = if run.knight.named() { run.knight.name.clone() } else { "No knight".to_string() };
     font.draw(reg, fb, &name, 60, 24, colour);
@@ -218,4 +227,34 @@ pub fn draw_sheet(
         sprite::draw_mask(reg, fb, UI, ARMOUR_CEL + cel, 29, 112, faint);
     }
     font.draw(reg, fb, &k.armour_name(items), 75, 122, light);
+}
+
+/// The sheet's menu, down the right hand side: eleven rows of seven pixels
+/// between the top rule and the bottom one, windowed on the cursor when there
+/// are more lines than that. An unlit line is drawn faint, like a shut door.
+fn draw_menu(
+    reg: &mut Registry, fb: &mut Framebuffer, font: &Font, menu: &[(String, bool)],
+    cursor: Option<usize>, light: u8, faint: u8, colour: u8,
+) {
+    if menu.is_empty() {
+        return;
+    }
+    const ROWS: usize = 11;
+    const X: i32 = 176;
+    const TOP: i32 = 28;
+    let at = cursor.unwrap_or(0);
+    let first = at.saturating_sub(ROWS - 1).min(menu.len().saturating_sub(ROWS));
+    for (row, (i, (line, lit))) in menu.iter().enumerate().skip(first).take(ROWS).enumerate() {
+        let y = TOP + row as i32 * 9;
+        let ink = if !lit { faint } else if cursor == Some(i) { colour } else { light };
+        if cursor == Some(i) {
+            fb.rect(X - 8, y + 2, 4, 3, colour);
+        }
+        font.draw(reg, fb, line, X, y, ink);
+    }
+    // Nine rows of ninety four pixels is a lot of sheet; say when there is
+    // more below than fits.
+    if first + ROWS < menu.len() {
+        font.draw(reg, fb, "...", X, TOP + ROWS as i32 * 9, faint);
+    }
 }
