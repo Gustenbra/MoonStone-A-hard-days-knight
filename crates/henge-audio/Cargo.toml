@@ -1,0 +1,16 @@
+[package]
+name = "henge-audio"
+description = "Turning what happened in a bout into sound, behind a trait so the backend can be swapped."
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["native"]
+# The desktop backend. Off by default in a server or wasm build, where there is
+# no audio device and the dependency would only be a liability.
+native = ["dep:rodio"]
+
+[dependencies]
+henge-core = { path = "../henge-core" }
+rodio = { version = "0.19", default-features = false, features = ["wav"], optional = true }

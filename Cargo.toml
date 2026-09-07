@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/henge-formats", "crates/henge-core", "crates/henge-assets", "crates/henge-desktop"]
+members = ["crates/henge-formats", "crates/henge-core", "crates/henge-assets", "crates/henge-audio", "crates/henge-desktop"]
 
 [workspace.package]
 version = "0.1.0"

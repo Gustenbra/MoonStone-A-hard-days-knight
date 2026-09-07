@@ -15,9 +15,13 @@ Ordered by what the project is missing most, not by what is easiest.
       *Limitation: a palette supports as many knights as it has hue groups. Three of the
       four arena families have six; the glade has four, two of them thin, so its fourth
       knight is washed out.*
-- [ ] **Audio.** All 49 samples are already baked to WAV and sitting unused. Write it behind
-      a trait from the start: native on desktop, Web Audio in a browser build. `Bout::step`
-      already returns the hits that landed, so the hook it needs exists.
+- [x] **Audio.** Done. `henge-audio` splits deciding *what* to play from *where it comes
+      out*: cues are derived by watching the fight and are pure testable logic, while the
+      backend is behind a trait so a browser or a server swaps only that half. All 49
+      samples load. No audio device is a normal state, not a failure, so the game plays
+      silently rather than refusing to start.
+      *Next: more than four cues, and sounds carried on animation frames rather than
+      inferred from state changes.*
 - [ ] **Text.** `BOLD.F` and `SMALL.FON` decode, but the character lookup table lives in
       `MAIN.EXE` and is not recovered, so glyph order is unknown. Either recover it or map
       it by eye.

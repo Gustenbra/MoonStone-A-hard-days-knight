@@ -10,7 +10,8 @@ name = "henge"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["audio"]
+audio = ["henge-audio/native"]
 # Opt-in developer mode for studying the original game's data. Off by default so
 # that a release build cannot contain original assets even by accident.
 research = ["dep:henge-formats"]
@@ -18,6 +19,7 @@ research = ["dep:henge-formats"]
 [dependencies]
 henge-core = { path = "../henge-core" }
 henge-assets = { path = "../henge-assets" }
+henge-audio = { path = "../henge-audio", default-features = false }
 henge-formats = { path = "../henge-formats", optional = true }
 anyhow = "1"
 winit = "0.29"

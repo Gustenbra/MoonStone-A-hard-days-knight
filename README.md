@@ -19,7 +19,8 @@ need your own copy of the original, which the engine reads and converts locally.
 - Movement, committed attacks, positional hit resolution, damage, death
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
-- 43 tests, all of it verifiable headlessly with no display
+- Sound: swings, blows, deaths and footfalls
+- 51 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -65,6 +66,7 @@ travel are verified as behaviour rather than by looking at screenshots:
 | Crate | Purpose |
 |---|---|
 | `henge-core` | The simulation: combat, animation, arenas, overworld. One dependency, serde. No rendering, no I/O, no platform. |
+| `henge-audio` | What to play, and where it comes out, split apart so only the second half is platform specific. |
 | `henge-assets` | Logical asset ids resolved through a stack of packs. |
 | `henge-formats` | Reads the original's files. Research and baking only; never linked into a release. |
 | `henge-desktop` | Window, input, palette framebuffer. Produces the executable. |
@@ -92,6 +94,27 @@ contains anything derived:
 ```sh
 cargo run --release -p henge-assets --bin henge-pack-status packs
 ```
+
+## Sound
+
+`henge-audio` keeps two things separate. Deciding **what** should be heard is done by
+watching the fight, and is pure logic with no platform behind it, so it is tested without
+a sound card. Deciding **where it comes out** sits behind a trait, so a browser build or a
+headless server replaces only that half.
+
+Cues are derived rather than scripted: a swing is announced when it starts, so the sound
+leads the blow; footfalls land on chosen frames of the walk cycle rather than every frame;
+and hits come from the simulation itself, so a blow is never unheard and a miss is never
+announced.
+
+Building without a sound stack at all is supported and checked in CI:
+
+```sh
+cargo build --workspace --no-default-features
+```
+
+**No audio device is a normal state, not a failure.** Containers, CI and plenty of
+machines have none. The game says so once and plays silently.
 
 ## Combat
 

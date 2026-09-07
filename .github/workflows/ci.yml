@@ -17,6 +17,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # The desktop audio backend needs ALSA headers on Linux. Windows and macOS
+      # use the system APIs and need nothing.
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        if: matrix.os == 'ubuntu-latest'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -25,6 +29,9 @@ jobs:
       # every target. If this ever needs an OS-specific fix, something has leaked
       # into henge-core that does not belong there.
       - run: cargo test --workspace
+      # The simulation must still build with no audio backend at all, which is
+      # what a server or a browser build needs.
+      - run: cargo build --workspace --no-default-features
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --all -- --check
         if: matrix.os == 'ubuntu-latest'
@@ -46,6 +53,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        if: matrix.os == 'ubuntu-latest'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release

@@ -11,6 +11,7 @@ mod research;
 
 use framebuffer::Framebuffer;
 use henge_assets::Registry;
+use henge_audio::{Clips, Sink, Voices};
 use map::MapScene;
 use henge_core::combat::Intent;
 use henge_core::{SCREEN_H, SCREEN_W};
@@ -158,6 +159,8 @@ struct App {
     map: Option<MapScene>,
     mode: Mode,
     encounter_pick: u32,
+    audio: Box<dyn Sink>,
+    voices: Voices,
     status: String,
     #[cfg(feature = "research")]
     research: Option<research::Viewer>,
@@ -165,6 +168,40 @@ struct App {
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mode { Map, Combat }
+
+/// Load every sound the packs offer, and open a device if there is one.
+///
+/// No device is a normal state, not a failure: containers, CI and plenty of
+/// desktops have none. The game plays silently rather than refusing to start.
+fn open_audio(reg: &mut henge_assets::Registry) -> Box<dyn Sink> {
+    let ids: Vec<String> = reg
+        .all_ids()
+        .into_iter()
+        .filter(|id| id.starts_with("sfx."))
+        .map(str::to_string)
+        .collect();
+
+    let mut clips = Clips::default();
+    for id in &ids {
+        let Some(r) = reg.sound(id) else { continue };
+        if let Ok(bytes) = std::fs::read(r.root.join(r.value)) {
+            clips.insert(id.clone(), bytes);
+        }
+    }
+    let loaded = clips.len();
+
+    #[cfg(feature = "audio")]
+    match henge_audio::Native::new(clips) {
+        Ok(n) => {
+            println!("audio: {loaded} clips");
+            return Box::new(n);
+        }
+        Err(e) => eprintln!("audio: {loaded} clips loaded but no output device ({e}), playing silently"),
+    }
+    #[cfg(not(feature = "audio"))]
+    let _ = loaded;
+    Box::new(henge_audio::Silent)
+}
 
 fn key_index(c: KeyCode) -> usize {
     match c {
@@ -230,6 +267,7 @@ impl App {
             Ok(w) => Some(w),
             Err(e) => { eprintln!("arena load failed: {e:#}"); None }
         };
+        let audio = open_audio(&mut reg);
         if world.is_none() {
             eprintln!("no arena data: {status}");
         } else {
@@ -245,6 +283,8 @@ impl App {
             mode: if map.is_some() { Mode::Map } else { Mode::Combat },
             map,
             encounter_pick: 0,
+            audio,
+            voices: Voices::new(),
             status,
             #[cfg(feature = "research")]
             research: research::Viewer::from_args()?,
@@ -300,6 +340,7 @@ impl App {
                 if let (Some(family), Some(w)) = (start, self.world.as_mut()) {
                     self.encounter_pick = self.encounter_pick.wrapping_add(1);
                     w.set_family(&family, self.encounter_pick);
+                    self.voices.reset();
                     self.mode = Mode::Combat;
                 }
             }
@@ -314,10 +355,14 @@ impl App {
                         },
                     ];
                     w.update(&seats);
+                    for (_, cue) in self.voices.observe(&w.bout.fighters, &w.events) {
+                        self.audio.play(cue.sound());
+                    }
                     // A finished bout hands control back to the map, or restarts
                     // in place when there is no map to go back to.
                     if w.settled_for() > 120 {
                         w.reset();
+                        self.voices.reset();
                         if self.map.is_some() {
                             self.mode = Mode::Map;
                         }
