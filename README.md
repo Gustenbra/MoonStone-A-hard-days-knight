@@ -20,7 +20,7 @@ need your own copy of the original, which the engine reads and converts locally.
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 51 tests, all of it verifiable headlessly with no display or sound card
+- 58 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 

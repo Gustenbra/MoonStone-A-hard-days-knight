@@ -29,7 +29,10 @@ Ordered by what the project is missing most, not by what is easiest.
 ## Next
 
 - [ ] Title screen, character select, results
-- [ ] Health and inventory persisting between fights, so dying costs something
+- [x] Health persisting between fights, so dying costs something. Wounds carry, only
+      travelling mends them, and winning heals nothing: the same walking that repairs you
+      is the walking that finds trouble. Dying ends the run.
+- [ ] Inventory, and something to spend a run's winnings on
 - [ ] Save and load
 - [ ] Web build (wasm), including running the bake client-side so no assets are ever served
 - [ ] Settle the arena family pairing question (see FORMATS.md)

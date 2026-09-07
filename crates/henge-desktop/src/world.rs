@@ -39,6 +39,9 @@ pub struct World {
     lut_arena: Option<usize>,
     /// A representative colour per seat, for status bars.
     seat_colours: [u8; 4],
+    /// What the player brings into the next bout. Wounds carry between fights,
+    /// so this is not always full.
+    player_health: Option<i32>,
 }
 
 impl World {
@@ -60,8 +63,12 @@ impl World {
             luts: [henge_assets::recolour::IDENTITY; 4],
             lut_arena: None,
             seat_colours: [1; 4],
+            player_health: None,
         };
-        w.set_players(2);
+        // One person by default. Two would leave the second knight controlled by
+        // a keyboard nobody is pressing: it never attacks, never closes, and a
+        // bout with it in can never settle. Press 2 to take that seat.
+        w.set_players(1);
         Ok(w)
     }
 
@@ -84,6 +91,12 @@ impl World {
         self.control.iter().filter(|c| matches!(c, Control::Local(_))).count()
     }
 
+    /// Set what the player enters the next bout with. Opponents are always
+    /// fresh; the player is whatever the run has left them.
+    pub fn set_player_health(&mut self, health: i32) {
+        self.player_health = Some(health);
+    }
+
     pub fn reset(&mut self) {
         let b = self.bounds();
         // Near the front of the walkable band: the band runs from the horizon
@@ -102,6 +115,9 @@ impl World {
             })
             .collect();
         self.bout = Bout::new(b, fighters);
+        if let (Some(h), Some(f)) = (self.player_health, self.bout.fighters.first_mut()) {
+            f.health = h.clamp(1, f.max_health);
+        }
         for c in self.control.iter_mut() {
             if let Control::Ai { cooldown } = c {
                 *cooldown = 20;

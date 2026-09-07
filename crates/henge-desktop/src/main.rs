@@ -14,6 +14,7 @@ use henge_assets::Registry;
 use henge_audio::{Clips, Sink, Voices};
 use map::MapScene;
 use henge_core::combat::Intent;
+use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
 use world::World;
 use std::num::NonZeroU32;
@@ -39,18 +40,22 @@ fn main() -> anyhow::Result<()> {
         app.keys[3] = true;
         let mut last = String::new();
         for t in 0..ticks {
-            // Wander rather than walking into the edge and stopping.
+            // Wander rather than walking into the edge and stopping, and swing
+            // often enough to actually win some fights. A trace where the player
+            // never fights back proves nothing about what carries between bouts.
             app.keys[3] = (t / 140) % 2 == 0;
             app.keys[2] = (t / 140) % 2 == 1;
+            app.keys[6] = t % 23 < 4;
             app.update();
             let line = match app.mode {
                 Mode::Map if app.map.is_none() => break,
                 Mode::Combat if app.world.is_none() => break,
                 Mode::Map => {
                     let Some(m) = app.map.as_ref() else { break };
-                    format!("{:>5}  MAP     day {:<3} step {:>4}  at {:>4},{:>4}  on {}",
-                        t, m.state.day, m.state.steps, m.state.x, m.state.y,
-                        m.last_terrain.name())
+                    let r = &app.run;
+                    format!("{:>5}  MAP     day {:<3} hp{:>4}  won {:<3} fought {:<3} {} on {}",
+                        t, m.state.day, r.health, r.victories, r.fights,
+                        if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name())
                 }
                 Mode::Combat => {
                     let Some(w) = app.world.as_ref() else { break };
@@ -58,7 +63,8 @@ fn main() -> anyhow::Result<()> {
                         .bout
                         .fighters
                         .iter()
-                        .map(|f| format!("{:<6}{:>4}", format!("{:?}", f.state), f.health))
+                        .map(|f| format!("{:<6}{:>4} @{:>3},{:>3}",
+                            format!("{:?}", f.state), f.health, f.x, f.y))
                         .collect();
                     format!("{:>5}  COMBAT  {:<8} {}", t, w.family(), who.join(" | "))
                 }
@@ -161,6 +167,9 @@ struct App {
     encounter_pick: u32,
     audio: Box<dyn Sink>,
     voices: Voices,
+    run: Run,
+    /// Ticks since the run ended, so the tally can be read before it restarts.
+    run_over_for: u32,
     status: String,
     #[cfg(feature = "research")]
     research: Option<research::Viewer>,
@@ -285,6 +294,8 @@ impl App {
             encounter_pick: 0,
             audio,
             voices: Voices::new(),
+            run: Run::new(100),
+            run_over_for: 0,
             status,
             #[cfg(feature = "research")]
             research: research::Viewer::from_args()?,
@@ -331,14 +342,40 @@ impl App {
 
         match self.mode {
             Mode::Map => {
+                if !self.run.alive() {
+                    // The run is over. Hold a moment so the tally can be read,
+                    // then begin again.
+                    self.run_over_for += 1;
+                    if self.run_over_for > 180 {
+                        self.run.restart();
+                        self.run_over_for = 0;
+                        if let Some(w) = self.world.as_mut() {
+                            w.set_player_health(self.run.health_for_fight());
+                        }
+                    }
+                    return;
+                }
                 let mut start: Option<String> = None;
+                let mut day_before = 0;
                 if let Some(m) = self.map.as_mut() {
+                    day_before = m.state.day;
                     if m.update(dx, dy) {
                         start = Some(m.last_terrain.family().to_string());
                     }
                 }
+                // Walking is how you mend, and also how you meet trouble. The
+                // same action both repairs and risks you.
+                if dx != 0 || dy != 0 {
+                    self.run.travelled();
+                }
+                if let Some(m) = self.map.as_ref() {
+                    if m.state.day != day_before {
+                        self.run.new_day();
+                    }
+                }
                 if let (Some(family), Some(w)) = (start, self.world.as_mut()) {
                     self.encounter_pick = self.encounter_pick.wrapping_add(1);
+                    w.set_player_health(self.run.health_for_fight());
                     w.set_family(&family, self.encounter_pick);
                     self.voices.reset();
                     self.mode = Mode::Combat;
@@ -360,9 +397,19 @@ impl App {
                     }
                     // A finished bout hands control back to the map, or restarts
                     // in place when there is no map to go back to.
+                    // Record the outcome once, on the tick the fight settles.
+                    if w.settled_for() == 1 {
+                        let survivor = w.bout.fighters.first();
+                        let health = survivor.map_or(0, |f| if f.alive() { f.health } else { 0 });
+                        let won = w.bout.winner() == Some(0);
+                        self.run.finished_fight(health, won);
+                    }
                     if w.settled_for() > 120 {
-                        w.reset();
                         self.voices.reset();
+                        if self.run.alive() {
+                            w.set_player_health(self.run.health_for_fight());
+                        }
+                        w.reset();
                         if self.map.is_some() {
                             self.mode = Mode::Map;
                         }
