@@ -231,9 +231,22 @@ fn segments_cross(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32), p4: (i32, i32)
     ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
 }
 
-/// A deliberately plain opponent: close the distance, then swing when in reach.
-/// Real behaviour comes later; this exists so combat can be felt end to end.
-pub fn simple_ai(me: &Fighter, foe: &Fighter, def: &ActorDef, cooldown: &mut i32) -> Intent {
+/// A deliberately plain opponent, but one a person can fight.
+///
+/// The first version closed at full speed and swung on every cooldown, which
+/// against a human on twenty health meant being pinned in place and cut down
+/// without a chance to answer: equal speed meant no getting away, and every
+/// hit froze the player for the next. This one has a rhythm that can be read
+/// and exploited, which is what makes a fight a game rather than a countdown.
+///
+/// * It closes at two thirds of walking speed, so the player can always make
+///   space by backing off.
+/// * After a swing it steps back for a moment before coming in again.
+/// * Every so often it hesitates, which is the opening to attack it.
+///
+/// `clock` is any counter that advances once a tick. Real behaviour, per
+/// creature, comes with the bestiary; this exists so combat can be felt.
+pub fn simple_ai(me: &Fighter, foe: &Fighter, def: &ActorDef, cooldown: &mut i32, clock: i32) -> Intent {
     if !me.alive() || !foe.alive() {
         return Intent::default();
     }
@@ -241,17 +254,29 @@ pub fn simple_ai(me: &Fighter, foe: &Fighter, def: &ActorDef, cooldown: &mut i32
     let dx = foe.x - me.x;
     let dy = foe.y - me.y;
     let reach = def.reach;
+    let toward = dx.signum();
+    let level = dy.abs() <= def.depth_tolerance;
 
-    if dx.abs() <= reach && dy.abs() <= def.depth_tolerance {
-        if *cooldown == 0 {
-            *cooldown = def.attack_cooldown;
-            return Intent { dx: 0, dy: 0, attack: true };
-        }
+    // Recovering from a swing: back off, then wait it out.
+    if *cooldown > 0 {
+        let backing = *cooldown > def.attack_cooldown - 14;
+        return Intent { dx: if backing { -toward } else { 0 }, dy: 0, attack: false };
+    }
+
+    if dx.abs() <= reach && level {
+        *cooldown = def.attack_cooldown;
+        return Intent { dx: 0, dy: 0, attack: true };
+    }
+
+    // A pause in the approach, every couple of seconds, that a watching
+    // player can learn to use.
+    if clock.rem_euclid(150) < 30 {
         return Intent::default();
     }
+
     Intent {
-        dx: if dx.abs() > reach - 4 { dx.signum() } else { 0 },
-        dy: if dy.abs() > def.depth_tolerance { dy.signum() } else { 0 },
+        dx: if dx.abs() > reach - 4 && clock % 3 != 0 { toward } else { 0 },
+        dy: if !level { dy.signum() } else { 0 },
         attack: false,
     }
 }
@@ -425,10 +450,16 @@ mod tests {
         let me = Fighter::new("a", &d, 0, 100, 1);
         let far = Fighter::new("b", &d, 200, 100, -1);
         let mut cd = 0;
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd).dx, 1, "walks toward a distant foe");
+        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 31).dx, 1, "walks toward a distant foe");
+        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 33).dx, 0, "but not every tick: slower than a person");
+        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 10).dx, 0, "and it hesitates now and then");
 
         let near = Fighter::new("b", &d, 20, 100, -1);
         let mut cd = 0;
-        assert!(simple_ai(&me, &near, &d, &mut cd).attack, "swings when in reach");
+        assert!(simple_ai(&me, &near, &d, &mut cd, 31).attack, "swings when in reach");
+        assert_eq!(cd, d.attack_cooldown);
+        let after = simple_ai(&me, &near, &d, &mut cd, 32);
+        assert!(!after.attack, "one swing, then it recovers");
+        assert_eq!(after.dx, -1, "and gives ground while it does");
     }
 }

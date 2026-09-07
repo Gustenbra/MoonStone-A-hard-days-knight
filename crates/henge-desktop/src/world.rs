@@ -20,7 +20,7 @@ const CELL_H: usize = 25;
 pub enum Control {
     /// Reads a set of keys on this machine. Moonstone was a couch game.
     Local(usize),
-    Ai { cooldown: i32 },
+    Ai { cooldown: i32, clock: i32 },
 }
 
 pub struct World {
@@ -107,7 +107,7 @@ impl World {
         let humans = humans.clamp(1, 4);
         let total = (humans + foes).clamp(2, 4);
         self.control = (0..total)
-            .map(|i| if i < humans { Control::Local(i) } else { Control::Ai { cooldown: 20 + i as i32 * 17 } })
+            .map(|i| if i < humans { Control::Local(i) } else { Control::Ai { cooldown: 20 + i as i32 * 17, clock: i as i32 * 37 } })
             .collect();
         self.reset();
     }
@@ -181,7 +181,7 @@ impl World {
             f.health = h.clamp(1, f.max_health);
         }
         for c in self.control.iter_mut() {
-            if let Control::Ai { cooldown } = c {
+            if let Control::Ai { cooldown, .. } = c {
                 *cooldown = 20;
             }
         }
@@ -269,8 +269,9 @@ impl World {
                 Some(Control::Ai { .. }) => {
                     if let Some(target) = self.bout.nearest_foe(i) {
                         let (me, foe) = (self.bout.fighters[i].clone(), self.bout.fighters[target].clone());
-                        if let Some(Control::Ai { cooldown }) = self.control.get_mut(i) {
-                            intents[i] = simple_ai(&me, &foe, &def, cooldown);
+                        if let Some(Control::Ai { cooldown, clock }) = self.control.get_mut(i) {
+                            *clock += 1;
+                            intents[i] = simple_ai(&me, &foe, &def, cooldown, *clock);
                         }
                     }
                 }
