@@ -57,6 +57,11 @@ pub struct Fighter {
     pub max_health: i32,
     /// One connect per swing, however many frames carry a hit line.
     pub struck: bool,
+    /// What this fighter's blow takes off, or zero for the bout's own figure.
+    /// Copied from the definition so a caller fighting at another scale can
+    /// move it with the health, the way it moves the bout's.
+    #[serde(default)]
+    pub damage: i32,
     /// The running task, for an actor animated by the recovered VM. `None`
     /// until the first tick of a state, and always for an actor with no scripts.
     #[serde(default)]
@@ -102,6 +107,7 @@ impl Fighter {
             health: def.health,
             max_health: def.health,
             struck: false,
+            damage: def.damage,
             task: None,
             record: TaskActor::with_health(def.health),
             cycle: 0,
@@ -117,6 +123,7 @@ impl Fighter {
                 let facing = if facing < 0 { FACING_LEFT } else { FACING_RIGHT };
                 let mut task =
                     Task::new(first, x + def.origin[0] as i32, y + def.origin[1] as i32, facing);
+                task.table = def.bank_table;
                 task.step(&def.animation, &mut f.record, false);
                 f.task = Some(task);
             }
@@ -254,7 +261,9 @@ impl Fighter {
         let mut step_now = false;
         match &mut self.task {
             None => {
-                self.task = Some(Task::new(&names[0], self.x + ox, self.y + oy, facing));
+                let mut task = Task::new(&names[0], self.x + ox, self.y + oy, facing);
+                task.table = def.bank_table;
+                self.task = Some(task);
                 self.script_tick = 0;
                 step_now = true;
             }

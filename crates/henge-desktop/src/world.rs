@@ -9,7 +9,7 @@ use henge_assets::{player_colours, player_luts, recolour, Lut, Registry};
 use henge_core::arena::Bounds;
 use henge_core::bout::{Bout, HitEvent};
 use henge_core::combat::{simple_ai, Fighter, Intent};
-use henge_core::content::{ActorData, ArenaData, Arenas, Families};
+use henge_core::content::{ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH};
 
 const CELL_W: usize = 32;
 const CELL_H: usize = 25;
@@ -52,6 +52,12 @@ pub struct World {
     /// Which knight is in which seat, so a fight is fought in the colours the
     /// select screen handed out.
     roster: Vec<usize>,
+    /// What the seats not taken by a person are filled with, by actor id. A
+    /// knight until the road says otherwise; `set_foe` and the family's own
+    /// creature list say otherwise.
+    foe: String,
+    /// The creatures the pack knows, in a fixed order, for cycling through.
+    bestiary: Vec<String>,
 }
 
 impl World {
@@ -65,6 +71,10 @@ impl World {
         anyhow::ensure!(actors.contains_key("knight"), "no knight definition in the pack");
 
         let bounds = arenas[&order[0]].bounds();
+        // Everyone the pack can field, the knight first so cycling from the
+        // default goes straight to the creatures.
+        let mut bestiary: Vec<String> = vec!["knight".into()];
+        bestiary.extend(actors.keys().filter(|k| k.as_str() != "knight").cloned());
         let mut w = World {
             arenas, families, actors, order, index: 0,
             bout: Bout::new(bounds, Vec::new()),
@@ -76,6 +86,8 @@ impl World {
             player_health: None,
             sheet_health: None,
             roster: (0..4).collect(),
+            foe: "knight".into(),
+            bestiary,
         };
         // One person by default. Two would leave the second knight controlled by
         // a keyboard nobody is pressing: it never attacks, never closes, and a
@@ -84,8 +96,67 @@ impl World {
         Ok(w)
     }
 
-    fn def(&self) -> &henge_core::content::ActorDef {
-        &self.actors["knight"]
+    /// The definition behind a seat. Every fighter in a bout was built from
+    /// an actor the pack holds, so a miss here is a bug rather than a state.
+    fn def_of(&self, actor: &str) -> &ActorDef {
+        &self.actors[actor]
+    }
+
+    fn def_at(&self, seat: usize) -> &ActorDef {
+        self.def_of(&self.bout.fighters[seat].actor)
+    }
+
+    /// Is this seat a knight, and so drawn in a knight's colours and named
+    /// off the roster, or a creature, drawn as its sheet has it?
+    pub fn is_knight(&self, seat: usize) -> bool {
+        self.bout.fighters.get(seat).map_or(true, |f| f.actor == "knight")
+    }
+
+    /// What a seat is called: the creature's name from its definition, or
+    /// nothing for a knight, whose name is the roster's business.
+    pub fn creature_name(&self, seat: usize) -> Option<String> {
+        let f = self.bout.fighters.get(seat)?;
+        if f.actor == "knight" {
+            return None;
+        }
+        Some(self.def_of(&f.actor).display_name(&f.actor).to_string())
+    }
+
+    /// Field a particular actor as the opponent. An unknown id is refused and
+    /// said so, rather than silently fielding a knight.
+    pub fn set_foe(&mut self, actor: &str) -> bool {
+        if !self.actors.contains_key(actor) {
+            let known: Vec<&str> = self.bestiary.iter().map(String::as_str).collect();
+            eprintln!("no actor called {actor}. The pack has: {}", known.join(", "));
+            return false;
+        }
+        self.foe = actor.to_string();
+        self.reset();
+        true
+    }
+
+    /// The next or previous creature in the pack, for the arena browser.
+    pub fn step_foe(&mut self, delta: i32) {
+        let n = self.bestiary.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let at = self.bestiary.iter().position(|b| *b == self.foe).unwrap_or(0) as i32;
+        let next = (((at + delta) % n) + n) % n;
+        let id = self.bestiary[next as usize].clone();
+        self.set_foe(&id);
+    }
+
+    /// The opponent the road produces on this family's ground: the family's
+    /// own creature list, indexed by its turn counter, or a knight where the
+    /// pack lists nothing.
+    pub fn foe_for(&self, family: &str, pick: usize) -> String {
+        self.families
+            .get(family)
+            .and_then(|f| f.creature(pick))
+            .filter(|c| self.actors.contains_key(*c))
+            .unwrap_or("knight")
+            .to_string()
     }
 
     /// How many people are at the keyboard. The rest of the four are opponents.
@@ -156,7 +227,8 @@ impl World {
         // Near the front of the walkable band: the band runs from the horizon
         // down, so its bottom edge is the ground closest to the viewer.
         let ground = b.bottom - 8;
-        let def = self.actors["knight"].clone();
+        let knight = self.actors["knight"].clone();
+        let foe = self.actors.get(&self.foe).cloned().unwrap_or_else(|| knight.clone());
         let n = self.control.len().max(2) as i32;
         let span = b.right - b.left - 100;
         let fighters = (0..n)
@@ -165,17 +237,40 @@ impl World {
                 // so nobody starts with their back to the fight.
                 let x = b.left + 50 + span * i / (n - 1).max(1);
                 let y = ground - (i % 2) * 10;
-                Fighter::new("knight", &def, x, y, if i % 2 == 0 { 1 } else { -1 })
+                let facing = if i % 2 == 0 { 1 } else { -1 };
+                // People are knights. The seats the machine fills are whatever
+                // the road, or the browser, asked for.
+                match self.control.get(i as usize) {
+                    Some(Control::Ai { .. }) if self.foe != "knight" => {
+                        Fighter::new(self.foe.as_str(), &foe, x, y, facing)
+                    }
+                    _ => Fighter::new("knight", &knight, x, y, facing),
+                }
             })
             .collect();
         self.bout = Bout::new(b, fighters);
+        // The scale every fight is at: a knight's health, and the blow that
+        // takes a quarter of it. Every knight in an arena is worth the same,
+        // so one number does for all of them, and the creatures, whose hit
+        // points and blows are at the original's scale of a twenty-point
+        // knight, are moved by the same ratio so a troll is as many swings
+        // deep at a hundred as it is at twenty.
+        let knight_max = self.sheet_health.unwrap_or(knight.health).max(1);
         if let Some(max) = self.sheet_health {
-            let base = def.health.max(1);
-            for f in self.bout.fighters.iter_mut() {
-                f.max_health = max;
-                f.health = max;
-            }
+            let base = knight.health.max(1);
             self.bout.damage = (self.bout.damage * max / base).max(1);
+        }
+        for f in self.bout.fighters.iter_mut() {
+            if f.actor == "knight" {
+                f.max_health = knight_max;
+                f.health = knight_max;
+            } else {
+                let scale = |v: i32| (v * knight_max / ORIGINAL_KNIGHT_HEALTH).max(1);
+                f.max_health = scale(f.max_health);
+                f.health = f.max_health;
+                f.damage = scale(f.damage);
+                f.record.set_health(f.health);
+            }
         }
         if let (Some(h), Some(f)) = (self.player_health, self.bout.fighters.first_mut()) {
             f.health = h.clamp(1, f.max_health);
@@ -197,13 +292,12 @@ impl World {
     /// property of who you fought and lives in the pack. Seat zero is excluded
     /// because a man does not loot himself.
     pub fn purse(&self) -> u32 {
-        let bounty = self.def().bounty;
         self.bout
             .fighters
             .iter()
             .enumerate()
             .filter(|(i, f)| *i != 0 && !f.alive())
-            .map(|_| bounty)
+            .map(|(_, f)| self.def_of(&f.actor).bounty)
             .sum()
     }
 
@@ -258,7 +352,6 @@ impl World {
     /// seat order; opponents are filled in here. The bout itself cannot tell
     /// which is which.
     pub fn update(&mut self, local: &[Intent]) {
-        let def = self.actors["knight"].clone();
         let mut intents = vec![Intent::default(); self.bout.fighters.len()];
 
         for i in 0..self.bout.fighters.len() {
@@ -269,6 +362,9 @@ impl World {
                 Some(Control::Ai { .. }) => {
                     if let Some(target) = self.bout.nearest_foe(i) {
                         let (me, foe) = (self.bout.fighters[i].clone(), self.bout.fighters[target].clone());
+                        // The opponent judges spacing by its own reach, so a
+                        // troll swings from where a troll's club lands.
+                        let def = self.def_of(&me.actor).clone();
                         if let Some(Control::Ai { cooldown, clock }) = self.control.get_mut(i) {
                             *clock += 1;
                             intents[i] = simple_ai(&me, &foe, &def, cooldown, *clock);
@@ -278,7 +374,8 @@ impl World {
                 None => {}
             }
         }
-        self.events = self.bout.step(&def, &intents);
+        let actors = &self.actors;
+        self.events = self.bout.step_with(|name| &actors[name], &intents);
     }
 
     pub fn render(&mut self, reg: &mut Registry, fb: &mut Framebuffer) -> anyhow::Result<()> {
@@ -362,7 +459,7 @@ impl World {
     fn draw_fighter(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
         -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
-        let def = self.def();
+        let def = self.def_at(index);
         if def.scripted() {
             return self.draw_task(reg, fb, index);
         }
@@ -401,9 +498,16 @@ impl World {
     fn draw_task(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
         -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
-        let def = self.def();
+        let def = self.def_at(index);
         let Some(task) = f.task.as_ref() else { return Ok(()) };
-        let lut = self.luts[self.knight_at(index) % 4];
+        // A knight wears his seat's colours. A creature is drawn as its sheet
+        // has it: the arena's palette already recolours it per region, which
+        // is how the original got a swamp trogg and a forest trogg for free.
+        let lut = if self.is_knight(index) {
+            self.luts[self.knight_at(index) % 4]
+        } else {
+            henge_assets::recolour::IDENTITY
+        };
         let at = (task.x, task.y, task.z);
         for part in &task.shown {
             let Some(bank) = def.bank(part.table, part.bank) else { continue };

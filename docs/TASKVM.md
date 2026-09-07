@@ -28,7 +28,12 @@ python3 tools/taskvm.py MAIN.EXE --composite Knight_SwWalkOn
 | the scripts | DGROUP, as named data symbols: `Knight_SwSwing`, `Troll_Walk1` |
 
 The scripts are ordinary data in the executable's data segment, and the symbol
-table names 221 of them. A script pointer is a near offset in DS.
+table names 236 of them. A script pointer is a near offset in DS. (The count was
+221 until the bestiary was built: the mudmen's prefix is `Mudmen`, where
+`MudmanTABLE` had suggested `Mudman`, so their fourteen scripts and
+`Rat_TreeBrush` were being filtered out. All fifteen parse like the rest, and
+they bring four more `TASKGOSUB` targets: `AddMudVoice`, `AddMudSound`,
+`AddCrushSnd` and `PlayScareMusic`.)
 
 ### Reading the handler table needs the link-time offset correction
 
@@ -77,11 +82,11 @@ script pointer itself with `add word ptr [di+2], n`, and that `n` is the width.
 | `0x8c` | `TASKSKIP` | 4 | `u8 _, u16 target`. Branch if the DS:`0x700` mode flag is set. Ten uses, five targets, and four of the five are the bloodless `*_CollapseDead` scripts |
 | `0x8e` | `TASKTIME` | 0 | The handler is a bare `RET`. It does not advance the script pointer, so it would spin. Never emitted in any script |
 | `0x90` | `TASKMOVE` | 8 | `u8 flags, i16 x, i16 y, i16 z`. With flags bit `0x40`, sets the task position outright. Otherwise adds: x by bit 0 and the facing, y by bit 3, z by bit 5 (see below) |
-| `0x92` | `TASKSOUND` | 2 | `u8 sample`. 124 uses, 49 distinct sample numbers |
+| `0x92` | `TASKSOUND` | 2 | `u8 sample`. 130 uses, 54 distinct sample numbers |
 | `0x94` | `TASKSAVE` | 6 | `u8 mode, i16 field, u16 value`. Store into the actor record at `actor+field`; mode bit 0 stores a byte, otherwise a word |
 | `0x96` | `TASKSHADOW` | 4 | `u8 on, u16 script`. Sets `actor+0xe` to the shadow script and `actor+0xc` to on/off. Eleven uses; the four non-zero targets are `Ratman_Shadow`, `Beast_KnightShadow`, `Dragon_Shadow`, `Balok_Shadow` |
-| `0x98` | `TASKGOSUB` | 4 | `u8 _, u16 routine`. Near call into the game's own code with x, y, z, facing, the bank table and the actor in registers. 124 uses; all 37 distinct targets resolve to named routines |
-| `0x9a` | `TASKDEAD` | 4 | `u8 _, u16 target`. Branch to `target` and clear the VM state if `actor+0x38` (hit points) is <= 0. All 19 distinct targets are death scripts |
+| `0x98` | `TASKGOSUB` | 4 | `u8 _, u16 routine`. Near call into the game's own code with x, y, z, facing, the bank table and the actor in registers. 141 uses; all 41 distinct targets resolve to named routines |
+| `0x9a` | `TASKDEAD` | 4 | `u8 _, u16 target`. Branch to `target` and clear the VM state if `actor+0x38` (hit points) is <= 0. All 20 distinct targets are death scripts |
 | `0x9c` | `TASKADDTASK` | 4 | `u8 _, u16 script`. Spawn a second task on that script. One use in the whole game, `Beast_BackToss` |
 | `0x9e` | `TASKKILLTASK` | 2 | `u8 _`. Marks the task inactive and zeroes the actor's first word |
 | `0xa0` | `TASKCELBUF` | 2 | `u8 n`. `task+0x18 <- TaskCelTable[n-1]`, choosing which set of sprite banks the frame records index. Only 1 and 2 are used |
@@ -127,7 +132,7 @@ them `Knight_Burn`, `Beast_BackToss`, `TroggSpear_Toss` and the three
 `Balok_*Knight` holds; read the terminator as unconditional and each of those
 plays once instead of the stated number of times.
 
-All 221 scripts end on `ff ff`.
+All 236 scripts end on `ff ff`.
 
 ## The sprite-part record
 
@@ -160,12 +165,12 @@ Flag bits, and where each is read:
 
 | bit | effect |
 |---|---|
-| `0x01` | also push this part onto `BodyPile`, the list the collision code walks (578 records) |
-| `0x02` | also push it onto `WeoponPile` (153 records) |
-| `0x10` | blit it a second time into the buffer at segment `0xac00` as well as the current target (166 records) |
-| `0x40` | do not fold this part into the actor's bounding box (`FindWidth`) (163 records) |
+| `0x01` | also push this part onto `BodyPile`, the list the collision code walks (615 records) |
+| `0x02` | also push it onto `WeoponPile` (156 records) |
+| `0x10` | blit it a second time into the buffer at segment `0xac00` as well as the current target (176 records) |
+| `0x40` | do not fold this part into the actor's bounding box (`FindWidth`) (227 records) |
 | `0x80` | drop the part entirely, piles included, when the DS:`0x700` mode flag is set (315 records) |
-| `0x04`, `0x20` | occur in the data (35 and 376 records) but are read by nothing in `PerformCOMMAND`. `0x08` never occurs |
+| `0x04`, `0x20` | occur in the data (35 and 462 records) but are read by nothing in `PerformCOMMAND`. `0x08` never occurs |
 
 The pile entry the collision code sees is ten bytes: the bank far pointer, the
 cel index, screen x, screen y, and a zero.
@@ -268,8 +273,8 @@ Everything above is read out of the code except the following.
 The decode was not accepted on the strength of the table looking plausible. It
 was checked by compositing and looking.
 
-`tools/taskvm.py --verify` parses all 221 named scripts: 3,709 part records and
-724 commands, no unknown opcode, every script terminating on `ff ff`, every
+`tools/taskvm.py --verify` parses all 236 named scripts: 3,957 part records and
+774 commands, no unknown opcode, every script terminating on `ff ff`, every
 part's bank selector a multiple of four, every `TASKGOTO` and `TASKDEAD` target
 the first byte of a named script, and every `TASKGOSUB` target the exact entry
 point of a named routine.
@@ -330,7 +335,7 @@ Three choices are worth knowing.
   exported instruction carries the name. The set is closed: the reader checks
   that every target is a script it exported.
 * **Calls out of the machine are effects.** `TASKGOSUB` becomes
-  `Effect::Gosub { routine, kind }`; the 37 targets are in `GOSUB_TARGETS` by
+  `Effect::Gosub { routine, kind }`; the 41 targets are in `GOSUB_TARGETS` by
   name, with a kind read off the name (`Sound`, `Spawn`, `Gore`, `Control`),
   and a name not in the table comes out `Unknown`. `TASKSOUND` is
   `Effect::Sound { sample }`. Nothing runs them. `TASKTIME`, whose handler
@@ -366,9 +371,9 @@ The baker writes three things into `packs/reference/data/`:
 
 | file | what |
 |---|---|
-| `scripts.json` | all 221 scripts, as the engine's own `Instr` values |
+| `scripts.json` | all 236 scripts, as the engine's own `Instr` values |
 | `banks.json` | the four bank tables for each of the eleven creature loaders, with a sheet, a frame base and every cel's size |
-| `actors.json` | the knight, carrying the closure of the scripts his states reach, his bank tables, which script each state plays, his origin and his frame rate |
+| `actors.json` | the knight and the ten creatures, each carrying the closure of the scripts its states reach, its bank tables, which table a task starts on, which script each state plays, its origin, hit box and girth read off its standing frame, its frame rate, and the numbers from its `Set*Tables` routine |
 
 Two of those numbers are ours and are marked so in the data's own comments.
 The **origin** is where the task's point sits relative to the feet, read off
@@ -376,8 +381,9 @@ the standing frame (52 pixels up, for the knight) because this engine places
 by the feet and the original places against a point near the head. The
 **frame rate**, six ticks a script frame, comes from `Knight_SwWalkOn`, whose
 baked offsets advance about 47 pixels over one four-frame stride, at two
-pixels a tick. Which script a state plays is also ours: `CONTROLTABLE` is
-uninitialised data and not in the load image.
+pixels a tick. Which script a state plays was thought to be ours too, because
+`CONTROLTABLE` is uninitialised data; it is not, and the next section says
+where it was found.
 
 ### What the knight does with it
 
@@ -394,3 +400,90 @@ against the `--composite` contact sheets. The walk and the swing match frame
 for frame, both facings; the death is the kneel and the collapse; and a traced
 practice duel still lands blows, staggers for the length of the recoil script,
 and ends in a death.
+
+## The controller tables, and the stat block
+
+The tables that say which script an actor plays for which purpose are `BSS`,
+which is why the load image shows nothing at their addresses. They are filled
+by two routines in `MOON` with a run of `mov word ptr [si+off], imm16`, and
+those immediates are the tables. `SetKnightAnims` (image `0x1771`) fills the
+knight's; `SetMonsterAnims` (`0x186b`) fills every creature's. Read out of
+the code with the same disassembler that read the handlers:
+
+| table | indexed by | holds |
+|---|---|---|
+| `*Wal` (`KnightWalSw`, `TroggWalAxe`, `TroggWalSp`, `TroggWalHammer`, `TrollWal`, `MudmenWal`, `RatmenWal`, `DragonWal`, `BeastWal`) | walk frame, times two, plus `WalkOFFSET` | the walk cycle: right-facing scripts at +0, up at +0x10, down at +0x20, each row zero terminated |
+| `*Att` (`KnightAttSw`, `TroggAttAxe`, `TroggAttHammer`) | attack kind | the attack script: knight 2 lunge, 4 swing, 6 knife, 8 block, 0xa right thrust, 0xc up thrust, 0xe evade, 0x10 chop |
+| `*Hit` (`KnightHitSw`, `TroggHitSp`, `TroggHitAxe`, `TroggHitHammer`, `BeastHit2`, `RatmenHit`, `DragonHit`, `MudmenHit`, `TrollHit`) | the attacker's attack kind, `[attacker+0x28]` | the blow-taken script, read in `TroggStruck` as `[[victim+0x14] + kind]` |
+| `*Dam` (`KnightDamSw`, `TroggDamAxe`, `TroggDamHammer`, `RatmenDam`, `TrollDam`, `MudmenDam`, `BalokDam`, `DragonDam`) | attack kind | the damage of that attack, before `CalcDamage` adds strength and weapon |
+| `*Blo` (`KnightBloSw`) | attack kind | not read; probably the blood |
+
+The walk rows, exactly as filled:
+
+```
+knight     R1 R2 R3 R4 / U1..U4 / D1..D4         (Knight_SwWalk*)
+trogg axe  R1 R2 R3 / U1..U4 / D1..D4            (also hammer, also spear)
+troll      Walk1 Walk2 Walk3 Walk4               (no up or down row)
+mudmen     Move1 Move3 Move1 Move2               (no up or down row)
+ratmen     Roll1..Roll4 / Leap1..Leap4           (no down row)
+dragon     LiftHead1..5, 5, 5, 5 / LowerHead1..5, 5, 5, 5   (rows at +0x10 and +0x20 only)
+beast      copied from BEWAL, which is in the unreadable first 2,906 bytes of DGROUP
+```
+
+Two slips in the original are worth knowing before anyone reads a table as
+gospel. `TrollHit` is filled with the address of `TrollHit` itself, eight
+times, where every other creature's `*Hit` holds a script; and `Demon_Slap`
+on disk runs straight on into `Demon_Zap` and `Demon_Whip`, so a parse that
+stops only on `ff ff` reads all three as one script, though a `TASKGOTO` to
+`Demon_Stance2` after the slap's fifth frame ends it before that matters.
+
+**The stat block** is written by a `Set*Tables` routine each `InitKnightvs*`
+calls, into the actor record. The offsets, read off the code:
+
+```
++0x10 stance script      +0x38 hit points          +0x52 approach range
++0x12 recovery script    +0x3c maximum hit points  +0x54 back-off range
++0x14 *Hit table         +0x35 kind                +0x56 plane tolerance
++0x16 *Att table         +0x18 bank table (0x8933 knight, 0x8949 creature)
++0x1a *Dam table         +0x1c *Wal table
+```
+
+The three ranges are what `MonsterTrack` reads: `CheckZAxis` is on the same
+plane when the z difference is within `+0x56`; `CheckXAxis` against `+0x54`
+goes to `TrackBack`, which sets the walk bit away from the knight; against
+`+0x52` it returns "in range" with no walk bit set; further out,
+`TrackOpponent` sets the walk bit towards him. What each creature does once
+in range is its own routine (`TroggAttacks` picks the spear's lunge inside
+`+0x52`, the chop beyond a hundred, the swing inside it) and is not built.
+
+| creature | `+0x38` | `+0x3c` | `+0x52` | `+0x54` | `+0x56` | `+0x35` | damage |
+|---|---|---|---|---|---|---|---|
+| knight | derived | derived | 100 | 80 | 4 | 6 | lunge 3, swing 4, knife 3, right thrust 2, up thrust 3, chop 4 |
+| trogg with axe | 20 | 20 | 100 | 90 | 5 | 0xc | 3 |
+| trogg with hammer | 20 | 20 | 70 | 65 | 5 | 0xe | 2 |
+| trogg with spear | 15 | 15 | 130 | 120 | 5 | 0x10 | no table |
+| beast | 10 | 10 | 2 | 1 | 5 | 0 | no table |
+| ratmen | 5, 7, 12 by moon | same | 40 | 30 | 5 | 0x12 | 3 and 1, rising to 6 and 3, 8 and 5 |
+| dragon | 200 | 120 | 60 | 20 | 5 | 0xa | 10 lunge and right thrust, 30 swing and chop |
+| dragon's claws | 50 | 50 | | | 10 | 0x16 | |
+| Balok | 30 | 30 | 80 | 60 | 10 | 0x18 | 4 |
+| mudmen | 30 | 30 | 80 | 75 | 5 | 2 | 2 |
+| troll | 40 | 40 | 150 | 90 | 5 | 0x20 | 3 |
+| demon | 250 | not set | 95 | 90 | 2 | 4 | no table |
+
+The knight's `Set*Tables` also writes 100, 80 and 4, and his walk speed is in
+`BKnightWALKR`: 25, 3, 23, 4 pixels over the four frames, 55 to the 47 that
+the frame rate above was read off `Knight_SwWalkOn`, which is close enough
+that six ticks a frame stands. The creatures'
+are `TroggWALKR` (0, 7, 23), `TrollWALKR` (16, 26, 13, 26), `MudmenWALK`
+(12 across and 12 deep, then 10 and 14) and `BeastChargeOffsets` (33, 27,
+17, 33). Every `InitKnightvs*` also writes 6 into `DELAY`; nothing in the
+image reads it back, so whether it is the frame delay is not known, and the
+six ticks a frame stands on the walk measurement rather than on it.
+
+What the pack does with all this: each creature's `walk` is its `*Wal` right
+row; its `hurt` is the `*Hit` entry for a swing, the one attack the knight has
+here; its `death` is where that script's own `TASKDEAD` goes; its `health`,
+`damage`, `approach`, `back_off` and `depth_tolerance` are the row above. Its
+`attack` is a choice among its own, and `reach`, `speed` and `bounty` are ours;
+the baker says which beside each.

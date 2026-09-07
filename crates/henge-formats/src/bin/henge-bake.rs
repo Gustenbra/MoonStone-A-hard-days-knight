@@ -60,6 +60,22 @@ const ARENAS: &[(&str, &str, &str, [&str; 8])] = &[
      ["gl1", "gl2", "gl3", "gl4", "gl5", "gl6", "gl7", "gl8"]),
 ];
 
+/// What waylays a traveller on each kind of ground, in the order the family's
+/// turn counter brings them round.
+///
+/// **Design, not recovered.** Which creature a stretch of the map produces is
+/// decided in `_MAP` and has not been read out of it. This is the obvious
+/// reading: troggs and ratmen under the trees, mudmen in the marsh, a troll
+/// in the waste. The beast, Balok, the demon and the dragon are lair and
+/// set-piece encounters in the original and do not wait by the road here
+/// either; `--foe` puts any of them in an arena.
+const AMBUSHES: &[(&str, &[&str])] = &[
+    ("glade", &["trogg_axe", "ratmen", "trogg_hammer"]),
+    ("forest", &["trogg_axe", "ratmen", "trogg_spear"]),
+    ("swamp", &["mudmen", "trogg_spear", "mudmen"]),
+    ("waste", &["troll", "trogg_hammer", "trogg_axe"]),
+];
+
 /// The sheet a placement asks for when its selector byte is 4, whatever the
 /// family. See `Family::tiles` in `henge-core` for what established it.
 const SHARED_TILES: &str = "FO2.CMP";
@@ -99,13 +115,16 @@ const CREATURE_BANKS: &[(&str, &[&str])] = &[
 
 /// Which script each of the knight's states plays.
 ///
-/// **Not recovered.** The original picks a script through `CONTROLTABLE`, which
-/// is uninitialised data and is not in the load image, so this mapping is ours.
-/// The scripts themselves are the original's, and the shape of the walk is the
-/// original's too: `Knight_SwWalkR1` through `R4` are four single-frame
-/// scripts, each ending on `ff ff`, and the controller hands over the next one
-/// every time the last has ended. The knight has four attacks (`SwSwing`,
-/// `SwChop`, `SwLunge` and three thrusts); one button gets the swing.
+/// **Recovered, as far as it goes.** The controller's tables are `BSS`, which
+/// is why they were thought lost, but `SetKnightAnims` fills them at start-up:
+/// `KnightWalSw` holds `Knight_SwWalkR1` through `R4` as the right-facing row,
+/// `KnightAttSw` the nine attacks by kind (lunge, swing, knife, block, three
+/// thrusts, evade, chop), and `KnightHitSw` the blow taken for each kind, with
+/// `Knight_SwWaistHit` for a swing. What is still ours is which one attack the
+/// one button gets, and which blow is taken for it: the swing, and the
+/// shoulder hit it was checked against when the VM landed. The walk's shape is
+/// the original's: four single-frame scripts, each ending on `ff ff`, the
+/// controller handing over the next each time the last has ended.
 const KNIGHT_SCRIPTS: &[(&str, &[&str])] = &[
     ("idle", &["Knight_SwStance"]),
     ("walk", &[
@@ -114,6 +133,211 @@ const KNIGHT_SCRIPTS: &[(&str, &[&str])] = &[
     ("attack", &["Knight_SwSwing"]),
     ("hurt", &["Knight_SwShoulderHit"]),
     ("death", &["Knight_SwDeath"]),
+];
+
+/// One creature of the bestiary: which scripts its five states play, and the
+/// numbers the original's own set-up routine gives it.
+#[derive(Clone, Copy)]
+struct Creature {
+    id: &'static str,
+    name: &'static str,
+    /// Key into `CREATURE_BANKS`: the loader whose table 2 the scripts index.
+    banks: &'static str,
+    /// The sheet the first bank was packed into, for `ActorDef::sheet`.
+    sheet: &'static str,
+    idle: &'static [&'static str],
+    walk: &'static [&'static str],
+    attack: &'static [&'static str],
+    hurt: &'static [&'static str],
+    death: &'static [&'static str],
+    /// `+0x38` and `+0x3c` of the actor record, from `Set*Tables`.
+    health: i32,
+    /// What its blow takes off, from the `*Dam` table `SetMonsterAnims` fills,
+    /// or a stand-in where the original sets it in code that has not been read.
+    damage: i32,
+    /// `+0x52`, `+0x54` and `+0x56`: stop approaching, give ground, same plane.
+    approach: i32,
+    back_off: i32,
+    depth: i32,
+    /// Ours: how close the plain opponent walks before it swings.
+    reach: i32,
+    /// Ours: pixels a tick, read off the walk offset tables where there is one.
+    speed: [i32; 2],
+    /// Ours: what it is worth to whoever puts it down.
+    bounty: u32,
+    /// Ours: how much ground it stands on, or zero to take three quarters of
+    /// the standing frame's width the way the knight's was set.
+    girth: i32,
+}
+
+/// The bestiary, as the original sets each creature up.
+///
+/// **Recovered, most of it.** `SetKnightAnims` and `SetMonsterAnims` in
+/// `MOON` fill the controller tables that were thought lost: for each
+/// creature a walk table (`*Wal`: the right-facing cycle at +0, up at +0x10,
+/// down at +0x20, each zero terminated), an attack table (`*Att`, by attack
+/// kind), a blow-taken table (`*Hit`, indexed by the attacker's attack kind,
+/// 2 lunge, 4 swing, 6 knife, 0xa right thrust, 0xc up thrust, 0x10 chop) and
+/// a damage table (`*Dam`, same index). The `Set*Tables` routines called from
+/// each `InitKnightvs*` write the stat block: hit points at `+0x38` and
+/// `+0x3c`, the tracker's two ranges at `+0x52` and `+0x54`, its plane
+/// tolerance at `+0x56`, the creature's kind at `+0x35`, and the stance and
+/// recovery scripts at `+0x10` and `+0x12`.
+///
+/// The walk cycles are the `*Wal` right-facing rows exactly. The blow taken
+/// is the `*Hit` entry for a swing, the one attack the knight has here, and
+/// the death is where that script's own `TASKDEAD` goes, so a creature dies
+/// the way the original kills it for that blow. The attack is one of the
+/// creature's own from its `*Att` table or, for the ones the code chooses
+/// directly (spear, ratman, troll, balok, demon, dragon), the script that
+/// routine picks first.
+///
+/// Numbers marked ours: `reach`, which is the range the plain opponent
+/// swings at and sits inside the recovered `approach` so the weapon actually
+/// crosses the body; `speed`, read off the `*WALKR` offset tables where the
+/// creature has one and chosen otherwise; and `bounty`, which the original
+/// keeps no table for.
+const CREATURES: &[Creature] = &[
+    Creature {
+        id: "troll", name: "Troll", banks: "troll", sheet: "actor.troll",
+        idle: &["Troll_Stance"],
+        walk: &["Troll_Walk1", "Troll_Walk2", "Troll_Walk3", "Troll_Walk4"],
+        // The troll has two: `Troll_Bunt`, a club thrust that lands from 33
+        // to 98 pixels out, and `Troll_Chop`, an overhead that lands from 105
+        // to 160 and shakes the screen. The original picks by distance, which
+        // is behaviour; the plain opponent closes in, so it gets the bunt.
+        attack: &["Troll_Bunt"],
+        // `SetMonsterAnims` fills `TrollHit` with the table's own address
+        // rather than `Troll_Hit`, eight times over, which reads as a slip in
+        // the original; `Troll_Hit` is the only blow-taken script it has.
+        hurt: &["Troll_Hit"],
+        death: &["Troll_Dies"],
+        health: 40, damage: 3, approach: 150, back_off: 90, depth: 5,
+        // `TrollWALKR` steps 16, 26, 13, 26: twenty pixels a frame.
+        reach: 80, speed: [3, 1], bounty: 40, girth: 0,
+    },
+    Creature {
+        id: "trogg_axe", name: "Trogg", banks: "trogg_axe", sheet: "actor.trogg_axe",
+        idle: &["TroggAxe_Stance"],
+        walk: &["TroggAxe_WalkR1", "TroggAxe_WalkR2", "TroggAxe_WalkR3"],
+        attack: &["TroggAxe_Swing"],
+        hurt: &["TroggAxe_WaistHit"],
+        death: &["TroggAxe_Split"],
+        health: 20, damage: 3, approach: 100, back_off: 90, depth: 5,
+        // `TroggWALKR` steps 0, 7, 23: ten pixels a frame.
+        reach: 70, speed: [2, 1], bounty: 15, girth: 0,
+    },
+    Creature {
+        id: "trogg_hammer", name: "Trogg", banks: "trogg_axe", sheet: "actor.trogg_axe",
+        idle: &["TroggHammer_Stance"],
+        walk: &["TroggHammer_WalkR1", "TroggHammer_WalkR2", "TroggHammer_WalkR3"],
+        attack: &["TroggHammer_Swing"],
+        hurt: &["TroggHammer_WaistHit"],
+        death: &["TroggHammer_Split"],
+        health: 20, damage: 2, approach: 70, back_off: 65, depth: 5,
+        reach: 60, speed: [2, 1], bounty: 15, girth: 0,
+    },
+    Creature {
+        id: "trogg_spear", name: "Trogg", banks: "trogg_spear", sheet: "actor.trogg_spear",
+        idle: &["TroggSpear_Stance"],
+        walk: &["TroggSpear_WalkR1", "TroggSpear_WalkR2", "TroggSpear_WalkR3"],
+        attack: &["TroggSpear_Lunge"],
+        hurt: &["TroggSpear_WaistHit"],
+        death: &["TroggSpear_Split"],
+        // No `TroggDamSp` exists; the spear's blow is set where the lunge
+        // lands, in code not yet read. Three is the axe's, as a stand-in.
+        health: 15, damage: 3, approach: 130, back_off: 120, depth: 5,
+        reach: 100, speed: [2, 1], bounty: 15, girth: 0,
+    },
+    Creature {
+        id: "ratmen", name: "Ratman", banks: "ratmen", sheet: "actor.ratmen",
+        idle: &["Ratman_Stance"],
+        walk: &["Ratman_Roll1", "Ratman_Roll2", "Ratman_Roll3", "Ratman_Roll4"],
+        attack: &["Ratman_Slash"],
+        hurt: &["Ratman_Knocked"],
+        death: &["Ratman_KnockDead"],
+        // Five hit points and a blow of three at new moon; `SetRatmenTables`
+        // raises both with the moon, to seven and six, then twelve and eight.
+        // The moon is not in the game yet, so the ratman is the dark one.
+        health: 5, damage: 3, approach: 40, back_off: 30, depth: 5,
+        reach: 24, speed: [3, 1], bounty: 5, girth: 0,
+    },
+    Creature {
+        id: "mudmen", name: "Mudman", banks: "mudmen", sheet: "actor.mudmen",
+        idle: &["Mudmen_Stance"],
+        walk: &["Mudmen_Move1", "Mudmen_Move3", "Mudmen_Move1", "Mudmen_Move2"],
+        attack: &["Mudmen_ArmAttack"],
+        hurt: &["Mudmen_Hit"],
+        death: &["Mudmen_Dies"],
+        health: 30, damage: 2, approach: 80, back_off: 75, depth: 5,
+        // `MudmenWALK` steps (12, 12), (10, 14): it comes at you on a
+        // diagonal, eleven across and thirteen deep a frame.
+        reach: 90, speed: [2, 2], bounty: 25, girth: 0,
+    },
+    Creature {
+        id: "demon", name: "Demon", banks: "demon", sheet: "actor.demon",
+        idle: &["Demon_Stance1"],
+        walk: &["Demon_Stance1"],
+        attack: &["Demon_Slap"],
+        hurt: &["Demon_Hurt"],
+        death: &["Demon_Death"],
+        // `InitKnightvsDemon` writes 250 hit points and no maximum. Its blow
+        // is not in a `*Dam` table; four is a stand-in between a troll's and
+        // a dragon's bite. Its screen border is `SETDEMONBORD`, not done.
+        health: 250, damage: 4, approach: 95, back_off: 90, depth: 2,
+        reach: 65, speed: [2, 1], bounty: 100, girth: 0,
+    },
+    Creature {
+        id: "beast", name: "Beast", banks: "beast", sheet: "bank.be1",
+        idle: &["Beast_Drool1"],
+        walk: &["Beast_Run1", "Beast_Run2", "Beast_Run3", "Beast_Run4"],
+        // The beast has no swing: its run is the attack, every `Beast_Run`
+        // frame carrying a weapon part, and what it does to a knight it
+        // reaches (`Beast_BackToss`, `Beast_ChestToss`) is the knight's own
+        // animation. Until that is built, the first run frame is its attack.
+        attack: &["Beast_Run1"],
+        hurt: &["Beast_LowerHit"],
+        death: &["Beast_LowerDead"],
+        // Ten hit points, and a tracker that closes to two pixels. Its blow
+        // is not in a `*Dam` table; three is a stand-in.
+        health: 10, damage: 3, approach: 2, back_off: 1, depth: 5,
+        // `BeastChargeOffsets` 33, 27, 17, 33: nearly thirty pixels a frame.
+        // Its weapon parts are its own body, so it has to be allowed close:
+        // three quarters of its width would keep it out of its own bite.
+        reach: 40, speed: [4, 1], bounty: 30, girth: 20,
+    },
+    Creature {
+        id: "balok", name: "Balok", banks: "balok", sheet: "actor.balok",
+        idle: &["Balok_Stance"],
+        walk: &["Balok_Jump", "Balok_Jumping"],
+        attack: &["Balok_UpperCut"],
+        hurt: &["Balok_UpperHit"],
+        death: &["Balok_Dead"],
+        health: 30, damage: 4, approach: 80, back_off: 60, depth: 10,
+        // Its uppercut lands from 41 to 74 pixels out, and its own width
+        // keeps a knight sixty away, so it swings from just outside that.
+        reach: 70, speed: [2, 1], bounty: 80, girth: 0,
+    },
+    Creature {
+        id: "dragon", name: "Dragon", banks: "dragon", sheet: "actor.dragon",
+        idle: &["Dragon_Stance"],
+        // The dragon does not walk. Its `DragonWal` rows are the head lifting
+        // and lowering, which the set-piece drives. Here it creeps, a pixel a
+        // tick, on its standing frame, because a plain opponent that cannot
+        // close never fights; the set piece will pin it to its lair floor.
+        walk: &["Dragon_Stance"],
+        attack: &["Dragon_HighBite"],
+        hurt: &["Dragon_Hit"],
+        death: &["Dragon_Dead"],
+        // `SetUpDragonTables` writes 200 hit points and a maximum of 120.
+        // `DragonDam` is 10 for a lunge or a right thrust and 30 for a swing
+        // or a chop; the bite is given the smaller.
+        health: 200, damage: 10, approach: 60, back_off: 20, depth: 5,
+        // The girth is a fraction of the figure, which is 212 wide: the bite
+        // is at its origin, and a knight kept the figure's width away could
+        // never be bitten.
+        reach: 60, speed: [1, 1], bounty: 250, girth: 50,
+    },
 ];
 
 /// Where the terrain grids live in the fully unpacked `MAIN.EXE` load image.
@@ -267,11 +491,14 @@ fn main() -> anyhow::Result<()> {
     let families: BTreeMap<&str, serde_json::Value> = ARENAS
         .iter()
         .map(|(name, sheet, backdrop, rotation)| {
+            let creatures: &[&str] =
+                AMBUSHES.iter().find(|(f, _)| f == name).map_or(&[], |(_, c)| *c);
             (*name, serde_json::json!({
                 "sheet": key(sheet),
                 "backdrop": key(backdrop),
                 "tiles": { "4": key(SHARED_TILES) },
                 "arenas": rotation,
+                "creatures": creatures,
             }))
         })
         .collect();
@@ -574,13 +801,13 @@ fn closure_of(all: &ScriptSet, roots: &[&str]) -> ScriptSet {
 /// Read off the actor's own standing frame rather than chosen: the origin is
 /// the point the original places parts against, and the feet are the lowest
 /// pixel of the parts that frame is made of.
-fn origin_of(scripts: &ScriptSet, banks: &BankTables, standing: &str) -> [i16; 2] {
+fn origin_of(scripts: &ScriptSet, banks: &BankTables, table: u8, standing: &str) -> [i16; 2] {
     let mut lowest = 0i32;
     let Some(script) = scripts.get(standing) else { return [0, 0] };
     for i in &script.code {
         let Instr::Part(p) = i else { continue };
         let Some([_, h]) = banks
-            .get(&p.table)
+            .get(&table)
             .and_then(|t| t.get(p.bank as usize))
             .and_then(|b| b.cel(p.cel))
         else {
@@ -589,6 +816,32 @@ fn origin_of(scripts: &ScriptSet, banks: &BankTables, standing: &str) -> [i16; 2
         lowest = lowest.max(p.y as i32 + h as i32);
     }
     [0, -(lowest as i16)]
+}
+
+/// The extent of a standing frame's `BODY` parts, as `[left, top, right,
+/// bottom]` about the task origin, facing right.
+///
+/// The parts the script flags `BODY` are what the original's collision code
+/// walks, so this is the figure as the original sees it, not as it is drawn:
+/// a trogg's spear held out in front is not `BODY` and a blow through it
+/// touches nothing.
+fn body_extent(scripts: &ScriptSet, banks: &BankTables, table: u8, standing: &str) -> Option<[i32; 4]> {
+    let script = scripts.get(standing)?;
+    let mut out: Option<[i32; 4]> = None;
+    for i in &script.code {
+        let Instr::Part(p) = i else { continue };
+        if !p.is(henge_core::taskvm::part_flags::BODY) {
+            continue;
+        }
+        let [w, h] = banks.get(&table)?.get(p.bank as usize)?.cel(p.cel)?;
+        let (l, t) = (p.x as i32, p.y as i32);
+        let (r, b) = (l + w as i32, t + h as i32);
+        out = Some(match out {
+            None => [l, t, r, b],
+            Some([ol, ot, or, ob]) => [ol.min(l), ot.min(t), or.max(r), ob.max(b)],
+        });
+    }
+    out
 }
 
 /// The knight, as the original animates him.
@@ -619,12 +872,19 @@ fn actor_definitions(
     let animation = closure_of(scripts, &roots);
     let mut def = ActorDef {
         sheet: "actor.knight".into(),
+        name: "Knight".into(),
         health: 100,
         speed_x: 2,
         speed_y: 1,
         reach: 38,
         depth_tolerance: 6,
         attack_cooldown: 45,
+        // The tracker's ranges from `SetKnightSwTables`: the knight stops
+        // closing at a hundred pixels and gives ground inside eighty, on a
+        // plane four deep. Carried for the behaviour work; `reach` above is
+        // what the plain opponent uses today.
+        approach: 100,
+        back_off: 80,
         // What a fallen knight is carrying, for whoever is left standing. Not
         // recovered: the original names `BESTOWGOLD` and a `GOLD` readout but
         // no table of what anything is worth, so this is a number chosen
@@ -637,11 +897,12 @@ fn actor_definitions(
         // four knights in one arena stand beside each other rather than inside
         // each other. Median standing frame in KN1.OB is 29 wide.
         girth: 28,
-        origin: origin_of(&animation, &knight_banks, "Knight_SwStance"),
+        origin: origin_of(&animation, &knight_banks, 1, "Knight_SwStance"),
         // One stride of `Knight_SwWalkOn` covers about 47 pixels in four
         // frames, and he walks two pixels a tick. See `ActorDef::script_ticks`.
         script_ticks: 6,
         banks: knight_banks,
+        bank_table: 1,
         ..ActorDef::default()
     };
     for (state, names) in KNIGHT_SCRIPTS {
@@ -651,7 +912,93 @@ fn actor_definitions(
     if def.animation.is_empty() {
         eprintln!("the knight has no animation: bake with an unpacked MAIN.EXE image");
     }
-    Ok(serde_json::to_string(&BTreeMap::from([("knight", def)]))?)
+    let mut actors = BTreeMap::from([("knight".to_string(), def)]);
+    if !scripts.is_empty() {
+        for c in CREATURES {
+            let def = creature_definition(c, scripts, banks)?;
+            actors.insert(c.id.to_string(), def);
+        }
+    }
+    Ok(serde_json::to_string(&actors)?)
+}
+
+/// One creature, built the same way the knight is: the closure of the
+/// scripts its states reach, its loader's bank tables, and an origin, a hit
+/// box and a girth read off its own standing frame.
+///
+/// The definition is checked whole before it is written. A script named
+/// wrongly, a state left empty or a part that no bank in the table can
+/// supply stops the bake with the creature and the script named, because
+/// the alternative is a creature that composites to a heap and has to be
+/// noticed by eye.
+fn creature_definition(
+    c: &Creature,
+    scripts: &ScriptSet,
+    banks: &BTreeMap<String, BankTables>,
+) -> anyhow::Result<ActorDef> {
+    let tables = banks
+        .get(c.banks)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{}: no bank tables for loader {}", c.id, c.banks))?;
+    let roots: Vec<&str> = [c.idle, c.walk, c.attack, c.hurt, c.death]
+        .iter()
+        .flat_map(|v| v.iter().copied())
+        .collect();
+    let animation = closure_of(scripts, &roots);
+    // Every creature's tables routine stores table 2 into `+0x18`.
+    let table = 2u8;
+    let stance = c.idle[0];
+    let origin = origin_of(&animation, &tables, table, stance);
+    // The hit box is the standing frame's `BODY` parts, narrowed to their
+    // middle half the way the knight's was authored (his stance is 36 wide
+    // and his box is 18), and as tall as those parts. The girth is three
+    // quarters of the drawn width, which is the knight's 28 against 36.
+    let extent = body_extent(&animation, &tables, table, stance)
+        .ok_or_else(|| anyhow::anyhow!("{}: {stance} has no BODY parts to size a box from", c.id))?;
+    let [l, t, r, b] = extent;
+    let (w, mid) = (r - l, (l + r) / 2);
+    let feet = -(origin[1] as i32);
+    let body = [
+        (mid - w / 4) as i16,
+        (feet - b).max(0) as i16,
+        (mid + w / 4) as i16,
+        (feet - t) as i16,
+    ];
+    let mut def = ActorDef {
+        sheet: c.sheet.into(),
+        name: c.name.into(),
+        health: c.health,
+        damage: c.damage,
+        speed_x: c.speed[0],
+        speed_y: c.speed[1],
+        reach: c.reach,
+        depth_tolerance: c.depth,
+        attack_cooldown: 45,
+        approach: c.approach,
+        back_off: c.back_off,
+        bounty: c.bounty,
+        body,
+        girth: if c.girth > 0 { c.girth } else { w * 3 / 4 },
+        origin,
+        // Six ticks a frame, as the knight: every `InitKnightvs*` routine also
+        // writes 6 into `DELAY`, though nothing in the image reads it back.
+        script_ticks: 6,
+        banks: tables,
+        bank_table: table,
+        animation,
+        ..ActorDef::default()
+    };
+    for (state, names) in [
+        ("idle", c.idle),
+        ("walk", c.walk),
+        ("attack", c.attack),
+        ("hurt", c.hurt),
+        ("death", c.death),
+    ] {
+        def.scripts.insert(state.to_string(), names.iter().map(|n| n.to_string()).collect());
+    }
+    def.validate().map_err(|e| anyhow::anyhow!("{}: {e}", c.id))?;
+    Ok(def)
 }
 
 /// Which character each glyph in a font bank draws.
@@ -1084,4 +1431,71 @@ fn knight_definitions() -> String {
         knight("Sir Gunther", [0xd00, 0x900, 0x500], [300, 185]),
     ])
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The baked script set and bank tables, if a pack has been baked. Both
+    /// are derived from the original and gitignored, so a checkout without
+    /// them cannot run this; it says so rather than passing quietly.
+    fn baked() -> Option<(ScriptSet, BTreeMap<String, BankTables>)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/reference/data");
+        let scripts = fs::read_to_string(root.join("scripts.json")).ok()?;
+        let banks = fs::read_to_string(root.join("banks.json")).ok()?;
+        Some((serde_json::from_str(&scripts).ok()?, serde_json::from_str(&banks).ok()?))
+    }
+
+    /// Every creature in the bestiary builds and validates against the real
+    /// scripts and bank tables: every script its states name is in the set,
+    /// every branch lands, and every part resolves to a cel on the table it
+    /// is drawn through. A typo in `CREATURES` fails here by name.
+    #[test]
+    fn every_creature_in_the_bestiary_is_whole() {
+        let Some((scripts, banks)) = baked() else {
+            eprintln!("no baked pack under packs/reference: bestiary check skipped");
+            return;
+        };
+        assert!(scripts.len() >= 236, "the pack has {} scripts, expected the full 236", scripts.len());
+        let mut ids = Vec::new();
+        for c in CREATURES {
+            let def = creature_definition(c, &scripts, &banks)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", c.id));
+            assert!(def.scripted(), "{}: not scripted", c.id);
+            assert_eq!(def.bank_table, 2, "{}: creatures draw through table 2", c.id);
+            assert!(def.health > 0 && def.damage > 0, "{}: no stat block", c.id);
+            assert!(def.origin[1] < 0, "{}: the origin sits above the feet", c.id);
+            ids.push(c.id);
+        }
+        for want in ["troll", "trogg_axe", "trogg_spear", "ratmen", "mudmen", "demon", "beast", "balok", "dragon"] {
+            assert!(ids.contains(&want), "the bestiary is missing {want}");
+        }
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "an id is listed twice");
+    }
+
+    /// The check is real: misspell one script and the creature is refused,
+    /// with the state and the name in the message.
+    #[test]
+    fn a_misspelt_creature_script_is_refused_by_name() {
+        let Some((scripts, banks)) = baked() else { return };
+        let mut c = Creature { ..CREATURES[0] };
+        c.attack = &["Troll_Chopp"];
+        let err = creature_definition(&c, &scripts, &banks).unwrap_err().to_string();
+        assert!(err.contains("Troll_Chopp") && err.contains("attack"), "{err}");
+    }
+
+    /// Every family's ambush list names creatures the bestiary has.
+    #[test]
+    fn every_ambush_names_a_creature_in_the_bestiary() {
+        for (family, list) in AMBUSHES {
+            assert!(!list.is_empty(), "{family} lists nothing");
+            for id in *list {
+                assert!(CREATURES.iter().any(|c| c.id == *id), "{family} names {id}, which is not in the bestiary");
+            }
+        }
+    }
 }

@@ -6,8 +6,9 @@ This is an **engine**. It ships no artwork, no sound and no game data. To play i
 need your own copy of the original, which the engine reads and converts locally.
 
 > **Status: early, and private while the licence is undecided.**
-> Combat and overworld travel work. Creatures do not animate yet, for reasons in
-> `docs/REVERSING.md`.
+> Combat and overworld travel work, and the road is walked by the original's own
+> creatures, animated from its own scripts. Their behaviour is still a plain
+> opponent's; `docs/BUILD_ORDER.md` says what is and is not there.
 
 ## What works
 
@@ -42,10 +43,16 @@ need your own copy of the original, which the engine reads and converts locally.
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
+- **The bestiary.** Troll, trogg with axe, hammer or spear, ratmen, mudmen, beast,
+  Balok, demon and dragon, each running the original's own animation scripts on
+  its own sprite banks, with the hit points, blows and ranges the original's own
+  set-up routines give them. Ambushes on the road field them by the ground you
+  are standing on. The demon's screen border and the dragon's set piece are not
+  built and are not faked
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 136 tests, all of it verifiable headlessly with no display or sound card
+- 178 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -86,12 +93,13 @@ down move the highlight, space takes the option, and Tab is always a way back ou
 Player one uses the arrows and space. Player two uses `WASD` and `F`. `1` and `2` set
 how many people are playing; the remaining seats are filled by opponents. `C` shows
 the character sheet. Tab switches between the overworld and the arena, `[` and `]`
-change arena, `R` restarts the bout, escape quits.
+change arena, `,` and `.` change which creature fills the opponents' seats, `R`
+restarts the bout, escape quits.
 
-The knight's animations are the original's own scripts, read out of the unpacked
-`MAIN.EXE`. The baker looks for `research/main.final.bin` and `research/symbols.json`,
-which `tools/symbolmap.py` writes (`docs/REVERSING.md`), and bakes a knight with no
-animation at all if they are missing, saying so.
+The knight's and the creatures' animations are the original's own scripts, read out of
+the unpacked `MAIN.EXE`. The baker looks for `research/main.final.bin` and
+`research/symbols.json`, which `tools/symbolmap.py` writes (`docs/REVERSING.md`), and
+bakes a knight with no animation and no creatures at all if they are missing, saying so.
 
 The bake step converts your copy of the game into indexed PNGs, WAVs and JSON. **After
 it runs, the engine reads only PNG, WAV and JSON.** It has no knowledge that the original
@@ -105,6 +113,14 @@ Nothing about this project requires a display, which is what makes it testable i
 ```sh
 henge --screenshot out.png [ticks] [arena] [--walk] [--fight]
 henge --trace [ticks] [arena]
+```
+
+`--foe <actor>` fills the opponents' seats with one creature, which is how each of the
+bestiary is captured and traced on its own:
+
+```sh
+henge --screenshot troll.png 40 0 --start arena --foe troll --walk
+henge --trace 600 0 --start arena --knight 0 --foe balok
 ```
 
 Both accept a scripted run, which is how a screen you have to walk to and a menu
@@ -139,14 +155,15 @@ looking at screenshots:
 ```
     0  MAP     day 1   at 146,115 hp 100  gold    0 -   won 0  fought 0        on forest
    21  MAP     day 1   at 157,115 hp 100  gold    0 -   won 0  fought 0        on swamp
-   30  COMBAT  sw1   swamp    Attack 100 @ 56,117 | Walk   100 @109,111 | ...
-   50  COMBAT  sw1   swamp    Attack 100 @ 69,117 | Attack  75 @ 99,111 | ...
+   30  COMBAT  sw1   swamp    knight Attack  20 @ 56,117 | mudmen Walk    30 @109,111
+   50  COMBAT  sw1   swamp    knight Attack  20 @ 69,117 | mudmen Attack  25 @ 99,111
 ```
 
 The map line carries the position because the ground is a table now: `on swamp` is
 `MapType` under the traveller's feet, not a guess at the colour of the picture. The
 combat line carries the arena's own name because which of a family's eight you get
-is a rotation, and watching it go round is how that is checked.
+is a rotation, and watching it go round is how that is checked; and each fighter's
+actor, because what waits in a swamp is a mudman and that is worth seeing too.
 
 ```
     0  PLACE   day 1  hp  30  gold  100  -         The Healer  > Tend my wounds

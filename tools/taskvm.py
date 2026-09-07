@@ -38,7 +38,7 @@ pointer itself (`add word ptr [di+2], n`), so the width is read out of the code.
 
 Checks that the result is right, all run by --verify:
 
-  * 221 named animation scripts in DGROUP parse end to end with no unknown
+  * 236 named animation scripts in DGROUP parse end to end with no unknown
     opcode, every one of them terminating on `ff ff`
   * every sprite-part record's bank selector is a multiple of four, which is
     what the bank table stride requires
@@ -314,7 +314,7 @@ def annotate(syms, name, body):
 
 
 SCRIPT_RE = re.compile(
-    r'^(Knight|Hero|Player|Trogg\w*|Beast|Ratman|Mudman|Troll|Demon|Dragon|Balok)_')
+    r'^(Knight|Hero|Player|Trogg\w*|Beast|Ratman|Rat|Mudmen|Troll|Demon|Dragon|Balok)_')
 
 
 def scripts(syms, prefix=None):
@@ -375,7 +375,8 @@ ACTOR_SLOTS = {
 PREFIX_ACTOR = {
     'Knight': 'knight', 'Hero': 'hero', 'Troll': 'troll',
     'TroggAxe': 'trogg_axe', 'TroggHammer': 'trogg_axe',
-    'TroggSpear': 'trogg_spear', 'Ratman': 'ratmen', 'Mudman': 'mudmen',
+    'TroggSpear': 'trogg_spear', 'Ratman': 'ratmen', 'Rat': 'ratmen',
+    'Mudmen': 'mudmen',
     'Beast': 'beast', 'Demon': 'demon', 'Dragon': 'dragon', 'Balok': 'balok',
 }
 

@@ -24,8 +24,8 @@ visible without unpacking the executable twice. **There are 2,223 symbols with a
 | **blocked** | cannot start until something else is decoded |
 | **design** | never recovered; has to be invented rather than ported |
 
-Honest headline: **about a third done**, and what remains includes the quest, the bestiary
-and every economy.
+Honest headline: **over half done**, and what remains includes the quest, the creatures'
+own behaviour and most of the economy.
 
 ---
 
@@ -55,8 +55,10 @@ slots, the three end-of-frame terminators, the six-byte sprite-part record, the 
 VM state record layouts, and the bank table for every creature. `tools/taskvm.py` reads it
 back out of `MAIN.EXE` and disassembles any script.
 
-The scripts themselves are named data in DGROUP: 221 of them, from `Knight_SwWalkR1` to
-`Balok_Blink`, all of which parse cleanly.
+The scripts themselves are named data in DGROUP: 236 of them, from `Knight_SwWalkR1` to
+`Balok_Blink`, all of which parse cleanly. The count was 221 until the bestiary was
+built: the mudmen's prefix is `Mudmen`, not `Mudman`, and their fourteen scripts and
+`Rat_TreeBrush` had been filtered out of every count.
 
 **Steps**
 
@@ -82,7 +84,7 @@ The scripts themselves are named data in DGROUP: 221 of them, from `Knight_SwWal
       Transcribing the end of frame handler found that `ff ff` honours a running
       `TASKLOOP` before ending anything, which `TASKVM.md` now records
 - [x] **Exported.** `henge-formats/src/taskvm.rs` reads the table and widths out of the
-      image, checks them against the documented set, and parses all 221 scripts into the
+      image, checks them against the documented set, and parses all 236 scripts into the
       engine's own instruction type; the baker writes `data/scripts.json` and, per
       creature, the four bank tables with cel sizes to `data/banks.json`
 - [x] **The knight.** Stance, the four walk frames as a cycle, swing, shoulder hit and
@@ -251,26 +253,59 @@ hardware. Nothing to port. Listed so the symbol list is complete.
 - [ ] Experience and levelling
 - [ ] Weapon state: drawn, sheathed, dropped, thrown
 
-## 3.2 Creatures `blocked`
+## 3.2 Creatures `done, on the standard states`
 
 Loaders exist for each: `LOADKNIGHT`, `LOADHEAD`, `LOADTROLL`, `LOADTROGGAXE`,
 `LOADTROGGSPEAR`, `LOADRATMEN`, `LOADMUDMEN`, `LOADDEMON`, `LOADDRAGON`, `LOADBALOK`,
 `LOADBEAST`.
 
-Their sprite banks are body parts, not whole poses, so every one needs 1.1. The scripts
-and the bank table for each are recovered (`TASKVM.md`); what is left is 1.1's remaining
-construction work, the interpreter itself.
+Every creature runs its own scripts on the task VM, through its loader's bank tables,
+in the same five states as the knight, and the road fields them by terrain. What each
+one plays, and where its numbers came from, is in `BUILD_ORDER.md` items 28 to 36 and
+in `TASKVM.md`.
 
-- [ ] Troll, trogg with axe, trogg with spear, ratmen, mudmen, demon, dragon, Balok, beast
-- [ ] Per-creature behaviour. `design`: no AI logic is named in the symbols beyond the
-      collision hooks, so their behaviour has to be observed or invented
+**The controller tables were not lost.** `SetKnightAnims` and `SetMonsterAnims` fill
+them at start-up, and the `Set*Tables` routine each `InitKnightvs*` calls writes the
+stat block. These are recovered and in the pack:
+
+| Original | What it is | Status |
+|---|---|---|
+| `TroggWalAxe`, `TrollWal`, `MudmenWal`, `RatmenWal`, `KnightWalSw` ... | walk cycles, right at +0, up at +0x10, down at +0x20 | done, right row; up and down rows wait on 37 |
+| `KnightAttSw`, `TroggAttAxe`, `TroggAttHammer` | attack script by attack kind | recovered; one attack per creature fielded |
+| `KnightHitSw`, `TroggHitAxe`, `RatmenHit`, `MudmenHit`, `DragonHit`, `BeastHit2` ... | blow-taken script by the attacker's attack kind | done for the swing, the one attack in play |
+| `KnightDamSw`, `TroggDamAxe`, `TroggDamHammer`, `RatmenDam`, `TrollDam`, `MudmenDam`, `BalokDam`, `DragonDam` | damage by attack kind | done, on each actor as `damage` |
+| actor record `+0x38`, `+0x3c`, `+0x52`, `+0x54`, `+0x56`, `+0x35`, `+0x18` | health, maximum, approach, back-off, plane, kind, bank table | done; approach and back-off carried, not yet read |
+| `TroggWALKR`/`U`/`D`, `TrollWALKR`, `MudmenWALK`, `BKnightWALKR`/`U`/`D`, `BeastChargeOffsets` | pixels moved per walk frame | read; speeds set from them |
+| `MonsterTrack`, `CheckZAxis`, `CheckXAxis`, `FaceKnight`, `MonsterWalk`, `NextWalk` | the tracker: close to `+0x52`, retreat inside `+0x54`, same plane within `+0x56` | read; the plain opponent stands in |
+| `TroggStart`, `TroggAttacks`, `TroggChop`, `TroggSwing`, `TroggStruck`, `BeastMove`, `MudmenSd` ... | per-creature behaviour | **todo**, item 37 |
+| `TroggTABLE`, `BeastTABLE`, `RatmanTABLE`, `MudmanTABLE`, `BalokTABLE`, `DemonTABLE` | the spawn tables `InitNewMO` reads position and facing from | not readable: they sit in the first 2,906 bytes of `DGROUP`, which the unpacked image holds as a stale copy of another region |
+| `TotalMonsters`, `MaxMonsters`, `AdjustLevel`, `lev_adjust`, `KLTAB` | how many come, in waves, scaled to the knight | read in outline; one at a time is fielded |
+| `SETDEMONBORD` | the demon's screen border | **todo** |
+
+- [x] Troll, trogg with axe (and hammer), trogg with spear, ratmen, mudmen, beast, Balok
+- [x] Demon and dragon on the standard states; see 3.3 and item 33 for what is not
+- [ ] Per-creature behaviour (item 37). `design` was the word here before; it is
+      less than that now. The tracker and each creature's attack choice are named
+      routines in `MOON` and have been read in outline, so building them is
+      translation with some judgement, not invention
 - [ ] `SETDEMONBORD`: the demon changes the screen border
+- [ ] Waves: `TotalMonsters` and `MaxMonsters`, three troggs one after another, two
+      ratmen at once, `AdjustLevel` adding more for a stronger knight
 
-## 3.3 The dragon `blocked`
+## 3.3 The dragon `partial`
 
 `BATTLEDRAGON`, `DRAGON`, `DRAGONOVER`, `DRAGONFLAG`, `DRAGONDEADFLAG`, `LOADDRAGON`.
 
-A distinct set-piece encounter with its own state machine, not an ordinary bout.
+A distinct set-piece encounter with its own state machine, not an ordinary bout. What
+is built is the dragon as an ordinary fighter: it stands, bites, is hurt and dies on
+its own scripts, with the hit points `SetUpDragonTables` gives it. What is not built,
+and has not been guessed at: `DragonFLAGS` and the states it encodes; the head
+lifting and lowering through `Dragon_LiftHead1`..`5` and `LowerHead1`..`5`; the fire
+(`Dragon_LowBreath`, `HighBreath`, `Dragon_Fire`, `TrackKnight`, `AddDragonFIRE`); the
+two claws, which `InitKnightvsDragon` sets up as actors of their own with fifty hit
+points each (`Claw1TABLE`, `Claw2TABLE`, `DEAD_CLAWS`); `Knight_Burn` and
+`Knight_BurnDeath`, which that routine installs as the knight's blow-taken scripts;
+and `Dragon_Flight1`..`8`, its flight over the map on `DRAGON5.CEL`.
 
 ---
 
@@ -584,7 +619,7 @@ hundred and twenty-five did.
 
 | Asset | Frames | Used |
 |---|---|---|
-| creature sprite banks | 8 sets | **none** |
+| creature sprite banks | 8 sets | all 8, through the task VM |
 | `MI.C` map icons | 47 | 1 of 47 |
 | `KI.CEL` UI furniture | 50 | 11: the status panel's labels, pips, swords and armour |
 | `SEL.CEL` selection art | 6 | all 6 |
@@ -606,7 +641,7 @@ Dependency order, not preference.
 2. Animation task VM (1.1), decoded; what is left is writing the interpreter
 
 **Then, in parallel**
-3. Creatures (3.2), which 1.1 unlocks all at once
+3. ~~Creatures (3.2)~~ **done** on the standard states; their behaviour is next
 4. ~~Gold and inventory (6)~~ **done**, which opened the merchant and leaves the
    tavern needing only what it offers
 5. ~~Title, character select and the status panel (8.1 to 8.3)~~ **done**, which

@@ -136,11 +136,13 @@ addresses do not need it: `seg*16 + off` with DGROUP at 0x123b lands on the righ
 
 ### Animations are scripts in the data segment, named
 
-The scripts are ordinary data in DGROUP, and the symbol table names 221 of them:
+The scripts are ordinary data in DGROUP, and the symbol table names 236 of them:
 `Knight_SwSwing`, `Knight_SwWalkR1`, `Troll_Walk1`, `Balok_Blink`, `Dragon_Shadow`. Each
 is a list of frames; each frame is a list of sprite parts and ends with `ff`.
 
-Every one of the 221 parses end to end with no unknown opcode and terminates on `ff ff`.
+Every one of the 236 parses end to end with no unknown opcode and terminates on `ff ff`.
+(221 was the count until the fourteen `Mudmen_*` scripts and `Rat_TreeBrush` were
+found; the prefix had been assumed to be `Mudman`, after `MudmanTABLE`.)
 Every `TASKGOTO` and `TASKDEAD` target is the first byte of another named script, every
 `TASKGOSUB` target the exact entry of a named routine: `KnightGruntSound`, `DrDropHead`,
 `KnifeThrow`, `SetDecapFLAG`.

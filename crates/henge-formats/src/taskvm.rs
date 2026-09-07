@@ -68,10 +68,17 @@ const EXPECTED: [(u8, &str, usize); 19] = [
 ];
 
 /// A script's name is its encounter followed by an underscore. These are the
-/// prefixes the 221 animation scripts in `DGROUP` use; nothing else in the
+/// prefixes the 236 animation scripts in `DGROUP` use; nothing else in the
 /// symbol table shares the shape.
-const SCRIPT_PREFIXES: [&str; 10] = [
-    "Knight", "Hero", "Player", "Beast", "Ratman", "Mudman", "Troll", "Demon", "Dragon", "Balok",
+///
+/// The set was 221 for a while, because the mudmen's prefix was assumed to be
+/// `Mudman` to match `MudmanTABLE` and it is `Mudmen`. The fourteen `Mudmen_*`
+/// scripts and `Rat_TreeBrush`, the tree the ratmen fight is dressed with,
+/// were found when the bestiary came to be built and nothing answered to the
+/// name. Every one of them parses end to end like the rest.
+const SCRIPT_PREFIXES: [&str; 12] = [
+    "Knight", "Hero", "Player", "Beast", "Ratman", "Rat", "Mudmen", "Troll", "Demon", "Dragon",
+    "Balok", "Mudman",
 ];
 
 fn is_script_name(name: &str) -> bool {
@@ -505,6 +512,8 @@ mod tests {
         assert!(is_script_name("Knight_SwSwing"));
         assert!(is_script_name("TroggAxe_Walk1"), "Trogg* is a family of prefixes");
         assert!(is_script_name("Balok_Blink"));
+        assert!(is_script_name("Mudmen_Stance"), "the mudmen are Mudmen, not Mudman");
+        assert!(is_script_name("Rat_TreeBrush"));
         assert!(!is_script_name("KnightGruntSound"), "a routine, not a script");
         assert!(!is_script_name("Knight"), "no underscore");
         assert!(!is_script_name("CelFile1"));

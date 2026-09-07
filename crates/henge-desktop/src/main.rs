@@ -67,6 +67,8 @@ fn carrying(run: &Run) -> String {
 ///   --knight <0..3>   begin the run as one of the four, without going through
 ///                     the select screen
 ///   --sheet           hold the character sheet open over whatever is drawn
+///   --foe <actor>     fill the opponents' seats with that creature, so each
+///                     of the bestiary can be captured on its own
 fn hurt_arg(a: &[String]) -> Option<i32> {
     a.iter().position(|s| s == "--hurt").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
 }
@@ -77,6 +79,10 @@ fn gold_arg(a: &[String]) -> Option<u32> {
 
 fn knight_arg(a: &[String]) -> Option<usize> {
     a.iter().position(|s| s == "--knight").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+fn foe_arg(a: &[String]) -> Option<String> {
+    a.iter().position(|s| s == "--foe").and_then(|i| a.get(i + 1)).cloned()
 }
 
 /// Which screen a headless run opens on.
@@ -187,6 +193,12 @@ fn prepare(app: &mut App, a: &[String]) {
     if let Some(g) = gold_arg(a) {
         app.run.gold = g;
     }
+    // Last, so it survives whatever taking a knight did to the seats.
+    if let (Some(foe), Some(w)) = (foe_arg(a), app.world.as_mut()) {
+        if !w.set_foe(&foe) {
+            std::process::exit(2);
+        }
+    }
     app.sheet = a.iter().any(|s| s == "--sheet");
 }
 
@@ -250,8 +262,8 @@ fn main() -> anyhow::Result<()> {
                         .bout
                         .fighters
                         .iter()
-                        .map(|f| format!("{:<6}{:>4} @{:>3},{:>3}",
-                            format!("{:?}", f.state), f.health, f.x, f.y))
+                        .map(|f| format!("{:<6} {:<6}{:>4} @{:>3},{:>3}",
+                            f.actor, format!("{:?}", f.state), f.health, f.x, f.y))
                         .collect();
                     // The arena's own name as well as its family, because which of
                     // the eight a family rotates to is now a thing worth seeing.
@@ -499,6 +511,10 @@ fn key_index(c: KeyCode) -> usize {
         // nothing reads as a broken menu rather than as a different key.
         // Kept separate from fire so that Enter does not also swing a sword.
         KeyCode::Enter | KeyCode::NumpadEnter => 12,
+        // The arena browser's creature cycle, beside the arena cycle on the
+        // brackets.
+        KeyCode::Comma => 13,
+        KeyCode::Period => 14,
         _ => 255,
     }
 }
@@ -561,7 +577,8 @@ impl App {
             println!("{status}");
             println!("menus: arrows move, enter or space takes. p1 arrows + space,");
             println!("p2 wasd + f, 1/2 set how many are playing,");
-            println!("tab switches map/arena, [ and ] change arena, R restarts, escape quits");
+            println!("tab switches map/arena, [ and ] change arena, , and . change the opponent,");
+            println!("R restarts, escape quits");
         }
 
         Ok(App {
@@ -611,6 +628,11 @@ impl App {
                 match code {
                     KeyCode::BracketLeft => self.world.as_mut().unwrap().step_arena(-1),
                     KeyCode::BracketRight => self.world.as_mut().unwrap().step_arena(1),
+                    // Comma and period cycle which creature fills the
+                    // opponents' seats, so each of the bestiary can be looked
+                    // at in the arena browser.
+                    KeyCode::Comma => self.world.as_mut().unwrap().step_foe(-1),
+                    KeyCode::Period => self.world.as_mut().unwrap().step_foe(1),
                     KeyCode::KeyR => self.world.as_mut().unwrap().reset(),
                     // 1 and 2 set how many people are at the keyboard; the rest
                     // of the four seats are filled by opponents.
@@ -735,6 +757,10 @@ impl App {
                     // through its eight in order rather than rolling for one.
                     let pick = self.run.next_arena(&family, w.rotation_len(&family));
                     w.set_player_health(self.run.health_for_fight());
+                    // Who waits on this ground is the family's own list,
+                    // brought round by the same counter as its arenas.
+                    let foe = w.foe_for(&family, pick);
+                    w.set_foe(&foe);
                     w.set_family(&family, pick);
                     self.voices.reset();
                     self.mode = Mode::Combat;
@@ -914,6 +940,9 @@ impl App {
         // who are, and nobody else.
         let humans = self.title.state.players.max(1);
         if let Some(w) = self.world.as_mut() {
+            // Practice is knight against knight, whatever the road last put
+            // in the arena.
+            w.set_foe("knight");
             w.set_seats(humans, if humans == 1 { 1 } else { 0 });
         }
         self.mode = Mode::Combat;
@@ -1109,8 +1138,13 @@ impl App {
                 let which = w.knight_at(i);
                 let def = self.knights.get(which);
                 let mine = i == 0 && self.run.knight.named();
+                // A creature's plate carries its own name and no lives: a
+                // troll has no sheet to read them off.
+                let creature = w.creature_name(i);
                 status::Plate {
-                    name: if mine {
+                    name: if let Some(c) = creature.clone() {
+                        c
+                    } else if mine {
                         self.run.knight.name.clone()
                     } else {
                         def.map_or_else(|| format!("Knight {}", which + 1), |d| d.name.clone())
@@ -1118,7 +1152,13 @@ impl App {
                     colour: w.seat_colour(i),
                     health: f.health,
                     max_health: f.max_health,
-                    lives: if mine { self.run.lives } else { def.map_or(0, |d| d.life) },
+                    lives: if creature.is_some() {
+                        0
+                    } else if mine {
+                        self.run.lives
+                    } else {
+                        def.map_or(0, |d| d.life)
+                    },
                 }
             })
             .collect()

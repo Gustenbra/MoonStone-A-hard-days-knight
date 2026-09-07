@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 36 done, 41 remaining.**
+**77 items. 43 done, 2 partial, 32 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -41,7 +41,7 @@ The engine and a vertical slice. Roughly a quarter of the game.
 ## Phase 1: the blockers
 
 This was the research phase, and it is finished, and so is the construction that followed
-it: 20 through 27 are done. Phases 2 and 4 are open.
+it: 20 through 27 are done, and phase 2 with them. Phase 4 is open.
 
 Item 20 was recorded as settled and negative. **It was wrong**, and 21 is what proved it:
 the search had been run against an image that was still packed, because `MAIN.EXE` is
@@ -111,20 +111,90 @@ That unblocked 22 almost for free, and most of the phase with it.
 
 ## Phase 2: the bestiary
 
-Unblocked all at once by 25. Every creature's animation scripts and bank table are
-recovered (`docs/TASKVM.md`), so each of these is translation rather than research. This
-is the single biggest change to how the game feels.
+Unblocked all at once by 25, and now built: every creature stands, walks, strikes,
+takes a blow and dies on its own scripts, and the road fields them. Two things
+turned up on the way that the record should carry.
 
-- [ ] 28. Troll
-- [ ] 29. Trogg with axe
-- [ ] 30. Trogg with spear
-- [ ] 31. Ratmen
-- [ ] 32. Mudmen
-- [ ] 33. Demon, including its screen border
-- [ ] 34. Beast
-- [ ] 35. Balok
-- [ ] 36. Dragon, as a set-piece encounter with its own state machine
-- [ ] 37. Per-creature behaviour. Not recovered; observe or design
+**The script set is 236, not 221.** The mudmen's prefix is `Mudmen`, not the `Mudman`
+of `MudmanTABLE`, so their fourteen scripts and `Rat_TreeBrush` had been filtered out
+of every count. All 236 parse and verify; the four `TASKGOSUB` targets the mudmen add
+(`AddMudVoice`, `AddMudSound`, `AddCrushSnd`, `PlayScareMusic`) are in the table.
+
+**The controller tables are recovered after all.** They are `BSS`, which is why the
+load image showed nothing, but `SetKnightAnims` and `SetMonsterAnims` in `MOON` fill
+them with immediates: a walk table per creature (`*Wal`, right at +0, up at +0x10,
+down at +0x20), the attack scripts by attack kind (`*Att`), the blow-taken script by
+the attacker's attack kind (`*Hit`), and the damage per attack kind (`*Dam`). And
+each `InitKnightvs*` calls a `Set*Tables` that writes the stat block into the actor
+record: hit points at `+0x38` and `+0x3c`, the tracker's approach and back-off ranges
+at `+0x52` and `+0x54`, its plane tolerance at `+0x56`, the kind at `+0x35`. So the
+numbers below are the original's, not chosen. `docs/TASKVM.md` has the tables.
+
+Each creature is an `ActorDef` like the knight's: the closure of the scripts its
+states reach, its loader's bank tables starting on table 2 (the actor record's `+0x18`,
+where the knight's holds table 1), an origin, hit box and girth read off its own
+standing frame, and the five states. Which of its attacks the one button gets is ours
+and marked so in the baker. **Every one was checked by looking**: `--start arena
+--foe <id>` in the arena browser, `,` and `.` to cycle, screenshots against the
+`tools/taskvm.py` composites, and a `--trace` of a fight to a death.
+
+**Which creature waits on which ground is design.** It lives on each family in the
+pack (`creatures`, brought round by the family's own turn counter): troggs and ratmen
+under the trees, mudmen in the marsh, a troll in the waste. The beast, Balok, the demon
+and the dragon are lair and set-piece encounters and do not stand by the road. A
+creature's health and blow are at the original's scale of a twenty-point knight, and a
+fight at any other scale moves them by the same ratio it moves the knight's blow.
+
+- [x] 28. **Troll.** `Troll_Stance`, `Walk1`..`4` (`TrollWal`), `Troll_Bunt` for the
+      button (`Troll_Chop` is the long one, 105 to 160 pixels out, for the behaviour to
+      pick), `Troll_Hit`, `Troll_Dies`. Forty hit points, a blow of three, ranges
+      150/90/5. `SetMonsterAnims` fills `TrollHit` with its own address eight times
+      over, which reads as a slip; `Troll_Hit` is the only blow-taken script it has
+- [x] 29. **Trogg with axe**, and the hammer trogg with it, since the axe loader's
+      banks hold both. `TroggAxe_Stance`, `WalkR1`..`R3`, `Swing`, `WaistHit` (the
+      `TroggHitAxe` entry for a swing), `Split` (where that script's `TASKDEAD` goes).
+      Twenty hit points, a blow of three (`TroggDamAxe`), ranges 100/90/5; the hammer
+      is the same at two damage and 70/65/5
+- [x] 30. **Trogg with spear.** `TroggSpear_Stance`, `WalkR1`..`R3`, `Lunge`, `WaistHit`,
+      `Split`. Fifteen hit points, ranges 130/120/5. It has no `*Dam` table; its blow
+      is set where the lunge lands, in code not yet read, so three stands in
+- [x] 31. **Ratmen.** `Ratman_Stance`, `Roll1`..`4` (`RatmenWal`; the leaps are its up
+      row), `Slash`, `Knocked`, `KnockDead`. Five hit points and a blow of three at new
+      moon; `SetRatmenTables` raises both with the moon, which is not in the game yet
+- [x] 32. **Mudmen.** `Mudmen_Stance`, `Move1`, `Move3`, `Move1`, `Move2` (`MudmenWal`,
+      exactly), `ArmAttack`, `Hit`, `Dies`. Thirty hit points, a blow of two, ranges
+      80/75/5. `MudmenWALK` moves it eleven across and thirteen deep a frame, so it
+      comes at you on a diagonal. `Mudmen_Appear` and `IBury`, the rising out of the
+      ground, are behaviour and wait on 37
+- [ ] 33. **Demon: partial.** It stands (`Demon_Stance1`), slaps (`Demon_Slap`, whose
+      own five frames carry the whip; the script runs on into `Demon_Zap` and
+      `Demon_Whip` on disk but its `TASKGOTO` to `Stance2` ends it first), is hurt
+      (`Demon_Hurt`) and dies (`Demon_Death`). 250 hit points, ranges 95/90/2; its
+      blow is not in a `*Dam` table, four stands in. **Missing**: `SETDEMONBORD`, the
+      screen border; `Demon_Evolve`, the entrance; `Demon_Whirl` and `AddDemonWhirl`;
+      the zap and the whip as separate attacks; `KnightOFF`/`KnightON`
+- [x] 34. **Beast.** `Beast_Drool1` to stand (its `+0x10` stance), `Run1`..`4`,
+      `LowerHit`, `LowerDead`. Ten hit points, a tracker that closes to two pixels. It
+      has no swing: every run frame carries a weapon part, so the first run frame is
+      its attack until the charge and the toss (`Beast_BackToss`, `ChestToss`, which
+      are the knight's own animation on the beast's banks) are built under 37
+- [x] 35. **Balok.** `Balok_Stance`, `Jump` and `Jumping` for a walk, `UpperCut`,
+      `UpperHit`, `Dead`. Thirty hit points, a blow of four (`BalokDam`), ranges
+      80/60/10. The grab and the three things it does to a held knight wait on 37
+- [ ] 36. **Dragon: partial.** `Dragon_Stance`, `HighBite`, `Hit`, `Dead`, on the
+      standard states; it creeps a pixel a tick on its standing frame so a plain
+      opponent can reach it, which is ours. 200 hit points against a maximum of 120,
+      as `SetUpDragonTables` writes them; a bite of ten (`DragonDam` gives 10 for a
+      lunge and 30 for a swing). **Missing, and not invented**: the set piece.
+      `BATTLEDRAGON` runs it with `DragonFLAGS`; the head lifts and lowers through
+      the `DragonWal` rows; `LowBreath` and `HighBreath` are the fire with
+      `TrackKnight`; the two claws are their own actors at fifty hit points each
+      (`Claw1TABLE`, `Claw2TABLE`, `Dragon_Claw`, `ClawSlap`, `ClawDead`); and
+      `Dragon_Flight1`..`8` are its map animation on `DRAGON5.CEL`
+- [ ] 37. Per-creature behaviour. The tracker's ranges are recovered and carried on
+      every actor (`approach`, `back_off`); what each creature does inside them
+      (`TroggAttacks` picks by distance, the ratman leaps, the mudman rises, the beast
+      charges) is read in outline and not built
 
 ## Phase 3: economy and character
 
@@ -147,7 +217,9 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
 
 ## Phase 4: combat depth
 
-37 needs phase 1. The rest can start now.
+All of it can start now. The attack tables (`KnightAttSw`: lunge, swing, knife, block,
+right, up and over thrusts, evade, chop, and the damage of each in `KnightDamSw`) are
+recovered with the bestiary's, so 46 is translation.
 
 - [ ] 46. Attack variety, several by direction and button
 - [ ] 47. Blocking and parrying
@@ -251,8 +323,9 @@ Any time. None of it blocks anything.
 
 ## If you only did three things
 
-**25** unblocks nine creatures at once and is the difference between a duelling game and
-Moonstone. **65** is cheap now that 38 gave the tavern something to charge for. **45** is
+**37** is what makes the nine creatures fight like themselves rather than like a
+knight in a costume, and the ranges it needs are already on every actor. **65** is
+cheap now that 38 gave the tavern something to charge for. **45** is
 next to free: experience is already counted and displayed, and `AdjustLevel` says exactly
 what spending it does.
 
@@ -264,6 +337,7 @@ the symbol coverage is checkable, and deliberately absent here.
 
 ## What is design rather than translation
 
-Items 37, 56, 64, 69, and all of phase 7. These were never recovered from the executable,
-so finishing them means designing and playtesting, not translating. Worth knowing before
+Items 37, 56, 64, 69, and all of phase 7, and which creature waits on which ground.
+These were never recovered from the executable, so finishing them means designing and
+playtesting, not translating. Worth knowing before
 anyone estimates the end of this list.

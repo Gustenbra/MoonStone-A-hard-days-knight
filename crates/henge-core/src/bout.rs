@@ -75,13 +75,29 @@ impl Bout {
             })
     }
 
-    /// One tick. `intents` is indexed to match `fighters`; a short slice is
-    /// treated as idle for the rest, which keeps a caller honest without
-    /// panicking mid-fight.
+    /// One tick, with every fighter the same kind. `intents` is indexed to
+    /// match `fighters`; a short slice is treated as idle for the rest, which
+    /// keeps a caller honest without panicking mid-fight.
     pub fn step(&mut self, def: &ActorDef, intents: &[Intent]) -> Vec<HitEvent> {
+        self.step_with(|_| def, intents)
+    }
+
+    /// One tick, with each fighter looked up by the actor it is.
+    ///
+    /// A bout used to take one definition for everyone in it, which was true
+    /// while everyone was a knight. An ambush is a troll against a knight, so
+    /// the definition is now asked for per fighter, by `Fighter::actor`. The
+    /// lookup is a closure rather than a map so the caller decides what a
+    /// missing name means; a map that returned nothing would have had to be
+    /// answered with a panic in the middle of a fight.
+    pub fn step_with<'a, F>(&mut self, def_of: F, intents: &[Intent]) -> Vec<HitEvent>
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
         let mut swings: Vec<(usize, Vec<(i32, i32)>)> = Vec::new();
         for i in 0..self.fighters.len() {
             let intent = intents.get(i).copied().unwrap_or_default();
+            let def = def_of(&self.fighters[i].actor);
             let line = self.fighters[i].step(def, intent, self.bounds);
             if !line.is_empty() {
                 swings.push((i, line));
@@ -93,6 +109,13 @@ impl Bout {
         // the moment there are more than two in the arena.
         let mut events = Vec::new();
         for (attacker, line) in swings {
+            let a_def = def_of(&self.fighters[attacker].actor);
+            // The blow is the attacker's own, or the bout's when the actor
+            // leaves it to the bout, which is how the knight is tuned.
+            let damage = match self.fighters[attacker].damage {
+                0 => self.damage,
+                d => d,
+            };
             for target in 0..self.fighters.len() {
                 if target == attacker || !self.fighters[target].alive() {
                     continue;
@@ -100,23 +123,30 @@ impl Bout {
                 if self.fighters[attacker].struck {
                     break;
                 }
-                let depth_ok = (self.fighters[attacker].y - self.fighters[target].y).abs()
-                    <= def.depth_tolerance;
-                if !depth_ok || !line_hits_body(&line, self.fighters[target].body(def)) {
+                let t_def = def_of(&self.fighters[target].actor);
+                // Two kinds of fighter can disagree about how deep a plane
+                // is. The looser of the two decides, both ways: a creature
+                // that reaches you across ten rows of depth can be reached
+                // across the same ten, or a knight who cannot step to its
+                // row would be untouchable to it and it to him.
+                let plane = a_def.depth_tolerance.max(t_def.depth_tolerance);
+                let depth_ok = (self.fighters[attacker].y - self.fighters[target].y).abs() <= plane;
+                let body = self.fighters[target].body(t_def);
+                if !depth_ok || !line_hits_body(&line, body) {
                     continue;
                 }
                 self.fighters[attacker].struck = true;
-                self.fighters[target].take_hit(self.damage);
+                self.fighters[target].take_hit(damage);
                 events.push(HitEvent {
                     attacker,
                     target,
-                    damage: self.damage,
+                    damage,
                     fatal: self.fighters[target].state == State::Dead,
                 });
             }
         }
 
-        self.separate(def);
+        self.separate(&def_of);
         if self.settled() {
             self.settled_for += 1;
         }
@@ -126,15 +156,29 @@ impl Bout {
     /// Living fighters at the same depth cannot occupy the same ground. Pushing
     /// them apart rather than blocking movement keeps a scrappy close-quarters
     /// fight readable instead of jamming people into a stalemate.
-    fn separate(&mut self, def: &ActorDef) {
-        let min_gap = if def.girth > 0 { def.girth } else { (def.body[2] - def.body[0]) as i32 };
+    ///
+    /// Two different kinds of fighter are kept apart by the wider of the two
+    /// girths and judged level by the looser of the two depth tolerances, so
+    /// a troll and a knight agree about whether they are standing on each
+    /// other whichever of them is asked.
+    fn separate<'a, F>(&mut self, def_of: &F)
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        let girth_of = |def: &ActorDef| {
+            if def.girth > 0 { def.girth } else { (def.body[2] - def.body[0]) as i32 }
+        };
         let living: Vec<usize> = self.alive().collect();
         for a in 0..living.len() {
             for b in a + 1..living.len() {
                 let (i, j) = (living[a], living[b]);
-                if (self.fighters[i].y - self.fighters[j].y).abs() > def.depth_tolerance {
+                let (di, dj) = (def_of(&self.fighters[i].actor), def_of(&self.fighters[j].actor));
+                if (self.fighters[i].y - self.fighters[j].y).abs()
+                    > di.depth_tolerance.max(dj.depth_tolerance)
+                {
                     continue;
                 }
+                let min_gap = girth_of(di).max(girth_of(dj));
                 let gap = self.fighters[j].x - self.fighters[i].x;
                 if gap.abs() >= min_gap {
                     continue;
@@ -166,6 +210,7 @@ impl Bout {
             mix(f.y as i64);
             mix(f.facing as i64);
             mix(f.health as i64);
+            mix(f.damage as i64);
             mix(f.state as i64);
             mix(f.struck as i64);
             mix(f.player.frame as i64);
@@ -384,6 +429,69 @@ mod tests {
             b.step(&d, &intents);
             restored.step(&d, &intents);
             assert_eq!(restored.state_hash(), b.state_hash(), "tick {t}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod mixed {
+    use super::*;
+    use crate::combat::tests::scripted_def;
+
+    fn bounds() -> Bounds {
+        Bounds { left: 0, right: 319, top: 10, bottom: 114 }
+    }
+
+    /// A troll and a knight in one bout: each fighter is stepped and struck by
+    /// its own definition. The creature's blow is its own number; the knight,
+    /// whose definition leaves the figure at zero, still deals the bout's.
+    #[test]
+    fn each_fighter_is_judged_by_its_own_definition() {
+        let knight = scripted_def();
+        let mut troll = scripted_def();
+        troll.health = 300;
+        troll.damage = 7;
+        troll.depth_tolerance = 20;
+        let def_of = |name: &str| if name == "troll" { &troll } else { &knight };
+
+        let mut b = Bout::new(
+            bounds(),
+            vec![
+                Fighter::new("knight", &knight, 100, 100, 1),
+                Fighter::new("troll", &troll, 130, 100, -1),
+            ],
+        );
+        assert_eq!(b.fighters[1].max_health, 300, "built from its own definition");
+        assert_eq!(b.fighters[1].damage, 7);
+
+        let mut dealt = std::collections::BTreeMap::new();
+        for _ in 0..40 {
+            let both = [Intent { dx: 0, dy: 0, attack: true }; 2];
+            for e in b.step_with(def_of, &both) {
+                dealt.insert(e.attacker, e.damage);
+            }
+        }
+        assert_eq!(dealt.get(&1), Some(&7), "the troll's blow is the troll's");
+        assert_eq!(dealt.get(&0), Some(&b.damage), "the knight's is the bout's");
+    }
+
+    /// The old one-definition entry point is the same machine with the same
+    /// definition handed back for everyone, so nothing that used it changes.
+    #[test]
+    fn one_definition_for_all_is_the_same_as_the_same_answer_for_each() {
+        let d = scripted_def();
+        let mk = || {
+            Bout::new(
+                bounds(),
+                vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 130, 100, -1)],
+            )
+        };
+        let (mut a, mut b) = (mk(), mk());
+        for t in 0..80 {
+            let intents = [Intent { dx: 0, dy: 0, attack: t % 3 == 0 }; 2];
+            a.step(&d, &intents);
+            b.step_with(|_| &d, &intents);
+            assert_eq!(a.state_hash(), b.state_hash(), "tick {t}");
         }
     }
 }

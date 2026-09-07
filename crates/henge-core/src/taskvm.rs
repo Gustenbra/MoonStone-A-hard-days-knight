@@ -300,16 +300,24 @@ pub enum GosubKind {
     Unknown,
 }
 
-/// Every `TASKGOSUB` target any of the 221 shipped scripts calls, with what the
+/// Every `TASKGOSUB` target any of the 236 shipped scripts calls, with what the
 /// routine is for.
 ///
-/// The addresses were resolved by `tools/taskvm.py`, and all 37 land exactly on
+/// The addresses were resolved by `tools/taskvm.py`, and all 41 land exactly on
 /// a named routine entry point, which is one of the checks that the link-time
 /// offset correction is real. The **kind** beside each name is read off the
 /// name and nothing more: none of these bodies has been disassembled, so a
 /// caller should treat the kind as a hint and the name as the fact.
+///
+/// Four of the 41 (`AddCrushSnd`, `AddMudSound`, `AddMudVoice` and
+/// `PlayScareMusic`) belong to the mudmen, whose fourteen scripts were missed
+/// while the set was believed to be 221: their prefix is `Mudmen`, not the
+/// `Mudman` of `MudmanTABLE`.
 pub const GOSUB_TARGETS: &[(&str, GosubKind)] = &[
+    ("AddCrushSnd", GosubKind::Sound),
     ("AddDemonWhirl", GosubKind::Spawn),
+    ("AddMudSound", GosubKind::Sound),
+    ("AddMudVoice", GosubKind::Sound),
     ("AddTrollSND", GosubKind::Sound),
     ("BalokRoarSound", GosubKind::Sound),
     ("BalokThrashSound", GosubKind::Sound),
@@ -335,6 +343,7 @@ pub const GOSUB_TARGETS: &[(&str, GosubKind)] = &[
     ("KnightON", GosubKind::Control),
     ("KnightSLAP", GosubKind::Control),
     ("MonsterOFF", GosubKind::Control),
+    ("PlayScareMusic", GosubKind::Sound),
     ("RatHangSound", GosubKind::Sound),
     ("RatImpaleSound", GosubKind::Sound),
     ("RatLeapSound", GosubKind::Sound),
@@ -1183,7 +1192,7 @@ mod tests {
 
     #[test]
     fn every_gosub_target_the_shipped_scripts_call_is_named() {
-        assert_eq!(GOSUB_TARGETS.len(), 37, "the 37 distinct targets in the data");
+        assert_eq!(GOSUB_TARGETS.len(), 41, "the 41 distinct targets in the data");
         let mut names: Vec<&str> = GOSUB_TARGETS.iter().map(|(n, _)| *n).collect();
         let before = names.len();
         names.sort_unstable();

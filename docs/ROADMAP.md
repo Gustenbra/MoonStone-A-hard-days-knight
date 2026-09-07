@@ -90,7 +90,7 @@ colour. Any sheet genuinely drawn over a foreign palette still has this problem.
 ## Reverse engineering still open
 
 - [x] **Multi-part sprite composition.** Decoded. The per-frame record is
-      `[u8 bank*4][u8 cel][i8 y][u8 flags][i16 x]`, and the 221 animation scripts are named
+      `[u8 bank*4][u8 cel][i8 y][u8 flags][i16 x]`, and the 236 animation scripts are named
       data in DGROUP. See `TASKVM.md`; verified by compositing knight and creature frames.
 - [x] Symbol name to address mapping in the debug info: 2,223 symbols with addresses,
       recovered by `tools/symbolmap.py`, which is what made the above fall out
