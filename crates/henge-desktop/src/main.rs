@@ -17,6 +17,7 @@ use henge_audio::{Clips, Sink, Voices};
 use map::MapScene;
 use text::Font;
 use henge_core::combat::Intent;
+use henge_core::item::{Items, Loss};
 use henge_core::place::{Answer, Approach, Places};
 use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
@@ -30,6 +31,19 @@ use winit::window::WindowBuilder;
 
 fn args_of() -> Vec<String> { std::env::args().collect() }
 
+/// What the pack holds, for one column of the trace. Ids rather than names,
+/// because a trace is read against the data and the data is keyed by id.
+fn carrying(run: &Run) -> String {
+    if run.kit.is_empty() {
+        return "-".into();
+    }
+    run.kit
+        .iter()
+        .map(|(id, n)| if n == 1 { id.to_string() } else { format!("{id}x{n}") })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// A scripted run for the headless modes, so a screen that needs walking to and
 /// a menu driving is reachable without a display.
 ///
@@ -40,8 +54,14 @@ fn args_of() -> Vec<String> { std::env::args().collect() }
 ///                     h/j/k/l walk, . waits
 ///   --hurt <hp>       start the run already wounded, so a healer has something
 ///                     to do without first having to win and lose a fight
+///   --gold <n>        start the run with coin, so a stall can be reached
+///                     without first winning the fights that pay for it
 fn hurt_arg(a: &[String]) -> Option<i32> {
     a.iter().position(|s| s == "--hurt").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+fn gold_arg(a: &[String]) -> Option<u32> {
+    a.iter().position(|s| s == "--gold").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
 }
 
 #[derive(Default)]
@@ -125,6 +145,7 @@ fn main() -> anyhow::Result<()> {
         let script = Script::from_args(&a);
         app.peaceful = script.peaceful;
         if let Some(hp) = hurt_arg(&a) { app.run.health = hp; }
+        if let Some(g) = gold_arg(&a) { app.run.gold = g; }
         if let Some(id) = script.at.as_deref() { app.enter(id); }
         // Travel while tracing, so the overworld loop is exercised too.
         app.keys[3] = true;
@@ -149,16 +170,17 @@ fn main() -> anyhow::Result<()> {
                 Mode::Map => {
                     let Some(m) = app.map.as_ref() else { break };
                     let r = &app.run;
-                    format!("{:>5}  MAP     day {:<3} hp{:>4}  won {:<3} fought {:<3} {} on {}",
-                        t, m.state.day, r.health, r.victories, r.fights,
+                    format!("{:>5}  MAP     day {:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {}",
+                        t, m.state.day, r.health, r.gold, carrying(r),
+                        r.victories, r.fights,
                         if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name())
                 }
                 Mode::Place => {
                     let Some(s) = app.visiting.as_ref() else { break };
                     let Some(def) = app.places.get(&s.visit.place) else { break };
-                    format!("{:>5}  PLACE   day {:<3} hp{:>4}  {:<30} {}",
-                        t, app.run.day, app.run.health, place::describe(def, &s.visit),
-                        s.visit.said)
+                    format!("{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}",
+                        t, app.run.day, app.run.health, app.run.gold, carrying(&app.run),
+                        place::describe(def, &s.visit, &app.items), s.visit.said)
                 }
                 Mode::Combat => {
                     let Some(w) = app.world.as_ref() else { break };
@@ -193,6 +215,7 @@ fn main() -> anyhow::Result<()> {
         let script = Script::from_args(&args);
         app.peaceful = script.peaceful;
         if let Some(hp) = hurt_arg(&args) { app.run.health = hp; }
+        if let Some(g) = gold_arg(&args) { app.run.gold = g; }
         if let Some(id) = script.at.as_deref() { app.enter(id); }
         let mut fed = 0usize;
         for _ in 0..ticks {
@@ -287,6 +310,9 @@ struct App {
     map: Option<MapScene>,
     /// Everywhere there is to go, and whether we are standing in one of them.
     places: Places,
+    /// What there is to buy, carry and drink. Shared by every stall, because a
+    /// flask is the same flask in Highwood as in Waterdeep.
+    items: Items,
     approach: Approach,
     visiting: Option<place::PlaceScene>,
     mode: Mode,
@@ -297,6 +323,12 @@ struct App {
     /// Suppress ambushes, so map rendering can be checked anywhere.
     peaceful: bool,
     run: Run,
+    /// The last thing a cutpurse took, for the map to say so. The map has no
+    /// message line of its own, so the notice rides on the purse plate in the
+    /// corner, beside the number it just changed.
+    robbed: String,
+    /// Ticks the robbery notice has left on screen.
+    robbed_for: u32,
     /// Ticks since the run ended, so the tally can be read before it restarts.
     run_over_for: u32,
     status: String,
@@ -408,6 +440,7 @@ impl App {
         let audio = open_audio(&mut reg);
         let fonts = text::load(&reg);
         let places = place::load(&reg);
+        let items = place::load_items(&reg);
         if world.is_none() {
             eprintln!("no arena data: {status}");
         } else {
@@ -424,6 +457,7 @@ impl App {
             mode: if map.is_some() { Mode::Map } else { Mode::Combat },
             map,
             places,
+            items,
             approach: Approach::default(),
             visiting: None,
             encounter_pick: 0,
@@ -432,6 +466,8 @@ impl App {
             fonts,
             peaceful: false,
             run: Run::new(100),
+            robbed: String::new(),
+            robbed_for: 0,
             run_over_for: 0,
             status,
             #[cfg(feature = "research")]
@@ -481,6 +517,7 @@ impl App {
     fn update(&mut self) {
         self.simulate();
         self.pressed = [false; 256];
+        self.robbed_for = self.robbed_for.saturating_sub(1);
     }
 
     fn simulate(&mut self) {
@@ -523,6 +560,26 @@ impl App {
                 // same action both repairs and risks you.
                 if dx != 0 || dy != 0 {
                     self.run.travelled();
+                    // And trouble is not only the kind you can swing at. A
+                    // cutpurse on the road is the world's half of
+                    // `TAKEFROMKNIGHT`: what you carry can leave you.
+                    if !self.peaceful {
+                        match self.run.waylaid() {
+                            Some(Loss::Gold(n)) => {
+                                self.robbed = format!("{n} gold taken");
+                                self.robbed_for = 180;
+                            }
+                            Some(Loss::Item(id)) => {
+                                let what = self
+                                    .items
+                                    .get(&id)
+                                    .map_or(id.clone(), |d| d.name.clone());
+                                self.robbed = format!("{what} taken");
+                                self.robbed_for = 180;
+                            }
+                            None => {}
+                        }
+                    }
                 }
                 if let Some(m) = self.map.as_ref() {
                     if m.state.day != day_before {
@@ -549,6 +606,7 @@ impl App {
                 let (up, down, take) = (self.pressed[0], self.pressed[1], self.pressed[6]);
                 let mut leave = false;
                 let mut days = 0;
+                let mut door: Option<String> = None;
                 if let Some(s) = self.visiting.as_mut() {
                     if let Some(def) = self.places.get(&s.visit.place) {
                         if up {
@@ -558,12 +616,21 @@ impl App {
                             s.visit.move_by(def, 1);
                         }
                         if take {
-                            match s.visit.choose(def, &mut self.run) {
+                            match s.visit.choose(def, &self.items, &mut self.run) {
                                 Answer::Left => leave = true,
                                 Answer::Stayed { days: d } => days = d,
+                                Answer::Went { place } => door = Some(place),
                             }
                         }
                     } else {
+                        leave = true;
+                    }
+                }
+                // A door inside a place opens another place rather than putting
+                // you back on the map: the merchant's stall is a room in the
+                // town, not a walk away from it.
+                if let Some(id) = door {
+                    if !self.enter(&id) {
                         leave = true;
                     }
                 }
@@ -600,7 +667,9 @@ impl App {
                         let survivor = w.bout.fighters.first();
                         let health = survivor.map_or(0, |f| if f.alive() { f.health } else { 0 });
                         let won = w.bout.winner() == Some(0);
-                        self.run.finished_fight(health, won);
+                        // What the fallen were carrying. The run decides whether
+                        // it is collected; a corpse collects nothing.
+                        self.run.finished_fight(health, won, w.purse());
                     }
                     if w.settled_for() > 120 {
                         self.voices.reset();
@@ -729,7 +798,10 @@ impl App {
                     // Places are drawn in the small font: their menus sit in
                     // panels the original painted only a few pixels wide.
                     let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
-                    if scene.render(&mut self.reg, &mut self.fb, def, font, &self.run).is_ok() {
+                    if scene
+                        .render(&mut self.reg, &mut self.fb, def, font, &self.run, &self.items)
+                        .is_ok()
+                    {
                         return;
                     }
                 }
@@ -741,9 +813,10 @@ impl App {
             if let Some(m) = self.map.take() {
                 let near = henge_core::place::nearest(&self.places, m.state.x, m.state.y, 16)
                     .map(|(_, d)| d.name.clone());
+                let notice = (self.robbed_for > 0).then_some(self.robbed.as_str());
                 let ok = m
-                    .render(&mut self.reg, &mut self.fb, self.fonts.get("bold"), &self.run,
-                            near.as_deref())
+                    .render(&mut self.reg, &mut self.fb, &self.fonts, &self.run,
+                            near.as_deref(), notice)
                     .is_ok();
                 self.map = Some(m);
                 if ok {

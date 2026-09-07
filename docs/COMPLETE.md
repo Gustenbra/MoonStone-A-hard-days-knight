@@ -285,9 +285,9 @@ Each is a named routine. All are **todo** beyond the menus already drawn.
 
 | Original | What it is | Status |
 |---|---|---|
-| `TAVERN` | recruit, rumours, drink | menu only |
+| `TAVERN` | recruit, rumours, drink | menu only, but gold now exists to charge |
 | `DICE` | a dice game | **todo**, `DICE.CEL` and `DICE.PIV` unused |
-| `HEALER` | restore health | done, costs days |
+| `HEALER` | restore health | done; the hermit costs days, a town healer days and gold |
 | `TEMPLE` | temple services | **todo** |
 | `MYSTIC` | mystic services | **todo** |
 | `STONEHENGE` | the stone circle | menu only |
@@ -303,24 +303,26 @@ Each is a named routine. All are **todo** beyond the menus already drawn.
 
 ---
 
-# 6. Items, magic and economy `todo`
+# 6. Items, magic and economy `partly done`
 
-Almost nothing here exists.
+Gold, prices, a carried pack and potions exist. Magic, curses, the hawk and the gem
+do not.
 
-| Original | What it is |
-|---|---|
-| `GEM`, `INITGEM`, `RESTOREGEM` | a gem item with state |
-| `HAWK`, `INITHAWK`, `RESTOREHAWK`, `INITCURSEHAWK` | a hawk, and a cursed variant |
-| `HASTE` | a haste effect |
-| `PCURSED` | player cursed state |
-| `CAST_MAGIC` | casting |
-| `DRINKPOTIONHEAL` | potions |
-| `BESTOWGOLD`, `BESTOWMAGIC`, `GETABILITY` | acquisition |
-| `TAKEFROMKNIGHT` | losing items |
+| Original | What it is | Status |
+|---|---|---|
+| `GEM`, `INITGEM`, `RESTOREGEM` | a gem item with state | **todo** |
+| `HAWK`, `INITHAWK`, `RESTOREHAWK`, `INITCURSEHAWK` | a hawk, and a cursed variant | **todo** |
+| `HASTE` | a haste effect | **todo** |
+| `PCURSED` | player cursed state | **todo** |
+| `CAST_MAGIC` | casting | **todo** |
+| `DRINKPOTIONHEAL` | potions | done, as an item virtue in the data |
+| `BESTOWGOLD`, `BESTOWMAGIC`, `GETABILITY` | acquisition | gold done, as a bounty off the fallen; the wizard's bestowal **todo** |
+| `TAKEFROMKNIGHT` | losing items | done: a flask is spent when drunk, and a cutpurse on the road takes coin or goods |
 
-- [ ] Gold, and prices, so the merchant can open
-- [ ] Inventory, carrying and losing items
-- [ ] Potions
+- [x] Gold, and prices, so the merchant can open
+- [x] Inventory, carrying and losing items
+- [x] Potions, in as much as healing flasks exist. A potion that does anything
+      other than mend waits on magic
 - [ ] Magic: spells, casting, costs
 - [ ] Curses
 - [ ] Abilities and character stats
@@ -394,7 +396,8 @@ Dependency order, not preference.
 
 **Then, in parallel**
 3. Creatures (3.2), which 1.1 unlocks all at once
-4. Gold and inventory (6), which opens the merchant and tavern
+4. ~~Gold and inventory (6)~~ **done**, which opened the merchant and leaves the
+   tavern needing only what it offers
 5. Title and character select (8)
 
 **Then**

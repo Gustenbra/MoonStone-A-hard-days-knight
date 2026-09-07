@@ -75,15 +75,47 @@ impl MapScene {
     /// takes the middle of the status bar off the terrain, because when a town
     /// is under your feet its name is the more useful of the two.
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                  font: Option<&crate::text::Font>, run: &henge_core::run::Run,
-                  here: Option<&str>) -> anyhow::Result<()> {
+                  fonts: &std::collections::BTreeMap<String, crate::text::Font>,
+                  run: &henge_core::run::Run,
+                  here: Option<&str>, notice: Option<&str>) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
 
         self.draw_token(reg, fb);
 
-        self.draw_status(reg, fb, font, run, here);
+        self.draw_status(reg, fb, fonts.get("bold"), run, here);
+        self.draw_purse(reg, fb, fonts.get("small"), run, notice);
         Ok(())
+    }
+
+    /// The purse, on a plate in the corner of the map.
+    ///
+    /// Not on the status bar, which is already full: the bold font is wide
+    /// enough that "open ground" and "100 of 100" barely share a line as it is,
+    /// and a third number would push one of them off. The corner is out of the
+    /// way, and it is where the same number sits in the place screens, so what
+    /// you are worth is always somewhere on the screen.
+    ///
+    /// A cutpurse's notice rides along beside it, because the map has no
+    /// message line and something taken off you cannot go unsaid.
+    fn draw_purse(&self, reg: &mut Registry, fb: &mut Framebuffer,
+                  font: Option<&crate::text::Font>, run: &henge_core::run::Run,
+                  notice: Option<&str>) {
+        let Some(font) = font else { return };
+        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
+        let (mut dark, mut light) = (0usize, 0usize);
+        for i in 1..32 {
+            if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
+            if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
+        }
+        let mut line = format!("{} gold", run.gold);
+        if let Some(n) = notice {
+            line.push_str("   ");
+            line.push_str(n);
+        }
+        let w = font.width(reg, &line);
+        fb.rect(4, 4, w + 8, 12, dark as u8);
+        font.draw(reg, fb, &line, 8, 7, light as u8);
     }
 
     /// Draw the traveller.

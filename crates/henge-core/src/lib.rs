@@ -8,6 +8,7 @@ pub mod arena;
 pub mod bout;
 pub mod combat;
 pub mod content;
+pub mod item;
 pub mod overworld;
 pub mod place;
 pub mod run;

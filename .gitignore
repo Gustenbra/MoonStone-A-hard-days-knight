@@ -22,3 +22,7 @@
 *.hit
 *.HIT
 *.voc
+
+# Python bytecode from the research tools
+__pycache__/
+*.pyc

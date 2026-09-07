@@ -8,12 +8,14 @@
 //! [`Run`]. The renderer is handed a [`PlaceDef`] and a [`Visit`] and decides
 //! nothing.
 //!
-//! **The price of a service is time.** There is no money in this game yet and
-//! inventing some would be inventing a whole economy, so the healer charges the
-//! only thing a run actually owns: days. Days matter because the map keeps its
-//! ambushes, so a week under a healer is a week the world moved without you.
+//! **Two prices, and they are different prices.** Time is what a service in the
+//! wilds costs: days matter because the map keeps its ambushes, so a week under
+//! a healer is a week the world moved without you. Coin is what a service in a
+//! town costs, now that there is coin. A place may ask for either or both, and
+//! which it asks for is authored in the pack rather than decided here.
 
-use crate::run::Run;
+use crate::item::{Items, Purchase};
+use crate::run::{Run, Used};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -25,14 +27,40 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "do", rename_all = "kebab-case")]
 pub enum Effect {
-    /// Someone tends your wounds, and the price is days.
+    /// Someone tends your wounds. The price is days, and in a town also coin.
     Heal {
         days: u32,
+        /// Coin as well as days. Zero for a hermit who wants only your time.
+        #[serde(default)]
+        gold: u32,
         /// Said when there was something to mend.
         said: String,
         /// Said when there was not. A healer does not take your time for nothing.
         refused: String,
+        /// Said when the purse is short. Falls back to `refused` rather than
+        /// saying nothing, so a refusal is never silent.
+        #[serde(default)]
+        too_poor: String,
     },
+    /// A stall. One line, one item, at the price the item data names, so the
+    /// menu and the goods can never disagree about what a thing costs.
+    Buy {
+        item: String,
+        said: String,
+        too_dear: String,
+        no_room: String,
+    },
+    /// Use something you are carrying, here and now.
+    Use {
+        item: String,
+        said: String,
+        /// Said when you have none, or when using it would achieve nothing.
+        refused: String,
+    },
+    /// Through a door inside this place: the merchant's stall is not the town
+    /// square. The place it names is normally `hidden`, so it exists only as
+    /// somewhere you are already standing can send you.
+    Go { place: String },
     /// On the sign, not built yet. The game admits it rather than pretending.
     Closed { said: String },
     /// Back out onto the map.
@@ -40,9 +68,36 @@ pub enum Effect {
 }
 
 impl Effect {
-    /// Whether this option can actually be taken. The renderer dims the rest.
+    /// Whether this option is one the game can honour at all. False only for a
+    /// door that is not built yet; whether you can afford what is behind an
+    /// open one is [`Effect::offered`].
     pub fn available(&self) -> bool {
         !matches!(self, Effect::Closed { .. })
+    }
+
+    /// Whether taking this option right now would do anything, given the purse
+    /// and the pack. The renderer dims the rest, so a man with eight coins can
+    /// see that the flask is out of reach before he tries for it.
+    pub fn offered(&self, items: &Items, run: &Run) -> bool {
+        match self {
+            Effect::Closed { .. } => false,
+            Effect::Heal { gold, .. } => run.gold >= *gold,
+            Effect::Buy { item, .. } => items
+                .get(item)
+                .is_some_and(|d| run.gold >= d.price && run.kit.room() > 0),
+            Effect::Use { item, .. } => run.kit.count(item) > 0,
+            Effect::Go { .. } | Effect::Leave => true,
+        }
+    }
+
+    /// What this option costs in coin, for a menu to show against its line. The
+    /// number lives with the item or with the place, never in the label.
+    pub fn cost(&self, items: &Items) -> Option<u32> {
+        match self {
+            Effect::Buy { item, .. } => items.get(item).map(|d| d.price),
+            Effect::Heal { gold, .. } if *gold > 0 => Some(*gold),
+            _ => None,
+        }
     }
 }
 
@@ -71,10 +126,18 @@ pub struct PlaceDef {
     /// room for words.
     pub menu: [i32; 4],
     pub options: Vec<Choice>,
+    /// Not on the map. A hidden place is a room inside another one, reached
+    /// only through an [`Effect::Go`], so its coordinates mean nothing and
+    /// walking can never stumble into it.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl PlaceDef {
     pub fn covers(&self, x: i32, y: i32) -> bool {
+        if self.hidden {
+            return false;
+        }
         let (dx, dy) = (x - self.x, y - self.y);
         dx * dx + dy * dy <= self.radius * self.radius
     }
@@ -96,7 +159,7 @@ pub type Places = BTreeMap<String, PlaceDef>;
 pub fn nearest(places: &Places, x: i32, y: i32, range: i32) -> Option<(&str, &PlaceDef)> {
     places
         .iter()
-        .filter(|(_, d)| d.distance2(x, y) <= range * range)
+        .filter(|(_, d)| !d.hidden && d.distance2(x, y) <= range * range)
         .min_by_key(|(id, d)| (d.distance2(x, y), id.as_str()))
         .map(|(id, d)| (id.as_str(), d))
 }
@@ -144,10 +207,12 @@ pub struct Visit {
 }
 
 /// What a choice did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Answer {
     /// Still here. `days` is what the choice cost in time.
     Stayed { days: u32 },
+    /// Through a door into another place, without going back out to the map.
+    Went { place: String },
     /// Out onto the map.
     Left,
 }
@@ -176,20 +241,53 @@ impl Visit {
     }
 
     /// Take the highlighted option.
-    pub fn choose(&mut self, def: &PlaceDef, run: &mut Run) -> Answer {
+    ///
+    /// Every branch either changes the run and says what it did, or changes
+    /// nothing and says why. There is no third case, which is what stops a
+    /// menu quietly eating a choice.
+    pub fn choose(&mut self, def: &PlaceDef, items: &Items, run: &mut Run) -> Answer {
         let Some(choice) = def.options.get(self.cursor) else {
             return Answer::Left;
         };
         match &choice.effect {
             Effect::Leave => Answer::Left,
+            Effect::Go { place } => Answer::Went { place: place.clone() },
             Effect::Closed { said } => {
                 self.said = said.clone();
                 Answer::Stayed { days: 0 }
             }
-            Effect::Heal { days, said, refused } => {
+            Effect::Heal { days, gold, said, refused, too_poor } => {
+                // Coin is asked for at the door, before the days are spent, so
+                // a man who cannot pay does not lose a week finding out.
+                if run.gold < *gold {
+                    self.said =
+                        if too_poor.is_empty() { refused.clone() } else { too_poor.clone() };
+                    return Answer::Stayed { days: 0 };
+                }
                 let spent = run.tended(*days);
-                self.said = if spent > 0 { said.clone() } else { refused.clone() };
+                if spent > 0 {
+                    run.spend(*gold);
+                    self.said = said.clone();
+                } else {
+                    self.said = refused.clone();
+                }
                 Answer::Stayed { days: spent }
+            }
+            Effect::Buy { item, said, too_dear, no_room } => {
+                self.said = match run.buy(item, items) {
+                    Purchase::Bought { .. } => said.clone(),
+                    Purchase::TooDear => too_dear.clone(),
+                    Purchase::NoRoom => no_room.clone(),
+                    Purchase::Unknown => format!("No {item} here."),
+                };
+                Answer::Stayed { days: 0 }
+            }
+            Effect::Use { item, said, refused } => {
+                self.said = match run.use_item(item, items) {
+                    Used::Did => said.clone(),
+                    _ => refused.clone(),
+                };
+                Answer::Stayed { days: 0 }
             }
         }
     }
@@ -198,6 +296,21 @@ impl Visit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::item::{ItemDef, Virtue};
+
+    fn shop() -> Items {
+        let mut items = Items::new();
+        items.insert(
+            "potion".into(),
+            ItemDef {
+                name: "Flask of healing".into(),
+                price: 25,
+                virtue: Virtue::Heal { health: 40 },
+                consumed: true,
+            },
+        );
+        items
+    }
 
     fn healer() -> PlaceDef {
         PlaceDef {
@@ -206,6 +319,7 @@ mod tests {
             x: 100,
             y: 100,
             radius: 5,
+            hidden: false,
             menu: [8, 8, 100, 100],
             options: vec![
                 Choice {
@@ -216,11 +330,50 @@ mod tests {
                     label: "Tend my wounds".into(),
                     effect: Effect::Heal {
                         days: 3,
+                        gold: 0,
                         said: "You are made whole.".into(),
                         refused: "You have no need of me.".into(),
+                        too_poor: String::new(),
                     },
                 },
                 Choice { label: "Leave".into(), effect: Effect::Leave },
+            ],
+        }
+    }
+
+    /// A stall, as the pack authors one: a way in, a thing to buy, a flask to
+    /// drink, and a way back to the room you came from.
+    fn merchant() -> PlaceDef {
+        PlaceDef {
+            name: "The Merchant".into(),
+            scene: "scene.highwood".into(),
+            x: 0,
+            y: 0,
+            radius: 0,
+            hidden: true,
+            menu: [8, 8, 100, 100],
+            options: vec![
+                Choice {
+                    label: "Flask of healing".into(),
+                    effect: Effect::Buy {
+                        item: "potion".into(),
+                        said: "The flask is yours.".into(),
+                        too_dear: "Come back with coin.".into(),
+                        no_room: "You cannot carry another.".into(),
+                    },
+                },
+                Choice {
+                    label: "Drink a flask".into(),
+                    effect: Effect::Use {
+                        item: "potion".into(),
+                        said: "You drain it.".into(),
+                        refused: "You have none, or no need.".into(),
+                    },
+                },
+                Choice {
+                    label: "Back".into(),
+                    effect: Effect::Go { place: "highwood".into() },
+                },
             ],
         }
     }
@@ -245,7 +398,7 @@ mod tests {
         let mut run = Run::new(100);
         let mut v = Visit::open("healer");
         assert!(matches!(def.options[v.cursor].effect, Effect::Closed { .. }));
-        v.choose(&def, &mut run);
+        v.choose(&def, &shop(), &mut run);
         assert!(!v.said.is_empty(), "a shut option should say why");
         v.move_by(&def, 1);
         assert!(v.said.is_empty(), "the refusal must not sit under the next option");
@@ -286,11 +439,11 @@ mod tests {
     fn the_healer_mends_you_and_charges_days() {
         let def = healer();
         let mut run = Run::new(100);
-        run.finished_fight(30, true);
+        run.finished_fight(30, true, 0);
         let mut v = Visit::open("healer");
         v.move_by(&def, 1);
         let day = run.day;
-        assert_eq!(v.choose(&def, &mut run), Answer::Stayed { days: 3 });
+        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 3 });
         assert_eq!(run.health, 100, "wounds close");
         assert_eq!(run.day, day + 3, "and time is what it cost");
         assert_eq!(v.said, "You are made whole.");
@@ -302,9 +455,38 @@ mod tests {
         let mut v = Visit::open("healer");
         v.move_by(&def, 1);
         let day = run.day;
-        assert_eq!(v.choose(&def, &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
         assert_eq!(run.day, day, "unwounded, so no time passes");
         assert_eq!(v.said, "You have no need of me.");
+    }
+
+    /// A hermit in the woods takes only days. A healer inside a town wants coin
+    /// as well, and asks for it at the door rather than after the week.
+    #[test]
+    fn a_town_healer_takes_coin_as_well_as_days() {
+        let mut def = healer();
+        def.options[1].effect = Effect::Heal {
+            days: 3,
+            gold: 10,
+            said: "You are made whole.".into(),
+            refused: "You have no need of me.".into(),
+            too_poor: "I do not work for nothing.".into(),
+        };
+        let mut run = Run::new(100);
+        run.finished_fight(30, true, 0);
+        let mut v = Visit::open("healer");
+        v.move_by(&def, 1);
+
+        let day = run.day;
+        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(v.said, "I do not work for nothing.");
+        assert_eq!(run.health, 30, "and an empty purse buys nothing");
+        assert_eq!(run.day, day, "nor costs a week to be turned away");
+
+        run.earn(25);
+        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 3 });
+        assert_eq!(run.gold, 15, "the fee changes hands");
+        assert_eq!(run.health, 100);
     }
 
     #[test]
@@ -312,7 +494,7 @@ mod tests {
         let (def, mut run) = (healer(), Run::new(100));
         let mut v = Visit::open("healer");
         assert!(!def.options[0].effect.available());
-        assert_eq!(v.choose(&def, &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
         assert_eq!(run, Run::new(100), "the run is untouched");
     }
 
@@ -322,7 +504,7 @@ mod tests {
         let mut v = Visit::open("healer");
         v.move_by(&def, -1);
         assert_eq!(v.cursor, 2, "up from the top wraps to the bottom");
-        assert_eq!(v.choose(&def, &mut run), Answer::Left);
+        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Left);
     }
 
     #[test]
@@ -351,4 +533,96 @@ mod tests {
         assert!(json.contains("\"do\":\"heal\""), "effects are tagged in the data");
     }
 
+    // The merchant.
+
+    #[test]
+    fn the_merchant_sells_and_the_coin_actually_moves() {
+        let (def, items) = (merchant(), shop());
+        let mut run = Run::new(100);
+        run.earn(60);
+        let mut v = Visit::open("highwood.merchant");
+        assert_eq!(v.choose(&def, &items, &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(run.gold, 35, "twenty five went across the counter");
+        assert_eq!(run.kit.count("potion"), 1, "and a flask came back");
+        assert_eq!(v.said, "The flask is yours.");
+    }
+
+    #[test]
+    fn a_merchant_turns_away_an_empty_purse_and_says_which_reason() {
+        let (def, items) = (merchant(), shop());
+        let mut run = Run::new(100);
+        let mut v = Visit::open("m");
+        v.choose(&def, &items, &mut run);
+        assert_eq!(v.said, "Come back with coin.");
+        assert!(run.kit.is_empty(), "nothing changed hands");
+
+        run.earn(1000);
+        run.kit.capacity = 0;
+        v.choose(&def, &items, &mut run);
+        assert_eq!(v.said, "You cannot carry another.");
+        assert_eq!(run.gold, 1000, "and a refused sale takes no coin");
+    }
+
+    /// The price is a property of the goods, so a menu can show it without the
+    /// label ever repeating it and the two can never drift apart.
+    #[test]
+    fn a_stall_line_carries_the_price_of_what_it_sells() {
+        let (def, items) = (merchant(), shop());
+        assert_eq!(def.options[0].effect.cost(&items), Some(25));
+        assert_eq!(def.options[2].effect.cost(&items), None, "a door is free");
+    }
+
+    /// A man with eight coins should be able to see that the flask is out of
+    /// reach before he chooses it.
+    #[test]
+    fn what_you_cannot_afford_is_not_offered() {
+        let (def, items) = (merchant(), shop());
+        let mut run = Run::new(100);
+        assert!(def.options[0].effect.available(), "the stall is open");
+        assert!(!def.options[0].effect.offered(&items, &run), "but not to a pauper");
+        run.earn(25);
+        assert!(def.options[0].effect.offered(&items, &run));
+        // Nor is a flask you are not carrying.
+        assert!(!def.options[1].effect.offered(&items, &run));
+        run.kit.take("potion", 1);
+        assert!(def.options[1].effect.offered(&items, &run));
+    }
+
+    #[test]
+    fn drinking_at_the_stall_mends_you_and_empties_the_flask() {
+        let (def, items) = (merchant(), shop());
+        let mut run = Run::new(100);
+        run.kit.take("potion", 1);
+        run.finished_fight(40, true, 0);
+        let mut v = Visit::open("m");
+        v.move_by(&def, 1);
+        v.choose(&def, &items, &mut run);
+        assert_eq!(run.health, 80);
+        assert!(run.kit.is_empty(), "the flask is gone");
+        assert_eq!(v.said, "You drain it.");
+    }
+
+    #[test]
+    fn a_door_inside_a_place_leads_to_the_other_room_and_not_to_the_map() {
+        let (def, items) = (merchant(), shop());
+        let mut run = Run::new(100);
+        let mut v = Visit::open("m");
+        v.move_by(&def, -1);
+        assert_eq!(
+            v.choose(&def, &items, &mut run),
+            Answer::Went { place: "highwood".into() }
+        );
+    }
+
+    /// A stall is a room inside a town, not a landmark. Walking must never find
+    /// it, however close to the map's origin its unused coordinates happen to
+    /// put it.
+    #[test]
+    fn a_hidden_place_is_not_on_the_map() {
+        let mut places = world();
+        places.insert("highwood.merchant".into(), merchant());
+        let mut a = Approach::default();
+        assert_eq!(a.step(&places, 0, 0), None, "standing on its coordinates finds nothing");
+        assert_eq!(nearest(&places, 0, 0, 40).map(|(id, _)| id), None);
+    }
 }

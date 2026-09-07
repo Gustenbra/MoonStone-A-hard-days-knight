@@ -128,6 +128,23 @@ impl World {
 
     pub fn settled_for(&self) -> u32 { self.bout.settled_for }
 
+    /// What the fallen were carrying, for whoever is left standing.
+    ///
+    /// Every fighter but the player's own seat is somebody else's, and each is
+    /// worth the bounty its actor definition names, so what a fight pays is a
+    /// property of who you fought and lives in the pack. Seat zero is excluded
+    /// because a man does not loot himself.
+    pub fn purse(&self) -> u32 {
+        let bounty = self.def().bounty;
+        self.bout
+            .fighters
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != 0 && !f.alive())
+            .map(|_| bounty)
+            .sum()
+    }
+
     /// How many visibly different knights this arena's palette can support.
     pub fn distinct_players(&self, palette: &[u32]) -> usize {
         recolour::max_distinct_players(palette)

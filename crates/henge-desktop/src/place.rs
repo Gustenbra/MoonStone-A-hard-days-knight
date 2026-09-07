@@ -15,6 +15,7 @@
 use crate::framebuffer::Framebuffer;
 use crate::text::Font;
 use henge_assets::Registry;
+use henge_core::item::Items;
 use henge_core::place::{Effect, PlaceDef, Places, Visit};
 use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
@@ -23,6 +24,12 @@ use henge_core::{SCREEN_H, SCREEN_W};
 /// error: the map simply has nowhere to go, exactly as it did before.
 pub fn load(reg: &Registry) -> Places {
     reg.read_data("data.places").unwrap_or_default()
+}
+
+/// Whatever goods the packs declare. A pack without items is not an error: the
+/// stalls simply have nothing on them, which is what they had before.
+pub fn load_items(reg: &Registry) -> Items {
+    reg.read_data("data.items").unwrap_or_default()
 }
 
 pub struct PlaceScene {
@@ -89,17 +96,18 @@ impl PlaceScene {
 
     pub fn render(
         &self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef,
-        font: Option<&Font>, run: &Run,
+        font: Option<&Font>, run: &Run, items: &Items,
     ) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
         let Some(font) = font else { return Ok(()) };
-        self.draw_menu(reg, fb, def, font);
+        self.draw_menu(reg, fb, def, font, run, items);
         self.draw_status(reg, fb, font, run);
         Ok(())
     }
 
-    fn draw_menu(&self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef, font: &Font) {
+    fn draw_menu(&self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef,
+                 font: &Font, run: &Run, items: &Items) {
         let [x, y, w, h] = def.menu;
         let ink = self.ink_for(fb, x, y, w, h);
         fb.rect(x, y, w, h, ink.ground);
@@ -113,7 +121,15 @@ impl PlaceScene {
         cy += 4;
 
         for (i, choice) in def.options.iter().enumerate() {
-            let open = choice.effect.available();
+            // Two different kinds of "no". A shut door is dim because it is not
+            // built; a flask you cannot afford is dim because of what is in
+            // your purse, and it brightens the moment you can pay for it.
+            let open = choice.effect.offered(items, run);
+            // A price belongs to the goods, so the label never repeats it and
+            // the two can never drift apart. It is written hard against the
+            // right edge of the box, which is where a bill goes.
+            let price = choice.effect.cost(items).map(|c| c.to_string());
+            let pw = price.as_deref().map_or(0, |p| font.width(reg, p));
             if i == self.visit.cursor {
                 // The highlight is a bar rather than a marker: the fonts have no
                 // arrow glyph, and inverting a line reads at this size anyway.
@@ -122,9 +138,15 @@ impl PlaceScene {
                 let bar = if open { ink.text } else { ink.faint };
                 fb.rect(x + 2, cy - 2, w - 4, STEP, bar);
                 font.draw(reg, fb, &choice.label, x + PAD, cy, ink.ground);
+                if let Some(p) = &price {
+                    font.draw(reg, fb, p, x + w - PAD - pw, cy, ink.ground);
+                }
             } else {
-                font.draw(reg, fb, &choice.label, x + PAD, cy,
-                          if open { ink.text } else { ink.faint });
+                let shade = if open { ink.text } else { ink.faint };
+                font.draw(reg, fb, &choice.label, x + PAD, cy, shade);
+                if let Some(p) = &price {
+                    font.draw(reg, fb, p, x + w - PAD - pw, cy, shade);
+                }
             }
             cy += STEP;
         }
@@ -156,6 +178,12 @@ impl PlaceScene {
         let right = format!("{} of {}", run.health.max(0), run.max_health);
         let w = font.width(reg, &right);
         font.draw(reg, fb, &right, 314 - w, 186, light as u8);
+        // The purse goes in the middle, where a place has nothing else to put:
+        // it is the number that changes when you buy something, so it has to be
+        // on the screen you buy things on.
+        let purse = format!("{} gold", run.gold);
+        let pw = font.width(reg, &purse);
+        font.draw(reg, fb, &purse, (SCREEN_W as i32 - pw) / 2, 186, light as u8);
     }
 }
 
@@ -179,10 +207,14 @@ fn wrap(reg: &Registry, font: &Font, text: &str, width: i32) -> Vec<String> {
 }
 
 /// A one-line summary for the headless trace.
-pub fn describe(def: &PlaceDef, visit: &Visit) -> String {
+pub fn describe(def: &PlaceDef, visit: &Visit, items: &Items) -> String {
     let label = visit.selected(def).map_or("-", |c| c.label.as_str());
     let shut = visit
         .selected(def)
         .is_some_and(|c| matches!(c.effect, Effect::Closed { .. }));
-    format!("{:<12} > {}{}", def.name, label, if shut { " (shut)" } else { "" })
+    let price = visit
+        .selected(def)
+        .and_then(|c| c.effect.cost(items))
+        .map_or(String::new(), |p| format!(" [{p}]"));
+    format!("{:<12} > {}{}{}", def.name, label, price, if shut { " (shut)" } else { "" })
 }

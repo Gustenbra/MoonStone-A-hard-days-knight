@@ -59,6 +59,11 @@ pub struct ActorDef {
     /// How closely depth must line up before a strike can connect.
     pub depth_tolerance: i32,
     pub attack_cooldown: i32,
+    /// What this kind of fighter is carrying, for whoever is left standing.
+    /// Per-creature and in the data, so a troll can be worth more than a rat
+    /// without a line of Rust changing.
+    #[serde(default)]
+    pub bounty: u32,
     /// Body box relative to the feet: [x_min, y_min, x_max, y_max], y upward.
     pub body: [i16; 4],
     pub sequences: BTreeMap<String, Sequence>,
@@ -94,3 +99,8 @@ pub struct FontDef {
 }
 
 pub type Fonts = BTreeMap<String, FontDef>;
+
+/// Items live in [`crate::item`] beside the pack and the purse that use them,
+/// and are re-exported here so a caller loading content finds them where it
+/// finds everything else the packs declare.
+pub use crate::item::{ItemDef, Items};

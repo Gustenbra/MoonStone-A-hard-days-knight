@@ -193,6 +193,9 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/places.json"), place_definitions())?;
     m.data.insert("data.places".into(), "data/places.json".into());
 
+    fs::write(out.join("data/items.json"), item_definitions())?;
+    m.data.insert("data.items".into(), "data/items.json".into());
+
     fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&m)?)?;
     println!(
         "baked {} sheets, {} sounds, {} palettes, {} data blobs into {}",
@@ -304,6 +307,12 @@ fn actor_definitions() -> String {
             "reach": 38,
             "depth_tolerance": 6,
             "attack_cooldown": 45,
+            // What a fallen knight is carrying, for whoever is left standing.
+            // Not recovered: the original names `BESTOWGOLD` and a `GOLD`
+            // readout but no table of what anything is worth, so this is a
+            // number chosen against the prices below. Three foes put down pays
+            // for a flask and leaves change.
+            "bounty": 15,
             "body": [-9, 0, 9, 50],
             "sequences": {
                 "idle": { "name": "idle", "end": "Loop", "frames": [
@@ -389,23 +398,62 @@ fn font_definitions() -> String {
 /// box is put exactly over that panel and the live menu replaces the painted
 /// one. The others have no panel, so the box goes where the art is quietest.
 ///
-/// Only the healer does anything yet. Everything else is listed and marked
-/// closed rather than left off, because the sign on the door is part of the
-/// place, and an option that looks live and silently does nothing is worse than
-/// one that says it is not open.
+/// **A stall is a room, not a menu line.** The merchant is its own place, marked
+/// `hidden` so walking can never find it, reached through the town's own menu
+/// and leaving back into it. That keeps a town's front door short and lets the
+/// shop have a box of its own, wide enough for goods and their prices, which a
+/// 62-pixel painted panel is not.
 ///
-/// **The price is days.** There is no money in the game and inventing some
-/// would be inventing an economy, so a healer takes the only thing a run has.
+/// **Two prices.** The hermit in the woods takes only days. The healers inside
+/// the walls want coin as well, which is the difference between the two worth
+/// having now that there is coin: the free one costs you a week of the calendar
+/// the moon and the ambushes are hung on.
 fn place_definitions() -> String {
-    let heal = |days: u32| {
+    let heal = |days: u32, gold: u32| {
         serde_json::json!({
-            "do": "heal", "days": days,
+            "do": "heal", "days": days, "gold": gold,
             "said": "Rest well. You are whole again.",
-            "refused": "You are unmarked. Keep your days."
+            "refused": "You are unmarked. Keep your days.",
+            "too_poor": "I keep no man for nothing."
         })
     };
     let closed = |said: &str| serde_json::json!({ "do": "closed", "said": said });
     let leave = serde_json::json!({ "do": "leave" });
+    let go = |place: &str| serde_json::json!({ "do": "go", "place": place });
+    let buy = |item: &str| {
+        serde_json::json!({
+            "do": "buy", "item": item,
+            "said": "A fair trade. Keep it dry.",
+            "too_dear": "Come back when your purse is heavier.",
+            "no_room": "You are carrying all you can."
+        })
+    };
+    let drink = |item: &str| {
+        serde_json::json!({
+            "do": "use", "item": item,
+            "said": "You drain it, and the ache goes out of you.",
+            "refused": "You have none, or no need of one."
+        })
+    };
+    // A stall sells the same goods wherever it stands; only the box moves,
+    // because it has to sit where that particular painting has room.
+    let stall = |name: &str, scene: &str, menu: serde_json::Value, back: &str| {
+        serde_json::json!({
+            "name": name,
+            "scene": scene,
+            "hidden": true,
+            "x": 0, "y": 0, "radius": 0,
+            "menu": menu,
+            "options": [
+                { "label": "Flask of healing", "effect": buy("potion") },
+                { "label": "Draught of life",  "effect": buy("elixir") },
+                { "label": "Iron key",         "effect": buy("key") },
+                { "label": "Drink a flask",    "effect": drink("potion") },
+                { "label": "Drink a draught",  "effect": drink("elixir") },
+                { "label": "Back",             "effect": go(back) }
+            ]
+        })
+    };
 
     serde_json::json!({
         "highwood": {
@@ -414,33 +462,45 @@ fn place_definitions() -> String {
             "x": 93, "y": 56, "radius": 6,
             "menu": [256, 0, 62, 200],
             "options": [
-                { "label": "Merchant", "effect": closed("The stalls are shuttered.") },
+                { "label": "Merchant", "effect": go("highwood.merchant") },
                 { "label": "Tavern",   "effect": closed("No one is pouring tonight.") },
-                { "label": "Healer",   "effect": heal(3) },
+                { "label": "Healer",   "effect": heal(3, 10) },
                 { "label": "Temple",   "effect": closed("The doors are barred.") },
                 { "label": "Leave",    "effect": leave }
             ]
         },
+        // A stall's box swallows the town's own painted menu as well as the
+        // art beside it. Leaving that painted list of doors showing next to a
+        // live one would offer the player two menus and honour only the live
+        // one, and it is wide enough here for goods and their prices, which the
+        // painted panel alone is not.
+        "highwood.merchant": stall(
+            "Merchant", "scene.highwood", serde_json::json!([140, 0, 178, 200]), "highwood"),
         "waterdeep": {
             "name": "Waterdeep",
             "scene": "scene.waterdee",
             "x": 292, "y": 157, "radius": 6,
             "menu": [2, 0, 62, 200],
             "options": [
-                { "label": "Merchant", "effect": closed("The stalls are shuttered.") },
+                { "label": "Merchant", "effect": go("waterdeep.merchant") },
                 { "label": "Tavern",   "effect": closed("No one is pouring tonight.") },
-                { "label": "Healer",   "effect": heal(3) },
+                { "label": "Healer",   "effect": heal(3, 10) },
                 { "label": "Mystic",   "effect": closed("Mythral will not see you.") },
                 { "label": "Leave",    "effect": leave }
             ]
         },
+        // Waterdeep's painted panel is on the left, so its stall grows to the
+        // right off it rather than to the left.
+        "waterdeep.merchant": stall(
+            "Merchant", "scene.waterdee", serde_json::json!([2, 0, 178, 200]), "waterdeep"),
         "healer": {
             "name": "The Healer",
             "scene": "scene.hea",
             "x": 94, "y": 164, "radius": 5,
             "menu": [6, 112, 154, 66],
             "options": [
-                { "label": "Tend my wounds", "effect": heal(3) },
+                { "label": "Tend my wounds", "effect": heal(3, 0) },
+                { "label": "Drink a flask",  "effect": drink("potion") },
                 { "label": "Leave",          "effect": leave }
             ]
         },
@@ -454,6 +514,46 @@ fn place_definitions() -> String {
                 { "label": "Wait",   "effect": closed("The moon is not yet full.") },
                 { "label": "Leave",  "effect": leave }
             ]
+        }
+    })
+    .to_string()
+}
+
+/// What there is to carry, and what a stall asks for it.
+///
+/// None of this is recovered. The original's symbols name `DRINKPOTIONHEAL`,
+/// `TAKEFROMKNIGHT` and a `GOLD` readout on the status art, which is enough to
+/// know that potions, an inventory and a purse all existed, and not enough to
+/// know a single price or a single strength. Every number here was chosen
+/// against the others: a flask is about two won fights, a draught is about
+/// five, and a town healer is cheaper than either but costs you the week.
+///
+/// It lands in the reference pack for now because it is authored alongside the
+/// places that sell it, and those carry the original's own town art. Nothing in
+/// this file is derived from the original, so it moves to the shippable pack
+/// the moment there is a town screen of our own to sell it in.
+fn item_definitions() -> String {
+    serde_json::json!({
+        "potion": {
+            "name": "Flask of healing",
+            "price": 25,
+            "consumed": true,
+            "virtue": { "does": "heal", "health": 40 }
+        },
+        "elixir": {
+            "name": "Draught of life",
+            "price": 70,
+            "consumed": true,
+            "virtue": { "does": "heal", "health": 100 }
+        },
+        // Carried, worth coin, and honest about doing nothing yet: the lairs it
+        // is for do not exist. An inert item is still a real item, and a thief
+        // can still take it off you.
+        "key": {
+            "name": "Iron key",
+            "price": 120,
+            "consumed": false,
+            "virtue": { "does": "inert" }
         }
     })
     .to_string()

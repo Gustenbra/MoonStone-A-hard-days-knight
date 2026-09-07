@@ -16,14 +16,18 @@ need your own copy of the original, which the engine reads and converts locally.
 - Where a fight happens is decided by the terrain you are standing on
 - **Places to go**: Highwood, Waterdeep, a healer in the woods and the stone
   circle, each on the landmark the map already draws. Walk onto one and it opens
-  with its own screen and menu. The healer mends you, and the price is days
+  with its own screen and menu
+- **Gold and goods**: coin comes off whoever you put down, and the merchants in
+  both towns are open. Flasks and draughts are bought, carried and drunk; a
+  healer in the woods still charges only days, and one inside the walls wants
+  coin as well. What you carry can leave you too, to a cutpurse on the road
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 58 tests, all of it verifiable headlessly with no display or sound card
+- 103 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -66,10 +70,12 @@ henge --screenshot out.png 6 0 --at healer --hurt 30 --input "..s"
 
 `--goto x,y` steers across the map a step a tick, and swings back at whatever
 ambushes it on the way. `--at <place>` starts inside a place, `--hurt <hp>` starts
-the run already wounded so a healer has something to do, and `--input` feeds one
-key press per tick: `u`/`d` move the highlight, `s` takes the option, `hjkl` walk,
-`.` waits. Presses arrive through the same edge-detected path the keyboard uses,
-so a script exercises the game rather than a stub.
+the run already wounded so a healer has something to do, `--gold <n>` starts it
+with coin so a stall can be reached without first winning the fights that pay for
+it, and `--input` feeds one key press per tick: `u`/`d` move the highlight, `s`
+takes the option, `hjkl` walk, `.` waits. Presses arrive through the same
+edge-detected path the keyboard uses, so a script exercises the game rather than
+a stub.
 
 `--trace` runs the simulation and prints every state change, which is how combat,
 travel and what a town does to a run are verified as behaviour rather than by
@@ -84,8 +90,14 @@ looking at screenshots:
 ```
 
 ```
-    0  PLACE   day 1   hp  30  The Healer   > Tend my wounds
-    2  PLACE   day 4   hp 100  The Healer   > Tend my wounds  Rest well. You are whole again.
+    0  PLACE   day 1  hp  30  gold  100  -         The Healer  > Tend my wounds
+    2  PLACE   day 4  hp 100  gold  100  -         The Healer  > Tend my wounds  Rest well...
+```
+
+```
+    0  PLACE   day 1  hp  40  gold  100  -         Merchant  > Flask of healing [25]
+    1  PLACE   day 1  hp  40  gold   75  potion    Merchant  > Flask of healing [25]  A fair trade.
+    6  PLACE   day 1  hp  80  gold   50  potion    Merchant  > Drink a flask          You drain it.
 ```
 
 ## How it is put together
@@ -179,6 +191,35 @@ in the actor's own space, and a swing connects when that line crosses the target
   of the swing rather than something bolted on beside it.
 
 All of it is data. Retuning the feel of the game is editing JSON, not editing Rust.
+
+## Gold, goods and a pack
+
+A run carries a purse and a pack, both of them ordinary simulation state that
+serializes with everything else. Coin comes off the fallen: what a fighter is
+worth is a `bounty` on its actor definition, so a troll can be worth more than a
+rat without a line of Rust changing. A purse is picked up after a fight, which
+means only a winner still on their feet collects one.
+
+Items are data like everything else. Each one names a price and a virtue, and a
+menu line takes its price from the goods rather than repeating it in the label,
+so the two can never drift apart:
+
+```json
+"potion": { "name": "Flask of healing", "price": 25, "consumed": true,
+            "virtue": { "does": "heal", "health": 40 } }
+```
+
+**Things leave the pack as well as entering it.** The original names a routine
+`TAKEFROMKNIGHT`, so losing is a real operation rather than an afterthought on a
+list that only ever grows: a flask drunk is a flask gone, and a cutpurse on the
+road takes a share of the purse or, failing that, something out of the pack. Who
+gets robbed is decided by a seeded roll carried in the run, so two machines
+walking the same road are robbed on the same step.
+
+A stall is its own place, marked `hidden` so walking can never stumble into it,
+reached through the town's own menu and leaving back into it. That keeps a
+town's front door short and gives the shop a box wide enough for goods and their
+prices.
 
 A bout takes **one `Intent` per fighter and cannot tell where they came from**. A
 keyboard, an opponent and a network packet are interchangeable, which is the seam

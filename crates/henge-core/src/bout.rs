@@ -209,6 +209,7 @@ mod tests {
         ActorDef {
             sheet: "test".into(), health: 100, speed_x: 2, speed_y: 1,
             reach: 40, depth_tolerance: 6, attack_cooldown: 30,
+            bounty: 0,
             body: [-9, 0, 9, 52], sequences,
         }
     }

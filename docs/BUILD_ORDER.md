@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 20 done, 57 remaining.**
+**77 items. 22 done, 55 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -85,10 +85,16 @@ Unblocked all at once by 25. This is the single biggest change to how the game f
 
 Independent of phase 1. **Can start immediately, in parallel with the research.**
 
-- [ ] 38. Gold and prices
-- [ ] 39. Inventory: carrying, using, losing
+- [x] 38. Gold and prices. Coin off the fallen, a `bounty` per actor in the data,
+      prices on the items, and both towns' merchants open. The healers inside the
+      walls charge coin as well as days; the hermit in the woods still charges only days
+- [x] 39. Inventory: carrying, using, losing. A bounded pack on the run, items as
+      data with a price and a virtue, flasks bought and drunk, and losing made real
+      both ways: a flask is spent when drunk, and a cutpurse on the road takes coin
+      or, failing that, something out of the pack
 - [ ] 40. Character stats and abilities
-- [ ] 41. Potions
+- [ ] 41. Potions beyond healing. Healing flasks landed with 39, as an item virtue
+      in the data; anything a potion does other than mend waits on 42
 - [ ] 42. Magic: spells, casting, costs
 - [ ] 43. Curses
 - [ ] 44. The hawk and the gem
@@ -117,7 +123,8 @@ Independent of everything. Makes it feel like a game rather than a demo.
 
 ## Phase 6: the world
 
-Needs 38 for the merchant to open. 60 and 61 are cheap wins available now.
+38 is done, so the merchant is open and the tavern has something to charge for.
+60 and 61 are cheap wins available now.
 
 - [ ] 57. Recover the real terrain table and location graph
 - [ ] 58. Recover the arena selection tables
@@ -158,8 +165,8 @@ Any time. None of it blocks anything.
 ## If you only did three things
 
 **25** unblocks nine creatures at once and is the difference between a duelling game and
-Moonstone. **38 and 39** open the merchant and the tavern, and give a run a reason to
-accumulate anything. **51** is small and makes the whole thing feel like a game.
+Moonstone. **51** is small and makes the whole thing feel like a game. **65** is now
+cheap: the tavern was shut for want of anything to charge, and 38 fixed that.
 
 ## What is not portable
 
