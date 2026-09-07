@@ -14,6 +14,7 @@ pub mod collide;
 pub mod depack;
 pub mod library;
 pub mod piv;
+pub mod taskvm;
 pub mod terrain;
 pub mod voc;
 

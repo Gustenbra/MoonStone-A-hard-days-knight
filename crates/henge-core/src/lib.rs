@@ -14,6 +14,7 @@ pub mod overworld;
 pub mod place;
 pub mod run;
 pub mod shell;
+pub mod taskvm;
 
 /// The original ran at 320x200 on a 4:3 display. Keeping that resolution keeps the
 /// art direction honest; the window scales it up.

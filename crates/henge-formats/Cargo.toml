@@ -12,3 +12,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 walkdir = "2"
 henge-assets = { path = "../henge-assets" }
+henge-core = { path = "../henge-core" }
