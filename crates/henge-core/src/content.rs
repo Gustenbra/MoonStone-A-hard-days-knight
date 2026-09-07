@@ -3,6 +3,7 @@
 
 use crate::anim::Sequence;
 use crate::arena::{Bounds, Prop};
+use crate::taskvm::{BankTables, ScriptSet};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -75,7 +76,7 @@ pub type Families = BTreeMap<String, Family>;
 
 /// Everything the simulation needs to know about one kind of fighter. All of it
 /// is data, so retuning the feel of the game is editing JSON, not editing Rust.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ActorDef {
     /// Asset id of the sprite sheet this actor's frames index into.
     pub sheet: String,
@@ -103,12 +104,78 @@ pub struct ActorDef {
     /// Zero, or absent, means fall back to the body's width.
     #[serde(default)]
     pub girth: i32,
+    /// Frame lists, for an actor animated by hand rather than by script.
+    ///
+    /// This is the simple authoring path and the one our own artwork will use
+    /// first: a list of frames, each held for a number of ticks. An actor that
+    /// fills [`ActorDef::animation`] instead runs the recovered task VM and
+    /// ignores this entirely.
+    #[serde(default)]
     pub sequences: BTreeMap<String, Sequence>,
+    /// The task VM scripts this actor's states play.
+    ///
+    /// Empty for an actor animated from `sequences`. When it is filled, this
+    /// actor is driven by [`crate::taskvm`]: it holds the closure of every
+    /// script its states can reach, so an actor definition is self contained
+    /// and a jump can never land outside it.
+    #[serde(default)]
+    pub animation: ScriptSet,
+    /// Which script, or cycle of scripts, each state plays.
+    ///
+    /// A cycle is how the original walks: `Knight_SwWalkR1` through `R4` are
+    /// four single-frame scripts, and the controller hands over the next one
+    /// each time the last has ended. Which scripts a state uses is a controller
+    /// decision, and the original's controller table is not recovered, so this
+    /// mapping is ours and lives in the data where it can be changed.
+    #[serde(default)]
+    pub scripts: BTreeMap<String, Vec<String>>,
+    /// The bank tables the scripts index through, keyed the way `TASKCELBUF`
+    /// numbers them. A script is meaningless without one.
+    #[serde(default)]
+    pub banks: BankTables,
+    /// Where the task's own origin sits relative to the actor's feet.
+    ///
+    /// The original places parts against a point near the top of the figure,
+    /// and this engine positions everything by the feet. This is the offset
+    /// between the two, taken from the actor's own standing frame rather than
+    /// chosen: it is where the lowest pixel of that frame falls.
+    #[serde(default)]
+    pub origin: [i16; 2],
+    /// How many ticks one script frame lasts.
+    ///
+    /// The original ran its task loop once per game frame, and this engine
+    /// ticks sixty times a second, so the two have to be related by something.
+    /// For the knight it is derived rather than felt: `Knight_SwWalkOn` bakes
+    /// its own travel into its part offsets, and it covers about 47 pixels in
+    /// the four frames of one stride. At a walking speed of two pixels a tick
+    /// that is six ticks a frame, which is the number that makes his feet keep
+    /// up with the ground he is crossing.
+    #[serde(default = "one_tick")]
+    pub script_ticks: u32,
+}
+
+fn one_tick() -> u32 {
+    1
 }
 
 impl ActorDef {
     pub fn sequence(&self, name: &str) -> Option<&Sequence> {
         self.sequences.get(name)
+    }
+
+    /// Whether this actor is animated by the task VM rather than by frame lists.
+    pub fn scripted(&self) -> bool {
+        !self.animation.is_empty() && !self.scripts.is_empty()
+    }
+
+    /// The scripts a state cycles through, in order.
+    pub fn scripts_for(&self, state: &str) -> &[String] {
+        self.scripts.get(state).map_or(&[], Vec::as_slice)
+    }
+
+    /// The bank a part names, through the table `TASKCELBUF` last selected.
+    pub fn bank(&self, table: u8, slot: u8) -> Option<&crate::taskvm::Bank> {
+        self.banks.get(&table)?.get(slot as usize).filter(|b| !b.cels.is_empty())
     }
 }
 

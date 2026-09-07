@@ -115,7 +115,17 @@ facing left  (task+0x14 == 3)   bit 0 clear: x += v     bit 0 set: x -= v
 |---|---|
 | `ff 00` | end of frame, next frame follows |
 | `ff fe` | end of frame; loop back if a `TASKLOOP` count is running, else advance |
-| `ff ff` | end of frame and end of animation. Clears `task+1`, which is what lets `TASKHANDLE` ask the controller for a new script. The script pointer is left on the `0xff`, so the last frame keeps being drawn |
+| `ff ff` | end of frame and, **unless a `TASKLOOP` count is running**, end of animation. Clears `task+1`, which is what lets `TASKHANDLE` ask the controller for a new script. The script pointer is left on the `0xff`, so the last frame keeps being drawn |
+
+The terminal form is not unconditional. The `ff ff` branch at `0x99a2` begins
+with the same three instructions as the `ff fe` branch at `0x9985`: test the
+loop flag, decrement the count, and jump back to the loop resume point if it
+is still non-zero. Only when that falls through does it clear `task+1`. This
+was found while transcribing the handler for the Rust interpreter. Eleven
+scripts reach their `ff ff` with a loop still open and depend on it, among
+them `Knight_Burn`, `Beast_BackToss`, `TroggSpear_Toss` and the three
+`Balok_*Knight` holds; read the terminator as unconditional and each of those
+plays once instead of the stated number of times.
 
 All 221 scripts end on `ff ff`.
 
@@ -295,3 +305,92 @@ encounter, not the bank table: `Knight_HangSd` is played on the ratman's banks
 and `Dragon_Flight*` on a table with `DRAGON5.CEL` in slot 0. The cel bounds
 check catches both and says so rather than drawing the wrong sprite, and
 `--actor ratmen` puts `Knight_HangSd` right.
+
+## The Rust side
+
+`crates/henge-core/src/taskvm.rs` is the interpreter, and
+`crates/henge-formats/src/taskvm.rs` is the reader that turns the image into
+its instructions.
+
+### The interpreter
+
+One `Task` per actor: a program counter, the facing, x, y and z, which bank
+table `TASKCELBUF` chose, and the 0x1a-byte state record as `VmState`, field
+for field with `TaskCommand`. `Task::step` runs from the pointer to the next
+end of frame and returns a `Frame`: the task position, the parts to draw, and
+the effects. It is integers only, keeps no clock, does no I/O and draws
+nothing, which is what lets `Bout::state_hash` fold it in and two machines
+agree about it.
+
+Three choices are worth knowing.
+
+* **A script is named, and a jump goes to a name.** The original keeps a raw
+  `DS` offset, but every `TASKGOTO`, `TASKDEAD`, `TASKSKIP`, `TASKADDTASK` and
+  `TASKSHADOW` target in the data is the first byte of a named script, so the
+  exported instruction carries the name. The set is closed: the reader checks
+  that every target is a script it exported.
+* **Calls out of the machine are effects.** `TASKGOSUB` becomes
+  `Effect::Gosub { routine, kind }`; the 37 targets are in `GOSUB_TARGETS` by
+  name, with a kind read off the name (`Sound`, `Spawn`, `Gore`, `Control`),
+  and a name not in the table comes out `Unknown`. `TASKSOUND` is
+  `Effect::Sound { sample }`. Nothing runs them. `TASKTIME`, whose handler
+  would spin, stops the task with `Effect::Stalled` instead.
+* **A finished script keeps showing its last frame.** The pointer stays on the
+  terminal `0xff` as in the original, so a step produces no new parts; the
+  task keeps the last non-empty part list and hands it back, rather than
+  re-running the frame, which would fire its sounds again every tick.
+
+`TASKJUMP`'s ballistic step is transcribed from `0x9ceb` as it stands,
+including two branches that read oddly (the upward form stores the speed into
+the y position when the sum is non-negative, and then compares the low byte of
+the position against the limit). One script uses it, `Beast_BackToss`, and it
+has not been watched running, so it is reproduced rather than corrected.
+
+Placement lives beside the interpreter as `place`: given a part, its bank and
+the task position, it returns the frame index in the sheet and the top-left
+corner, with the `-(x + cel_width)` term when mirrored. A `Bank` is a sheet
+id, the index of the bank's first cel in that sheet, and the size of every
+cel, so the simulation can place a blade without ever opening a PNG.
+
+### The reader and the baker
+
+The reader does what `tools/taskvm.py` does, in Rust: finds `mov di, 0x9448`
+in `INITTASK`, takes the run of stores after it as the handler table, applies
+the link-time correction from `symbols.json`'s `code_shift_map`, reads each
+width out of the handler's `add word ptr [di+2], n`, and then compares the
+whole set against the table in this document. That comparison is the check
+that the image is the right one: a wrong or uncorrected address reads a
+different instruction and the widths come out as anything but these.
+
+The baker writes three things into `packs/reference/data/`:
+
+| file | what |
+|---|---|
+| `scripts.json` | all 221 scripts, as the engine's own `Instr` values |
+| `banks.json` | the four bank tables for each of the eleven creature loaders, with a sheet, a frame base and every cel's size |
+| `actors.json` | the knight, carrying the closure of the scripts his states reach, his bank tables, which script each state plays, his origin and his frame rate |
+
+Two of those numbers are ours and are marked so in the data's own comments.
+The **origin** is where the task's point sits relative to the feet, read off
+the standing frame (52 pixels up, for the knight) because this engine places
+by the feet and the original places against a point near the head. The
+**frame rate**, six ticks a script frame, comes from `Knight_SwWalkOn`, whose
+baked offsets advance about 47 pixels over one four-frame stride, at two
+pixels a tick. Which script a state plays is also ours: `CONTROLTABLE` is
+uninitialised data and not in the load image.
+
+### What the knight does with it
+
+The fighter's five states map onto `Knight_SwStance`, the four
+`Knight_SwWalkR` frames cycled in turn, `Knight_SwSwing`,
+`Knight_SwShoulderHit` and `Knight_SwDeath`. The swing's hit shape is no
+longer a hand drawn line: it is the rectangle of every part the frame flags
+`WEAPON`, placed by the same arithmetic that draws it. The data gates it
+better than a state check could: the stance carries the sword as a `BODY`
+part and only the swing marks it a weapon.
+
+Checked by taking screenshots of the arena every six ticks and reading them
+against the `--composite` contact sheets. The walk and the swing match frame
+for frame, both facings; the death is the kneel and the collapse; and a traced
+practice duel still lands blows, staggers for the length of the recoil script,
+and ends in a death.

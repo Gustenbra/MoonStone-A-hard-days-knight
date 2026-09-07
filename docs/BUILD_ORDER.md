@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 33 done, 44 remaining.**
+**77 items. 36 done, 41 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -40,8 +40,8 @@ The engine and a vertical slice. Roughly a quarter of the game.
 
 ## Phase 1: the blockers
 
-This was the research phase, and it is now finished: 20 through 24 are done. What is left
-of it, 25 to 27, is construction. Everything in phases 2 and 4 waits on 25.
+This was the research phase, and it is finished, and so is the construction that followed
+it: 20 through 27 are done. Phases 2 and 4 are open.
 
 Item 20 was recorded as settled and negative. **It was wrong**, and 21 is what proved it:
 the search had been run against an image that was still packed, because `MAIN.EXE` is
@@ -79,9 +79,35 @@ That unblocked 22 almost for free, and most of the phase with it.
       swing all come out coherent, the mirrored form stays assembled, and the troll,
       trogg, ratman and balok composite from their own bank tables. All 221 named scripts
       in DGROUP parse end to end and terminate on `ff ff`
-- [ ] 25. Write the VM in `henge-core` as a deterministic interpreter, integers only
-- [ ] 26. Export every actor's animation scripts to data
-- [ ] 27. Replace the hand-authored knight sequences with the recovered ones
+- [x] 25. **The VM, in `henge-core/src/taskvm.rs`.** Every command, the three end of
+      frame forms and the part record, as a deterministic interpreter: integers only,
+      `BTreeMap`, no I/O, one `step` per tick returning the parts to draw as bank slot,
+      cel, offset and flags. The end of frame handler was transcribed from the code at
+      0x993a in its own order, which turned up one thing the docs had not: `ff ff` loops
+      like `ff fe` while a `TASKLOOP` count is running, and only ends the animation when
+      it is not. `TASKGOSUB` is an emitted effect naming the routine, with all 37 targets
+      in a table by name and none of them faked; `TASKSOUND` is a cue. Twenty one tests,
+      including a loop, a gosub, the branch on hit points, and a state hash that survives
+      a serialize and reload. `Bout::state_hash` folds the VM state in
+- [x] 26. **Exported: all 221 scripts and every actor's bank tables.** `henge-formats`
+      reads the handler table out of `INITTASK` and each width out of its handler, checks
+      the set it recovers against the documented one, and parses the scripts into the
+      engine's own `Instr` values, so the baker cannot write a script the engine would
+      not accept. `data/scripts.json` holds the lot, 3,709 parts and 724 commands, the
+      same counts `tools/taskvm.py` reports; `data/banks.json` holds the four bank tables
+      for each of the eleven creature loaders, with a sheet, a frame base and the size of
+      every cel, because a mirrored part is placed at `task_x - (x + cel_width)`. Needs
+      `research/main.final.bin` and `research/symbols.json`; the baker says so when they
+      are missing
+- [x] 27. **The knight runs the original's scripts.** `Knight_SwStance`, the four
+      `Knight_SwWalkR` frames cycled the way the original's controller cycles them,
+      `Knight_SwSwing`, `Knight_SwShoulderHit` and `Knight_SwDeath`, composited from
+      their parts through the bank tables. The hand authored frame lists are deleted.
+      Hit lines are gone with them: the swing's blade is the parts the script flags
+      `WEAPON`, swept as their own rectangles, which also means the stance's sword, flagged
+      `BODY`, cannot cut. **Checked by looking**: the in-game walk and swing match the
+      `tools/taskvm.py` contact sheets frame for frame, both facings, and a traced
+      practice duel still lands hits, staggers, and ends in a death
 
 ## Phase 2: the bestiary
 

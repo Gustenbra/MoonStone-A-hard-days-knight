@@ -88,6 +88,11 @@ how many people are playing; the remaining seats are filled by opponents. `C` sh
 the character sheet. Tab switches between the overworld and the arena, `[` and `]`
 change arena, `R` restarts the bout, escape quits.
 
+The knight's animations are the original's own scripts, read out of the unpacked
+`MAIN.EXE`. The baker looks for `research/main.final.bin` and `research/symbols.json`,
+which `tools/symbolmap.py` writes (`docs/REVERSING.md`), and bakes a knight with no
+animation at all if they are missing, saying so.
+
 The bake step converts your copy of the game into indexed PNGs, WAVs and JSON. **After
 it runs, the engine reads only PNG, WAV and JSON.** It has no knowledge that the original
 formats exist; those live entirely in `henge-formats`, which is not linked into a release

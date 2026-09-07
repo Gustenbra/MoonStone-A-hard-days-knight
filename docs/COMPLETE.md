@@ -34,7 +34,7 @@ and every economy.
 Two things gated large parts of everything else. Both are now research-complete: what is
 left of 1.1 is construction, not investigation.
 
-## 1.1 The animation task VM `partial`
+## 1.1 The animation task VM `done`
 
 The original runs animations as **bytecode on a small virtual machine**, and composes each
 character from **several sprite parts per frame**. 39 symbols implement it:
@@ -74,11 +74,30 @@ The scripts themselves are named data in DGROUP: 221 of them, from `Knight_SwWal
       plain index rather than the slot times four. **Verified by compositing and looking**:
       the knight's walk cycle, stance and sword swing all come out as coherent figures, the
       mirrored form stays assembled, and the troll, trogg, ratman and balok composite too
-- [ ] Write the VM in `henge-core` as a deterministic interpreter, integers only
-- [ ] Export every actor's scripts to data, so ours can be authored the same way
-- [ ] Replace the hand-authored knight sequences with the recovered ones
+- [x] **The VM.** `henge-core/src/taskvm.rs`: `PerformCOMMAND`, `ENDOFFRAME` and all
+      nineteen handlers as a deterministic interpreter, integers only, stepped once a
+      tick, returning parts as logical data. `TASKGOSUB` and `TASKSOUND` are emitted
+      effects (`Effect::Gosub` names the routine and its kind out of a table of all 37;
+      `Effect::Sound` names the sample); none is faked and none is skipped silently.
+      Transcribing the end of frame handler found that `ff ff` honours a running
+      `TASKLOOP` before ending anything, which `TASKVM.md` now records
+- [x] **Exported.** `henge-formats/src/taskvm.rs` reads the table and widths out of the
+      image, checks them against the documented set, and parses all 221 scripts into the
+      engine's own instruction type; the baker writes `data/scripts.json` and, per
+      creature, the four bank tables with cel sizes to `data/banks.json`
+- [x] **The knight.** Stance, the four walk frames as a cycle, swing, shoulder hit and
+      death, drawn part by part through the bank tables with the `TASKLEFT` mirror term.
+      Hit shapes are the `WEAPON` flagged parts of the frame being shown. The hand
+      authored frame lists are deleted. Verified against the `tools/taskvm.py` composites
+      by eye, and by a traced duel that still resolves
 
-**Unlocks**: all eight creatures, correct combat timing, shadows, gore, correct sorting.
+**Still to do here**: the other three attacks (`SwChop`, `SwLunge`, the thrusts) and
+the up and down walks, which wait on 46; `TASKSHADOW`, which no knight script uses;
+playing `Effect::Sound` and the sound gosubs through `henge-audio`, which still derives
+its cues from state changes. `CONTROLTABLE` is uninitialised data and not in the load
+image, so which script a state plays is ours and lives in `actors.json`.
+
+**Unlocked**: all eight creatures, shadows, gore, correct sorting.
 
 ## 1.2 Symbol name to address mapping `done`
 

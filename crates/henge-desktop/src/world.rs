@@ -363,6 +363,9 @@ impl World {
         -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
         let def = self.def();
+        if def.scripted() {
+            return self.draw_task(reg, fb, index);
+        }
         let Some(seq) = f.sequence(def) else { return Ok(()) };
         let Some(frame) = f.player.current(seq) else { return Ok(()) };
         let Some(rect) = reg
@@ -388,6 +391,44 @@ impl World {
         Ok(())
     }
 
+    /// A fighter animated by the task VM: several cels a frame, each named by a
+    /// bank slot and placed by the interpreter, drawn in script order so a
+    /// later part covers an earlier one.
+    ///
+    /// The simulation decided all of this. Nothing here chooses a frame or a
+    /// position; it resolves a bank slot to a sheet and blits, with the mirror
+    /// term the original's `TASKLEFT` applies.
+    fn draw_task(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
+        -> anyhow::Result<()> {
+        let f = &self.bout.fighters[index];
+        let def = self.def();
+        let Some(task) = f.task.as_ref() else { return Ok(()) };
+        let lut = self.luts[self.knight_at(index) % 4];
+        let at = (task.x, task.y, task.z);
+        for part in &task.shown {
+            let Some(bank) = def.bank(part.table, part.bank) else { continue };
+            let Some(placed) = henge_core::taskvm::place(part, bank, at, task.mirror()) else {
+                continue;
+            };
+            let Some(rect) = reg
+                .sheet(&bank.sheet)
+                .and_then(|r| r.value.frames.get(placed.frame as usize).copied())
+            else {
+                continue;
+            };
+            let img = reg.image(&bank.sheet)?;
+            let (w, h) = (rect.w as usize, rect.h as usize);
+            let mut px = vec![0u8; w * h];
+            for row in 0..h {
+                let src = (rect.y as usize + row) * img.width + rect.x as usize;
+                if src + w <= img.pixels.len() {
+                    px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
+                }
+            }
+            fb.blit_lut(&px, w, h, placed.x, placed.y, placed.mirror, &lut);
+        }
+        Ok(())
+    }
 }
 
 impl FighterExt for Fighter {}

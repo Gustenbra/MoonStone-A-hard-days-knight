@@ -13,8 +13,11 @@
 
 use anyhow::Context;
 use henge_assets::{FrameRect, Manifest, Provenance, Sheet};
+use henge_core::content::ActorDef;
+use henge_core::taskvm::{Bank, BankTables, Instr, ScriptSet};
+use henge_formats::taskvm::{all_scripts, Symbols};
 use henge_formats::{piv, voc, Collide, Library, Sprite};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -60,6 +63,58 @@ const ARENAS: &[(&str, &str, &str, [&str; 8])] = &[
 /// The sheet a placement asks for when its selector byte is 4, whatever the
 /// family. See `Family::tiles` in `henge-core` for what established it.
 const SHARED_TILES: &str = "FO2.CMP";
+
+/// The four bank tables `TASKCELBUF` chooses between, by slot.
+///
+/// **Recovered**, out of the loaders at the addresses `docs/TASKVM.md` names.
+/// A part record's bank selector is a slot number times four, and only one of
+/// these tables says what artwork that slot holds, which is why a script is
+/// meaningless on its own.
+///
+/// Table 1 is the knight, and it is always loaded: a knight is in every fight.
+/// Table 2 is whichever creature was loaded, one at a time. Tables 3 and 4 are
+/// loaded once at startup and shared. A slot with no file is a hole in the
+/// table and stays a hole here, so slot numbers keep lining up.
+const KNIGHT_BANKS: &[&str] = &["KN1.OB", "KN2.OB", "KN3.OB", "KN4.OB", "KN5.OB"];
+const TABLE3_BANKS: &[&str] = &["MI.C", "KI.CEL", "KI.CEL", "KI.CEL", "KI.CEL", "PO.CEL"];
+const TABLE4_BANKS: &[&str] = &["BLO.CEL", "BLO.CEL", "BLO.CEL", "BLO.CEL", "BLO.CEL"];
+
+/// Table 2, one creature at a time, read out of the creature loaders. An empty
+/// name is a slot that loader leaves alone.
+const CREATURE_BANKS: &[(&str, &[&str])] = &[
+    ("knight", KNIGHT_BANKS),
+    ("hero", &["HE1.OB", "HE2.OB", "HE3.OB", "KN4.OB", "KN5.OB"]),
+    ("troll", &["TROLL1.CEL", "TROLL2.CEL"]),
+    ("trogg_axe", &["TROGGAX1.CEL", "TROGGAX2.CEL"]),
+    ("trogg_spear", &[
+        "TROGGSP1.CEL", "TROGGSP2.CEL", "TROGGSP2.CEL", "TROGGSP2.CEL", "TROGGSP2.CEL",
+    ]),
+    ("ratmen", &["RATMEN1.CEL", "RATMEN2.CEL"]),
+    ("mudmen", &["MUDMEN1.CEL", "MUDMEN2.CEL"]),
+    ("balok", &["BALOK1.CEL", "BALOK3.CEL", "BALOK2.CEL"]),
+    ("dragon", &["DRAGON1.CEL", "DRAGON2.CEL", "", "", "DRAGON5.CEL"]),
+    ("beast", &["BE1.C", "BE2.C"]),
+    ("demon", &["DEMON2.CEL", "", "DEMON3.CEL", "DEMON4.CEL", "DEMON1.CEL"]),
+];
+
+/// Which script each of the knight's states plays.
+///
+/// **Not recovered.** The original picks a script through `CONTROLTABLE`, which
+/// is uninitialised data and is not in the load image, so this mapping is ours.
+/// The scripts themselves are the original's, and the shape of the walk is the
+/// original's too: `Knight_SwWalkR1` through `R4` are four single-frame
+/// scripts, each ending on `ff ff`, and the controller hands over the next one
+/// every time the last has ended. The knight has four attacks (`SwSwing`,
+/// `SwChop`, `SwLunge` and three thrusts); one button gets the swing.
+const KNIGHT_SCRIPTS: &[(&str, &[&str])] = &[
+    ("idle", &["Knight_SwStance"]),
+    ("walk", &[
+        "Knight_SwWalkR1", "Knight_SwWalkR2", "Knight_SwWalkR3", "Knight_SwWalkR4",
+    ]),
+    ("attack", &["Knight_SwSwing"]),
+    ("hurt", &["Knight_SwShoulderHit"]),
+    ("death", &["Knight_SwDeath"]),
+];
 
 /// Where the terrain grids live in the fully unpacked `MAIN.EXE` load image.
 ///
@@ -223,7 +278,40 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/families.json"), serde_json::to_string(&families)?)?;
     m.data.insert("data.families".into(), "data/families.json".into());
 
-    fs::write(out.join("data/actors.json"), actor_definitions())?;
+    // The animation task VM: every actor's bank tables, and every script.
+    let banks = bank_tables(&lib);
+    fs::write(out.join("data/banks.json"), serde_json::to_string(&banks)?)?;
+    m.data.insert("data.banks".into(), "data/banks.json".into());
+
+    let scripts = match animation_scripts(&src) {
+        Ok(Some(set)) => {
+            let all = || set.values().flat_map(|s| &s.code);
+            println!(
+                "task VM: {} scripts, {} part records, {} commands",
+                set.len(),
+                all().filter(|i| matches!(i, Instr::Part(_))).count(),
+                all().filter(|i| !matches!(i, Instr::Part(_) | Instr::EndFrame { .. })).count(),
+            );
+            fs::write(out.join("data/scripts.json"), serde_json::to_string(&set)?)?;
+            m.data.insert("data.scripts".into(), "data/scripts.json".into());
+            set
+        }
+        Ok(None) => {
+            eprintln!(
+                "no unpacked MAIN.EXE image and symbol table found: baking without the \n  \
+                 animation scripts, so the knight will have no animation at all.\n  \
+                 make them with `python3 tools/symbolmap.py MAIN.EXE research/symbols.json \\\n    \
+                 --image research/main.final.bin`"
+            );
+            ScriptSet::new()
+        }
+        Err(e) => {
+            eprintln!("animation scripts: {e:#}");
+            ScriptSet::new()
+        }
+    };
+
+    fs::write(out.join("data/actors.json"), actor_definitions(&scripts, &banks)?)?;
     m.data.insert("data.actors".into(), "data/actors.json".into());
 
     fs::write(out.join("data/fonts.json"), font_definitions())?;
@@ -343,82 +431,227 @@ fn write_indexed(
     Ok(())
 }
 
-/// Animation and combat definitions for the knight, authored by reading the
-/// sprite bank frame by frame.
+/// Every actor's bank tables, so a part record's slot number means something.
 ///
-/// These are not recovered from the original. `MAIN.EXE` runs animations as
-/// scripts on a small task VM, and characters are composed of several sprite
-/// parts per frame. That VM is now decoded (`docs/TASKVM.md`) and the original
-/// scripts can be lifted, but nothing here reads them yet: build-order item 27
-/// replaces these. Every number here was chosen by looking at the frames and by
-/// feel, which is what our own artwork will need anyway.
-///
-/// Frame indices only mean anything against the reference sheet, so this lands
-/// in the reference pack and is marked derived along with everything else in it.
-///
-/// Hit lines are in the actor's own space: x forward, y up from the feet.
-fn actor_definitions() -> String {
-    // KN1.OB, read off the bank:
-    //   10..17  an eight frame walk cycle, side on
-    //   34      guard, sword held across the body
-    //   43      the raise, striding in with the arm up
-    //   41      the downswing
-    //   40      the follow through
-    //   35      recoiling
-    //   49, 46, 48, 45  the death collapse
-    serde_json::json!({
-        "knight": {
-            "sheet": "actor.knight",
-            "health": 100,
-            "speed_x": 2,
-            "speed_y": 1,
-            "reach": 38,
-            "depth_tolerance": 6,
-            "attack_cooldown": 45,
-            // What a fallen knight is carrying, for whoever is left standing.
-            // Not recovered: the original names `BESTOWGOLD` and a `GOLD`
-            // readout but no table of what anything is worth, so this is a
-            // number chosen against the prices below. Three foes put down pays
-            // for a flask and leaves change.
-            "bounty": 15,
-            "body": [-9, 0, 9, 50],
-            // Wider than the hit box on purpose. The hit box is narrow so that
-            // a strike has to be aimed; the girth is roughly the drawn figure,
-            // so four knights in one arena stand beside each other rather than
-            // inside each other. Median standing frame in KN1.OB is 29 wide.
-            "girth": 28,
-            "sequences": {
-                "idle": { "name": "idle", "end": "Loop", "frames": [
-                    { "sprite": 10, "ticks": 10 }
-                ]},
-                "walk": { "name": "walk", "end": "Loop", "frames": [
-                    { "sprite": 10, "ticks": 4 }, { "sprite": 11, "ticks": 4 },
-                    { "sprite": 12, "ticks": 4 }, { "sprite": 13, "ticks": 4 },
-                    { "sprite": 14, "ticks": 4 }, { "sprite": 15, "ticks": 4 },
-                    { "sprite": 16, "ticks": 4 }, { "sprite": 17, "ticks": 4 }
-                ]},
-                // The swing carries the fighter forward through its own dx, so
-                // spacing is decided when you commit rather than while you swing.
-                "attack": { "name": "attack", "end": "HoldLast", "frames": [
-                    { "sprite": 34, "ticks": 4 },
-                    { "sprite": 43, "ticks": 3, "dx": 2 },
-                    { "sprite": 41, "ticks": 3, "dx": 3,
-                      "hit": [[14, 46], [34, 34], [40, 20]] },
-                    { "sprite": 40, "ticks": 4,
-                      "hit": [[16, 30], [38, 22], [44, 12]] },
-                    { "sprite": 34, "ticks": 6 }
-                ]},
-                "hurt": { "name": "hurt", "end": "HoldLast", "frames": [
-                    { "sprite": 35, "ticks": 10 }
-                ]},
-                "death": { "name": "death", "end": "HoldLast", "frames": [
-                    { "sprite": 49, "ticks": 4 }, { "sprite": 46, "ticks": 4 },
-                    { "sprite": 48, "ticks": 5 }, { "sprite": 45, "ticks": 200 }
-                ]}
+/// Table 1 is the knight and is always loaded; table 2 is whichever creature
+/// the encounter loaded; tables 3 and 4 are the shared icon and blood banks.
+/// The knight gets the knight in both 1 and 2, because a bout between knights
+/// loads one into each, which is what makes a script that switches tables
+/// mid-animation work when both fighters are knights.
+fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
+    let mut cache: BTreeMap<String, Bank> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for (creature, slots) in CREATURE_BANKS {
+        let mut tables = BankTables::new();
+        for (n, files) in [(1u8, KNIGHT_BANKS), (2, *slots), (3, TABLE3_BANKS), (4, TABLE4_BANKS)] {
+            let banks: Vec<Bank> = files.iter().map(|f| bank_of(lib, f, &mut cache)).collect();
+            if banks.iter().any(|b| !b.cels.is_empty()) {
+                tables.insert(n, banks);
             }
         }
-    })
-    .to_string()
+        out.insert(creature.to_string(), tables);
+    }
+    out
+}
+
+/// One bank: which sheet the baker packed it into, where in that sheet it
+/// starts, and how big each of its cels is.
+///
+/// The sizes matter to the simulation, not only to the renderer: a mirrored
+/// part is placed at `task_x - (x + cel_width)`, so a width is geometry.
+fn bank_of(lib: &Library, file: &str, cache: &mut BTreeMap<String, Bank>) -> Bank {
+    if file.is_empty() {
+        return Bank::default();
+    }
+    if let Some(b) = cache.get(file) {
+        return b.clone();
+    }
+    let sizes = |name: &str| -> Option<Vec<[u16; 2]>> {
+        Some(
+            lib.cel(name)
+                .ok()?
+                .images
+                .iter()
+                .map(|s| [s.real_width.max(1) as u16, s.height.max(1) as u16])
+                .collect(),
+        )
+    };
+    let bank = match ACTORS.iter().find(|(_, banks)| banks.contains(&file)) {
+        Some((actor, banks)) => {
+            let mut base = 0u32;
+            let mut cels = Vec::new();
+            for f in *banks {
+                let Some(c) = sizes(f) else { continue };
+                if *f == file {
+                    cels = c;
+                    break;
+                }
+                base += c.len() as u32;
+            }
+            Bank { sheet: format!("actor.{actor}"), base, cels }
+        }
+        None => {
+            let stem = file.split('.').next().unwrap_or(file).to_lowercase();
+            Bank { sheet: format!("bank.{stem}"), base: 0, cels: sizes(file).unwrap_or_default() }
+        }
+    };
+    cache.insert(file.to_string(), bank.clone());
+    bank
+}
+
+/// Every animation script in the original, read out of the unpacked load image.
+///
+/// The image and the symbol table are not something this crate can make:
+/// `MAIN.EXE` is PKLITE outside and EXEPACK inside, and both layers are peeled
+/// by running their own stubs under emulation in `tools/symbolmap.py`. This
+/// looks for the two files that tool writes and says plainly when they are not
+/// there, rather than pretending.
+fn animation_scripts(src: &str) -> anyhow::Result<Option<ScriptSet>> {
+    let images = [
+        std::env::args().nth(3).unwrap_or_default(),
+        "research/main.final.bin".into(),
+        format!("{src}/main.final.bin"),
+    ];
+    let symbols = [
+        std::env::args().nth(4).unwrap_or_default(),
+        "research/symbols.json".into(),
+        format!("{src}/symbols.json"),
+    ];
+    let find = |c: &[String]| c.iter().filter(|p| !p.is_empty()).find_map(|p| fs::read(p).ok());
+    let (Some(img), Some(sym)) = (find(&images), find(&symbols)) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        img.len() == IMAGE_LEN,
+        "the unpacked image is {} bytes, expected {IMAGE_LEN}",
+        img.len()
+    );
+    let syms = Symbols::parse(&String::from_utf8_lossy(&sym))?;
+    let (set, report) = all_scripts(&img, &syms)?;
+    anyhow::ensure!(
+        report.scripts > 200,
+        "only {} scripts parsed; the image or the symbols are not the ones this was \
+         recovered from",
+        report.scripts
+    );
+    Ok(Some(set))
+}
+
+/// Every script a set of roots can reach, following every branch.
+///
+/// An actor definition carries its own scripts, so it has to carry everything
+/// they can jump to as well: a swing ends by going to the stance, and a blow
+/// taken with no hit points left goes to a death. Anything short of the closure
+/// would leave the interpreter pointing at a name nothing defines.
+fn closure_of(all: &ScriptSet, roots: &[&str]) -> ScriptSet {
+    let mut out = ScriptSet::new();
+    let mut queue: Vec<String> = roots.iter().map(|r| r.to_string()).collect();
+    let mut seen: BTreeSet<String> = queue.iter().cloned().collect();
+    while let Some(name) = queue.pop() {
+        let Some(script) = all.get(&name) else { continue };
+        for i in &script.code {
+            let target = match i {
+                Instr::Goto { target, .. }
+                | Instr::Skip { target }
+                | Instr::Dead { target }
+                | Instr::AddTask { target }
+                | Instr::TestEq { target, .. }
+                | Instr::TestNe { target, .. } => target,
+                Instr::Shadow { script, .. } => script,
+                _ => continue,
+            };
+            if !target.is_empty() && seen.insert(target.clone()) {
+                queue.push(target.clone());
+            }
+        }
+        out.insert(name, script.clone());
+    }
+    out
+}
+
+/// Where the task's origin sits above the actor's feet.
+///
+/// Read off the actor's own standing frame rather than chosen: the origin is
+/// the point the original places parts against, and the feet are the lowest
+/// pixel of the parts that frame is made of.
+fn origin_of(scripts: &ScriptSet, banks: &BankTables, standing: &str) -> [i16; 2] {
+    let mut lowest = 0i32;
+    let Some(script) = scripts.get(standing) else { return [0, 0] };
+    for i in &script.code {
+        let Instr::Part(p) = i else { continue };
+        let Some([_, h]) = banks
+            .get(&p.table)
+            .and_then(|t| t.get(p.bank as usize))
+            .and_then(|b| b.cel(p.cel))
+        else {
+            continue;
+        };
+        lowest = lowest.max(p.y as i32 + h as i32);
+    }
+    [0, -(lowest as i16)]
+}
+
+/// The knight, as the original animates him.
+///
+/// **The frame lists are gone.** They used to live here, chosen by eye out of
+/// `KN1.OB`: an eight frame walk, a four frame swing with hit lines drawn by
+/// feel, and a collapse. What replaces them is the original's own scripts,
+/// running on the task VM in `henge-core`, and with them come things no hand
+/// authored list had: the knight is composed of several parts a frame rather
+/// than one sprite, his sword is a separate cel that follows his hand, a blow
+/// he takes carries `TASKDEAD` so it turns into a death by itself if it was the
+/// last one he could take, and his swing announces itself with the original's
+/// own `KnightGruntSound` and sample 0x0b.
+///
+/// The numbers that are still ours are the ones that were never in the scripts:
+/// how fast he walks, how far he reaches, how long an opponent waits between
+/// swings, and what he is carrying. Those are combat tuning, not animation.
+///
+/// Without an unpacked `MAIN.EXE` there are no scripts, and the knight is
+/// written out with none. That is deliberate: a second, hand authored set kept
+/// beside the real one is exactly what this item was for removing.
+fn actor_definitions(
+    scripts: &ScriptSet,
+    banks: &BTreeMap<String, BankTables>,
+) -> anyhow::Result<String> {
+    let knight_banks = banks.get("knight").cloned().unwrap_or_default();
+    let roots: Vec<&str> = KNIGHT_SCRIPTS.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+    let animation = closure_of(scripts, &roots);
+    let mut def = ActorDef {
+        sheet: "actor.knight".into(),
+        health: 100,
+        speed_x: 2,
+        speed_y: 1,
+        reach: 38,
+        depth_tolerance: 6,
+        attack_cooldown: 45,
+        // What a fallen knight is carrying, for whoever is left standing. Not
+        // recovered: the original names `BESTOWGOLD` and a `GOLD` readout but
+        // no table of what anything is worth, so this is a number chosen
+        // against the prices. Three foes put down pays for a flask and leaves
+        // change.
+        bounty: 15,
+        body: [-9, 0, 9, 50],
+        // Wider than the hit box on purpose. The hit box is narrow so that a
+        // strike has to be aimed; the girth is roughly the drawn figure, so
+        // four knights in one arena stand beside each other rather than inside
+        // each other. Median standing frame in KN1.OB is 29 wide.
+        girth: 28,
+        origin: origin_of(&animation, &knight_banks, "Knight_SwStance"),
+        // One stride of `Knight_SwWalkOn` covers about 47 pixels in four
+        // frames, and he walks two pixels a tick. See `ActorDef::script_ticks`.
+        script_ticks: 6,
+        banks: knight_banks,
+        ..ActorDef::default()
+    };
+    for (state, names) in KNIGHT_SCRIPTS {
+        def.scripts.insert(state.to_string(), names.iter().map(|n| n.to_string()).collect());
+    }
+    def.animation = animation;
+    if def.animation.is_empty() {
+        eprintln!("the knight has no animation: bake with an unpacked MAIN.EXE image");
+    }
+    Ok(serde_json::to_string(&BTreeMap::from([("knight", def)]))?)
 }
 
 /// Which character each glyph in a font bank draws.

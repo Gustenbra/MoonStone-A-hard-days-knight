@@ -171,6 +171,19 @@ impl Bout {
             mix(f.player.frame as i64);
             mix(f.player.ticks_in_frame as i64);
             mix(f.player.finished as i64);
+            // The task VM is part of the simulation, not a decoration on it: a
+            // swing's hit shape comes out of the frame it is showing, so two
+            // machines that disagree about where a script is disagree about
+            // combat. Everything that decides the next tick goes in.
+            mix(f.cycle as i64);
+            mix(f.script_tick as i64);
+            if let Some(t) = &f.task {
+                t.hash_into(&mut mix);
+            }
+            for (at, v) in &f.record.fields {
+                mix(*at as i64);
+                mix(*v as i64);
+            }
         }
         mix(self.settled_for as i64);
         h
@@ -212,6 +225,7 @@ mod tests {
             bounty: 0,
             girth: 0,
             body: [-9, 0, 9, 52], sequences,
+            ..ActorDef::default()
         }
     }
 
@@ -333,5 +347,43 @@ mod tests {
             restored.step(&d, &intents);
         }
         assert_eq!(restored.state_hash(), b.state_hash());
+    }
+
+    /// The same round trip, for fighters run by the task VM. The interpreter's
+    /// state is part of the fingerprint, so a snapshot that restored the
+    /// fighters but not their scripts would be caught here.
+    #[test]
+    fn a_scripted_bout_survives_a_round_trip_through_serialization() {
+        let d = crate::combat::tests::scripted_def();
+        let mut b = Bout::new(
+            bounds(),
+            vec![
+                Fighter::new("k", &d, 100, 100, 1),
+                Fighter::new("k", &d, 130, 100, -1),
+                Fighter::new("k", &d, 200, 104, 1),
+            ],
+        );
+        let script = |t: usize, i: usize| Intent {
+            dx: if (t / 5 + i) % 3 == 0 { 1 } else { -1 },
+            dy: 0,
+            attack: (t / 4 + i) % 3 == 0,
+        };
+        let mut hits = 0;
+        for t in 0..60 {
+            let intents: Vec<Intent> = (0..3).map(|i| script(t, i)).collect();
+            hits += b.step(&d, &intents).len();
+        }
+        assert!(hits > 0, "the weapon cels connect with something");
+
+        let json = serde_json::to_string(&b).unwrap();
+        let mut restored: Bout = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, b);
+        assert_eq!(restored.state_hash(), b.state_hash());
+        for t in 60..200 {
+            let intents: Vec<Intent> = (0..3).map(|i| script(t, i)).collect();
+            b.step(&d, &intents);
+            restored.step(&d, &intents);
+            assert_eq!(restored.state_hash(), b.state_hash(), "tick {t}");
+        }
     }
 }

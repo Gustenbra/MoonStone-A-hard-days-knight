@@ -43,14 +43,22 @@ struct Snapshot {
 #[derive(Default)]
 pub struct Voices {
     prev: Vec<Snapshot>,
-    /// Which frames of a walk cycle put a foot down. Two per eight frame cycle
-    /// is a walk; every frame would be a stampede.
+    /// Which frames of a hand authored walk cycle put a foot down. Two per
+    /// eight frame cycle is a walk; every frame would be a stampede.
     pub step_frames: Vec<usize>,
+    /// The same, for a fighter animated by the task VM, whose walk is a cycle
+    /// of four one-frame scripts rather than an eight frame list. Two of those
+    /// four are foot plants, which is the same walk counted differently.
+    pub script_step_frames: Vec<usize>,
 }
 
 impl Voices {
     pub fn new() -> Voices {
-        Voices { prev: Vec::new(), step_frames: vec![0, 4] }
+        Voices {
+            prev: Vec::new(),
+            step_frames: vec![0, 4],
+            script_step_frames: vec![0, 2],
+        }
     }
 
     pub fn observe(&mut self, fighters: &[Fighter], hits: &[HitEvent]) -> Vec<(usize, Cue)> {
@@ -58,7 +66,14 @@ impl Voices {
         let mut out = Vec::new();
 
         for (i, f) in fighters.iter().enumerate() {
-            let now = Snapshot { state: Some(f.state), frame: f.player.frame };
+            // Where the walk is up to. A scripted fighter's cycle is which of
+            // its state's scripts is playing; a hand authored one's is the
+            // frame the player is on.
+            let scripted = f.task.is_some();
+            let now = Snapshot {
+                state: Some(f.state),
+                frame: if scripted { f.cycle } else { f.player.frame },
+            };
             let was = self.prev[i];
 
             // A swing is announced when it begins, not when it connects, so the
@@ -66,10 +81,8 @@ impl Voices {
             if now.state == Some(State::Attack) && was.state != Some(State::Attack) {
                 out.push((i, Cue::Swing));
             }
-            if f.state == State::Walk
-                && now.frame != was.frame
-                && self.step_frames.contains(&now.frame)
-            {
+            let steps = if scripted { &self.script_step_frames } else { &self.step_frames };
+            if f.state == State::Walk && now.frame != was.frame && steps.contains(&now.frame) {
                 out.push((i, Cue::Step));
             }
             self.prev[i] = now;
@@ -102,6 +115,7 @@ mod tests {
             bounty: 0,
             girth: 0,
             body: [-9, 0, 9, 52], sequences: BTreeMap::new(),
+            ..ActorDef::default()
         }
     }
 
