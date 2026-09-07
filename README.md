@@ -95,6 +95,25 @@ contains anything derived:
 cargo run --release -p henge-assets --bin henge-pack-status packs
 ```
 
+## Text
+
+The game can say things now. The fonts decoded from the start, but which glyph draws
+which character is a table inside the original executable that is not recovered, so the
+order was read off the artwork: A-Z, then a-z, then 0-9, then punctuation. A few ornaments
+at the end are unidentified and left unmapped rather than guessed at; an unmapped glyph is
+simply never drawn.
+
+The mapping lives in the pack as content, so a replacement font needs no code change.
+Glyphs draw as a silhouette in a chosen colour, since a glyph's own shades are legible
+over one arena's palette and invisible over the next.
+
+```sh
+henge --screenshot out.png 5 0 --say "Day 1|forest|100 of 100"
+```
+
+`--say` draws a line over whatever was rendered, which is how the font and its mapping are
+checked without hunting for a frame that happens to show the status bar.
+
 ## Sound
 
 `henge-audio` keeps two things separate. Deciding **what** should be heard is done by

@@ -22,9 +22,12 @@ Ordered by what the project is missing most, not by what is easiest.
       silently rather than refusing to start.
       *Next: more than four cues, and sounds carried on animation frames rather than
       inferred from state changes.*
-- [ ] **Text.** `BOLD.F` and `SMALL.FON` decode, but the character lookup table lives in
-      `MAIN.EXE` and is not recovered, so glyph order is unknown. Either recover it or map
-      it by eye.
+- [x] **Text.** Done. The lookup table in `MAIN.EXE` is still not recovered, so the glyph
+      order was read off the artwork instead: the banks run A-Z, then a-z, then 0-9, then
+      punctuation, with a few unidentified ornaments at the end left unmapped rather than
+      guessed at. The mapping lives in the pack as content, so a replacement font is a data
+      change. Text draws as a silhouette in a chosen colour, because a glyph's own shades
+      are legible over one arena's palette and invisible over the next.
 
 ## Next
 

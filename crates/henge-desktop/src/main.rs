@@ -5,6 +5,7 @@
 
 mod framebuffer;
 mod map;
+mod text;
 mod world;
 #[cfg(feature = "research")]
 mod research;
@@ -13,6 +14,7 @@ use framebuffer::Framebuffer;
 use henge_assets::Registry;
 use henge_audio::{Clips, Sink, Voices};
 use map::MapScene;
+use text::Font;
 use henge_core::combat::Intent;
 use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
@@ -91,6 +93,14 @@ fn main() -> anyhow::Result<()> {
             app.update();
         }
         app.render();
+        // --say draws a line of text over whatever was rendered, so the font
+        // and its glyph mapping can be checked directly rather than by hunting
+        // for a frame that happens to show the status bar.
+        if let Some(j) = args.iter().position(|a| a == "--say") {
+            if let Some(line) = args.get(j + 1).cloned() {
+                app.say(&line);
+            }
+        }
         app.save_png(&path)?;
         println!("wrote {path} ({})", app.status);
         return Ok(());
@@ -167,6 +177,7 @@ struct App {
     encounter_pick: u32,
     audio: Box<dyn Sink>,
     voices: Voices,
+    fonts: std::collections::BTreeMap<String, Font>,
     run: Run,
     /// Ticks since the run ended, so the tally can be read before it restarts.
     run_over_for: u32,
@@ -277,6 +288,7 @@ impl App {
             Err(e) => { eprintln!("arena load failed: {e:#}"); None }
         };
         let audio = open_audio(&mut reg);
+        let fonts = text::load(&reg);
         if world.is_none() {
             eprintln!("no arena data: {status}");
         } else {
@@ -294,6 +306,7 @@ impl App {
             encounter_pick: 0,
             audio,
             voices: Voices::new(),
+            fonts,
             run: Run::new(100),
             run_over_for: 0,
             status,
@@ -419,6 +432,44 @@ impl App {
         }
     }
 
+    /// The tally at the end of a run. Without words this was a blank screen and
+    /// a pause, which told the player nothing about what they had just done.
+    fn draw_run_over(&mut self) {
+        let Some(font) = self.fonts.remove("bold") else { return };
+        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
+        let (mut dark, mut light) = (0usize, 0usize);
+        for i in 1..32 {
+            if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) { dark = i; }
+            if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) { light = i; }
+        }
+        self.fb.rect(40, 66, 240, 68, dark as u8);
+        font.draw_centred(&mut self.reg, &mut self.fb, "You are slain", 74, light as u8);
+        let tally = format!("Day {}  Won {} of {}", self.run.day, self.run.victories, self.run.fights);
+        font.draw_centred(&mut self.reg, &mut self.fb, &tally, 100, light as u8);
+        self.fonts.insert("bold".into(), font);
+    }
+
+    /// Draw a line of text over the current frame, for checking the font.
+    fn say(&mut self, line: &str) {
+        let Some(font) = self.fonts.remove("bold") else {
+            eprintln!("no font in the packs");
+            return;
+        };
+        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
+        let (mut dark, mut light) = (0usize, 0usize);
+        for i in 1..32 {
+            if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) { dark = i; }
+            if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) { light = i; }
+        }
+        let mut y = 30;
+        for part in line.split('|') {
+            self.fb.rect(0, y - 4, 320, 26, dark as u8);
+            font.draw_centred(&mut self.reg, &mut self.fb, part, y, light as u8);
+            y += 30;
+        }
+        self.fonts.insert("bold".into(), font);
+    }
+
     fn save_png(&self, path: &str) -> anyhow::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut enc = png::Encoder::new(
@@ -442,8 +493,16 @@ impl App {
             return;
         }
         if self.mode == Mode::Map {
-            if let Some(m) = self.map.as_ref() {
-                if m.render(&mut self.reg, &mut self.fb).is_ok() {
+            // Take the map out of self for the duration of the draw, so it can
+            // borrow the registry and the fonts alongside it.
+            if let Some(m) = self.map.take() {
+                let ok = m.render(&mut self.reg, &mut self.fb, self.fonts.get("bold"), &self.run)
+                    .is_ok();
+                self.map = Some(m);
+                if ok {
+                    if !self.run.alive() {
+                        self.draw_run_over();
+                    }
                     return;
                 }
             }

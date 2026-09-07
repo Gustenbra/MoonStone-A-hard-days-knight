@@ -187,6 +187,9 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/actors.json"), actor_definitions())?;
     m.data.insert("data.actors".into(), "data/actors.json".into());
 
+    fs::write(out.join("data/fonts.json"), font_definitions())?;
+    m.data.insert("data.fonts".into(), "data/fonts.json".into());
+
     fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&m)?)?;
     println!(
         "baked {} sheets, {} sounds, {} palettes, {} data blobs into {}",
@@ -328,6 +331,39 @@ fn actor_definitions() -> String {
                     { "sprite": 48, "ticks": 5 }, { "sprite": 45, "ticks": 200 }
                 ]}
             }
+        }
+    })
+    .to_string()
+}
+
+/// Which character each glyph in a font bank draws.
+///
+/// The game looks glyphs up through a table inside `MAIN.EXE` that is not
+/// recovered, so this was read off the artwork: the banks turned out to run
+/// A-Z, then a-z, then 0-9, then punctuation.
+///
+/// A few glyphs near the end are ornaments whose meaning is not obvious. They
+/// are left unmapped rather than guessed at, which costs nothing: an unmapped
+/// glyph is simply never drawn.
+fn font_definitions() -> String {
+    const LETTERS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!?.,";
+    serde_json::json!({
+        "bold": {
+            "sheet": "bank.bold",
+            // glyphs[i] is the character glyph i draws.
+            "glyphs": LETTERS,
+            "space": 69,
+            "space_width": 7,
+            "tracking": 1,
+            "line_height": 20
+        },
+        "small": {
+            "sheet": "bank.small",
+            "glyphs": LETTERS,
+            "space": 69,
+            "space_width": 4,
+            "tracking": 1,
+            "line_height": 8
         }
     })
     .to_string()

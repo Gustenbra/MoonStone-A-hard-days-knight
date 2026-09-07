@@ -72,3 +72,25 @@ impl ActorDef {
 
 pub type Actors = BTreeMap<String, ActorDef>;
 pub type ActorData = Actors;
+
+/// A font bank, and which character each of its glyphs draws.
+///
+/// The original looks glyphs up through a table inside its executable. That
+/// table is not recovered, so this mapping was read off the artwork instead and
+/// lives as content, which means a replacement font needs no code change.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FontDef {
+    /// Asset id of the glyph bank.
+    pub sheet: String,
+    /// `glyphs[i]` is the character glyph `i` draws. Glyphs past the end of this
+    /// string are ornaments with no character, and are never drawn.
+    pub glyphs: String,
+    /// Glyph index of the blank used for a space.
+    pub space: usize,
+    pub space_width: i32,
+    /// Pixels between characters.
+    pub tracking: i32,
+    pub line_height: i32,
+}
+
+pub type Fonts = BTreeMap<String, FontDef>;

@@ -66,6 +66,29 @@ impl Framebuffer {
         }
     }
 
+    /// Draws a sprite as a flat silhouette in one colour.
+    ///
+    /// Text is drawn this way rather than in its own colours: arena palettes
+    /// differ, so a glyph's own shades are legible over one backdrop and invisible
+    /// over the next. A silhouette in a chosen colour reads everywhere.
+    pub fn blit_mask(&mut self, src: &[u8], sw: usize, sh: usize, x: i32, y: i32, colour: u8) {
+        for sy in 0..sh {
+            let dy = y + sy as i32;
+            if dy < 0 || dy >= SCREEN_H as i32 {
+                continue;
+            }
+            for sx in 0..sw {
+                let dx = x + sx as i32;
+                if dx < 0 || dx >= SCREEN_W as i32 {
+                    continue;
+                }
+                if src[sy * sw + sx] != 0 {
+                    self.pixels[dy as usize * SCREEN_W + dx as usize] = colour;
+                }
+            }
+        }
+    }
+
     pub fn blit(&mut self, src: &[u8], sw: usize, sh: usize, x: i32, y: i32, flip: bool) {
         for sy in 0..sh {
             let dy = y + sy as i32;

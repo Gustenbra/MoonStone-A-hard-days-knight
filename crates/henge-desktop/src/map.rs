@@ -67,7 +67,9 @@ impl MapScene {
         encounter
     }
 
-    pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer) -> anyhow::Result<()> {
+    pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer,
+                  font: Option<&crate::text::Font>, run: &henge_core::run::Run)
+        -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
 
@@ -89,36 +91,28 @@ impl MapScene {
             }
         }
 
-        self.draw_status(fb);
+        self.draw_status(reg, fb, font, run);
         Ok(())
     }
 
-    fn draw_status(&self, fb: &mut Framebuffer) {
+    fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer,
+                   font: Option<&crate::text::Font>, run: &henge_core::run::Run) {
         let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
         let (mut dark, mut light) = (0usize, 0usize);
         for i in 1..32 {
             if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
             if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
         }
-        fb.rect(0, 182, 320, 18, dark as u8);
+        fb.rect(0, 178, 320, 22, dark as u8);
 
-        // No font is wired yet, so the day reads as a row of marks and the
-        // terrain as a bar whose length names it. Crude, but it is honest about
-        // what it knows rather than printing nothing.
-        let day = self.state.day.min(40) as i32;
-        for i in 0..day {
-            fb.rect(6 + i * 3, 186, 2, 4, light as u8);
-        }
-        let width = match self.last_terrain {
-            Terrain::Forest => 20,
-            Terrain::Glade => 40,
-            Terrain::Swamp => 60,
-            Terrain::Waste => 80,
-        };
-        fb.rect(6, 193, width, 3, light as u8);
-
-        // Progress through the current day.
-        let frac = (self.state.steps * 300 / self.state.steps_per_day.max(1)) as i32;
-        fb.rect(10, 178, frac, 2, light as u8);
+        let Some(font) = font else { return };
+        let left = format!("Day {}", self.state.day);
+        font.draw(reg, fb, &left, 6, 182, light as u8);
+        let mid = self.last_terrain.name();
+        let w = font.width(reg, mid);
+        font.draw(reg, fb, mid, (320 - w) / 2, 182, light as u8);
+        let right = format!("{} of {}", run.health.max(0), run.max_health);
+        let w = font.width(reg, &right);
+        font.draw(reg, fb, &right, 314 - w, 182, light as u8);
     }
 }
