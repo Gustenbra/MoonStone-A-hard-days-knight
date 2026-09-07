@@ -190,6 +190,9 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/fonts.json"), font_definitions())?;
     m.data.insert("data.fonts".into(), "data/fonts.json".into());
 
+    fs::write(out.join("data/places.json"), place_definitions())?;
+    m.data.insert("data.places".into(), "data/places.json".into());
+
     fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&m)?)?;
     println!(
         "baked {} sheets, {} sounds, {} palettes, {} data blobs into {}",
@@ -364,6 +367,93 @@ fn font_definitions() -> String {
             "space_width": 4,
             "tracking": 1,
             "line_height": 8
+        }
+    })
+    .to_string()
+}
+
+/// The places on the map, and what each of them offers.
+///
+/// The original's overworld is a node graph inside `MAIN.EXE` that is not
+/// recovered, so these coordinates were not lifted from it: they were read off
+/// the map image by eye, and each one sits on the landmark the artist already
+/// drew there. Highwood is the white castle in the northern snow, Waterdeep is
+/// the walled port on the eastern shore, the healer keeps the ruin in the
+/// southern forest, and the stones are the circle the game is named after.
+///
+/// The backdrops are the original's own town screens, which is why this lives
+/// in the reference pack along with everything else derived from it.
+///
+/// `menu` is where the words go on that particular backdrop. Highwood and
+/// Waterdeep painted their menu onto a panel at the edge of the picture, so the
+/// box is put exactly over that panel and the live menu replaces the painted
+/// one. The others have no panel, so the box goes where the art is quietest.
+///
+/// Only the healer does anything yet. Everything else is listed and marked
+/// closed rather than left off, because the sign on the door is part of the
+/// place, and an option that looks live and silently does nothing is worse than
+/// one that says it is not open.
+///
+/// **The price is days.** There is no money in the game and inventing some
+/// would be inventing an economy, so a healer takes the only thing a run has.
+fn place_definitions() -> String {
+    let heal = |days: u32| {
+        serde_json::json!({
+            "do": "heal", "days": days,
+            "said": "Rest well. You are whole again.",
+            "refused": "You are unmarked. Keep your days."
+        })
+    };
+    let closed = |said: &str| serde_json::json!({ "do": "closed", "said": said });
+    let leave = serde_json::json!({ "do": "leave" });
+
+    serde_json::json!({
+        "highwood": {
+            "name": "Highwood",
+            "scene": "scene.highwood",
+            "x": 93, "y": 56, "radius": 6,
+            "menu": [256, 0, 62, 200],
+            "options": [
+                { "label": "Merchant", "effect": closed("The stalls are shuttered.") },
+                { "label": "Tavern",   "effect": closed("No one is pouring tonight.") },
+                { "label": "Healer",   "effect": heal(3) },
+                { "label": "Temple",   "effect": closed("The doors are barred.") },
+                { "label": "Leave",    "effect": leave }
+            ]
+        },
+        "waterdeep": {
+            "name": "Waterdeep",
+            "scene": "scene.waterdee",
+            "x": 292, "y": 157, "radius": 6,
+            "menu": [2, 0, 62, 200],
+            "options": [
+                { "label": "Merchant", "effect": closed("The stalls are shuttered.") },
+                { "label": "Tavern",   "effect": closed("No one is pouring tonight.") },
+                { "label": "Healer",   "effect": heal(3) },
+                { "label": "Mystic",   "effect": closed("Mythral will not see you.") },
+                { "label": "Leave",    "effect": leave }
+            ]
+        },
+        "healer": {
+            "name": "The Healer",
+            "scene": "scene.hea",
+            "x": 94, "y": 164, "radius": 5,
+            "menu": [6, 112, 154, 66],
+            "options": [
+                { "label": "Tend my wounds", "effect": heal(3) },
+                { "label": "Leave",          "effect": leave }
+            ]
+        },
+        "stones": {
+            "name": "The Stones",
+            "scene": "scene.hen1",
+            "x": 158, "y": 102, "radius": 6,
+            "menu": [8, 18, 132, 74],
+            "options": [
+                { "label": "Listen", "effect": closed("The stones keep their counsel.") },
+                { "label": "Wait",   "effect": closed("The moon is not yet full.") },
+                { "label": "Leave",  "effect": leave }
+            ]
         }
     })
     .to_string()

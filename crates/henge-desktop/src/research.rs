@@ -23,7 +23,19 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn from_args() -> anyhow::Result<Option<Viewer>> {
-        let Some(dir) = std::env::args().nth(1) else { return Ok(None) };
+        // Look for an explicit flag rather than taking argument one. Reading
+        // "the first argument" meant that with this feature compiled in, the
+        // research viewer swallowed the first flag of every other command and
+        // reported it as a missing directory.
+        let args: Vec<String> = std::env::args().collect();
+        let Some(dir) = args
+            .iter()
+            .position(|a| a == "--research")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+        else {
+            return Ok(None);
+        };
         let lib = Library::open(&dir)?;
         let arenas = lib.with_extension(&["t"]);
         let banks = lib.with_extension(&["cel", "ob"]);

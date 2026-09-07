@@ -35,6 +35,14 @@ Ordered by what the project is missing most, not by what is easiest.
 - [x] Health persisting between fights, so dying costs something. Wounds carry, only
       travelling mends them, and winning heals nothing: the same walking that repairs you
       is the walking that finds trouble. Dying ends the run.
+- [x] Somewhere to go. Places live in the pack as data: a name, a backdrop, a map
+      position and a menu, so adding one is editing JSON. Only the healer does
+      anything yet, and what it charges is **days**, because days are the only
+      currency a run has and inventing money would be inventing an economy. An
+      option that is not built is listed and marked shut rather than left off,
+      since a live-looking option that silently does nothing is worse than a
+      closed door. Positions were read off the map art, not recovered: the
+      original's node graph is still inside `MAIN.EXE`.
 - [ ] Inventory, and something to spend a run's winnings on
 - [ ] Save and load
 - [ ] Web build (wasm), including running the bake client-side so no assets are ever served

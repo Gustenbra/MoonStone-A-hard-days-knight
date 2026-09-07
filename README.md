@@ -14,6 +14,9 @@ need your own copy of the original, which the engine reads and converts locally.
 - 57 combat arenas across four families, with real terrain, scenery and depth sorting
 - An overworld you travel across, with a day cycle and ambushes
 - Where a fight happens is decided by the terrain you are standing on
+- **Places to go**: Highwood, Waterdeep, a healer in the woods and the stone
+  circle, each on the landmark the map already draws. Walk onto one and it opens
+  with its own screen and menu. The healer mends you, and the price is days
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
@@ -30,6 +33,9 @@ Two commands, once:
 cargo run --release -p henge-formats --bin henge-bake -- "path/to/Moonstone" packs/reference
 cargo run --release
 ```
+
+Walking onto a town, the healer or the stone circle opens it. In a place, up and
+down move the highlight, space takes the option, and Tab is always a way back out.
 
 Player one uses the arrows and space. Player two uses `WASD` and `F`. `1` and `2` set
 how many people are playing; the remaining seats are filled by opponents. Tab switches
@@ -50,8 +56,24 @@ henge --screenshot out.png [ticks] [arena] [--walk] [--fight]
 henge --trace [ticks] [arena]
 ```
 
-`--trace` runs the simulation and prints every state change, which is how combat and
-travel are verified as behaviour rather than by looking at screenshots:
+Both accept a scripted run, which is how a screen you have to walk to and a menu
+you have to drive get reached with no keyboard and no display:
+
+```sh
+henge --trace 400 0 --goto 158,102 --input "....d.d.s"   # walk there, then choose
+henge --screenshot out.png 6 0 --at healer --hurt 30 --input "..s"
+```
+
+`--goto x,y` steers across the map a step a tick, and swings back at whatever
+ambushes it on the way. `--at <place>` starts inside a place, `--hurt <hp>` starts
+the run already wounded so a healer has something to do, and `--input` feeds one
+key press per tick: `u`/`d` move the highlight, `s` takes the option, `hjkl` walk,
+`.` waits. Presses arrive through the same edge-detected path the keyboard uses,
+so a script exercises the game rather than a stub.
+
+`--trace` runs the simulation and prints every state change, which is how combat,
+travel and what a town does to a run are verified as behaviour rather than by
+looking at screenshots:
 
 ```
     0  MAP     day 1   step    1  at  151, 120  on forest
@@ -59,6 +81,11 @@ travel are verified as behaviour rather than by looking at screenshots:
    55  COMBAT  forest   player Hurt   hp  75   foe Attack hp 100
   261  COMBAT  forest   player Dead   hp   0   foe Attack hp 100
   381  MAP     day 1   step   12  at  162, 120  on forest
+```
+
+```
+    0  PLACE   day 1   hp  30  The Healer   > Tend my wounds
+    2  PLACE   day 4   hp 100  The Healer   > Tend my wounds  Rest well. You are whole again.
 ```
 
 ## How it is put together

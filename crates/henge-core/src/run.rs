@@ -82,6 +82,25 @@ impl Run {
         !self.over
     }
 
+    /// Days spent in someone's care. Wounds close, and the price is time.
+    ///
+    /// Time is the only thing a run owns: there is no money in this game yet,
+    /// and days are not free, because the calendar is what the map's ambushes
+    /// and the moon are hung on. Returns the days actually spent, which is
+    /// zero when there was nothing to mend: a healer does not take a week off
+    /// you to look at an unmarked man.
+    pub fn tended(&mut self, days: u32) -> u32 {
+        if !self.alive() || self.health >= self.max_health {
+            return 0;
+        }
+        self.health = self.max_health;
+        self.progress = 0;
+        for _ in 0..days {
+            self.new_day();
+        }
+        days
+    }
+
     pub fn new_day(&mut self) {
         if self.alive() {
             self.day += 1;
@@ -160,6 +179,25 @@ mod tests {
         r.finished_fight(30, true);
         assert_eq!(r.fights, 3);
         assert_eq!(r.victories, 2);
+    }
+
+    #[test]
+    fn a_healer_trades_days_for_health() {
+        let mut r = Run::new(100);
+        r.finished_fight(20, true);
+        assert_eq!(r.tended(4), 4);
+        assert_eq!(r.health, 100);
+        assert_eq!(r.day, 5, "four days passed while you lay there");
+    }
+
+    #[test]
+    fn nobody_charges_a_whole_man() {
+        let mut r = Run::new(100);
+        assert_eq!(r.tended(4), 0, "nothing to mend, so no time spent");
+        assert_eq!(r.day, 1);
+        // And a dead man is past helping.
+        r.finished_fight(0, false);
+        assert_eq!(r.tended(4), 0);
     }
 
     #[test]

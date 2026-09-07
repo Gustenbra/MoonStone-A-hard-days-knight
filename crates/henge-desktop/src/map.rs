@@ -67,9 +67,12 @@ impl MapScene {
         encounter
     }
 
+    /// `here` is the place you are standing on or walking towards, if any. It
+    /// takes the middle of the status bar off the terrain, because when a town
+    /// is under your feet its name is the more useful of the two.
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                  font: Option<&crate::text::Font>, run: &henge_core::run::Run)
-        -> anyhow::Result<()> {
+                  font: Option<&crate::text::Font>, run: &henge_core::run::Run,
+                  here: Option<&str>) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
 
@@ -91,12 +94,13 @@ impl MapScene {
             }
         }
 
-        self.draw_status(reg, fb, font, run);
+        self.draw_status(reg, fb, font, run, here);
         Ok(())
     }
 
     fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                   font: Option<&crate::text::Font>, run: &henge_core::run::Run) {
+                   font: Option<&crate::text::Font>, run: &henge_core::run::Run,
+                   here: Option<&str>) {
         let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
         let (mut dark, mut light) = (0usize, 0usize);
         for i in 1..32 {
@@ -107,12 +111,20 @@ impl MapScene {
 
         let Some(font) = font else { return };
         let left = format!("Day {}", self.state.day);
+        let lw = font.width(reg, &left);
         font.draw(reg, fb, &left, 6, 182, light as u8);
-        let mid = self.last_terrain.name();
-        let w = font.width(reg, mid);
-        font.draw(reg, fb, mid, (320 - w) / 2, 182, light as u8);
         let right = format!("{} of {}", run.health.max(0), run.max_health);
-        let w = font.width(reg, &right);
-        font.draw(reg, fb, &right, 314 - w, 182, light as u8);
+        let rw = font.width(reg, &right);
+        font.draw(reg, fb, &right, 314 - rw, 182, light as u8);
+
+        // The middle is centred in what is left over, not on the screen: this
+        // font is wide, and "open ground" centred on 320 runs straight through
+        // the health readout.
+        let mid = here.unwrap_or_else(|| self.last_terrain.name());
+        let (from, to) = (6 + lw + 6, 314 - rw - 6);
+        let mw = font.width(reg, mid);
+        if mw <= to - from {
+            font.draw(reg, fb, mid, from + (to - from - mw) / 2, 182, light as u8);
+        }
     }
 }

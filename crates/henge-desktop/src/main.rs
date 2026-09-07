@@ -5,6 +5,7 @@
 
 mod framebuffer;
 mod map;
+mod place;
 mod text;
 mod world;
 #[cfg(feature = "research")]
@@ -16,6 +17,7 @@ use henge_audio::{Clips, Sink, Voices};
 use map::MapScene;
 use text::Font;
 use henge_core::combat::Intent;
+use henge_core::place::{Answer, Approach, Places};
 use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
 use world::World;
@@ -28,6 +30,83 @@ use winit::window::WindowBuilder;
 
 fn args_of() -> Vec<String> { std::env::args().collect() }
 
+/// A scripted run for the headless modes, so a screen that needs walking to and
+/// a menu driving is reachable without a display.
+///
+///   --at <place-id>   start standing in that place
+///   --goto <x>,<y>    walk there first, the way a held key would
+///   --input <script>  one key press per tick afterwards:
+///                     u/d move the highlight, s takes the option,
+///                     h/j/k/l walk, . waits
+///   --hurt <hp>       start the run already wounded, so a healer has something
+///                     to do without first having to win and lose a fight
+fn hurt_arg(a: &[String]) -> Option<i32> {
+    a.iter().position(|s| s == "--hurt").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+#[derive(Default)]
+struct Script {
+    goto: Option<(i32, i32)>,
+    keys: Vec<char>,
+    at: Option<String>,
+}
+
+impl Script {
+    fn from_args(a: &[String]) -> Script {
+        let after = |flag: &str| {
+            a.iter().position(|s| s == flag).and_then(|i| a.get(i + 1)).cloned()
+        };
+        Script {
+            goto: after("--goto").and_then(|v| {
+                let (x, y) = v.split_once(',')?;
+                Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+            }),
+            keys: after("--input").map(|s| s.chars().collect()).unwrap_or_default(),
+            at: after("--at"),
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.goto.is_some() || !self.keys.is_empty() || self.at.is_some()
+    }
+
+    /// Drive one tick: steer while there is still ground to cover, then start
+    /// feeding key presses.
+    fn drive(&self, app: &mut App, fed: &mut usize) {
+        if let Some((gx, gy)) = self.goto {
+            match app.mode {
+                // Ambushes happen on the way, and a traveller who never swings
+                // dies to the first one, so swing while walking.
+                Mode::Combat => {
+                    app.keys = [false; 256];
+                    app.keys[6] = app.tick % 23 < 4;
+                    return;
+                }
+                Mode::Map => {
+                    // `is_none_or` would read better but postdates the crate's
+                    // minimum Rust version.
+                    let there = match app.map.as_ref() {
+                        Some(m) => m.state.x == gx && m.state.y == gy,
+                        None => true,
+                    };
+                    if !there {
+                        app.keys = [false; 256];
+                        app.steer(gx, gy);
+                        return;
+                    }
+                }
+                // Arrived: the script takes over.
+                Mode::Place => {}
+            }
+        }
+        let c = self.keys.get(*fed).copied();
+        if c.is_some() {
+            *fed += 1;
+        }
+        app.drive(c);
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let mut app = App::new()?;
 
@@ -38,26 +117,42 @@ fn main() -> anyhow::Result<()> {
         let ticks: u64 = a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(600);
         let arena: i32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
         if let Some(w) = app.world.as_mut() { w.step_arena(arena); }
+        let script = Script::from_args(&a);
+        if let Some(hp) = hurt_arg(&a) { app.run.health = hp; }
+        if let Some(id) = script.at.as_deref() { app.enter(id); }
         // Travel while tracing, so the overworld loop is exercised too.
         app.keys[3] = true;
         let mut last = String::new();
+        let mut fed = 0usize;
         for t in 0..ticks {
-            // Wander rather than walking into the edge and stopping, and swing
-            // often enough to actually win some fights. A trace where the player
-            // never fights back proves nothing about what carries between bouts.
-            app.keys[3] = (t / 140) % 2 == 0;
-            app.keys[2] = (t / 140) % 2 == 1;
-            app.keys[6] = t % 23 < 4;
+            if script.active() {
+                script.drive(&mut app, &mut fed);
+            } else {
+                // Wander rather than walking into the edge and stopping, and swing
+                // often enough to actually win some fights. A trace where the player
+                // never fights back proves nothing about what carries between bouts.
+                app.keys[3] = (t / 140) % 2 == 0;
+                app.keys[2] = (t / 140) % 2 == 1;
+                app.keys[6] = t % 23 < 4;
+            }
             app.update();
             let line = match app.mode {
                 Mode::Map if app.map.is_none() => break,
                 Mode::Combat if app.world.is_none() => break,
+                Mode::Place if app.visiting.is_none() => break,
                 Mode::Map => {
                     let Some(m) = app.map.as_ref() else { break };
                     let r = &app.run;
                     format!("{:>5}  MAP     day {:<3} hp{:>4}  won {:<3} fought {:<3} {} on {}",
                         t, m.state.day, r.health, r.victories, r.fights,
                         if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name())
+                }
+                Mode::Place => {
+                    let Some(s) = app.visiting.as_ref() else { break };
+                    let Some(def) = app.places.get(&s.visit.place) else { break };
+                    format!("{:>5}  PLACE   day {:<3} hp{:>4}  {:<30} {}",
+                        t, app.run.day, app.run.health, place::describe(def, &s.visit),
+                        s.visit.said)
                 }
                 Mode::Combat => {
                     let Some(w) = app.world.as_ref() else { break };
@@ -89,7 +184,14 @@ fn main() -> anyhow::Result<()> {
         }
         app.keys[3] = args.iter().any(|a| a == "--walk");
         app.keys[6] = args.iter().any(|a| a == "--fight");
+        let script = Script::from_args(&args);
+        if let Some(hp) = hurt_arg(&args) { app.run.health = hp; }
+        if let Some(id) = script.at.as_deref() { app.enter(id); }
+        let mut fed = 0usize;
         for _ in 0..ticks {
+            if script.active() {
+                script.drive(&mut app, &mut fed);
+            }
             app.update();
         }
         app.render();
@@ -170,9 +272,16 @@ struct App {
     fade: u8,
     tick: u64,
     keys: [bool; 256],
+    /// Keys that went down this tick. A menu wants presses, not held keys, or
+    /// one tap of Down would run the highlight off the bottom of the list.
+    pressed: [bool; 256],
     reg: Registry,
     world: Option<World>,
     map: Option<MapScene>,
+    /// Everywhere there is to go, and whether we are standing in one of them.
+    places: Places,
+    approach: Approach,
+    visiting: Option<place::PlaceScene>,
     mode: Mode,
     encounter_pick: u32,
     audio: Box<dyn Sink>,
@@ -187,7 +296,7 @@ struct App {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Mode { Map, Combat }
+enum Mode { Map, Combat, Place }
 
 /// Load every sound the packs offer, and open a device if there is one.
 ///
@@ -289,6 +398,7 @@ impl App {
         };
         let audio = open_audio(&mut reg);
         let fonts = text::load(&reg);
+        let places = place::load(&reg);
         if world.is_none() {
             eprintln!("no arena data: {status}");
         } else {
@@ -300,9 +410,13 @@ impl App {
         Ok(App {
             fb, fade: 255, tick: 0,
             keys: [false; 256],
+            pressed: [false; 256],
             reg, world,
             mode: if map.is_some() { Mode::Map } else { Mode::Combat },
             map,
+            places,
+            approach: Approach::default(),
+            visiting: None,
             encounter_pick: 0,
             audio,
             voices: Voices::new(),
@@ -318,6 +432,9 @@ impl App {
     fn key(&mut self, code: KeyCode, down: bool) {
         let i = key_index(code);
         if i < 256 {
+            if down && !self.keys[i] {
+                self.pressed[i] = true;
+            }
             if down && self.world.is_some() {
                 match code {
                     KeyCode::BracketLeft => self.world.as_mut().unwrap().step_arena(-1),
@@ -330,7 +447,13 @@ impl App {
                     // Tab flips between the overworld and the arena, which is
                     // how the arena browser stays reachable.
                     KeyCode::Tab => {
-                        self.mode = if self.mode == Mode::Map { Mode::Combat } else { Mode::Map };
+                        self.mode = match self.mode {
+                            Mode::Map => Mode::Combat,
+                            Mode::Combat => Mode::Map,
+                            // Tab is also the way out of a place, so a broken
+                            // menu can never trap you indoors.
+                            Mode::Place => { self.visiting = None; Mode::Map }
+                        };
                     }
                     _ => {}
                 }
@@ -343,7 +466,14 @@ impl App {
         }
     }
 
+    /// One tick. A key press is an edge: it lasts exactly this tick and is
+    /// spent whether or not anything wanted it.
     fn update(&mut self) {
+        self.simulate();
+        self.pressed = [false; 256];
+    }
+
+    fn simulate(&mut self) {
         self.tick += 1;
         #[cfg(feature = "research")]
         if let Some(v) = self.research.as_mut() {
@@ -370,11 +500,13 @@ impl App {
                 }
                 let mut start: Option<String> = None;
                 let mut day_before = 0;
+                let mut arrived: Option<String> = None;
                 if let Some(m) = self.map.as_mut() {
                     day_before = m.state.day;
                     if m.update(dx, dy) {
                         start = Some(m.last_terrain.family().to_string());
                     }
+                    arrived = self.approach.step(&self.places, m.state.x, m.state.y);
                 }
                 // Walking is how you mend, and also how you meet trouble. The
                 // same action both repairs and risks you.
@@ -386,12 +518,54 @@ impl App {
                         self.run.new_day();
                     }
                 }
+                // A town is somewhere you arrive at, not somewhere you get
+                // jumped outside of: walking through the gate beats the ambush
+                // roll taken on the same step.
+                if let Some(id) = arrived {
+                    if self.enter(&id) {
+                        return;
+                    }
+                }
                 if let (Some(family), Some(w)) = (start, self.world.as_mut()) {
                     self.encounter_pick = self.encounter_pick.wrapping_add(1);
                     w.set_player_health(self.run.health_for_fight());
                     w.set_family(&family, self.encounter_pick);
                     self.voices.reset();
                     self.mode = Mode::Combat;
+                }
+            }
+            Mode::Place => {
+                let (up, down, take) = (self.pressed[0], self.pressed[1], self.pressed[6]);
+                let mut leave = false;
+                let mut days = 0;
+                if let Some(s) = self.visiting.as_mut() {
+                    if let Some(def) = self.places.get(&s.visit.place) {
+                        if up {
+                            s.visit.move_by(def, -1);
+                        }
+                        if down {
+                            s.visit.move_by(def, 1);
+                        }
+                        if take {
+                            match s.visit.choose(def, &mut self.run) {
+                                Answer::Left => leave = true,
+                                Answer::Stayed { days: d } => days = d,
+                            }
+                        }
+                    } else {
+                        leave = true;
+                    }
+                }
+                // Time spent indoors has to move the map's calendar too, or the
+                // day on the status bar would disagree with the day of the run.
+                if days > 0 {
+                    if let Some(m) = self.map.as_mut() {
+                        m.state.pass_days(days);
+                    }
+                }
+                if leave {
+                    self.visiting = None;
+                    self.mode = Mode::Map;
                 }
             }
             Mode::Combat => {
@@ -430,6 +604,52 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Walk into a place and open its menu.
+    fn enter(&mut self, id: &str) -> bool {
+        let Some(def) = self.places.get(id) else {
+            let known: Vec<&str> = self.places.keys().map(String::as_str).collect();
+            eprintln!("no place called {id}. The pack has: {}", known.join(", "));
+            return false;
+        };
+        match place::PlaceScene::open(&mut self.reg, def, id) {
+            Ok(scene) => {
+                self.visiting = Some(scene);
+                self.mode = Mode::Place;
+                true
+            }
+            Err(e) => {
+                eprintln!("cannot enter {id}: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// One scripted key press, for the headless harness. Real input arrives the
+    /// same way, through `pressed`, so this exercises the game and not a stub.
+    fn drive(&mut self, c: Option<char>) {
+        self.keys = [false; 256];
+        match c {
+            Some('u') => self.pressed[0] = true,
+            Some('d') => self.pressed[1] = true,
+            Some('s') => self.pressed[6] = true,
+            Some('h') => self.keys[2] = true,
+            Some('l') => self.keys[3] = true,
+            Some('k') => self.keys[0] = true,
+            Some('j') => self.keys[1] = true,
+            _ => {}
+        }
+    }
+
+    /// Steer towards a map position, one step a tick, the way a held key would.
+    fn steer(&mut self, gx: i32, gy: i32) {
+        let Some(m) = self.map.as_ref() else { return };
+        let (x, y) = (m.state.x, m.state.y);
+        self.keys[2] = x > gx;
+        self.keys[3] = x < gx;
+        self.keys[0] = y > gy;
+        self.keys[1] = y < gy;
     }
 
     /// The tally at the end of a run. Without words this was a blank screen and
@@ -492,11 +712,27 @@ impl App {
             v.render(&mut self.fb);
             return;
         }
+        if self.mode == Mode::Place {
+            if let Some(scene) = self.visiting.as_ref() {
+                if let Some(def) = self.places.get(&scene.visit.place) {
+                    // Places are drawn in the small font: their menus sit in
+                    // panels the original painted only a few pixels wide.
+                    let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
+                    if scene.render(&mut self.reg, &mut self.fb, def, font, &self.run).is_ok() {
+                        return;
+                    }
+                }
+            }
+        }
         if self.mode == Mode::Map {
             // Take the map out of self for the duration of the draw, so it can
             // borrow the registry and the fonts alongside it.
             if let Some(m) = self.map.take() {
-                let ok = m.render(&mut self.reg, &mut self.fb, self.fonts.get("bold"), &self.run)
+                let near = henge_core::place::nearest(&self.places, m.state.x, m.state.y, 16)
+                    .map(|(_, d)| d.name.clone());
+                let ok = m
+                    .render(&mut self.reg, &mut self.fb, self.fonts.get("bold"), &self.run,
+                            near.as_deref())
                     .is_ok();
                 self.map = Some(m);
                 if ok {

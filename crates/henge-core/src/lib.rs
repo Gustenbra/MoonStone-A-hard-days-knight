@@ -9,6 +9,7 @@ pub mod bout;
 pub mod combat;
 pub mod content;
 pub mod overworld;
+pub mod place;
 pub mod run;
 
 /// The original ran at 320x200 on a 4:3 display. Keeping that resolution keeps the

@@ -126,6 +126,13 @@ impl Overworld {
         self.seed = seed | 1;
     }
 
+    /// Days spent standing still: under a healer, or waiting somewhere out of
+    /// the rain. Travel is not the only thing that moves the calendar.
+    pub fn pass_days(&mut self, days: u32) {
+        self.day += days;
+        self.steps = 0;
+    }
+
     /// Move, advance the clock, and report an encounter if one is triggered.
     pub fn travel(&mut self, dx: i32, dy: i32, bounds: Bounds) -> bool {
         if dx == 0 && dy == 0 {
@@ -205,6 +212,15 @@ mod tests {
         }
         assert_eq!(w.day, 2);
         assert_eq!(w.steps, 0);
+    }
+
+    #[test]
+    fn time_can_pass_without_walking() {
+        let mut w = Overworld::new(10, 10);
+        w.travel(1, 0, bounds());
+        w.pass_days(3);
+        assert_eq!(w.day, 4);
+        assert_eq!(w.steps, 0, "a day spent indoors starts the next one fresh");
     }
 
     #[test]
