@@ -66,16 +66,37 @@ hooks. It is a small language, and the whole game's feel lives in it.
 
 **Unlocks**: all eight creatures, correct combat timing, shadows, gore, correct sorting.
 
-## 1.2 Symbol name to address mapping `blocked`
+## 1.2 Symbol name to address mapping `partial`
 
-The debug info holds 334 names and a decoded module table, but the name-to-address map is
-not recovered. With it, every function below can be found at an exact offset and read.
+**The debug info contains no symbol address table.** This was tested rather than assumed.
+The appended region is fully accounted for:
 
-- [ ] Reverse the debug info's symbol record format (Borland style; line table and module
-      table already decoded)
-- [ ] Emit a symbol map, and feed it to a disassembler
+| Range | Size | Contents |
+|---|---|---|
+| 78294-78782 | 488 | padding |
+| 78782-116534 | 37752 | line-number table, 4-byte records |
+| 116542-116726 | 184 | module records, then the name strings |
 
-**Unlocks**: makes almost everything below cheaper, 1.1 most of all.
+Ruled out, each by a direct check: names referenced by byte offset into the string table;
+names referenced by index; records positioned immediately before the strings at any stride
+from 2 to 20 for both 334 and 345 entries; the trailing 8-byte records as per-module symbol
+counts (they sum to 171, not 334 or 345); and a global scan of the whole region for any run
+of 334 records whose fields look like an offset and a segment.
+
+Two earlier "matches" were false positives worth recording, because they will fool the next
+person too: a stride-16 read of the line table makes fields 4, 8 and 12 all look like
+ascending code offsets at once, because the underlying structure is stride 4.
+
+**So addresses have to come from somewhere else.** The viable route:
+
+- [ ] Names are in link order and code is laid out in link order. Find function entry points
+      within each module's known code range by disassembling, then match the Nth entry point
+      to the Nth name belonging to that module
+- [ ] Anchor and cross-check using the line table, which already maps line numbers to code
+      offsets, and using string references such as the data file names and the disk prompts
+
+**What we already have without it**: the module table gives each of the eleven source
+modules an exact code range, which is most of what 1.1 needed this for.
 
 ---
 

@@ -43,8 +43,17 @@ The engine and a vertical slice. Roughly a quarter of the game.
 Research, not construction. **Could take a day or a month**; nothing makes that
 predictable. Everything in phases 2 and 4 waits on these.
 
-- [ ] 20. Reverse the debug info's symbol record format
-- [ ] 21. Emit a symbol map and feed it to a disassembler
+- [x] 20. ~~Reverse the debug info's symbol record format~~ **Settled: there is none.**
+      The appended region is fully accounted for as 488 bytes of padding, one 37,752-byte
+      line-number table, and 184 bytes of module records plus the name strings. No table
+      maps a name to an address, at any stride, anywhere in the file. Ruled out: names by
+      byte offset, names by index, records positioned before the strings, per-module symbol
+      counts, and a global scan for any run of 334 plausible offset/segment pairs
+- [ ] 21. Recover addresses the other way: **names are in link order, and so is the code.**
+      Find function entry points inside each module's known code range by disassembling,
+      then match the Nth entry point to the Nth name for that module. Cross-check against
+      the line table, which already maps line numbers to offsets, and against known string
+      references (file names, prompts) to anchor specific functions
 - [ ] 22. Locate the animation interpreter, using `_TASK.ASM`'s known code range
 - [ ] 23. Recover the task VM opcode set and operand widths
 - [ ] 24. Recover the per-frame sprite-part record. **Verify by compositing and looking**:

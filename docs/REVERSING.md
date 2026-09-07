@@ -32,9 +32,13 @@ names, including the original source file paths.
 pairs, verified by each start plus its length landing exactly on the next start. So every
 one of the eleven source modules has a known code range.
 
-**The name-to-address mapping is not recovered.** This is the highest-value item still
-open: it would land the animation interpreter and the hit calculation at exact offsets,
-and the format below would fall out of reading the interpreter rather than guessing.
+**There is no name-to-address mapping in the file.** Tested, not assumed: the appended
+region is fully accounted for as padding, a line-number table and the module records plus
+name strings, and a global scan finds no run of 334 records that could be an address table.
+See `COMPLETE.md` section 1.2 for everything that was ruled out and how.
+
+Addresses must instead be recovered by matching link order: names are listed in link order,
+code is laid out in link order, and each module's code range is already known.
 
 ## Animations are scripts, not frame lists
 
