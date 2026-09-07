@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 19 done, 58 remaining.**
+**77 items. 20 done, 57 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -42,6 +42,10 @@ The engine and a vertical slice. Roughly a quarter of the game.
 
 Research, not construction. **Could take a day or a month**; nothing makes that
 predictable. Everything in phases 2 and 4 waits on these.
+
+Item 20 turned out to be a negative result: the thing it asked for does not exist in the
+file. That is worth as much as a build, because it stops the next person spending days on
+it, and it forced 21 onto a route that can actually work.
 
 - [x] 20. ~~Reverse the debug info's symbol record format~~ **Settled: there is none.**
       The appended region is fully accounted for as 488 bytes of padding, one 37,752-byte
