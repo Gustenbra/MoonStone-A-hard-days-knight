@@ -6,7 +6,11 @@ use henge_assets::Registry;
 use henge_core::arena::Bounds;
 use henge_core::overworld::{terrain_of_patch, Overworld, Terrain};
 
-const TOKEN_SHEET: &str = "bank.ki";
+/// The map's icon set. Frames 0-9 are the knights' tokens in player colours,
+/// 10-14 crystals, 43-46 creatures.
+const TOKEN_SHEET: &str = "bank.mi";
+/// The red knight, matching player one's colours in the arena.
+const TOKEN_FRAME: usize = 3;
 const MAP_SCENE: &str = "scene.map";
 
 pub struct MapScene {
@@ -95,7 +99,7 @@ impl MapScene {
     /// it, outlined in the opposite extreme. That keeps it legible over dark
     /// forest and over snow without either being a special case.
     fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer) {
-        let Some(rect) = reg.sheet(TOKEN_SHEET).and_then(|r| r.value.frames.first().copied())
+        let Some(rect) = reg.sheet(TOKEN_SHEET).and_then(|r| r.value.frames.get(TOKEN_FRAME).copied())
         else { return };
         let Ok(img) = reg.image(TOKEN_SHEET) else { return };
 
@@ -108,40 +112,26 @@ impl MapScene {
             }
         }
 
-        let (x, y) = (self.state.x - w as i32 / 2, self.state.y - h as i32);
-        let (fill, outline) = Self::ink_over(fb, x, y, w, h);
+        let (x, y) = (self.state.x - w as i32 / 2, self.state.y - h as i32 / 2);
 
-        // Outline first, as the silhouette nudged one pixel each way, then the
-        // fill on top. Without it the marker dissolves into dithered ground.
+        // These icons are authored against the map's own palette, which is the
+        // palette loaded here, so their indices already mean the right colours.
+        // No translation, and no silhouette: the token draws as the little
+        // helmeted knight it was drawn as.
+        //
+        // A dark halo first, so it does not dissolve into dithered ground.
+        let shadow = Self::darkest(fb);
         for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            fb.blit_mask(&px, w, h, x + ox, y + oy, outline);
+            fb.blit_mask(&px, w, h, x + ox, y + oy, shadow);
         }
-        fb.blit_mask(&px, w, h, x, y, fill);
+        fb.blit(&px, w, h, x, y, false);
     }
 
-    /// Two colours that stand out against the ground under a rectangle: one far
-    /// from its average brightness, and one far from that.
-    fn ink_over(fb: &Framebuffer, x: i32, y: i32, w: usize, h: usize) -> (u8, u8) {
+    /// The darkest entry in the loaded palette, for a halo that lifts a token
+    /// off dithered ground without recolouring it.
+    fn darkest(fb: &Framebuffer) -> u8 {
         let luma = |c: u32| (((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff)) / 6;
-        let mut total = 0u32;
-        let mut n = 0u32;
-        for yy in y..y + h as i32 {
-            for xx in x..x + w as i32 {
-                if (0..320).contains(&xx) && (0..200).contains(&yy) {
-                    total += luma(fb.palette[(fb.pixels[yy as usize * 320 + xx as usize] & 0x1f) as usize]);
-                    n += 1;
-                }
-            }
-        }
-        let ground = if n == 0 { 128 } else { total / n };
-        let furthest = |from: u32| {
-            (1..32)
-                .max_by_key(|i| luma(fb.palette[*i]).abs_diff(from))
-                .unwrap_or(1) as u8
-        };
-        let fill = furthest(ground);
-        let outline = furthest(luma(fb.palette[fill as usize]));
-        (fill, outline)
+        (1..32).min_by_key(|i| luma(fb.palette[*i])).unwrap_or(1) as u8
     }
 
     fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer,

@@ -48,6 +48,26 @@ Ordered by what the project is missing most, not by what is easiest.
 - [ ] Web build (wasm), including running the bake client-side so no assets are ever served
 - [ ] Settle the arena family pairing question (see FORMATS.md)
 
+## The map's icon set
+
+`MI.C` is the overworld's icons, and most of it is still unused:
+
+| Frames | What |
+|---|---|
+| 0-4 | the knights' map tokens, one per player colour |
+| 5-9 | the same tokens ringed, presumably whose turn it is |
+| 10-14 | crystals on coloured bases |
+| 42 | a grave marker |
+| 43-46 | creature tokens on coloured bases |
+
+These are authored against the **map's own palette**, so their indices are already correct
+when drawn on the map and need no translation. That is worth knowing before reaching for
+the workaround below: check whether a sheet belongs to the palette you are drawing it over
+before assuming it does not.
+
+- [ ] Use the rest: creature tokens for roaming enemies, crystals for whatever the quest
+      turns out to need, the ringed variants for the active player
+
 ## Known defect: sheets do not record which palette they mean
 
 A sheet's pixels are palette **indices**, and nothing in the manifest says which
@@ -56,11 +76,11 @@ palette and every index means a different colour, which is not a visible error s
 as a plausible-looking one: the traveller's token drew as a smear of browns and blues
 that read as map dithering, so it appeared to be missing rather than wrong.
 
-The token is currently worked around by drawing it as a flat silhouette, which is
-legible but throws away the figure. **The real fix is to record each sheet's source
-palette in the manifest**, so indices can be translated into whatever palette is loaded,
-by nearest colour. That would restore the token as a recognisable figure and would fix
-the whole class at once, since any sheet drawn over a foreign palette has this problem.
+The traveller's token no longer suffers from this, but only because it turned out to
+belong to the map's palette after all: it was the wrong sprite from the wrong file, not a
+palette problem. **The real fix remains to record each sheet's source palette in the
+manifest**, so indices can be translated into whatever palette is loaded, by nearest
+colour. Any sheet genuinely drawn over a foreign palette still has this problem.
 
 - [ ] Record a `palette` id per sheet in the manifest, and translate on draw
 
