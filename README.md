@@ -141,6 +141,10 @@ henge --screenshot out.png 5 0 --say "Day 1|forest|100 of 100"
 `--say` draws a line over whatever was rendered, which is how the font and its mapping are
 checked without hunting for a frame that happens to show the status bar.
 
+`--peaceful` suppresses ambushes. Without it, checking how the map draws anywhere but the
+starting corner is impossible: the traveller is killed en route long before arriving, so
+half the map could never be looked at.
+
 ## Sound
 
 `henge-audio` keeps two things separate. Deciding **what** should be heard is done by

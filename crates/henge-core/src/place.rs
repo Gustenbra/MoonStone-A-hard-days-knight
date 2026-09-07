@@ -165,6 +165,10 @@ impl Visit {
             return;
         }
         self.cursor = (((self.cursor as i32 + dy) % n + n) % n) as usize;
+        // What a place last said to you belongs to the option you chose.
+        // Leaving it up while the highlight moves puts a refusal under a
+        // live option and reads as though that option refused you.
+        self.said.clear();
     }
 
     pub fn selected<'a>(&self, def: &'a PlaceDef) -> Option<&'a Choice> {
@@ -230,6 +234,21 @@ mod tests {
         far.y = 40;
         p.insert("highwood".into(), far);
         p
+    }
+
+    /// A refusal belongs to the option that refused you. Left on screen while
+    /// the highlight moves, it sits under a live option and reads as though
+    /// that option had refused you.
+    #[test]
+    fn the_last_message_does_not_follow_the_highlight() {
+        let def = healer();
+        let mut run = Run::new(100);
+        let mut v = Visit::open("healer");
+        assert!(matches!(def.options[v.cursor].effect, Effect::Closed { .. }));
+        v.choose(&def, &mut run);
+        assert!(!v.said.is_empty(), "a shut option should say why");
+        v.move_by(&def, 1);
+        assert!(v.said.is_empty(), "the refusal must not sit under the next option");
     }
 
     #[test]
@@ -331,4 +350,5 @@ mod tests {
         assert_eq!(serde_json::from_str::<PlaceDef>(&json).unwrap(), def);
         assert!(json.contains("\"do\":\"heal\""), "effects are tagged in the data");
     }
+
 }

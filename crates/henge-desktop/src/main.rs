@@ -49,6 +49,10 @@ struct Script {
     goto: Option<(i32, i32)>,
     keys: Vec<char>,
     at: Option<String>,
+    /// Suppress ambushes. Checking how the map draws anywhere but the starting
+    /// corner was otherwise impossible: the traveller is killed en route long
+    /// before arriving, so half the map could never be looked at.
+    peaceful: bool,
 }
 
 impl Script {
@@ -63,6 +67,7 @@ impl Script {
             }),
             keys: after("--input").map(|s| s.chars().collect()).unwrap_or_default(),
             at: after("--at"),
+            peaceful: a.iter().any(|s| s == "--peaceful"),
         }
     }
 
@@ -118,6 +123,7 @@ fn main() -> anyhow::Result<()> {
         let arena: i32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
         if let Some(w) = app.world.as_mut() { w.step_arena(arena); }
         let script = Script::from_args(&a);
+        app.peaceful = script.peaceful;
         if let Some(hp) = hurt_arg(&a) { app.run.health = hp; }
         if let Some(id) = script.at.as_deref() { app.enter(id); }
         // Travel while tracing, so the overworld loop is exercised too.
@@ -185,6 +191,7 @@ fn main() -> anyhow::Result<()> {
         app.keys[3] = args.iter().any(|a| a == "--walk");
         app.keys[6] = args.iter().any(|a| a == "--fight");
         let script = Script::from_args(&args);
+        app.peaceful = script.peaceful;
         if let Some(hp) = hurt_arg(&args) { app.run.health = hp; }
         if let Some(id) = script.at.as_deref() { app.enter(id); }
         let mut fed = 0usize;
@@ -287,6 +294,8 @@ struct App {
     audio: Box<dyn Sink>,
     voices: Voices,
     fonts: std::collections::BTreeMap<String, Font>,
+    /// Suppress ambushes, so map rendering can be checked anywhere.
+    peaceful: bool,
     run: Run,
     /// Ticks since the run ended, so the tally can be read before it restarts.
     run_over_for: u32,
@@ -421,6 +430,7 @@ impl App {
             audio,
             voices: Voices::new(),
             fonts,
+            peaceful: false,
             run: Run::new(100),
             run_over_for: 0,
             status,
@@ -503,7 +513,8 @@ impl App {
                 let mut arrived: Option<String> = None;
                 if let Some(m) = self.map.as_mut() {
                     day_before = m.state.day;
-                    if m.update(dx, dy) {
+                    let ambushed = m.update(dx, dy);
+                    if ambushed && !self.peaceful {
                         start = Some(m.last_terrain.family().to_string());
                     }
                     arrived = self.approach.step(&self.places, m.state.x, m.state.y);

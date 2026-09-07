@@ -76,26 +76,72 @@ impl MapScene {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
 
-        // The traveller's token, anchored so its feet sit on the map position.
-        if let Some(rect) = reg
-            .sheet(TOKEN_SHEET)
-            .and_then(|r| r.value.frames.first().copied())
-        {
-            if let Ok(img) = reg.image(TOKEN_SHEET) {
-                let (w, h) = (rect.w as usize, rect.h as usize);
-                let mut px = vec![0u8; w * h];
-                for row in 0..h {
-                    let src = (rect.y as usize + row) * img.width + rect.x as usize;
-                    if src + w <= img.pixels.len() {
-                        px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
-                    }
-                }
-                fb.blit(&px, w, h, self.state.x - w as i32 / 2, self.state.y - h as i32, false);
-            }
-        }
+        self.draw_token(reg, fb);
 
         self.draw_status(reg, fb, font, run, here);
         Ok(())
+    }
+
+    /// Draw the traveller.
+    ///
+    /// Not with the sprite's own colours. Sheet pixels are palette *indices*,
+    /// and nothing records which palette they were baked against, so blitting
+    /// them onto the map writes indices that mean entirely different colours
+    /// here. The result was a smear of browns and blues that read as map
+    /// dithering, which is why the traveller looked absent rather than wrong.
+    ///
+    /// A map marker wants to be found at a glance anyway, so it is drawn as a
+    /// silhouette in whichever colour stands furthest from the ground beneath
+    /// it, outlined in the opposite extreme. That keeps it legible over dark
+    /// forest and over snow without either being a special case.
+    fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer) {
+        let Some(rect) = reg.sheet(TOKEN_SHEET).and_then(|r| r.value.frames.first().copied())
+        else { return };
+        let Ok(img) = reg.image(TOKEN_SHEET) else { return };
+
+        let (w, h) = (rect.w as usize, rect.h as usize);
+        let mut px = vec![0u8; w * h];
+        for row in 0..h {
+            let src = (rect.y as usize + row) * img.width + rect.x as usize;
+            if src + w <= img.pixels.len() {
+                px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
+            }
+        }
+
+        let (x, y) = (self.state.x - w as i32 / 2, self.state.y - h as i32);
+        let (fill, outline) = Self::ink_over(fb, x, y, w, h);
+
+        // Outline first, as the silhouette nudged one pixel each way, then the
+        // fill on top. Without it the marker dissolves into dithered ground.
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            fb.blit_mask(&px, w, h, x + ox, y + oy, outline);
+        }
+        fb.blit_mask(&px, w, h, x, y, fill);
+    }
+
+    /// Two colours that stand out against the ground under a rectangle: one far
+    /// from its average brightness, and one far from that.
+    fn ink_over(fb: &Framebuffer, x: i32, y: i32, w: usize, h: usize) -> (u8, u8) {
+        let luma = |c: u32| (((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff)) / 6;
+        let mut total = 0u32;
+        let mut n = 0u32;
+        for yy in y..y + h as i32 {
+            for xx in x..x + w as i32 {
+                if (0..320).contains(&xx) && (0..200).contains(&yy) {
+                    total += luma(fb.palette[(fb.pixels[yy as usize * 320 + xx as usize] & 0x1f) as usize]);
+                    n += 1;
+                }
+            }
+        }
+        let ground = if n == 0 { 128 } else { total / n };
+        let furthest = |from: u32| {
+            (1..32)
+                .max_by_key(|i| luma(fb.palette[*i]).abs_diff(from))
+                .unwrap_or(1) as u8
+        };
+        let fill = furthest(ground);
+        let outline = furthest(luma(fb.palette[fill as usize]));
+        (fill, outline)
     }
 
     fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer,

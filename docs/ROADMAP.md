@@ -48,6 +48,22 @@ Ordered by what the project is missing most, not by what is easiest.
 - [ ] Web build (wasm), including running the bake client-side so no assets are ever served
 - [ ] Settle the arena family pairing question (see FORMATS.md)
 
+## Known defect: sheets do not record which palette they mean
+
+A sheet's pixels are palette **indices**, and nothing in the manifest says which
+palette they were baked against. Draw a sheet over a scene that loads a different
+palette and every index means a different colour, which is not a visible error so much
+as a plausible-looking one: the traveller's token drew as a smear of browns and blues
+that read as map dithering, so it appeared to be missing rather than wrong.
+
+The token is currently worked around by drawing it as a flat silhouette, which is
+legible but throws away the figure. **The real fix is to record each sheet's source
+palette in the manifest**, so indices can be translated into whatever palette is loaded,
+by nearest colour. That would restore the token as a recognisable figure and would fix
+the whole class at once, since any sheet drawn over a foreign palette has this problem.
+
+- [ ] Record a `palette` id per sheet in the manifest, and translate on draw
+
 ## Reverse engineering still open
 
 - [ ] **Multi-part sprite composition.** Creature banks are body parts, not whole poses, so
