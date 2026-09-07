@@ -1,5 +1,8 @@
 # Roadmap
 
+> For the exhaustive version, built around the 334 symbols left in the original
+> executable, see [COMPLETE.md](COMPLETE.md). This file is the working shortlist.
+
 Ordered by what the project is missing most, not by what is easiest.
 
 ## Now
