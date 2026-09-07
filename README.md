@@ -12,8 +12,14 @@ need your own copy of the original, which the engine reads and converts locally.
 ## What works
 
 - 57 combat arenas across four families, with real terrain, scenery and depth sorting
-- An overworld you travel across, with a day cycle and ambushes
-- Where a fight happens is decided by the terrain you are standing on
+- An overworld you travel across, with a day cycle and ambushes, laid out by the
+  original's own two map tables: which of the four kinds of ground each 8x8 block
+  is, and how hard that block is to cross. Nothing on the map is impassable; the
+  forest and the marsh are half speed and the mountain spine a quarter, and a
+  step the ground refuses still costs you the day
+- Where a fight happens is decided by the terrain you are standing on, and which
+  of that family's eight arenas you get is the family's own turn counter, the way
+  the original rotates through them
 - **Places to go**: Highwood, Waterdeep, a healer in the woods and the stone
   circle, each on the landmark the map already draws. Walk onto one and it opens
   with its own screen and menu
@@ -21,13 +27,25 @@ need your own copy of the original, which the engine reads and converts locally.
   both towns are open. Flasks and draughts are bought, carried and drunk; a
   healer in the woods still charges only days, and one inside the walls wants
   coin as well. What you carry can leave you too, to a cutpurse on the road
+- **A title screen, and a knight to choose.** The game opens on its own wordmark,
+  which turned out to be the last three frames of the bold font's bank, over an
+  option list that is the original's: one to four players, gore on or off,
+  practice combat or the moon quest. Leave it alone and it starts showing you the
+  intro plates. The four knights are Sir Banner, Sir Dwain, Sir Balain and Sir
+  Gunther, blue, gold, emerald and red because the executable's own colour table
+  says so, and each begins in his own corner of the map
+- **A status panel with something on it.** Strength, constitution and endurance,
+  life points, daggers, gold, experience, health, the sword in your hand and the
+  armour on your back, at the coordinates the original's own routine places them
+  and drawn with its own icons. One plate per fighter along the bottom of an
+  arena, and the whole sheet on a key
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 103 tests, all of it verifiable headlessly with no display or sound card
+- 136 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -38,13 +56,17 @@ cargo run --release -p henge-formats --bin henge-bake -- "path/to/Moonstone" pac
 cargo run --release
 ```
 
+It opens on the title screen. Up and down move the highlight, left and right change
+the setting on the row you are on, and space takes it. The moon quest goes to the
+select screen, where left and right pick a knight and space takes him.
+
 Walking onto a town, the healer or the stone circle opens it. In a place, up and
 down move the highlight, space takes the option, and Tab is always a way back out.
 
 Player one uses the arrows and space. Player two uses `WASD` and `F`. `1` and `2` set
-how many people are playing; the remaining seats are filled by opponents. Tab switches
-between the overworld and the arena, `[` and `]` change arena, `R` restarts the bout,
-escape quits.
+how many people are playing; the remaining seats are filled by opponents. `C` shows
+the character sheet. Tab switches between the overworld and the arena, `[` and `]`
+change arena, `R` restarts the bout, escape quits.
 
 The bake step converts your copy of the game into indexed PNGs, WAVs and JSON. **After
 it runs, the engine reads only PNG, WAV and JSON.** It has no knowledge that the original
@@ -66,6 +88,8 @@ you have to drive get reached with no keyboard and no display:
 ```sh
 henge --trace 400 0 --goto 158,102 --input "....d.d.s"   # walk there, then choose
 henge --screenshot out.png 6 0 --at healer --hurt 30 --input "..s"
+henge --trace 12 0 --start title --input "ldddss"        # two players, quest, choose
+henge --screenshot out.png 120 0 --start arena --knight 2 --fight --sheet
 ```
 
 `--goto x,y` steers across the map a step a tick, and swings back at whatever
@@ -73,21 +97,31 @@ ambushes it on the way. `--at <place>` starts inside a place, `--hurt <hp>` star
 the run already wounded so a healer has something to do, `--gold <n>` starts it
 with coin so a stall can be reached without first winning the fights that pay for
 it, and `--input` feeds one key press per tick: `u`/`d` move the highlight, `s`
-takes the option, `hjkl` walk, `.` waits. Presses arrive through the same
-edge-detected path the keyboard uses, so a script exercises the game rather than
-a stub.
+takes the option, `hjkl` walk or move the highlight sideways, `.` waits. Presses
+arrive through the same edge-detected path the keyboard uses, so a script
+exercises the game rather than a stub.
+
+`--start <title|select|map|arena>` says which screen to open on. It defaults to the
+map, so every recipe written before the shell existed still does what it did; the
+window opens on the title. `--knight <0..3>` begins a run as one of the four
+without going through the select screen, and `--sheet` holds the character sheet
+open over whatever is drawn.
 
 `--trace` runs the simulation and prints every state change, which is how combat,
 travel and what a town does to a run are verified as behaviour rather than by
 looking at screenshots:
 
 ```
-    0  MAP     day 1   step    1  at  151, 120  on forest
-   11  COMBAT  forest   player Idle   hp 100   foe Idle   hp 100
-   55  COMBAT  forest   player Hurt   hp  75   foe Attack hp 100
-  261  COMBAT  forest   player Dead   hp   0   foe Attack hp 100
-  381  MAP     day 1   step   12  at  162, 120  on forest
+    0  MAP     day 1   at 146,115 hp 100  gold    0 -   won 0  fought 0        on forest
+   21  MAP     day 1   at 157,115 hp 100  gold    0 -   won 0  fought 0        on swamp
+   30  COMBAT  sw1   swamp    Attack 100 @ 56,117 | Walk   100 @109,111 | ...
+   50  COMBAT  sw1   swamp    Attack 100 @ 69,117 | Attack  75 @ 99,111 | ...
 ```
+
+The map line carries the position because the ground is a table now: `on swamp` is
+`MapType` under the traveller's feet, not a guess at the colour of the picture. The
+combat line carries the arena's own name because which of a family's eight you get
+is a rotation, and watching it go round is how that is checked.
 
 ```
     0  PLACE   day 1  hp  30  gold  100  -         The Healer  > Tend my wounds
@@ -227,12 +261,12 @@ networked play plugs into without touching combat. See `docs/ROADMAP.md`.
 
 ## Documentation
 
-- [`docs/FORMATS.md`](docs/FORMATS.md) — the original's file formats, fully documented
-- [`docs/REVERSING.md`](docs/REVERSING.md) — unpacking the executable, and what is still unknown
-- [`docs/BUILD_ORDER.md`](docs/BUILD_ORDER.md) — every item once, in the order to do it
-- [`docs/COMPLETE.md`](docs/COMPLETE.md) — everything left to build, against the original's own 334 function names
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is next, including the multiplayer architecture
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — including the rules that keep the simulation networkable
+- [`docs/FORMATS.md`](docs/FORMATS.md): the original's file formats, fully documented
+- [`docs/REVERSING.md`](docs/REVERSING.md): unpacking the executable, and what is still unknown
+- [`docs/BUILD_ORDER.md`](docs/BUILD_ORDER.md): every item once, in the order to do it
+- [`docs/COMPLETE.md`](docs/COMPLETE.md): everything left to build, against the original's own function names
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): what is next, including the multiplayer architecture
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): including the rules that keep the simulation networkable
 
 ## Licence
 

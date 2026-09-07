@@ -212,6 +212,75 @@ pub fn max_distinct_players(palette: &[u32]) -> usize {
     hue_buckets(palette).len().min(4).max(1)
 }
 
+/// The brightnesses a ramp is built at. Four steps span a figure's shading
+/// without spending more of a 32-entry palette than one knight is worth.
+const RAMP_LUMA: [f32; 4] = [45.0, 90.0, 140.0, 185.0];
+
+/// A shading ramp in one colour's hue, dark to light.
+///
+/// [`player_luts`] substitutes within a palette that already exists, which is
+/// the only thing an arena allows: its 32 entries come from the backdrop and
+/// there is no room to add a knight. A screen that builds its own palette has no
+/// such constraint, and the character select is one, so it can be given the four
+/// knights' real colours instead of the nearest hues the artwork happened to
+/// contain.
+///
+/// The hue and saturation are the colour's; only the brightness is chosen, at
+/// four fixed levels, because brightness is what carries form. A ramp too dark
+/// to shade upwards is lifted towards white rather than clipped, which keeps the
+/// blue knight from turning into a silhouette.
+pub fn ramp(colour: u32) -> [u32; 4] {
+    let (h, s) = hue_sat(colour);
+    let mut out = [0u32; 4];
+    for (slot, want) in out.iter_mut().zip(RAMP_LUMA) {
+        // The fully bright version of this hue, which is as saturated as the
+        // ramp ever gets.
+        let full = from_hue_sat(h, s, 255.0);
+        let full_luma = luma(full).max(1.0);
+        *slot = if want <= full_luma {
+            scale(full, want / full_luma)
+        } else {
+            // Brighter than the hue can go on its own: walk it towards white.
+            let t = ((want - full_luma) / (255.0 - full_luma)).clamp(0.0, 1.0);
+            towards_white(full, t)
+        };
+    }
+    out
+}
+
+fn from_hue_sat(h: f32, s: f32, v: f32) -> u32 {
+    let c = v * s;
+    let x = c * (1.0 - (((h / 60.0) % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    pack(r + m, g + m, b + m)
+}
+
+fn pack(r: f32, g: f32, b: f32) -> u32 {
+    let c = |v: f32| (v.round().clamp(0.0, 255.0) as u32) & 0xff;
+    (c(r) << 16) | (c(g) << 8) | c(b)
+}
+
+fn scale(colour: u32, k: f32) -> u32 {
+    pack(
+        (colour >> 16 & 0xff) as f32 * k,
+        (colour >> 8 & 0xff) as f32 * k,
+        (colour & 0xff) as f32 * k,
+    )
+}
+
+fn towards_white(colour: u32, t: f32) -> u32 {
+    let mix = |v: u32| v as f32 + (255.0 - v as f32) * t;
+    pack(mix(colour >> 16 & 0xff), mix(colour >> 8 & 0xff), mix(colour & 0xff))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +356,38 @@ mod tests {
                 assert_ne!(luts[a], luts[b], "players {a} and {b} look identical");
             }
         }
+    }
+
+    /// A built ramp has to shade: four steps that climb in brightness and keep
+    /// the colour they were asked for. A flat ramp would leave the knight a
+    /// silhouette.
+    #[test]
+    fn a_ramp_climbs_in_brightness_and_keeps_its_hue() {
+        for colour in [0x0000cc, 0xffaa00, 0xaaee88, 0xdd0000] {
+            let r = ramp(colour);
+            for pair in r.windows(2) {
+                assert!(
+                    luma(pair[1]) > luma(pair[0]) + 20.0,
+                    "{colour:#08x} does not shade: {pair:?}"
+                );
+            }
+            let (want, _) = hue_sat(colour);
+            for step in r.iter().take(3) {
+                let (got, s) = hue_sat(*step);
+                assert!(s >= MIN_SATURATION, "{step:#08x} washed out to grey");
+                assert!(hue_gap(got, want) < 20.0, "{step:#08x} is not the colour asked for");
+            }
+        }
+    }
+
+    /// The blue knight is the hard case: 0x0000cc is darker at full saturation
+    /// than the top of the ramp wants, so the ramp has to reach for white rather
+    /// than clip and leave two identical steps.
+    #[test]
+    fn a_dark_hue_still_reaches_the_top_of_its_ramp() {
+        let r = ramp(0x0000cc);
+        assert!(luma(r[3]) > 150.0, "the blue knight would be unreadable: {r:?}");
+        assert_ne!(r[2], r[3]);
     }
 
     /// A palette with one hue cannot produce four knights. It has to say so and

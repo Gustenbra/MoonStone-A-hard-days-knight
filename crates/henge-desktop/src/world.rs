@@ -42,6 +42,16 @@ pub struct World {
     /// What the player brings into the next bout. Wounds carry between fights,
     /// so this is not always full.
     player_health: Option<i32>,
+    /// The health every knight in the arena is worth, once a run has chosen one.
+    ///
+    /// A knight's health is `10 * constitution + armour + 10`, so a new one is
+    /// worth twenty, and the arenas here are authored against a hundred. Both
+    /// scales take four blows to settle a fight, so adopting the recovered one
+    /// means moving the damage with it and nothing else.
+    sheet_health: Option<i32>,
+    /// Which knight is in which seat, so a fight is fought in the colours the
+    /// select screen handed out.
+    roster: Vec<usize>,
 }
 
 impl World {
@@ -64,6 +74,8 @@ impl World {
             lut_arena: None,
             seat_colours: [1; 4],
             player_health: None,
+            sheet_health: None,
+            roster: (0..4).collect(),
         };
         // One person by default. Two would leave the second knight controlled by
         // a keyboard nobody is pressing: it never attacks, never closes, and a
@@ -97,6 +109,35 @@ impl World {
         self.player_health = Some(health);
     }
 
+    /// Fight at the chosen knight's scale rather than the arena's.
+    ///
+    /// Everyone in an arena is a knight, so one number does for all four. The
+    /// blow is moved by the same ratio, which keeps a bout the same number of
+    /// swings long as it was: without that, a knight worth twenty health would
+    /// be cut down by a single hit authored against a hundred.
+    pub fn set_sheet_health(&mut self, max_health: i32) {
+        self.sheet_health = Some(max_health.max(1));
+        self.reset();
+    }
+
+    /// Which knight sits in which seat. Colours follow it, so the knight chosen
+    /// on the select screen is the one that walks into the arena.
+    pub fn set_roster(&mut self, roster: Vec<usize>) {
+        if !roster.is_empty() {
+            self.roster = roster;
+        }
+    }
+
+    /// The knight in a seat, for whoever is drawing a name or a plate.
+    pub fn knight_at(&self, seat: usize) -> usize {
+        self.roster.get(seat).copied().unwrap_or(seat % 4)
+    }
+
+    /// The colour that seat's knight wears in the loaded palette.
+    pub fn seat_colour(&self, seat: usize) -> u8 {
+        self.seat_colours[self.knight_at(seat) % 4]
+    }
+
     pub fn reset(&mut self) {
         let b = self.bounds();
         // Near the front of the walkable band: the band runs from the horizon
@@ -115,6 +156,14 @@ impl World {
             })
             .collect();
         self.bout = Bout::new(b, fighters);
+        if let Some(max) = self.sheet_health {
+            let base = def.health.max(1);
+            for f in self.bout.fighters.iter_mut() {
+                f.max_health = max;
+                f.health = max;
+            }
+            self.bout.damage = (self.bout.damage * max / base).max(1);
+        }
         if let (Some(h), Some(f)) = (self.player_health, self.bout.fighters.first_mut()) {
             f.health = h.clamp(1, f.max_health);
         }
@@ -154,18 +203,32 @@ impl World {
     pub fn name(&self) -> &str { &self.order[self.index] }
     pub fn bounds(&self) -> Bounds { self.arena().bounds() }
 
+    /// How many arenas a family's rotation has in it. Eight, in every family
+    /// the original ships; asked for rather than assumed so a pack can differ.
+    pub fn rotation_len(&self, family: &str) -> usize {
+        self.families.get(family).map_or(0, |f| f.arenas.len())
+    }
+
     /// Pick an arena belonging to a family, so an encounter in the swamp is
-    /// fought in a swamp. Falls back to any arena if the family is unknown.
-    pub fn set_family(&mut self, family: &str, pick: u32) {
-        let matching: Vec<usize> = self
-            .order
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| self.arenas[*name].family == family)
-            .map(|(i, _)| i)
-            .collect();
-        if !matching.is_empty() {
-            self.index = matching[pick as usize % matching.len()];
+    /// fought in a swamp.
+    ///
+    /// `pick` is the family's own turn counter, kept on the run, because the
+    /// original chooses by rotation and not by chance: `Table[counter]`, then
+    /// `inc counter` and `and counter, 7`. The eight arenas of a family come
+    /// round in order, and the six lair layouts, which are not in that table,
+    /// never come up on the road at all.
+    pub fn set_family(&mut self, family: &str, pick: usize) {
+        let names = self.families.get(family).map(|f| f.arenas.clone()).unwrap_or_default();
+        let wanted = names
+            .get(pick % names.len().max(1))
+            .and_then(|n| self.order.iter().position(|o| o == n));
+        // A family with no rotation in the pack still has to put the fight
+        // somewhere, so fall back to any arena that claims the family.
+        let fallback = || {
+            self.order.iter().position(|n| self.arenas[n].family == family)
+        };
+        if let Some(i) = wanted.or_else(fallback) {
+            self.index = i;
         }
         self.reset();
     }
@@ -211,6 +274,11 @@ impl World {
             .get(&family_name)
             .ok_or_else(|| anyhow::anyhow!("unknown arena family {family_name}"))?;
         let (sheet_id, backdrop_id) = (family.sheet.clone(), family.backdrop.clone());
+        // Which sheet each placement draws from. Recovered: the byte is 4 for
+        // the shared `FO2` sheet and the family's own sheet otherwise, and
+        // compositing an arena either way shows only that reading makes a
+        // coherent picture.
+        let tiles = family.tiles.clone();
 
         // The backdrop owns the palette everything else is drawn in, which is how
         // the original recoloured the same creature per region for free.
@@ -238,11 +306,13 @@ impl World {
 
         for (_, item) in items {
             match item {
-                Item::Prop(p) => self.draw_prop(reg, fb, &sheet_id, p),
+                Item::Prop(p) => {
+                    let sheet = tiles.get(&p.sheet).unwrap_or(&sheet_id).clone();
+                    self.draw_prop(reg, fb, &sheet, p)
+                }
                 Item::Fighter(i) => self.draw_fighter(reg, fb, i)?,
             }
         }
-        self.draw_health(fb);
         Ok(())
     }
 
@@ -300,49 +370,10 @@ impl World {
         let ox = if flip { -(rect.ox + w as i32) } else { rect.ox };
         let x = f.x + ox + frame.offset_x as i32;
         let y = f.y + rect.oy + frame.offset_y as i32;
-        fb.blit_lut(&px, w, h, x, y, flip, &self.luts[index % 4]);
+        fb.blit_lut(&px, w, h, x, y, flip, &self.luts[self.knight_at(index) % 4]);
         Ok(())
     }
 
-    /// The colour to fill this seat's status bar with: the hue that seat's
-    /// knight wears, taken from the same ranked hues the recolour uses.
-    fn seat_status_shade(&self, index: usize) -> u8 {
-        self.seat_colours[index % 4]
-    }
-
-    /// Whichever palette extreme stands out most against a given colour, so a
-    /// bar is readable whatever the arena and whatever the knight.
-    fn contrast_with(palette: &[u32], colour: u8) -> u8 {
-        let l = |i: usize| palette.get(i).map_or(0i32, |c| {
-            (((c >> 16 & 0xff) * 2 + (c >> 8 & 0xff) * 3 + (c & 0xff)) / 6) as i32
-        });
-        let n = palette.len().min(32);
-        let (mut dark, mut light) = (1usize, 1usize);
-        for i in 1..n {
-            if l(i) < l(dark) { dark = i; }
-            if l(i) > l(light) { light = i; }
-        }
-        let c = l(colour as usize);
-        if (c - l(dark)).abs() >= (c - l(light)).abs() { dark as u8 } else { light as u8 }
-    }
-
-    /// Arena palettes have no fixed slots, so pick the darkest and brightest
-    /// entries at draw time. That way the bars read on every backdrop instead of
-    /// turning pink in one arena and vanishing in the next.
-    /// One bar per fighter, each tinted to match the marker above its knight.
-    fn draw_health(&self, fb: &mut Framebuffer) {
-        let palette: Vec<u32> = fb.palette.to_vec();
-        let n = self.bout.fighters.len().max(1) as i32;
-        let w = (312 / n - 6).clamp(20, 82);
-        for (i, f) in self.bout.fighters.iter().enumerate() {
-            let x0 = 4 + i as i32 * (w + 6);
-            let fill = self.seat_status_shade(i);
-            let frame = Self::contrast_with(&palette, fill);
-            let frac = f.health.max(0) * (w - 4) / f.max_health.max(1);
-            fb.rect(x0, 6, w, 8, frame);
-            fb.rect(x0 + 2, 8, frac, 4, fill);
-        }
-    }
 }
 
 impl FighterExt for Fighter {}

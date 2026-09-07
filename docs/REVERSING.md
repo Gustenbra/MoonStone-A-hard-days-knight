@@ -93,52 +93,219 @@ hooks, and **characters are composed of several sprite parts per frame**. That i
 creature banks contain loose legs, torsos and heads rather than whole poses, and it is
 why the combat reads as positional rather than as trading canned attacks.
 
-### The interpreter has been found
+### The interpreter has been found, and decoded
 
 `PerformCOMMAND` at image offset `0x97fb`, with `PerformLOOP` at `0x97f2` just above it as
 the loop head. It is unmistakably a bytecode fetch-and-dispatch loop. `di` is the task
 record, `[di+2]` is the script pointer, and each pass reads one byte:
 
 ```
-0xff          end
-0xfd          script pointer <- [actor+0x18]      return / loop back
-0xfe          script pointer <- [actor+6]         restart
-bit 0x80 set  call [TaskComTable + (op & 0x7f)]   a command, through a function table
-otherwise     op & 0x1f selects a bank from [di+0x18], then a frame record follows
+0xff          end of frame; the next byte says what happens after it
+0xfd          script pointer <- TaskCommand[0x18]  resume after a jump
+0xfe          script pointer <- TaskCommand[6]     resume after a loop
+bit 0x80 set  call [TaskComTable + (op & 0x7f)]    a command, through a function table
+otherwise     a six-byte sprite-part record
 ```
 
 `TaskComTable` is at DS:0x9448, and the instruction that indexes it is literally
 `mov bx, 0x9448` at `0x9832`. The symbol table and the code agree to the byte, which is as
 good a confirmation of both as this work gets.
 
-The frame path reads `[si+1]` into `[di+0x13]`, `[si+2]` as a signed y contribution summed
-with `[di+6]` and `[di+8]`, `[si+4]` as x added to `[di+4]`, and tests bit 0x40 of
-`[si+3]`; `[di+0x14]` bit 1 mirrors the x term. Related: `TaskCelTable` DS:0x9474,
-`TaskTable` DS:0x947e, `TaskPlace` 0x986c, `MoveX` 0x9b5d.
+**The full opcode set, the operand widths and the frame record are recovered.** Nineteen
+commands, three empty table slots, and a six-byte part record. `docs/TASKVM.md` has the
+whole instruction set with what established each part; `tools/taskvm.py` reads it back out
+of `MAIN.EXE` and disassembles any script.
 
-### What is known about the data
+### Absolute code addresses in the code are link-time, not image, offsets
 
-Located around `0x0e000` in the unpacked image. The structure is per-frame lists: a
-two-byte header, a run of six-byte records, and a two-byte terminator. The records look
-like `[kind][image][x][flags][i16 y]`, with one bit of `flags` reading as a horizontal
-flip.
+`TaskComTable` is BSS, so it is 44 zero bytes in the load image; the handler addresses
+exist only as immediates in `INITTASK`, which fills the table at run time. Taken as image
+offsets, those immediates land mid-instruction and the table reads as nonsense.
 
-Three consecutive groups differing by exactly one record is what an animation cycle looks
-like, and that pattern is present.
+They are **link-time offsets**, and need the same correction `symbolmap.py` already fits
+for code symbols: a coordinate space up to 473 bytes longer than the shipped image,
+changing in seven steps. Apply it and all nineteen entries land exactly on a routine entry
+point; skip it and none of them do. The same correction turns every `TASKGOSUB` operand
+into the exact entry of a named routine, and makes cross-region `call rel16` targets
+resolve to symbols instead of to junk.
 
-### Why it is not decoded
+So the correction is a real property of the binary rather than an artefact of the fit, and
+it applies to absolute code addresses baked into the code as well as to the debug info.
+Anything that follows an absolute code address in this image has to apply it. Data
+addresses do not need it: `seg*16 + off` with DGROUP at 0x123b lands on the right bytes.
 
-**Compositing a group's parts does not produce a coherent figure.** The region is right
-and the record shape is roughly right, but the field semantics are wrong somewhere,
-most likely in how `kind` selects which bank each part is drawn from.
+### Animations are scripts in the data segment, named
 
-This is stated plainly because a plausible-sounding table that is quietly incorrect would
-be worse than nothing. **This gates the entire bestiary**: until it is decoded, no
-creature can animate, and picking a different creature does not help, because they are
-all composed the same way.
+The scripts are ordinary data in DGROUP, and the symbol table names 221 of them:
+`Knight_SwSwing`, `Knight_SwWalkR1`, `Troll_Walk1`, `Balok_Blink`, `Dragon_Shadow`. Each
+is a list of frames; each frame is a list of sprite parts and ends with `ff`.
+
+Every one of the 221 parses end to end with no unknown opcode and terminates on `ff ff`.
+Every `TASKGOTO` and `TASKDEAD` target is the first byte of another named script, every
+`TASKGOSUB` target the exact entry of a named routine: `KnightGruntSound`, `DrDropHead`,
+`KnifeThrow`, `SetDecapFLAG`.
+
+### The frame record, and how the earlier attempt was wrong
+
+```
+ 0   u8   bank selector, low five bits, equal to the slot number times four
+ 1   u8   cel index within that bank
+ 2   i8   y offset
+ 3   u8   flags
+ 4   i16  x offset
+```
+
+The earlier guess, `[kind][image][x][flags][i16 y]`, had **x and y the wrong way round**:
+the byte is y and the word is x. It also read `kind` as a plain bank number when it is the
+slot times four, because the bank table holds far pointers four bytes apart and the
+selector is used as a raw byte offset into it. Those two errors together are why
+compositing produced a heap rather than a figure, and no amount of staring at the bytes
+was going to separate them from a wrong guess about the record length. Reading the code
+that consumes the record settled all of it in one pass.
+
+### It was checked by compositing and looking
+
+Which was the whole point. Walking `Knight_SwWalkOn` through the decoded opcodes and
+drawing its parts out of `KN1.OB`..`KN5.OB` gives a coherent eight-frame walk cycle.
+`Knight_SwSwing` gives a sword swing with its blade arc. Setting the facing to 3 mirrors
+the figure correctly, parts still assembled, which is what confirms the `-(x + cel_width)`
+term in the mirrored placement. The same code against the creature bank tables gives a
+troll with its club, a trogg with its axe, a ratman, and a three-bank balok whose second
+frame opens its jaws.
+
+## The overworld is two byte grids and a rectangle
+
+The map's rules turned out to be small and complete, and all of them are in `_MAP`.
+
+### The terrain table
+
+`_MAP:MapType` is **40 columns by 26 rows of bytes**, at image offset 125,890, one byte to
+each 8x8 block of the 320x200 `MAP.CMP` picture. `_MAP:FindLandscape` reads one out and
+stores it in the variable `MOON:ColourBackdrop` switches on, which is what gives the four
+codes their meanings:
+
+```
+0  plain / glade    GL1..GL8.T over GLB1.CMP
+2  forest           FO1..FO8.T over FOB1.CMP
+4  swamp            SW1..SW8.T over SWB1.CMP
+6  waste            WA1..WA8.T over WAB1.CMP
+```
+
+The index comes from `_MAP:CalcKnGrid` and `_MAP:GetIndex`. It reads the map token's width
+and height out of the `MI.C` bank header, which are 8 and 10, and computes
+
+```
+grid_x = (x + width/2)  >> 3
+grid_y = (y + height)   >> 3
+index  = grid_y * 40 + grid_x
+```
+
+where `x, y` are `knight[0x5c]` and `knight[0x5e]`, the token's **top-left corner** on the
+map. So the ground under a traveller is the ground under the middle of his feet. With `y`
+bounded at 190 the row index reaches 25, which is why the table has a twenty-sixth row for
+a picture only twenty-five rows tall.
+
+**Checked by looking.** Drawing the grid's own boundaries over the map artwork puts them on
+the treeline, the edge of the marsh and the mountain ridge, region for region. Fitting the
+table against the picture at one row up and one row down also makes the within-region
+colour variance worse, and reading two rows either way runs into bytes that are not one of
+the four codes at all, which pins both the start and the length.
+
+### Hard going, and nothing impassable
+
+`_MAP:MapSLOW` is a second grid at image offset 124,890 on the same index, holding a
+two-bit mask. `_MAP:CheckSLOW`, in full:
+
+```
+SlowFLAG = 0
+if either map effect flag is set: return      ; the pair beside GemXY, one of
+                                              ; which GEMEncounter tests
+mask = MapSLOW[index]
+if mask == 0: return
+SlowDELAY += 1
+if (SlowDELAY & mask) == 0: return
+SlowFLAG = 1
+```
+
+and `_MAP:MapMovement` increments the step counter, sees `SlowFLAG`, and throws the
+direction away. **So a refused step still costs the day**; hard ground is a tax on time,
+not a wall. Mask 1 and mask 2 are half speed on different rhythms, mask 3 a quarter. Laid
+over the artwork the 3s are the mountain spine and the escarpments, the 1s the deep forest
+and the 2s the marsh and the broken waste.
+
+The only hard limit is a rectangle. `_MAP:HawkBorders` clears whichever direction bit would
+take the token out of `0..=310` by `0..=190`, using four literal comparisons against 0,
+0x136 and 0xbe. That is one screen, which is what settles the scrolling question: `MAP.CMP`
+is a single 320x200 image, `_MAP:SHOW` hands the position to the blitter with nothing
+subtracted from it, and there is nowhere for the view to go. `_MAP:ScrollINPUT` reads the
+keyboard despite its name.
+
+### A place is a box, and two of them have coordinates
+
+`MOON:CheckGROOC` decides whether you have arrived somewhere by overlapping two rectangles,
+one axis at a time, through a helper at image 0x9f0d that counts the passes; two passes is
+inside. Both rectangles come out of the `MI.C` bank by `MOON:GetWIDTH`: the place's icon,
+and the traveller's own 8x10 token. There is no radius and no centre anywhere in it.
+
+What it walks is `MOON:MapIconsTABLE`, records of `[u16 icon][u16 x][u16 y]` ending on a
+negative icon, and what it pushes is a stack of `[x][y][kind]` at DS:043c that
+`_MAP:CreatePaper` turns into the menu. The kind is the icon's frame number, and
+`MOON:StackMessages` maps 0x15..0x22 onto "Enter Village", the two cities, Stonehenge, the
+Valley of the Gods, Math the Wizard and a dead knight's grave. The four village kinds are
+each gated on the knight's own index, so **a village belongs to one knight and only he can
+enter it**.
+
+`_MAP:KnightGoesToTown` carries the two cities as literals: (94, 47) for Highwood and
+(297, 157) for Waterdeep, compared as grid cells (12, 7) and (37, 20). Those cells are
+exactly what the index formula above makes of those pixels, which is a check on both.
+
+### Part of DGROUP is not in the load image, and `MapIconsTABLE` is in it
+
+`MapIconsTABLE` itself cannot be read. The first **2,906 bytes** of DGROUP in the unpacked
+image are a byte-for-byte duplicate of the region 0x5398 higher, which is real animation
+script data; the duplicate ends exactly where `MOON:LairFile`, the first initialised datum,
+begins. So that span is uninitialised storage the packer does not carry and the emulated
+unpack left stale, not the program's data.
+
+Everything the symbol table places below DS:0b5a is therefore unreadable in this image:
+`MapIconsTABLE`, `LairLocation`, `LairType`, `ForestLairs`, and MOON's scratch variables.
+Everything at or above it reads correctly, which is how `LairFile` gives all 24 lair
+layouts (`fol1.t` through `gll6.t`, six per family) and how the terrain grids at 0x1e7da
+and 0x1ebc2 are trustworthy.
+
+Worth knowing before trusting any address in that range: a symbol having an address does
+not mean the bytes at that address are the program's.
+
+### The arena tables
+
+Four tables of eight in `_LOADER`, each entry a pointer to a filename, with a counter
+beside it:
+
+```
+PlainTable   GL1.t..GL8.t     counter DS:8995
+ForestTable  FO1.t..FO8.t     counter DS:8997
+SwampTable   SW1.t..SW8.t     counter DS:8991
+WasteTable   WA1.t..WA8.t     counter DS:8993
+```
+
+The loader for a family reads `Table[counter]`, loads it, then `inc counter` and
+`and counter, 7`. **A rotation, not a roll.** The four counters are the `PLAINCOUNT`,
+`FORESTCOUNT`, `SWAMPCOUNT` and `WASTECOUNT` publics.
+
+Beside them, `TileTable` is four words indexed by the same landscape code and gives the
+scenery sheet: `FO1.CMP` for plain *and* forest, `SW1.CMP` for swamp, `WA1.CMP` for waste.
+The routine that reads it tests its argument against 4 first and keeps `FO2.CMP` when it
+matches. Every `.T` placement's first byte is 3, 4 or 0xfe, so the natural reading is that
+the byte is that argument. **Checked by compositing and looking**: drawing `GL1.T` with
+everything from `FO2` gives a black tangle where the canopy should be, everything from
+`FO1` gives blue-black blobs, and 4 from `FO2` with the rest from `FO1` gives a tree with a
+trunk, a canopy and a stump. The same test on `FO3.T` puts 0xfe with 3 rather than with 4.
 
 ## Consequence for the port
 
-The animation sequences in this project are **authored, not recovered**: read off the
-sprite banks frame by frame, with timings chosen by feel. The player and hero banks
-contain complete figures, so they animate; creatures do not.
+The bestiary is unblocked. All eight creatures are composed the same way, and their
+scripts are recovered along with the knight's.
+
+The animation sequences currently in this project are **authored, not recovered**: read
+off the sprite banks frame by frame, with timings chosen by feel. Replacing them with the
+real scripts is build-order item 27, and now only needs the VM written in Rust.

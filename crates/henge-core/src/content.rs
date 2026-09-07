@@ -38,6 +38,36 @@ pub struct Family {
     pub sheet: String,
     /// Asset id of the full-screen backdrop.
     pub backdrop: String,
+    /// The sheet a placement draws from, keyed by the placement's first byte.
+    ///
+    /// **Recovered.** `_LOADER` picks the tile sheet from `TileTable`, four
+    /// words indexed by the landscape code, which reads `FO1.CMP` for both
+    /// plain and forest, `SW1.CMP` for swamp and `WA1.CMP` for waste. The
+    /// routine that does it first tests the selector against 4 and keeps
+    /// `FO2.CMP` when it matches, so an arena of any family draws part of its
+    /// scenery from `FO2`. Every `.T` placement in the game carries 3, 4 or
+    /// 0xfe in that byte, and compositing the three readings shows only one of
+    /// them makes a coherent picture: 4 from `FO2`, everything else from the
+    /// family's own sheet.
+    #[serde(default)]
+    pub tiles: BTreeMap<u8, String>,
+    /// The eight arenas this family rotates through, in file order.
+    ///
+    /// **Recovered.** Each family has a table of eight filename pointers
+    /// (`PlainTable`, `ForestTable`, `SwampTable`, `WasteTable`) and a counter
+    /// beside it. Generating an arena reads `Table[counter]`, loads it, then
+    /// does `inc counter` and `and counter, 7`. The choice is a rotation, not a
+    /// roll: the eight sheets of a family come round in order and repeat every
+    /// eighth fight in it.
+    #[serde(default)]
+    pub arenas: Vec<String>,
+}
+
+impl Family {
+    /// Which sheet a placement's first byte asks for.
+    pub fn tile_sheet(&self, selector: u8) -> &str {
+        self.tiles.get(&selector).unwrap_or(&self.sheet)
+    }
 }
 
 pub type Arenas = BTreeMap<String, ArenaData>;

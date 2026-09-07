@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 25 done, 52 remaining.**
+**77 items. 33 done, 44 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -40,8 +40,8 @@ The engine and a vertical slice. Roughly a quarter of the game.
 
 ## Phase 1: the blockers
 
-Research, not construction. **Could take a day or a month**; nothing makes that
-predictable. Everything in phases 2 and 4 waits on these.
+This was the research phase, and it is now finished: 20 through 24 are done. What is left
+of it, 25 to 27, is construction. Everything in phases 2 and 4 waits on 25.
 
 Item 20 was recorded as settled and negative. **It was wrong**, and 21 is what proved it:
 the search had been run against an image that was still packed, because `MAIN.EXE` is
@@ -65,17 +65,29 @@ That unblocked 22 almost for free, and most of the phase with it.
       disassembly as a bytecode fetch-and-dispatch loop, not by name alone. The command
       table it indexes is `TaskComTable`, and the code's `mov bx, 0x9448` matches that
       symbol's address exactly
-- [ ] 23. Recover the task VM opcode set and operand widths, by reading out
-      `TaskComTable` and disassembling each handler it points at
-- [ ] 24. Recover the per-frame sprite-part record. **Verify by compositing and looking**:
-      if it does not make a coherent figure it is not decoded, however plausible it looks
+- [x] 23. **Recovered: nineteen commands, with operand widths.** `TaskComTable` is BSS,
+      so the handler addresses live only as immediates in `INITTASK`, and those are
+      link-time offsets needing the same correction `symbolmap.py` fits for code symbols.
+      Corrected, all nineteen land exactly on a routine entry; uncorrected, none do.
+      Widths come from each handler's own `add word ptr [di+2], n`. Three table slots are
+      empty and one handler is a bare `RET`. `docs/TASKVM.md` has the set;
+      `tools/taskvm.py` reads it back and disassembles any script
+- [x] 24. **Recovered: `[u8 bank*4][u8 cel][i8 y][u8 flags][i16 x]`.** The earlier guess
+      had x and y the wrong way round and read the bank selector as a plain index rather
+      than the slot times four, which is why it composited to a heap. **Checked by
+      compositing and looking**: the knight's eight-frame walk cycle, stance and sword
+      swing all come out coherent, the mirrored form stays assembled, and the troll,
+      trogg, ratman and balok composite from their own bank tables. All 221 named scripts
+      in DGROUP parse end to end and terminate on `ff ff`
 - [ ] 25. Write the VM in `henge-core` as a deterministic interpreter, integers only
 - [ ] 26. Export every actor's animation scripts to data
 - [ ] 27. Replace the hand-authored knight sequences with the recovered ones
 
 ## Phase 2: the bestiary
 
-Unblocked all at once by 25. This is the single biggest change to how the game feels.
+Unblocked all at once by 25. Every creature's animation scripts and bank table are
+recovered (`docs/TASKVM.md`), so each of these is translation rather than research. This
+is the single biggest change to how the game feels.
 
 - [ ] 28. Troll
 - [ ] 29. Trogg with axe
@@ -120,9 +132,26 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
 
 Independent of everything. Makes it feel like a game rather than a demo.
 
-- [ ] 50. Title screen and attract mode
-- [ ] 51. Character select, with the four knights' differing stats
-- [ ] 52. A real status panel
+- [x] 50. **Title screen and attract mode.** The wordmark was in the font: `BOLD.F` has 76
+      frames and the glyph map only ever used 66, and frames 73, 74 and 75 are the
+      `Moonstone / A Hard Days Knight` logo and the two credit lines. The option list is
+      `DoOptions`: four rows, a player count of one to four, a gore switch, practice combat
+      and moon quest, clamping at both ends rather than wrapping, with the arrow at `ARX`
+      50. What the original drew it over is in `INTR.EXE` and still unknown, so it goes
+      over an intro plate, and attract mode cycles the other ten
+- [x] 51. **Character select.** `CH.PIV` and `SEL.CEL`, both of which the pack had decoded
+      and never shown, and the rules from `ChooseKnight`, `ChooseRefresh`, `FindChosen` and
+      `ChooseFIRE`. `KnightGlowColours` gives each knight's three shades, so the four are
+      blue, gold, emerald and red because the original says so, which is also what the
+      initials on `BNAME`, `GNAME`, `ENAME` and `RNAME` stand for. **The four do not differ
+      in stats**: `InitKnights` separates them by name, colour and which corner of the map
+      they start in, and hands all four the same block. The data allows four different
+      ones; what ships is the original's
+- [x] 52. **A real status panel.** The knight record and `DisplayKnight` give the whole
+      sheet: strength, constitution and endurance at `+0x2e`..`+0x30`, life points, gold,
+      daggers, experience, health and its maximum, the weapon and the armour, with the
+      arithmetic that turns them into a fight. One plate per fighter along the bottom of an
+      arena, and the sheet itself on a key
 - [ ] 53. Mouse pointer and clickable widgets
 - [ ] 54. The message system: wait, occurrence and instruction messages
 - [ ] 55. The intro sequence (`INTR.EXE`, never examined)
@@ -131,13 +160,38 @@ Independent of everything. Makes it feel like a game rather than a demo.
 ## Phase 6: the world
 
 38 is done, so the merchant is open and the tavern has something to charge for.
-60 and 61 are cheap wins available now.
+57, 58, 60 and 61 are done: the map's own tables are in the game.
 
-- [ ] 57. Recover the real terrain table and location graph
-- [ ] 58. Recover the arena selection tables
+- [x] 57. **Recovered: `_MAP:MapType`, 40x26 bytes, one family code per 8x8 block of the
+      map picture.** Codes 0, 2, 4, 6 are plain, forest, swamp and waste, which is the
+      order `MOON:ColourBackdrop` compares against. `_MAP:CalcKnGrid` builds the index from
+      the traveller's token: `((x+4)>>3, (y+10)>>3)`, the middle of his feet. Checked by
+      drawing the grid's own boundaries over the map artwork, where they follow the
+      treeline, the marsh edge and the mountain ridge. The location graph is **half
+      recovered**: the two towns' coordinates and the nine kinds of place and their menu
+      lines are out of the executable, but `MOON:MapIconsTABLE` itself is uninitialised
+      data and is not in the load image, so where the other seven sit is not recovered
+- [x] 58. **Recovered: four tables of eight, and a counter, not a roll.** `PlainTable`,
+      `ForestTable`, `SwampTable` and `WasteTable` each hold eight filename pointers, and
+      generating an arena reads `Table[counter]`, then `inc counter` and `and counter, 7`.
+      The six lair layouts per family are not in those tables and so never come up on the
+      road. Also recovered: `TileTable` gives plain and forest the same `FO1` scenery
+      sheet, and a placement whose selector byte is 4 draws from `FO2` instead, whatever
+      the family. Checked by compositing an arena all three ways and looking: only that
+      one makes a coherent picture
 - [ ] 59. The moors arena family, which we do not render at all
-- [ ] 60. What makes ground impassable
-- [ ] 61. Map scrolling
+- [x] 60. **Recovered: nothing on the map is impassable; ground is slow instead.**
+      `_MAP:MapSLOW` is a second grid on the same index holding a two-bit mask, and
+      `_MAP:CheckSLOW` refuses the step when `counter & mask` is not zero, having already
+      charged it to the day. Forest and marsh are half speed, the mountain spine a quarter.
+      The only hard limit is a rectangle: `_MAP:HawkBorders` clamps the token to
+      `0..=310` by `0..=190`
+- [x] 61. **Settled, and negative: the overworld map does not scroll or pan.** `MAP.CMP`
+      is one 320x200 picture, `_MAP:SHOW` hands the token's position straight to the
+      blitter with nothing subtracted, and `HawkBorders` bounds that position to exactly
+      one screen. `_MAP:ScrollINPUT`, despite the name, reads the keyboard. The `SCROLL`
+      and `PAN` symbols carry no addresses and belong elsewhere; `SCROLLX` in `_STATUS` is
+      the status panel's own icon cursor
 - [ ] 62. Lairs: placement, entry, contents, the guardian fight
 - [ ] 63. Moon phases on a weekly cycle, and the between-days screen
 - [ ] 64. What the moon gates
@@ -172,8 +226,9 @@ Any time. None of it blocks anything.
 ## If you only did three things
 
 **25** unblocks nine creatures at once and is the difference between a duelling game and
-Moonstone. **51** is small and makes the whole thing feel like a game. **65** is now
-cheap: the tavern was shut for want of anything to charge, and 38 fixed that.
+Moonstone. **65** is cheap now that 38 gave the tavern something to charge for. **45** is
+next to free: experience is already counted and displayed, and `AdjustLevel` says exactly
+what spending it does.
 
 ## What is not portable
 

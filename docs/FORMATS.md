@@ -98,8 +98,14 @@ placement[]                         six bytes each, until sheet == 0xff:
 **`x` and `y` are signed.** Scenery may start above or left of the screen, so a tree can
 be cut off by the top edge. Reading them unsigned produces values like 65532 for -4.
 
-Which sheets an arena draws from is implied by its filename prefix. Props sort by `y` so
-that actors occlude correctly.
+**`sheet` says which of two sheets the cell is cut from**, and it is the only byte in the
+format that is not obvious. Every placement in the game carries 3, 4 or 0xfe there. The
+executable's `TileTable` gives each arena family one sheet, `FO1.CMP` for both plain and
+forest, `SW1.CMP` for swamp and `WA1.CMP` for waste, and the routine that reads it tests
+its argument against 4 first and keeps `FO2.CMP` when it matches. So 4 draws from `FO2`
+whatever the family, and 3 and 0xfe from the family's own sheet. Compositing `GL1.T` all
+three ways settles it: the mixed reading is the only one that makes a tree rather than a
+tangle. Props sort by `y` so that actors occlude correctly.
 
 Every arena shares the same walkable rectangle except for its depth: `x` always spans the
 full width and the band always begins at the same `y`, while the bottom edge varies per
@@ -137,7 +143,9 @@ to recover and the least worth recovering.
 
 ## Open questions
 
-- The **arena family pairing**. The file table in the executable lists four backdrops
-  immediately followed by four scenery sheets. If those pair positionally, two of the
-  current mappings are swapped. Settle it by rendering both and looking.
+- ~~The **arena family pairing**.~~ **Settled.** `TileTable` in `_LOADER` is four words
+  indexed by the landscape code: plain and forest both take `FO1.CMP`, swamp `SW1.CMP`,
+  waste `WA1.CMP`, over the `GLB1`, `FOB1`, `SWB1` and `WAB1` backdrops. The positional
+  pairing would have given the plain family `FO2`, which is wrong: `FO2` is the sheet
+  every family reaches for when a placement's `sheet` byte is 4.
 - The **multi-part composition format**, which gates every creature. See `REVERSING.md`.

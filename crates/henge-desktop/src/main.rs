@@ -6,6 +6,9 @@
 mod framebuffer;
 mod map;
 mod place;
+mod shell;
+mod sprite;
+mod status;
 mod text;
 mod world;
 #[cfg(feature = "research")]
@@ -18,8 +21,10 @@ use map::MapScene;
 use text::Font;
 use henge_core::combat::Intent;
 use henge_core::item::{Items, Loss};
+use henge_core::knight::Knights;
 use henge_core::place::{Answer, Approach, Places};
 use henge_core::run::Run;
+use henge_core::shell::Start;
 use henge_core::{SCREEN_H, SCREEN_W};
 use world::World;
 use std::num::NonZeroU32;
@@ -56,12 +61,41 @@ fn carrying(run: &Run) -> String {
 ///                     to do without first having to win and lose a fight
 ///   --gold <n>        start the run with coin, so a stall can be reached
 ///                     without first winning the fights that pay for it
+///   --start <screen>  title, select, map or arena. Defaults to the map, so
+///                     every recipe written before the shell existed still does
+///                     what it did
+///   --knight <0..3>   begin the run as one of the four, without going through
+///                     the select screen
+///   --sheet           hold the character sheet open over whatever is drawn
 fn hurt_arg(a: &[String]) -> Option<i32> {
     a.iter().position(|s| s == "--hurt").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
 }
 
 fn gold_arg(a: &[String]) -> Option<u32> {
     a.iter().position(|s| s == "--gold").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+fn knight_arg(a: &[String]) -> Option<usize> {
+    a.iter().position(|s| s == "--knight").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+/// Which screen a headless run opens on.
+///
+/// The default is the map, so every recipe written before the shell existed
+/// still does what it did. An interactive run opens on the title, because that
+/// is where a game opens.
+fn start_arg(a: &[String]) -> Option<Mode> {
+    let name = a.iter().position(|s| s == "--start").and_then(|i| a.get(i + 1))?;
+    match name.as_str() {
+        "title" => Some(Mode::Title),
+        "select" => Some(Mode::Select),
+        "map" => Some(Mode::Map),
+        "arena" | "combat" => Some(Mode::Combat),
+        other => {
+            eprintln!("no screen called {other}: try title, select, map or arena");
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -120,8 +154,8 @@ impl Script {
                         return;
                     }
                 }
-                // Arrived: the script takes over.
-                Mode::Place => {}
+                // Arrived, or in front of a screen the script drives directly.
+                _ => {}
             }
         }
         let c = self.keys.get(*fed).copied();
@@ -130,6 +164,30 @@ impl Script {
         }
         app.drive(c);
     }
+}
+
+/// The flags both headless modes share.
+///
+/// Order matters: who you are first, because taking a knight sets the health the
+/// rest of the run is measured against and moves you to their corner of the map;
+/// then which screen; then whatever state the run is being posed in.
+fn prepare(app: &mut App, a: &[String]) {
+    if let Some(k) = knight_arg(a) {
+        app.take_knight(k, App::roster_led_by(k));
+    }
+    if let Some(mode) = start_arg(a) {
+        app.mode = mode;
+        if mode == Mode::Select {
+            app.begin_select();
+        }
+    }
+    if let Some(hp) = hurt_arg(a) {
+        app.run.health = hp;
+    }
+    if let Some(g) = gold_arg(a) {
+        app.run.gold = g;
+    }
+    app.sheet = a.iter().any(|s| s == "--sheet");
 }
 
 fn main() -> anyhow::Result<()> {
@@ -144,8 +202,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(w) = app.world.as_mut() { w.step_arena(arena); }
         let script = Script::from_args(&a);
         app.peaceful = script.peaceful;
-        if let Some(hp) = hurt_arg(&a) { app.run.health = hp; }
-        if let Some(g) = gold_arg(&a) { app.run.gold = g; }
+        prepare(&mut app, &a);
         if let Some(id) = script.at.as_deref() { app.enter(id); }
         // Travel while tracing, so the overworld loop is exercised too.
         app.keys[3] = true;
@@ -164,14 +221,19 @@ fn main() -> anyhow::Result<()> {
             }
             app.update();
             let line = match app.mode {
+                // The shell has no state worth a line of trace: what it does is
+                // decided by looking at it, and it is checked by test in
+                // `henge_core::shell` instead.
+                Mode::Title => format!("{t:>5}  TITLE"),
+                Mode::Select => format!("{t:>5}  SELECT"),
                 Mode::Map if app.map.is_none() => break,
                 Mode::Combat if app.world.is_none() => break,
                 Mode::Place if app.visiting.is_none() => break,
                 Mode::Map => {
                     let Some(m) = app.map.as_ref() else { break };
                     let r = &app.run;
-                    format!("{:>5}  MAP     day {:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {}",
-                        t, m.state.day, r.health, r.gold, carrying(r),
+                    format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {}",
+                        t, m.state.day, m.state.x, m.state.y, r.health, r.gold, carrying(r),
                         r.victories, r.fights,
                         if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name())
                 }
@@ -191,7 +253,9 @@ fn main() -> anyhow::Result<()> {
                         .map(|f| format!("{:<6}{:>4} @{:>3},{:>3}",
                             format!("{:?}", f.state), f.health, f.x, f.y))
                         .collect();
-                    format!("{:>5}  COMBAT  {:<8} {}", t, w.family(), who.join(" | "))
+                    // The arena's own name as well as its family, because which of
+                    // the eight a family rotates to is now a thing worth seeing.
+                    format!("{:>5}  COMBAT  {:<5} {:<8} {}", t, w.name(), w.family(), who.join(" | "))
                 }
             };
             let key = line[7..].to_string();
@@ -214,8 +278,7 @@ fn main() -> anyhow::Result<()> {
         app.keys[6] = args.iter().any(|a| a == "--fight");
         let script = Script::from_args(&args);
         app.peaceful = script.peaceful;
-        if let Some(hp) = hurt_arg(&args) { app.run.health = hp; }
-        if let Some(g) = gold_arg(&args) { app.run.gold = g; }
+        prepare(&mut app, &args);
         if let Some(id) = script.at.as_deref() { app.enter(id); }
         let mut fed = 0usize;
         for _ in 0..ticks {
@@ -236,6 +299,13 @@ fn main() -> anyhow::Result<()> {
         app.save_png(&path)?;
         println!("wrote {path} ({})", app.status);
         return Ok(());
+    }
+
+    // A game opens on its title screen. `--start` overrides it, which is how the
+    // window can still be pointed straight at a map or an arena.
+    app.mode = start_arg(&args_of()).unwrap_or(Mode::Title);
+    if app.mode == Mode::Select {
+        app.begin_select();
     }
 
     let event_loop = EventLoop::new()?;
@@ -313,10 +383,15 @@ struct App {
     /// What there is to buy, carry and drink. Shared by every stall, because a
     /// flask is the same flask in Highwood as in Waterdeep.
     items: Items,
+    /// The four knights, in select order.
+    knights: Knights,
+    title: shell::TitleScene,
+    select: Option<shell::SelectScene>,
+    /// Whether the character sheet is up over whatever else is on screen.
+    sheet: bool,
     approach: Approach,
     visiting: Option<place::PlaceScene>,
     mode: Mode,
-    encounter_pick: u32,
     audio: Box<dyn Sink>,
     voices: Voices,
     fonts: std::collections::BTreeMap<String, Font>,
@@ -337,7 +412,7 @@ struct App {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Mode { Map, Combat, Place }
+enum Mode { Title, Select, Map, Combat, Place }
 
 /// Load every sound the packs offer, and open a device if there is one.
 ///
@@ -441,6 +516,9 @@ impl App {
         let fonts = text::load(&reg);
         let places = place::load(&reg);
         let items = place::load_items(&reg);
+        // A pack without knights is not an error; the title simply cannot offer
+        // a quest, exactly as it could not before.
+        let knights: Knights = reg.read_data("data.knights").unwrap_or_default();
         if world.is_none() {
             eprintln!("no arena data: {status}");
         } else {
@@ -458,9 +536,12 @@ impl App {
             map,
             places,
             items,
+            knights,
+            title: shell::TitleScene::default(),
+            select: None,
+            sheet: false,
             approach: Approach::default(),
             visiting: None,
-            encounter_pick: 0,
             audio,
             voices: Voices::new(),
             fonts,
@@ -499,8 +580,15 @@ impl App {
                             // Tab is also the way out of a place, so a broken
                             // menu can never trap you indoors.
                             Mode::Place => { self.visiting = None; Mode::Map }
+                            // And the way out of the shell, so a pack with no
+                            // knights in it cannot strand you on a select screen
+                            // with nothing to select.
+                            Mode::Select => { self.select = None; Mode::Title }
+                            Mode::Title => Mode::Map,
                         };
                     }
+                    // The character sheet, over whatever is on screen.
+                    KeyCode::KeyC => self.sheet = !self.sheet,
                     _ => {}
                 }
             }
@@ -531,6 +619,8 @@ impl App {
         let dy = self.keys[1] as i32 - self.keys[0] as i32;
 
         match self.mode {
+            Mode::Title => self.title_tick(),
+            Mode::Select => self.select_tick(),
             Mode::Map => {
                 if !self.run.alive() {
                     // The run is over. Hold a moment so the tally can be read,
@@ -550,8 +640,8 @@ impl App {
                 let mut arrived: Option<String> = None;
                 if let Some(m) = self.map.as_mut() {
                     day_before = m.state.day;
-                    let ambushed = m.update(dx, dy);
-                    if ambushed && !self.peaceful {
+                    let step = m.update(dx, dy);
+                    if step.encounter && !self.peaceful {
                         start = Some(m.last_terrain.family().to_string());
                     }
                     arrived = self.approach.step(&self.places, m.state.x, m.state.y);
@@ -595,9 +685,12 @@ impl App {
                     }
                 }
                 if let (Some(family), Some(w)) = (start, self.world.as_mut()) {
-                    self.encounter_pick = self.encounter_pick.wrapping_add(1);
+                    // Which arena of that family comes next is the family's own
+                    // turn counter, carried on the run: the original rotates
+                    // through its eight in order rather than rolling for one.
+                    let pick = self.run.next_arena(&family, w.rotation_len(&family));
                     w.set_player_health(self.run.health_for_fight());
-                    w.set_family(&family, self.encounter_pick);
+                    w.set_family(&family, pick);
                     self.voices.reset();
                     self.mode = Mode::Combat;
                 }
@@ -686,6 +779,133 @@ impl App {
         }
     }
 
+    /// The title's option list, and the attract loop behind it.
+    ///
+    /// A press while it is showing off only wakes it. Letting the same press
+    /// through would mean walking away from the keyboard and coming back to find
+    /// the game had started itself.
+    fn title_tick(&mut self) {
+        let (up, down) = (self.pressed[0], self.pressed[1]);
+        let (left, right, take) = (self.pressed[2], self.pressed[3], self.pressed[6]);
+        let touched = up || down || left || right || take;
+        let was_attracting = self.title.attracting();
+        if touched {
+            self.title.touched();
+        } else {
+            self.title.tick();
+        }
+        if was_attracting || !touched {
+            return;
+        }
+        if up {
+            self.title.state.move_by(-1);
+        }
+        if down {
+            self.title.state.move_by(1);
+        }
+        if left {
+            self.title.state.adjust(-1);
+        }
+        if right {
+            self.title.state.adjust(1);
+        }
+        if take {
+            match self.title.state.choose() {
+                Some(Start::Quest) => self.begin_select(),
+                Some(Start::Practice) => self.begin_practice(),
+                None => {}
+            }
+        }
+    }
+
+    /// Choosing knights, one player at a time.
+    fn select_tick(&mut self) {
+        let (left, right, take) = (self.pressed[2], self.pressed[3], self.pressed[6]);
+        let Some(select) = self.select.as_mut() else {
+            self.mode = Mode::Title;
+            return;
+        };
+        if left {
+            select.state.move_by(-1);
+        }
+        if right {
+            select.state.move_by(1);
+        }
+        if take {
+            select.state.take();
+        }
+        if select.state.done() {
+            self.begin_quest();
+        }
+    }
+
+    fn begin_select(&mut self) {
+        if self.knights.is_empty() {
+            // Nothing to choose between, so there is nothing to show. Start the
+            // quest as nobody rather than opening an empty screen.
+            self.mode = Mode::Map;
+            return;
+        }
+        let players = self.title.state.players.min(self.knights.len());
+        self.select = Some(shell::SelectScene::new(&self.reg, players, &self.knights));
+        self.mode = Mode::Select;
+    }
+
+    /// Practice: one bout, no map, and the first knight so the panel has a
+    /// sheet to read. `StartPractice` in the original.
+    fn begin_practice(&mut self) {
+        self.take_knight(0, Self::roster_led_by(0));
+        self.mode = Mode::Combat;
+    }
+
+    /// The quest proper. Seat zero is the person at this keyboard, so their
+    /// knight is the one the run belongs to; the rest fill the other seats.
+    fn begin_quest(&mut self) {
+        let chosen = self.select.as_ref().map(|s| s.state.chosen()).unwrap_or_default();
+        let mine = chosen.first().copied().unwrap_or(0);
+        let mut roster = chosen.clone();
+        for i in 0..henge_core::shell::SEATS {
+            if !roster.contains(&i) {
+                roster.push(i);
+            }
+        }
+        self.take_knight(mine, roster);
+        self.select = None;
+        self.mode = if self.map.is_some() { Mode::Map } else { Mode::Combat };
+    }
+
+    /// The four seats with a given knight in the first of them. Seat zero is the
+    /// person at this keyboard, so whoever they chose has to sit in it.
+    fn roster_led_by(knight: usize) -> Vec<usize> {
+        let mut roster = vec![knight];
+        for i in 0..henge_core::shell::SEATS {
+            if i != knight {
+                roster.push(i);
+            }
+        }
+        roster
+    }
+
+    /// Begin a run as one of the four, and put the arena in their colours.
+    fn take_knight(&mut self, knight: usize, roster: Vec<usize>) {
+        let Some(def) = self.knights.get(knight) else { return };
+        self.run = Run::for_knight(def, knight, &self.items);
+        // The original starts each knight in their own corner. Ours is clamped
+        // into the walkable part of the map, because two of the four corners it
+        // names sit outside it.
+        if let Some(m) = self.map.as_mut() {
+            use henge_core::overworld::{MAX_X, MAX_Y};
+            m.state.x = def.home[0].clamp(0, MAX_X);
+            m.state.y = def.home[1].clamp(0, MAX_Y);
+        }
+        let humans = self.title.state.players.max(1);
+        if let Some(w) = self.world.as_mut() {
+            w.set_players(humans);
+            w.set_roster(roster);
+            w.set_sheet_health(self.run.max_health);
+        }
+    }
+
     /// Walk into a place and open its menu.
     fn enter(&mut self, id: &str) -> bool {
         let Some(def) = self.places.get(id) else {
@@ -714,10 +934,12 @@ impl App {
             Some('u') => self.pressed[0] = true,
             Some('d') => self.pressed[1] = true,
             Some('s') => self.pressed[6] = true,
-            Some('h') => self.keys[2] = true,
-            Some('l') => self.keys[3] = true,
-            Some('k') => self.keys[0] = true,
-            Some('j') => self.keys[1] = true,
+            // Held and pressed both: walking reads the key, a menu reads the
+            // edge, and the same letter has to drive either.
+            Some('h') => { self.keys[2] = true; self.pressed[2] = true; }
+            Some('l') => { self.keys[3] = true; self.pressed[3] = true; }
+            Some('k') => { self.keys[0] = true; self.pressed[0] = true; }
+            Some('j') => { self.keys[1] = true; self.pressed[1] = true; }
             _ => {}
         }
     }
@@ -786,11 +1008,77 @@ impl App {
         Ok(())
     }
 
+    /// One fighter's plate, for each seat in the bout.
+    ///
+    /// Seat zero is the person at this keyboard, so it reads the live sheet on
+    /// the run; the rest read the definitions, because nothing yet tracks what
+    /// another knight has been through.
+    fn combat_plates(&self) -> Vec<status::Plate> {
+        let Some(w) = self.world.as_ref() else { return Vec::new() };
+        w.bout
+            .fighters
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let which = w.knight_at(i);
+                let def = self.knights.get(which);
+                let mine = i == 0 && self.run.knight.named();
+                status::Plate {
+                    name: if mine {
+                        self.run.knight.name.clone()
+                    } else {
+                        def.map_or_else(|| format!("Knight {}", which + 1), |d| d.name.clone())
+                    },
+                    colour: w.seat_colour(i),
+                    health: f.health,
+                    max_health: f.max_health,
+                    lives: if mine { self.run.lives } else { def.map_or(0, |d| d.life) },
+                }
+            })
+            .collect()
+    }
+
+    /// The scene, and then the character sheet over it if it is up.
     fn render(&mut self) {
+        self.draw_scene();
+        if self.sheet {
+            let seat = self.run.knight.seat;
+            let colour = henge_assets::player_colours(&self.fb.palette)[seat % 4];
+            let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
+            status::draw_sheet(
+                &mut self.reg, &mut self.fb, font, &self.run, &self.items, colour,
+            );
+        }
+    }
+
+    fn draw_scene(&mut self) {
         #[cfg(feature = "research")]
         if let Some(v) = self.research.as_ref() {
             v.render(&mut self.fb);
             return;
+        }
+        if self.mode == Mode::Title {
+            let fonts = shell::Fonts {
+                bold: self.fonts.get("bold"),
+                small: self.fonts.get("small"),
+            };
+            // The title owns the whole frame, so it is taken out of self for the
+            // draw the way the map is.
+            let title = std::mem::take(&mut self.title);
+            title.render(&mut self.reg, &mut self.fb, &fonts);
+            self.title = title;
+            return;
+        }
+        if self.mode == Mode::Select {
+            if let Some(select) = self.select.take() {
+                let fonts = shell::Fonts {
+                    bold: self.fonts.get("bold"),
+                    small: self.fonts.get("small"),
+                };
+                select.render(&mut self.reg, &mut self.fb, &fonts, &self.knights, &self.items);
+                self.select = Some(select);
+                return;
+            }
         }
         if self.mode == Mode::Place {
             if let Some(scene) = self.visiting.as_ref() {
@@ -827,10 +1115,17 @@ impl App {
                 }
             }
         }
-        if let Some(w) = self.world.as_mut() {
-            if w.render(&mut self.reg, &mut self.fb).is_ok() {
-                return;
-            }
+        let drawn = match self.world.as_mut() {
+            Some(w) => w.render(&mut self.reg, &mut self.fb).is_ok(),
+            None => false,
+        };
+        if drawn {
+            // The plates go on after the arena, so they sit over the ground
+            // rather than under the fighters.
+            let plates = self.combat_plates();
+            let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
+            status::draw_plates(&mut self.reg, &mut self.fb, font, &plates);
+            return;
         }
         // Nothing loaded: a slow sweep, so it is obvious the window and timing
         // are alive and the problem is the data.

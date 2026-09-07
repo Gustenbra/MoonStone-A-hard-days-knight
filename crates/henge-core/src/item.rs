@@ -28,11 +28,23 @@ use std::collections::BTreeMap;
 /// everything else a merchant might stock is [`Virtue::Inert`] until the system
 /// that gives it meaning exists. An inert item is honest: it is carried, it is
 /// worth coin, and using it says so.
+///
+/// Two of these are worn rather than used. `CalcDamage` adds a weapon's own
+/// number to every swing, and the routine at 0x28d adds an armour's to the
+/// health a knight can carry, so both are properties of the thing and belong
+/// beside its price. Using one does nothing: you are already wearing it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "does", rename_all = "kebab-case")]
 pub enum Virtue {
     /// Mends wounds on the spot, up to your full health.
     Heal { health: i32 },
+    /// Held. What it adds to a swing, from `CalcDamage`: nothing for a long
+    /// sword, two for a broad sword, three for a claymore, five for the sword of
+    /// sharpness.
+    Weapon { damage: i32 },
+    /// Worn. What it adds to the health a knight can carry and to their stride,
+    /// from the two derivation routines in `MOON`.
+    Armour { health: i32, stride: i32 },
     /// Carried and worth something, but it does nothing yet.
     Inert,
 }

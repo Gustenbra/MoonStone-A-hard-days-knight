@@ -15,6 +15,7 @@
 //! which it asks for is authored in the pack rather than decided here.
 
 use crate::item::{Items, Purchase};
+use crate::overworld::{TOKEN_H, TOKEN_W};
 use crate::run::{Run, Used};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -114,11 +115,19 @@ pub struct PlaceDef {
     pub name: String,
     /// Asset id of the full-screen backdrop; its palette is `palette.<scene>`.
     pub scene: String,
-    /// Where it sits on the map image.
+    /// The rectangle it occupies on the map image: top-left corner, then size.
+    ///
+    /// **Recovered.** The original keeps a place as an entry in
+    /// `MOON:MapIconsTABLE`, three words of icon number, x and y, and decides
+    /// that you are there in `MOON:CheckGROOC`: it takes the icon's width and
+    /// height out of the `MI.C` bank with `MOON:GetWIDTH`, does the same for
+    /// the traveller's own 8x10 token, and overlaps the two rectangles one axis
+    /// at a time. There is no radius and no centre. `x`, `y` are the icon's
+    /// top-left, in the same coordinates the traveller's own position uses.
     pub x: i32,
     pub y: i32,
-    /// How close you have to walk before you are inside.
-    pub radius: i32,
+    pub w: i32,
+    pub h: i32,
     /// Where the renderer puts the menu: `[x, y, w, h]`.
     ///
     /// Layout rather than rules, but it belongs beside the place and not in
@@ -134,19 +143,27 @@ pub struct PlaceDef {
 }
 
 impl PlaceDef {
+    /// Whether the traveller's token overlaps this place's icon.
+    ///
+    /// `MOON:CheckGROOC` calls the same half-open range test twice, once per
+    /// axis, and counts the passes; two passes is inside. That is a plain
+    /// axis-aligned box overlap, so this is one.
     pub fn covers(&self, x: i32, y: i32) -> bool {
         if self.hidden {
             return false;
         }
-        let (dx, dy) = (x - self.x, y - self.y);
-        dx * dx + dy * dy <= self.radius * self.radius
+        let spans = |a: i32, aw: i32, b: i32, bw: i32| a < b + bw && b < a + aw;
+        spans(x, TOKEN_W, self.x, self.w) && spans(y, TOKEN_H, self.y, self.h)
     }
 
-    /// Distance squared, for picking the closest of several. Squared so the
-    /// simulation never needs a square root, and so never needs a float.
+    /// Distance squared between the middle of this place and the middle of the
+    /// token, for picking the closest of several and for naming what you are
+    /// walking towards. Squared so the simulation never needs a square root,
+    /// and so never needs a float.
     pub fn distance2(&self, x: i32, y: i32) -> i32 {
-        let (dx, dy) = (x - self.x, y - self.y);
-        dx * dx + dy * dy
+        let dx = (x * 2 + TOKEN_W) - (self.x * 2 + self.w);
+        let dy = (y * 2 + TOKEN_H) - (self.y * 2 + self.h);
+        (dx * dx + dy * dy) / 4
     }
 }
 
@@ -318,7 +335,8 @@ mod tests {
             scene: "scene.hea".into(),
             x: 100,
             y: 100,
-            radius: 5,
+            w: 10,
+            h: 10,
             hidden: false,
             menu: [8, 8, 100, 100],
             options: vec![
@@ -349,7 +367,8 @@ mod tests {
             scene: "scene.highwood".into(),
             x: 0,
             y: 0,
-            radius: 0,
+            w: 0,
+            h: 0,
             hidden: true,
             menu: [8, 8, 100, 100],
             options: vec![
@@ -402,6 +421,39 @@ mod tests {
         assert!(!v.said.is_empty(), "a shut option should say why");
         v.move_by(&def, 1);
         assert!(v.said.is_empty(), "the refusal must not sit under the next option");
+    }
+
+    /// A box, not a circle. `MOON:CheckGROOC` overlaps two rectangles, so a
+    /// corner counts: standing at the bottom-right of a place's icon puts you
+    /// inside it even though the middles are further apart than either half.
+    #[test]
+    fn a_place_is_a_box_and_its_corners_count() {
+        let d = healer(); // 10 x 10 at (100, 100); the token is 8 x 10.
+        assert!(d.covers(109, 109), "a single overlapping pixel is inside");
+        assert!(!d.covers(110, 100), "one further and the boxes only touch");
+        assert!(!d.covers(100, 110));
+        assert!(d.covers(93, 91), "and the same on the other two edges");
+        assert!(!d.covers(92, 91));
+    }
+
+    /// The two towns, at the coordinates `_MAP:KnightGoesToTown` walks a knight
+    /// to, in boxes the size of their own `MI.C` icons. Whatever else moves,
+    /// standing on the recovered spot has to put you in the town.
+    #[test]
+    fn the_towns_hold_the_spots_the_original_sends_a_knight_to() {
+        let town = |x, y, w, h| PlaceDef {
+            name: "t".into(), scene: "s".into(), x, y, w, h,
+            hidden: false, menu: [0, 0, 0, 0], options: vec![],
+        };
+        // Highwood: icon 0x19 is 25x32, hung so that (94, 47) is in the middle.
+        let highwood = town(86, 36, 25, 32);
+        assert!(highwood.covers(94, 47));
+        // Waterdeep: icon 0x1a is 32x28, hung around (297, 157).
+        let waterdeep = town(285, 148, 32, 28);
+        assert!(waterdeep.covers(297, 157));
+        // And they are nowhere near each other, so a walk between them is a walk.
+        assert!(!highwood.covers(297, 157));
+        assert!(!waterdeep.covers(94, 47));
     }
 
     #[test]

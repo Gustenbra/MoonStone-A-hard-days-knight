@@ -14,7 +14,9 @@
 //! serialized with everything else, so a run still round-trips.
 
 use crate::item::{Inventory, ItemDef, Items, Loss, Purchase, Virtue};
+use crate::knight::{Knight, KnightDef};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// What came of using something you carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +44,20 @@ pub struct Run {
     pub gold: u32,
     /// What you carry.
     pub kit: Inventory,
+    /// Whose run this is: the sheet the status panel reads. A default sheet
+    /// belongs to nobody, which is what a run has before a knight is chosen.
+    #[serde(default)]
+    pub knight: Knight,
+    /// Life points. `+0x31` on the knight record; five to begin with, and the
+    /// thing a healer looks at first in `KnightHeal`.
+    #[serde(default)]
+    pub lives: i32,
+    #[serde(default)]
+    pub max_lives: i32,
+    /// `+0x36`. One a won bout, more for a bigger creature. Spending it on an
+    /// ability is `AdjustLevel`, which is build order item 45 and not here.
+    #[serde(default)]
+    pub experience: u32,
     /// Steps of travel banked toward the next point of healing.
     progress: u32,
     /// How far you must walk to mend one point.
@@ -52,6 +68,16 @@ pub struct Run {
     /// system, so two machines walking the same road are robbed on the same
     /// step.
     seed: u32,
+    /// Where each arena family's rotation has got to.
+    ///
+    /// **Recovered.** The original keeps one counter per family beside its
+    /// table of eight arenas (`PLAINCOUNT`, `FORESTCOUNT`, `SWAMPCOUNT`,
+    /// `WASTECOUNT` in the source names; four adjacent words in `_LOADER`), and
+    /// generating an arena does `inc counter` then `and counter, 7`. So this is
+    /// part of the run's state, not a roll, and it serializes with the rest of
+    /// it. A `BTreeMap` so the order is defined on every machine.
+    #[serde(default)]
+    pub arena_turn: BTreeMap<String, u32>,
 }
 
 impl Run {
@@ -65,10 +91,49 @@ impl Run {
             over: false,
             gold: 0,
             kit: Inventory::default(),
+            knight: Knight::default(),
+            lives: 0,
+            max_lives: 0,
+            experience: 0,
             progress: 0,
             steps_per_point: 12,
             theft_odds: 700,
             seed: 0x51ed_270b,
+            arena_turn: BTreeMap::new(),
+        }
+    }
+
+    /// Which arena of a family the next fight in it uses, and advance the
+    /// rotation. `and counter, 7` in the original, so eight and then round
+    /// again; `len` is here only so a family with fewer than eight arenas in
+    /// the pack cannot index off the end of it.
+    pub fn next_arena(&mut self, family: &str, len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        let turn = self.arena_turn.entry(family.to_string()).or_insert(0);
+        let pick = *turn as usize;
+        *turn = (*turn + 1) & 7;
+        pick.min(len - 1)
+    }
+
+    /// Begin a run as one of the four.
+    ///
+    /// Health is not chosen here. `SetKnightEquipment` writes ninety-nine into
+    /// the health field and the routine at 0x28d immediately overwrites it with
+    /// `10 * constitution + armour + 10`, so a knight who has taken nothing off
+    /// anybody rides out with twenty. Doing the same means the number on the
+    /// panel is the number the arithmetic produces rather than one written
+    /// beside it.
+    pub fn for_knight(def: &KnightDef, seat: usize, items: &Items) -> Run {
+        let knight = Knight::from_def(def, seat);
+        let max_health = knight.max_health(items);
+        Run {
+            gold: def.gold,
+            lives: def.life,
+            max_lives: def.life,
+            knight,
+            ..Run::new(max_health)
         }
     }
 
@@ -165,6 +230,9 @@ impl Run {
             self.victories += 1;
             if !self.over {
                 self.gold = self.gold.saturating_add(purse);
+                // `BKwon` adds one for a knight put down. The bigger creatures
+                // are worth two and three, which is a table for when they exist.
+                self.experience = self.experience.saturating_add(1);
             }
         }
         !self.over
@@ -232,7 +300,8 @@ impl Run {
                 self.health = (self.health + health).min(self.max_health);
                 true
             }
-            Virtue::Inert => false,
+            // Worn, not used. A sword in your hand is already doing its work.
+            Virtue::Weapon { .. } | Virtue::Armour { .. } | Virtue::Inert => false,
         }
     }
 
@@ -265,8 +334,48 @@ impl Run {
     }
 
     /// Start again. A finished run is read, then cleared.
+    ///
+    /// Who you are survives. The tally, the purse and the pack do not: a new run
+    /// is the same knight riding out again, not a different one, so the select
+    /// screen is not made to run twice for the same decision.
     pub fn restart(&mut self) {
+        let (knight, lives) = (self.knight.clone(), self.max_lives);
         *self = Run::new(self.max_health);
+        self.knight = knight;
+        self.lives = lives;
+        self.max_lives = lives;
+    }
+}
+
+#[cfg(test)]
+mod arena_rotation_tests {
+    use super::Run;
+
+    /// `Table[counter]`, `inc counter`, `and counter, 7`: eight in order, then
+    /// round again. Not a roll, so no seed comes into it.
+    #[test]
+    fn a_family_rotates_through_its_eight_arenas_in_order() {
+        let mut run = Run::new(100);
+        let picks: Vec<usize> = (0..10).map(|_| run.next_arena("swamp", 8)).collect();
+        assert_eq!(picks, vec![0, 1, 2, 3, 4, 5, 6, 7, 0, 1]);
+    }
+
+    #[test]
+    fn each_family_keeps_its_own_place_in_the_rotation() {
+        let mut run = Run::new(100);
+        run.next_arena("swamp", 8);
+        run.next_arena("swamp", 8);
+        assert_eq!(run.next_arena("forest", 8), 0, "the forest has not been visited");
+        assert_eq!(run.next_arena("swamp", 8), 2, "and the swamp is where it was");
+    }
+
+    #[test]
+    fn a_short_rotation_cannot_index_off_the_end_of_the_pack() {
+        let mut run = Run::new(100);
+        for _ in 0..8 {
+            assert!(run.next_arena("moors", 3) < 3);
+        }
+        assert_eq!(run.next_arena("nothing", 0), 0, "an empty family answers rather than panics");
     }
 }
 
@@ -341,6 +450,78 @@ mod tests {
         let before = r.day;
         r.new_day();
         assert_eq!(r.day, before);
+    }
+
+    /// A knight brings their own health, and the arithmetic decides it: a
+    /// starting knight is worth twenty, not the ninety-nine the original writes
+    /// into the field a moment before overwriting it.
+    #[test]
+    fn a_run_takes_its_health_from_the_knight_who_starts_it() {
+        let mut items = shop();
+        items.insert(
+            "padded_armour".into(),
+            ItemDef {
+                name: "Padded armour".into(),
+                price: 0,
+                virtue: Virtue::Armour { health: 0, stride: 0 },
+                consumed: false,
+            },
+        );
+        let def = KnightDef {
+            name: "Sir Banner".into(),
+            shades: vec![0x0000cc],
+            home: [10, 10],
+            strength: 1,
+            constitution: 1,
+            endurance: 1,
+            life: 5,
+            daggers: 10,
+            gold: 10,
+            weapon: "long_sword".into(),
+            armour: "padded_armour".into(),
+        };
+        let r = Run::for_knight(&def, 0, &items);
+        assert_eq!(r.max_health, 20);
+        assert_eq!(r.health, 20);
+        assert_eq!(r.gold, 10, "and the ten they set out with");
+        assert_eq!(r.lives, 5);
+        assert_eq!(r.knight.name, "Sir Banner");
+        assert_eq!(r.knight.seat, 0);
+    }
+
+    /// Who you are is not part of the slate. Wiping it would mean choosing a
+    /// knight again every time a run ends.
+    #[test]
+    fn a_restart_keeps_the_knight_and_clears_everything_else() {
+        let mut r = Run::new(40);
+        r.knight.name = "Sir Dwain".into();
+        r.knight.seat = 1;
+        r.max_lives = 5;
+        r.lives = 2;
+        r.gold = 200;
+        r.experience = 7;
+        r.finished_fight(0, false, 0);
+        r.restart();
+        assert_eq!(r.knight.name, "Sir Dwain");
+        assert_eq!(r.knight.seat, 1);
+        assert_eq!(r.lives, 5, "back to full");
+        assert_eq!(r.gold, 0);
+        assert_eq!(r.experience, 0);
+        assert_eq!(r.health, 40);
+        assert!(r.alive());
+    }
+
+    /// `BKwon`: a knight put down is worth a point, and a fight you lost is
+    /// worth nothing.
+    #[test]
+    fn winning_is_worth_experience_and_losing_is_not() {
+        let mut r = Run::new(100);
+        r.finished_fight(50, true, 0);
+        assert_eq!(r.experience, 1);
+        r.finished_fight(20, false, 0);
+        assert_eq!(r.experience, 1);
+        r.finished_fight(0, true, 0);
+        assert_eq!(r.experience, 1, "and a corpse collects nothing, points included");
     }
 
     #[test]

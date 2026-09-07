@@ -27,7 +27,8 @@ On Moonstone's `MAIN.EXE`: 1.3 million instructions, 78 KB in, 181 KB out.
 - The game's complete data-file table, in load order, including the disk prompts
   (`Please insert Disk A`, `Please insert Sample Disk in Drive`).
 - 16-bit code for all 11 modules named in the symbol table.
-- Animation data around `0x0e000`-`0x012000`: per-frame lists of sprite parts.
+- The animation scripts, as named data in DGROUP, image `0x13024`-`0x206a5`: 221 of
+  them, decoded in `docs/TASKVM.md` and readable with `taskvm.py`.
 
 ## What the symbol table gives
 

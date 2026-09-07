@@ -3,8 +3,9 @@
 
 use crate::framebuffer::Framebuffer;
 use henge_assets::Registry;
-use henge_core::arena::Bounds;
-use henge_core::overworld::{terrain_of_patch, Overworld, Terrain};
+use henge_core::overworld::{
+    terrain_of_patch, Landscape, Overworld, Step, Terrain, MAP_H, MAP_W, TOKEN_H, TOKEN_W,
+};
 
 /// The map's icon set. Frames 0-9 are the knights' tokens in player colours,
 /// 10-14 crystals, 43-46 creatures.
@@ -19,6 +20,9 @@ pub struct MapScene {
     /// during the update.
     palette: Vec<u32>,
     pixels: Vec<u8>,
+    /// The recovered `MapType` and `MapSLOW` grids. Empty only when the pack
+    /// was baked without the unpacked executable to read them out of.
+    land: Landscape,
     pub last_terrain: Terrain,
 }
 
@@ -34,41 +38,55 @@ impl MapScene {
             "{MAP_SCENE} is {}x{}, expected a full screen", img.width, img.height
         );
         let pixels = img.pixels.clone();
+        let land: Landscape = reg.read_data("data.overworld").unwrap_or_default();
+        if land.is_empty() {
+            eprintln!(
+                "no overworld grid in the packs: terrain will be guessed from the map's colours"
+            );
+        }
         Ok(MapScene {
-            state: Overworld::new(150, 120),
+            state: Overworld::new(146, 115),
             palette,
             pixels,
+            land,
             last_terrain: Terrain::Forest,
         })
-    }
-
-    /// Travel is confined to the map area; the bottom strip is the status bar.
-    pub fn bounds() -> Bounds {
-        Bounds { left: 6, right: 313, top: 6, bottom: 176 }
     }
 
     /// Sample a patch around the traveller rather than a single pixel: the map
     /// art is dithered, so one pixel flips between two or three terrains as you
     /// walk and a fight would be picked at random.
-    pub fn terrain_here(&self) -> Terrain {
+    ///
+    /// Fallback only. When the pack carries the real `MapType` grid the answer
+    /// comes off that instead, and the art is never looked at.
+    fn terrain_by_colour(&self) -> Terrain {
         const R: i32 = 4;
+        let (cx, cy) = (self.state.x + TOKEN_W / 2, self.state.y + TOKEN_H / 2);
         let mut samples = Vec::with_capacity(((R * 2 + 1) * (R * 2 + 1)) as usize);
         for dy in -R..=R {
             for dx in -R..=R {
-                let x = (self.state.x + dx).clamp(0, 319) as usize;
-                let y = (self.state.y + dy).clamp(0, 199) as usize;
-                let idx = self.pixels[y * 320 + x] as usize;
+                let x = (cx + dx).clamp(0, MAP_W - 1) as usize;
+                let y = (cy + dy).clamp(0, MAP_H - 1) as usize;
+                let idx = self.pixels[y * MAP_W as usize + x] as usize;
                 samples.push(*self.palette.get(idx).unwrap_or(&0));
             }
         }
         terrain_of_patch(samples)
     }
 
-    /// One tick. Returns true when an encounter starts.
-    pub fn update(&mut self, dx: i32, dy: i32) -> bool {
-        let encounter = self.state.travel(dx, dy, Self::bounds());
+    pub fn terrain_here(&self) -> Terrain {
+        if self.land.is_empty() {
+            self.terrain_by_colour()
+        } else {
+            self.state.terrain(&self.land)
+        }
+    }
+
+    /// One tick.
+    pub fn update(&mut self, dx: i32, dy: i32) -> Step {
+        let step = self.state.travel(dx, dy, &self.land);
         self.last_terrain = self.terrain_here();
-        encounter
+        step
     }
 
     /// `here` is the place you are standing on or walking towards, if any. It
@@ -81,10 +99,14 @@ impl MapScene {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
 
-        self.draw_token(reg, fb);
-
+        // The status bar goes down first and the traveller on top of it. The
+        // map is the whole screen in the original, and the recovered bound lets
+        // the token walk to y=190, which is inside our bar; a token drawn first
+        // simply vanishes down there. Ours is the bar, so ours is the one that
+        // gives way.
         self.draw_status(reg, fb, fonts.get("bold"), run, here);
         self.draw_purse(reg, fb, fonts.get("small"), run, notice);
+        self.draw_token(reg, fb);
         Ok(())
     }
 
@@ -144,7 +166,9 @@ impl MapScene {
             }
         }
 
-        let (x, y) = (self.state.x - w as i32 / 2, self.state.y - h as i32 / 2);
+        // The original's map position is the token's own top-left corner, which
+        // is what `_MAP:SHOW` hands the blitter, so there is nothing to offset.
+        let (x, y) = (self.state.x, self.state.y);
 
         // These icons are authored against the map's own palette, which is the
         // palette loaded here, so their indices already mean the right colours.
