@@ -53,7 +53,8 @@ cargo build --release
 if errorlevel 1 exit /b 1
 
 echo.
-echo   arrows move, space swings, escape quits
+echo   menus: arrows move, enter or space takes
+echo   fighting: arrows move, space swings, escape quits
 echo   tab switches map and arena, [ and ] change arena, R restarts, C the sheet
 echo   player two: WASD and F
 echo.

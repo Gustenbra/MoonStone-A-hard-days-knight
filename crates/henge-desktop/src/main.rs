@@ -463,6 +463,11 @@ fn key_index(c: KeyCode) -> usize {
         KeyCode::KeyA => 9,
         KeyCode::KeyD => 10,
         KeyCode::KeyF => 11,
+        // Enter takes a menu option. The original had only fire, but everyone
+        // arriving at a menu presses Enter first, and finding that it does
+        // nothing reads as a broken menu rather than as a different key.
+        // Kept separate from fire so that Enter does not also swing a sword.
+        KeyCode::Enter | KeyCode::NumpadEnter => 12,
         _ => 255,
     }
 }
@@ -523,7 +528,8 @@ impl App {
             eprintln!("no arena data: {status}");
         } else {
             println!("{status}");
-            println!("p1 arrows + space, p2 wasd + f, 1/2 set how many are playing,");
+            println!("menus: arrows move, enter or space takes. p1 arrows + space,");
+            println!("p2 wasd + f, 1/2 set how many are playing,");
             println!("tab switches map/arena, [ and ] change arena, R restarts, escape quits");
         }
 
@@ -554,6 +560,13 @@ impl App {
             #[cfg(feature = "research")]
             research: research::Viewer::from_args()?,
         })
+    }
+
+    /// Space or Enter takes the highlighted option. Both, everywhere a menu
+    /// asks, so there is never a screen where one of them silently does
+    /// nothing.
+    fn takes(&self) -> bool {
+        self.pressed[6] || self.pressed[12]
     }
 
     fn key(&mut self, code: KeyCode, down: bool) {
@@ -696,7 +709,7 @@ impl App {
                 }
             }
             Mode::Place => {
-                let (up, down, take) = (self.pressed[0], self.pressed[1], self.pressed[6]);
+                let (up, down, take) = (self.pressed[0], self.pressed[1], self.takes());
                 let mut leave = false;
                 let mut days = 0;
                 let mut door: Option<String> = None;
@@ -786,7 +799,7 @@ impl App {
     /// the game had started itself.
     fn title_tick(&mut self) {
         let (up, down) = (self.pressed[0], self.pressed[1]);
-        let (left, right, take) = (self.pressed[2], self.pressed[3], self.pressed[6]);
+        let (left, right, take) = (self.pressed[2], self.pressed[3], self.takes());
         let touched = up || down || left || right || take;
         let was_attracting = self.title.attracting();
         if touched {
@@ -820,7 +833,7 @@ impl App {
 
     /// Choosing knights, one player at a time.
     fn select_tick(&mut self) {
-        let (left, right, take) = (self.pressed[2], self.pressed[3], self.pressed[6]);
+        let (left, right, take) = (self.pressed[2], self.pressed[3], self.takes());
         let Some(select) = self.select.as_mut() else {
             self.mode = Mode::Title;
             return;
@@ -934,6 +947,9 @@ impl App {
             Some('u') => self.pressed[0] = true,
             Some('d') => self.pressed[1] = true,
             Some('s') => self.pressed[6] = true,
+            // 'e' is Enter, so the headless driver can prove Enter takes a menu
+            // option and not only that space does.
+            Some('e') => self.pressed[12] = true,
             // Held and pressed both: walking reads the key, a menu reads the
             // edge, and the same letter has to drive either.
             Some('h') => { self.keys[2] = true; self.pressed[2] = true; }
