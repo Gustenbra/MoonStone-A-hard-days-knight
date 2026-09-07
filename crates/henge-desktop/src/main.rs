@@ -323,8 +323,19 @@ fn main() -> anyhow::Result<()> {
     let mut surface = softbuffer::Surface::new(&context, window.clone())
         .map_err(|e| anyhow::anyhow!("no drawing surface: {e}"))?;
 
+    // The simulation runs at a fixed sixty ticks a second, whatever the
+    // machine can draw. Without this the loop ran a tick per frame and a frame
+    // as fast as the window could blit, so a fast machine played the whole
+    // game several times too quickly: an opponent crossed the arena in a
+    // blink and swung faster than a person can read, and practice was over in
+    // two seconds. Time is accumulated and spent in whole ticks so the
+    // simulation never sees a fractional step, which is what keeps two
+    // machines agreeing on it.
+    const TICK: std::time::Duration = std::time::Duration::from_micros(16_667);
+    let mut last = std::time::Instant::now();
+    let mut owed = std::time::Duration::ZERO;
+
     event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
             Event::WindowEvent {
@@ -339,7 +350,24 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             Event::AboutToWait => {
-                app.update();
+                let now = std::time::Instant::now();
+                owed += now - last;
+                last = now;
+                // A stall (a dragged window, a sleeping laptop) must not be
+                // paid back as a burst of ticks; cap what can be owed.
+                if owed > TICK * 6 {
+                    owed = TICK * 6;
+                }
+                let mut ticked = false;
+                while owed >= TICK {
+                    app.update();
+                    owed -= TICK;
+                    ticked = true;
+                }
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(last + (TICK - owed)));
+                if !ticked {
+                    return;
+                }
                 let size = window.inner_size();
                 let (Some(w), Some(h)) =
                     (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
