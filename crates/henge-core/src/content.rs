@@ -96,6 +96,13 @@ pub struct ActorDef {
     pub bounty: u32,
     /// Body box relative to the feet: [x_min, y_min, x_max, y_max], y upward.
     pub body: [i16; 4],
+    /// How much ground this fighter stands on, for keeping two of them apart.
+    /// Separate from `body`, which is the hit box: a body narrow enough to make
+    /// strikes feel fair is much narrower than the drawn figure, so using it
+    /// for spacing let four knights stand inside one another.
+    /// Zero, or absent, means fall back to the body's width.
+    #[serde(default)]
+    pub girth: i32,
     pub sequences: BTreeMap<String, Sequence>,
 }
 

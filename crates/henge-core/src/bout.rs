@@ -127,7 +127,7 @@ impl Bout {
     /// them apart rather than blocking movement keeps a scrappy close-quarters
     /// fight readable instead of jamming people into a stalemate.
     fn separate(&mut self, def: &ActorDef) {
-        let min_gap = (def.body[2] - def.body[0]) as i32;
+        let min_gap = if def.girth > 0 { def.girth } else { (def.body[2] - def.body[0]) as i32 };
         let living: Vec<usize> = self.alive().collect();
         for a in 0..living.len() {
             for b in a + 1..living.len() {
@@ -210,6 +210,7 @@ mod tests {
             sheet: "test".into(), health: 100, speed_x: 2, speed_y: 1,
             reach: 40, depth_tolerance: 6, attack_cooldown: 30,
             bounty: 0,
+            girth: 0,
             body: [-9, 0, 9, 52], sequences,
         }
     }

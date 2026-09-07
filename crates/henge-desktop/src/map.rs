@@ -104,7 +104,7 @@ impl MapScene {
         // the token walk to y=190, which is inside our bar; a token drawn first
         // simply vanishes down there. Ours is the bar, so ours is the one that
         // gives way.
-        self.draw_status(reg, fb, fonts.get("bold"), run, here);
+        self.draw_status(reg, fb, fonts.get("small").or_else(|| fonts.get("bold")), run, here);
         self.draw_purse(reg, fb, fonts.get("small"), run, notice);
         self.draw_token(reg, fb);
         Ok(())
@@ -199,24 +199,28 @@ impl MapScene {
             if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
             if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
         }
-        fb.rect(0, 178, 320, 22, dark as u8);
+        fb.rect(0, 188, 320, 12, dark as u8);
 
+        // The small font, not the bold one. The bold font is the title
+        // wordmark's face, twenty pixels tall on a two hundred pixel screen,
+        // and a status bar set in it came out as unreadable blobs that
+        // overran their own bar.
         let Some(font) = font else { return };
+        let y = 191;
         let left = format!("Day {}", self.state.day);
         let lw = font.width(reg, &left);
-        font.draw(reg, fb, &left, 6, 182, light as u8);
+        font.draw(reg, fb, &left, 6, y, light as u8);
         let right = format!("{} of {}", run.health.max(0), run.max_health);
         let rw = font.width(reg, &right);
-        font.draw(reg, fb, &right, 314 - rw, 182, light as u8);
+        font.draw(reg, fb, &right, 314 - rw, y, light as u8);
 
-        // The middle is centred in what is left over, not on the screen: this
-        // font is wide, and "open ground" centred on 320 runs straight through
-        // the health readout.
+        // The middle is centred in what is left over rather than on the screen,
+        // so a long place name cannot run through the health readout.
         let mid = here.unwrap_or_else(|| self.last_terrain.name());
         let (from, to) = (6 + lw + 6, 314 - rw - 6);
         let mw = font.width(reg, mid);
         if mw <= to - from {
-            font.draw(reg, fb, mid, from + (to - from - mw) / 2, 182, light as u8);
+            font.draw(reg, fb, mid, from + (to - from - mw) / 2, y, light as u8);
         }
     }
 }

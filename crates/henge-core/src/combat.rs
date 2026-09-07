@@ -65,7 +65,7 @@ impl Fighter {
         ActorDef {
             sheet: String::new(), health: 1, speed_x: 0, speed_y: 0,
             reach: 0, depth_tolerance: 0, attack_cooldown: 0,
-            bounty: 0,
+            bounty: 0, girth: 0,
             body: [0; 4], sequences: Default::default(),
         }
     }
@@ -295,6 +295,7 @@ mod tests {
             depth_tolerance: 6,
             attack_cooldown: 30,
             bounty: 0,
+            girth: 0,
             body: [-9, 0, 9, 52],
             sequences,
         }

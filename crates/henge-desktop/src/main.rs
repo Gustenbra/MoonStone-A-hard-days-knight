@@ -973,18 +973,35 @@ impl App {
     /// The tally at the end of a run. Without words this was a blank screen and
     /// a pause, which told the player nothing about what they had just done.
     fn draw_run_over(&mut self) {
-        let Some(font) = self.fonts.remove("bold") else { return };
+        // The heading is set in the title face and the tally underneath it in
+        // the small one. Both lines in the bold face overran the box and came
+        // out as blobs, because that face is twenty pixels tall and "Day 1
+        // Won 0 of 1" is far wider than the box it was centred in.
+        let Some(head) = self.fonts.remove("bold") else { return };
+        let small = self.fonts.remove("small");
         let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
         let (mut dark, mut light) = (0usize, 0usize);
         for i in 1..32 {
             if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) { dark = i; }
             if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) { light = i; }
         }
-        self.fb.rect(40, 66, 240, 68, dark as u8);
-        font.draw_centred(&mut self.reg, &mut self.fb, "You are slain", 74, light as u8);
-        let tally = format!("Day {}  Won {} of {}", self.run.day, self.run.victories, self.run.fights);
-        font.draw_centred(&mut self.reg, &mut self.fb, &tally, 100, light as u8);
-        self.fonts.insert("bold".into(), font);
+        let tally = format!("Day {}   Won {} of {}", self.run.day, self.run.victories, self.run.fights);
+        let body = small.as_ref().unwrap_or(&head);
+
+        // Size the box to the words rather than hoping they fit inside a fixed
+        // one, which is what clipped the tally before.
+        let hw = head.width(&mut self.reg, "You are slain");
+        let tw = body.width(&mut self.reg, &tally);
+        let w = (hw.max(tw) + 32).min(312);
+        let x = (320 - w) / 2;
+        self.fb.rect(x, 78, w, 46, dark as u8);
+        head.draw_centred(&mut self.reg, &mut self.fb, "You are slain", 86, light as u8);
+        body.draw_centred(&mut self.reg, &mut self.fb, &tally, 110, light as u8);
+
+        self.fonts.insert("bold".into(), head);
+        if let Some(f) = small {
+            self.fonts.insert("small".into(), f);
+        }
     }
 
     /// Draw a line of text over the current frame, for checking the font.

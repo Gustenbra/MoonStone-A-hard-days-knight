@@ -382,6 +382,11 @@ fn actor_definitions() -> String {
             // for a flask and leaves change.
             "bounty": 15,
             "body": [-9, 0, 9, 50],
+            // Wider than the hit box on purpose. The hit box is narrow so that
+            // a strike has to be aimed; the girth is roughly the drawn figure,
+            // so four knights in one arena stand beside each other rather than
+            // inside each other. Median standing frame in KN1.OB is 29 wide.
+            "girth": 28,
             "sequences": {
                 "idle": { "name": "idle", "end": "Loop", "frames": [
                     { "sprite": 10, "ticks": 10 }
