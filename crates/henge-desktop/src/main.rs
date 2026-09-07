@@ -406,6 +406,9 @@ struct App {
     robbed_for: u32,
     /// Ticks since the run ended, so the tally can be read before it restarts.
     run_over_for: u32,
+    /// A practice bout is not part of a run: nothing carries, nobody is slain,
+    /// and it goes back to the title when it is over.
+    practice: bool,
     status: String,
     #[cfg(feature = "research")]
     research: Option<research::Viewer>,
@@ -556,6 +559,7 @@ impl App {
             robbed: String::new(),
             robbed_for: 0,
             run_over_for: 0,
+            practice: false,
             status,
             #[cfg(feature = "research")]
             research: research::Viewer::from_args()?,
@@ -769,7 +773,8 @@ impl App {
                     // A finished bout hands control back to the map, or restarts
                     // in place when there is no map to go back to.
                     // Record the outcome once, on the tick the fight settles.
-                    if w.settled_for() == 1 {
+                    let practice = self.practice;
+                    if w.settled_for() == 1 && !practice {
                         let survivor = w.bout.fighters.first();
                         let health = survivor.map_or(0, |f| if f.alive() { f.health } else { 0 });
                         let won = w.bout.winner() == Some(0);
@@ -779,12 +784,20 @@ impl App {
                     }
                     if w.settled_for() > 120 {
                         self.voices.reset();
-                        if self.run.alive() {
-                            w.set_player_health(self.run.health_for_fight());
-                        }
-                        w.reset();
-                        if self.map.is_some() {
-                            self.mode = Mode::Map;
+                        if practice {
+                            // Nothing to carry back. Practice is over when the
+                            // bout is, and the title is where it came from.
+                            w.reset();
+                            self.practice = false;
+                            self.mode = Mode::Title;
+                        } else {
+                            if self.run.alive() {
+                                w.set_player_health(self.run.health_for_fight());
+                            }
+                            w.reset();
+                            if self.map.is_some() {
+                                self.mode = Mode::Map;
+                            }
                         }
                     }
                 }
@@ -867,7 +880,14 @@ impl App {
     /// Practice: one bout, no map, and the first knight so the panel has a
     /// sheet to read. `StartPractice` in the original.
     fn begin_practice(&mut self) {
+        self.practice = true;
         self.take_knight(0, Self::roster_led_by(0));
+        // A duel when one person is at the keyboard; otherwise the people
+        // who are, and nobody else.
+        let humans = self.title.state.players.max(1);
+        if let Some(w) = self.world.as_mut() {
+            w.set_seats(humans, if humans == 1 { 1 } else { 0 });
+        }
         self.mode = Mode::Combat;
     }
 
@@ -882,6 +902,7 @@ impl App {
                 roster.push(i);
             }
         }
+        self.practice = false;
         self.take_knight(mine, roster);
         self.select = None;
         self.mode = if self.map.is_some() { Mode::Map } else { Mode::Combat };
@@ -913,7 +934,11 @@ impl App {
         }
         let humans = self.title.state.players.max(1);
         if let Some(w) = self.world.as_mut() {
-            w.set_players(humans);
+            // One opponent on the road. Ambushes are creatures in the original,
+            // and until the bestiary lands they are knights standing in; three
+            // knights of equal strength on twenty health is not an ambush, it
+            // is an execution.
+            w.set_seats(humans, 1);
             w.set_roster(roster);
             w.set_sheet_health(self.run.max_health);
         }

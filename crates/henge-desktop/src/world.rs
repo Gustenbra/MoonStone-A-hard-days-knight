@@ -91,9 +91,22 @@ impl World {
     /// How many people are at the keyboard. The rest of the four are opponents.
     /// Moonstone was a four player game; this is that, with the seats not taken
     /// by a person filled in.
+    /// Every seat filled: the arena browser's brawl, and what the 1 and 2 keys
+    /// set up. Not what a game fight wants; see `set_seats`.
     pub fn set_players(&mut self, humans: usize) {
+        self.set_seats(humans, 4 - humans.clamp(1, 4));
+    }
+
+    /// The people at this keyboard, plus this many computer opponents.
+    ///
+    /// A fight was always four knights, whatever asked for it, and a single
+    /// person choosing practice was put up against three at once. At twenty
+    /// health that is over in under a second, before the first key is read,
+    /// and it does not practise anything. One person practises against one.
+    pub fn set_seats(&mut self, humans: usize, foes: usize) {
         let humans = humans.clamp(1, 4);
-        self.control = (0..4)
+        let total = (humans + foes).clamp(2, 4);
+        self.control = (0..total)
             .map(|i| if i < humans { Control::Local(i) } else { Control::Ai { cooldown: 20 + i as i32 * 17 } })
             .collect();
         self.reset();
