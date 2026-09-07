@@ -13,7 +13,7 @@
 
 use anyhow::Context;
 use henge_assets::{FrameRect, Manifest, Provenance, Sheet};
-use henge_core::content::ActorDef;
+use henge_core::content::{ActorDef, AttackDef};
 use henge_core::taskvm::{Bank, BankTables, Instr, ScriptSet};
 use henge_formats::taskvm::{all_scripts, Symbols};
 use henge_formats::{piv, voc, Collide, Library, Sprite};
@@ -133,7 +133,69 @@ const KNIGHT_SCRIPTS: &[(&str, &[&str])] = &[
     ("attack", &["Knight_SwSwing"]),
     ("hurt", &["Knight_SwShoulderHit"]),
     ("death", &["Knight_SwDeath"]),
+    // `+0x12`, what `KnightHitNormal` hands over the moment a blow lands.
+    ("recover", &["Knight_SwRecover"]),
 ];
+
+/// `KnightAttSw` and `KnightDamSw`, as `SetUpKnight` fills them: the script
+/// for each attack kind and what the blow is worth before `CalcDamage` adds
+/// strength and the sword. The chop is written as eight rather than the
+/// table's four because `CalcDamage` doubles a chop after the additions, and
+/// the block and the evade take nothing off anyone.
+///
+/// **Recovered.** Which of these the joystick picks is `Rjoystick` and
+/// `Ljoystick`, in `henge_core::combat::Attack::for_direction`.
+const KNIGHT_ATTACKS: &[(&str, &str, i32)] = &[
+    ("lunge", "Knight_SwLunge", 3),
+    ("swing", "Knight_SwSwing", 4),
+    ("knife", "Knight_SwKnife", 3),
+    ("block", "Knight_SwBlock", 0),
+    ("rthrust", "Knight_SwRThrust", 2),
+    ("uthrust", "Knight_SwUThrust", 3),
+    ("evade", "Knight_SwEvade", 0),
+    ("chop", "Knight_SwChop", 8),
+];
+
+/// `KnightHitSw`: the blow the knight takes, by the attacker's kind. A cut
+/// is taken at the waist, a stab or a chop at the shoulder; a blow of kind
+/// block or evade cannot land, so those rows (`Knight_SwRecover`) are not
+/// carried.
+const KNIGHT_HURT: &[(&str, &str)] = &[
+    ("lunge", "Knight_SwWaistHit"),
+    ("swing", "Knight_SwWaistHit"),
+    ("knife", "Knight_SwShoulderHit"),
+    ("rthrust", "Knight_SwWaistHit"),
+    ("uthrust", "Knight_SwShoulderHit"),
+    ("chop", "Knight_SwShoulderHit"),
+];
+
+/// `KnightBloSw`, which the name had suggested was blood and is the block
+/// table `CheckBlock` reads: the guard that stops each kind. The rows for
+/// the knife and the up thrust are left at zero in the original, which is
+/// what an idle knight holds; that quirk lives in `Fighter::blocks`.
+const KNIGHT_BLOCKS: &[(&str, &str)] = &[
+    ("chop", "evade"),
+    ("swing", "block"),
+    ("lunge", "evade"),
+    ("rthrust", "evade"),
+];
+
+/// What a blow does to a knight who is down: `MudmenStruck1` and
+/// `KnightKnightStruck1`. `Knight_SwCollapse` is the second half of
+/// `Knight_SwDeath`, the fall itself; `Knight_SwDeCap` sets `DeCapFLAG`,
+/// skips to the collapse when the gore is off, and ends by killing the task.
+const KNIGHT_FINISHES: &[(&str, &str)] = &[
+    ("collapse", "Knight_SwCollapse"),
+    ("decap", "Knight_SwDeCap"),
+];
+
+/// The scripts the game's own code hands to a task it spawns off the knight:
+/// `KnifeThrow` starts the dagger on `SpeedKnife` and `ControlKnife` keeps
+/// it on `Knife`. Both draw from `KN4.OB`, slot 3 of the knight's table.
+const KNIGHT_SPAWNED: &[&str] = &["SpeedKnife", "Knife"];
+
+/// The spray `AddBlood` starts, on bank table 4. Every part of it is gated.
+const BLOOD: &str = "Blood1";
 
 /// One creature of the bestiary: which scripts its five states play, and the
 /// numbers the original's own set-up routine gives it.
@@ -150,6 +212,21 @@ struct Creature {
     attack: &'static [&'static str],
     hurt: &'static [&'static str],
     death: &'static [&'static str],
+    /// The kind the attack above lands as: what the creature's own routine
+    /// writes into `+0x28` before it plays the script, named the way the
+    /// knight's kinds are. That is what indexes the knight's `KnightHitSw`.
+    kind: &'static str,
+    /// The creature's other attacks, by kind, where its routine has more
+    /// than one to pick from. Which it picks when is item 37.
+    alternates: &'static [(&'static str, &'static str)],
+    /// `*Hit`: the blow-taken script by the knight's attack kind, each with
+    /// its own `TASKDEAD` and so its own death. A kind missing here takes
+    /// `hurt`.
+    hurt_by: &'static [(&'static str, &'static str)],
+    /// Whether its blows go through `CheckBlock`: only the troggs' do.
+    blockable: bool,
+    /// Whether `AddBlood` is called when it is struck.
+    bleeds: bool,
     /// `+0x38` and `+0x3c` of the actor record, from `Set*Tables`.
     health: i32,
     /// What its blow takes off, from the `*Dam` table `SetMonsterAnims` fills,
@@ -212,6 +289,13 @@ const CREATURES: &[Creature] = &[
         // the original; `Troll_Hit` is the only blow-taken script it has.
         hurt: &["Troll_Hit"],
         death: &["Troll_Dies"],
+        // `TrollBunt` writes 4 and `TrollChop` 0x10. `TrollHit` is one script
+        // for every kind, and `TrollStruck` calls `AddBlood`.
+        kind: "swing",
+        alternates: &[("chop", "Troll_Chop")],
+        hurt_by: &[],
+        blockable: false,
+        bleeds: true,
         health: 40, damage: 3, approach: 150, back_off: 90, depth: 5,
         // `TrollWALKR` steps 16, 26, 13, 26: twenty pixels a frame.
         reach: 80, speed: [3, 1], bounty: 40, girth: 0,
@@ -223,6 +307,17 @@ const CREATURES: &[Creature] = &[
         attack: &["TroggAxe_Swing"],
         hurt: &["TroggAxe_WaistHit"],
         death: &["TroggAxe_Split"],
+        // `TroggSwing` writes 4 and `TroggChop` 0x10; `TroggHitAxe` is the
+        // row below, and `TroggStruck1` runs the knight's `CheckBlock`.
+        kind: "swing",
+        alternates: &[("chop", "TroggAxe_Chop")],
+        hurt_by: &[
+            ("lunge", "TroggAxe_Stabbed"), ("swing", "TroggAxe_WaistHit"),
+            ("knife", "TroggAxe_ShoulderHit"), ("rthrust", "TroggAxe_Stabbed"),
+            ("uthrust", "TroggAxe_ShoulderHit"), ("chop", "TroggAxe_ShoulderHit"),
+        ],
+        blockable: true,
+        bleeds: false,
         health: 20, damage: 3, approach: 100, back_off: 90, depth: 5,
         // `TroggWALKR` steps 0, 7, 23: ten pixels a frame.
         reach: 70, speed: [2, 1], bounty: 15, girth: 0,
@@ -234,6 +329,15 @@ const CREATURES: &[Creature] = &[
         attack: &["TroggHammer_Swing"],
         hurt: &["TroggHammer_WaistHit"],
         death: &["TroggHammer_Split"],
+        kind: "swing",
+        alternates: &[("chop", "TroggHammer_Chop")],
+        hurt_by: &[
+            ("lunge", "TroggHammer_Stabbed"), ("swing", "TroggHammer_WaistHit"),
+            ("knife", "TroggHammer_ShoulderHit"), ("rthrust", "TroggHammer_Stabbed"),
+            ("uthrust", "TroggHammer_ShoulderHit"), ("chop", "TroggHammer_ShoulderHit"),
+        ],
+        blockable: true,
+        bleeds: false,
         health: 20, damage: 2, approach: 70, back_off: 65, depth: 5,
         reach: 60, speed: [2, 1], bounty: 15, girth: 0,
     },
@@ -244,6 +348,17 @@ const CREATURES: &[Creature] = &[
         attack: &["TroggSpear_Lunge"],
         hurt: &["TroggSpear_WaistHit"],
         death: &["TroggSpear_Split"],
+        // `TroggAttacks` writes 2 for the spear. `TroggSpearStruck1` runs
+        // `CheckBlock` and answers a block with `Knight_SwEvade`.
+        kind: "lunge",
+        alternates: &[],
+        hurt_by: &[
+            ("lunge", "TroggSpear_Stabbed"), ("swing", "TroggSpear_WaistHit"),
+            ("knife", "TroggSpear_ShoulderHit"), ("rthrust", "TroggSpear_Stabbed"),
+            ("uthrust", "TroggSpear_ShoulderHit"), ("chop", "TroggSpear_ShoulderHit"),
+        ],
+        blockable: true,
+        bleeds: false,
         // No `TroggDamSp` exists; the spear's blow is set where the lunge
         // lands, in code not yet read. Three is the axe's, as a stand-in.
         health: 15, damage: 3, approach: 130, back_off: 120, depth: 5,
@@ -256,6 +371,17 @@ const CREATURES: &[Creature] = &[
         attack: &["Ratman_Slash"],
         hurt: &["Ratman_Knocked"],
         death: &["Ratman_KnockDead"],
+        // `ControlRatCollide` writes 4 for the slash and 2 for the bite,
+        // which is a grab and waits on 37. `RatmenHit` is the row below.
+        kind: "swing",
+        alternates: &[],
+        hurt_by: &[
+            ("lunge", "Ratman_Stabbed"), ("swing", "Ratman_Knocked"),
+            ("knife", "Ratman_Stabbed"), ("rthrust", "Ratman_Stabbed"),
+            ("uthrust", "Ratman_Stabbed"), ("chop", "Ratman_HitOnHead"),
+        ],
+        blockable: false,
+        bleeds: false,
         // Five hit points and a blow of three at new moon; `SetRatmenTables`
         // raises both with the moon, to seven and six, then twelve and eight.
         // The moon is not in the game yet, so the ratman is the dark one.
@@ -269,6 +395,15 @@ const CREATURES: &[Creature] = &[
         attack: &["Mudmen_ArmAttack"],
         hurt: &["Mudmen_Hit"],
         death: &["Mudmen_Dies"],
+        // The mudman's routines never write `+0x28`, so it stays at zero and
+        // `KnightHitSw[0]` is the stance: in the original its arm does not
+        // stagger the knight, it entangles him, which is item 37. A swing
+        // stands in so the blow is felt.
+        kind: "swing",
+        alternates: &[],
+        hurt_by: &[],
+        blockable: false,
+        bleeds: false,
         health: 30, damage: 2, approach: 80, back_off: 75, depth: 5,
         // `MudmenWALK` steps (12, 12), (10, 14): it comes at you on a
         // diagonal, eleven across and thirteen deep a frame.
@@ -281,6 +416,12 @@ const CREATURES: &[Creature] = &[
         attack: &["Demon_Slap"],
         hurt: &["Demon_Hurt"],
         death: &["Demon_Death"],
+        // `DemonAttack` writes 0x10 for the slap, 4 for the zap, 2 for the whip.
+        kind: "chop",
+        alternates: &[],
+        hurt_by: &[],
+        blockable: false,
+        bleeds: false,
         // `InitKnightvsDemon` writes 250 hit points and no maximum. Its blow
         // is not in a `*Dam` table; four is a stand-in between a troll's and
         // a dragon's bite. Its screen border is `SETDEMONBORD`, not done.
@@ -298,6 +439,17 @@ const CREATURES: &[Creature] = &[
         attack: &["Beast_Run1"],
         hurt: &["Beast_LowerHit"],
         death: &["Beast_LowerDead"],
+        // `ControlBeast` writes 0x10. `BeastHit2` is the row below; a blow
+        // from above finds the head and its own death.
+        kind: "chop",
+        alternates: &[],
+        hurt_by: &[
+            ("lunge", "Beast_LowerHit"), ("swing", "Beast_LowerHit"),
+            ("knife", "Beast_LowerHit"), ("rthrust", "Beast_LowerHit"),
+            ("uthrust", "Beast_UpperHit"), ("chop", "Beast_UpperHit"),
+        ],
+        blockable: false,
+        bleeds: false,
         // Ten hit points, and a tracker that closes to two pixels. Its blow
         // is not in a `*Dam` table; three is a stand-in.
         health: 10, damage: 3, approach: 2, back_off: 1, depth: 5,
@@ -313,6 +465,13 @@ const CREATURES: &[Creature] = &[
         attack: &["Balok_UpperCut"],
         hurt: &["Balok_UpperHit"],
         death: &["Balok_Dead"],
+        // `ControlBalok` writes 4 for the uppercut and 0x10 for the grab.
+        // `BalokStruck` calls `AddBlood`.
+        kind: "swing",
+        alternates: &[],
+        hurt_by: &[],
+        blockable: false,
+        bleeds: true,
         health: 30, damage: 4, approach: 80, back_off: 60, depth: 10,
         // Its uppercut lands from 41 to 74 pixels out, and its own width
         // keeps a knight sixty away, so it swings from just outside that.
@@ -329,6 +488,12 @@ const CREATURES: &[Creature] = &[
         attack: &["Dragon_HighBite"],
         hurt: &["Dragon_Hit"],
         death: &["Dragon_Dead"],
+        // `DragonAttack` writes 2 for the bite. `DragonStruck` calls `AddBlood`.
+        kind: "lunge",
+        alternates: &[],
+        hurt_by: &[],
+        blockable: false,
+        bleeds: true,
         // `SetUpDragonTables` writes 200 hit points and a maximum of 120.
         // `DragonDam` is 10 for a lunge or a right thrust and 30 for a swing
         // or a chop; the bite is given the smaller.
@@ -868,7 +1033,14 @@ fn actor_definitions(
     banks: &BTreeMap<String, BankTables>,
 ) -> anyhow::Result<String> {
     let knight_banks = banks.get("knight").cloned().unwrap_or_default();
-    let roots: Vec<&str> = KNIGHT_SCRIPTS.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+    let roots: Vec<&str> = KNIGHT_SCRIPTS
+        .iter()
+        .flat_map(|(_, v)| v.iter().copied())
+        .chain(KNIGHT_ATTACKS.iter().map(|(_, s, _)| *s))
+        .chain(KNIGHT_HURT.iter().map(|(_, s)| *s))
+        .chain(KNIGHT_FINISHES.iter().map(|(_, s)| *s))
+        .chain(KNIGHT_SPAWNED.iter().copied())
+        .collect();
     let animation = closure_of(scripts, &roots);
     let mut def = ActorDef {
         sheet: "actor.knight".into(),
@@ -908,7 +1080,18 @@ fn actor_definitions(
     for (state, names) in KNIGHT_SCRIPTS {
         def.scripts.insert(state.to_string(), names.iter().map(|n| n.to_string()).collect());
     }
+    for (kind, script, damage) in KNIGHT_ATTACKS {
+        def.attacks.insert(kind.to_string(), AttackDef { script: script.to_string(), damage: *damage });
+    }
+    def.attack = "swing".into();
+    def.hurt_by = KNIGHT_HURT.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
+    def.blocks = KNIGHT_BLOCKS.iter().map(|(k, g)| (k.to_string(), g.to_string())).collect();
+    def.finishes = KNIGHT_FINISHES.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
+    def.blockable = true;
     def.animation = animation;
+    if !def.animation.is_empty() {
+        def.validate().map_err(|e| anyhow::anyhow!("knight: {e}"))?;
+    }
     if def.animation.is_empty() {
         eprintln!("the knight has no animation: bake with an unpacked MAIN.EXE image");
     }
@@ -940,9 +1123,20 @@ fn creature_definition(
         .get(c.banks)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("{}: no bank tables for loader {}", c.id, c.banks))?;
+    // `+0x12`, the recovery script every creature's `*Hit` hands over the
+    // moment its blow lands: the stance for all but the beast and Balok.
+    let recover = match c.id {
+        "beast" => "Beast_TurnAround",
+        "balok" => "Balok_Recover",
+        _ => c.idle[0],
+    };
     let roots: Vec<&str> = [c.idle, c.walk, c.attack, c.hurt, c.death]
         .iter()
         .flat_map(|v| v.iter().copied())
+        .chain(c.alternates.iter().map(|(_, s)| *s))
+        .chain(c.hurt_by.iter().map(|(_, s)| *s))
+        .chain(c.bleeds.then_some(BLOOD))
+        .chain(std::iter::once(recover))
         .collect();
     let animation = closure_of(scripts, &roots);
     // Every creature's tables routine stores table 2 into `+0x18`.
@@ -997,6 +1191,18 @@ fn creature_definition(
     ] {
         def.scripts.insert(state.to_string(), names.iter().map(|n| n.to_string()).collect());
     }
+    def.scripts.insert("recover".into(), vec![recover.to_string()]);
+    def.attacks.insert(
+        c.kind.to_string(),
+        AttackDef { script: c.attack[0].to_string(), damage: c.damage },
+    );
+    for (kind, script) in c.alternates {
+        def.attacks.insert(kind.to_string(), AttackDef { script: script.to_string(), damage: c.damage });
+    }
+    def.attack = c.kind.to_string();
+    def.hurt_by = c.hurt_by.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
+    def.blockable = c.blockable;
+    def.bleeds = c.bleeds;
     def.validate().map_err(|e| anyhow::anyhow!("{}: {e}", c.id))?;
     Ok(def)
 }

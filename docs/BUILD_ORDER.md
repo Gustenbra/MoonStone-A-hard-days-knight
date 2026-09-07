@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 43 done, 2 partial, 32 remaining.**
+**77 items. 47 done, 2 partial, 28 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -41,7 +41,7 @@ The engine and a vertical slice. Roughly a quarter of the game.
 ## Phase 1: the blockers
 
 This was the research phase, and it is finished, and so is the construction that followed
-it: 20 through 27 are done, and phase 2 with them. Phase 4 is open.
+it: 20 through 27 are done, and phase 2 with them, and now phase 4.
 
 Item 20 was recorded as settled and negative. **It was wrong**, and 21 is what proved it:
 the search had been run against an image that was still packed, because `MAIN.EXE` is
@@ -217,14 +217,112 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
 
 ## Phase 4: combat depth
 
-All of it can start now. The attack tables (`KnightAttSw`: lunge, swing, knife, block,
-right, up and over thrusts, evade, chop, and the damage of each in `KnightDamSw`) are
-recovered with the bestiary's, so 46 is translation.
+Built, and most of it turned out to be translation: the knight's controller
+(`ControlKnight`, `KnightAttack`, `CheckBlock`, `KnightGotStruck` and the
+`*Struck1` routines it dispatches to) reads cleanly, and the pieces that had been
+taken for design were in it. Three corrections to the record came out of reading
+it, and `TASKVM.md` carries them: DS:0x700 **is** written, by `OSWITCHES` off the
+title's gore row, and zero is gore on; `KnightBloSw` is the block table, not the
+blood; and the scripts are 239, not 236, because `SpeedKnife`, `Knife` and
+`Blood1` carry no encounter prefix and were filtered out. **Every part checked by
+looking**: each of the eight attacks against its `tools/taskvm.py` composite frame
+by frame, the dagger across the arena into a trogg, a held block against a
+knight, the evade against a spear, a troll bleeding where the sword landed, and
+the decapitation beside the bloodless collapse from the same fight.
 
-- [ ] 46. Attack variety, several by direction and button
-- [ ] 47. Blocking and parrying
-- [ ] 48. Weapon state: drawn, sheathed, dropped, thrown
-- [ ] 49. Gore and dismemberment
+- [x] 46. **Attack variety. Recovered:** `KnightAttack` strips the fire bit from
+      the input word, doubles it and reads `Rjoystick` or `Ljoystick` by the
+      facing, and the two tables are mirrors, so the direction held with fire,
+      relative to where the knight looks, picks the kind: forward is the swing,
+      forward and up the up thrust, forward and down the lunge, up the chop, down
+      the evade, back the rear thrust, back and up the knife, back and down the
+      block. Fire alone is slot 0 of `KnightAttSw`, the stance, which is to say
+      nothing; here it is the swing, so that one button still fights and the
+      plain opponent, which only knows one button, does too. That one cell is
+      ours. The kind is the offset into `KnightAttSw`, and it is what indexes
+      every `*Hit` and `*Dam` table, so a creature's blow-taken script now
+      follows the knight's attack (`TroggHitAxe`: stabbed by a lunge or a rear
+      thrust, cut at the waist by a swing, at the shoulder by the rest) and each
+      of those scripts' own `TASKDEAD` picks the death: a trogg stabbed falls,
+      one cut at the waist is split. The creatures' kinds are recovered from
+      what their routines write into `+0x28` (`TroggSwing` 4, `TroggChop`
+      0x10, the spear's lunge 2, the troll's bunt 4 and chop 0x10, the ratman's
+      slash 4, Balok's uppercut 4, the dragon's bite 2, the demon's slap and the
+      beast's charge 0x10; the mudman never writes one, and a swing stands in).
+      Damage is the `*Dam` entry against the default attack's, so the chop is
+      twice the swing (`CalcDamage` doubles it) and the rear thrust half; what
+      `CalcDamage` adds for strength and the sword is item 40's. Also read and
+      **not built**: the moment a blow lands the attacker is handed `+0x12`,
+      which is built (`Knight_SwRecover`; the creatures' is their stance, so a
+      swing that connects is cut short as the original cuts it); the encounter
+      overrides `InitKnightvs*` make to the knight's table (against the spear
+      trogg both guard slots become the evade, against the ratmen the block
+      becomes `Knight_SwOThrust` and the evade `Knight_SwDThrust`, which are the
+      two scripts not in the base table), which are item 37's business; and the
+      cursed knight's inverted joystick in `ControlKnight`, item 43's
+- [x] 47. **Blocking. Recovered**, from `CheckBlock`: the defender's block
+      table (`KnightBloSw`, at `+0x1e`) is read at the attacker's kind and the
+      entry has to equal what the defender is doing: a block stops a swing, an
+      evade stops a chop, a lunge or a rear thrust. A block only counts from
+      the front, which the code tests as the two not facing the same way; an
+      evade stops one blow and is spent until the knight walks (bit 7 of
+      `+0x48`, cleared in `ControlKnight` on a step). A stopped blow does no
+      harm, the attacker bounces into his recovery, and the defender's guard
+      replays. Only the knight has a table, and only a knight's or a trogg's
+      blows are checked (`KnightKnightStruck1`, `TroggStruck1`,
+      `TroggSpearStruck1`); every other creature's, and the dagger's, land
+      through `KnightStruck1`, which never asks. One quirk is reproduced because
+      it is what the code does: the table's empty rows are zero, an idle knight's
+      kind is zero, so an up thrust from the front is stopped by a knight
+      standing still and lands only on one mid-swing or turned away. One
+      simplification is ours: the original never clears `+0x28` on a blow taken,
+      so a reeling knight keeps the kind of whatever he was doing; here a
+      reeling or recovering knight never blocks. **Not built**: what the
+      original does with a block against the spear (`TroggSpearStruck1` plays
+      `Knight_SwEvade` for it), and the Black Knight's own guard (`BKBlock`,
+      `_evadechop`), which is his behaviour
+- [x] 48. **Weapon state: the thrown dagger, and honestly not the rest.** The
+      dagger is the one weapon state the scripts hold, and it is built end to
+      end: `Knight_SwKnife` opens with a `TASKTESTEQ` on the dagger count at
+      `+0x34` (`SetKnightEquipment` writes ten there) and goes back to the
+      stance when it is zero; its last frame calls `KnifeThrow`, which takes one
+      off the belt and spawns a task of kind 0x1a on `SpeedKnife` at the
+      knight's position and facing, on his own banks (`KN4.OB`, slot 3), with
+      `KnifeDam` (three) for its blow; `ControlKnife` hands the task `Knife`
+      every frame, twenty pixels forward and the blade, until it touches
+      something or leaves the screen (past 0x14a on the right, ten pixels past
+      the left). In henge a `Missile` is a task in the bout beside the fighters,
+      stepped by the same interpreter, folded into the fingerprint, and
+      serialized with everything else; the daggers come off the run's sheet
+      going in and what is left goes back onto it, so a thrown dagger is a
+      dagger gone. **What the item covers that is not done:** `SWORDFLAG`, the
+      drawn and sheathed state (`Knight_SwWalkOn` is the walk on with the
+      sword drawn, and nothing here sheathes it), and a dropped or lost sword
+      (`TakeSword`, `_no_sword`, `DisplayMSword` are the status panel's side of
+      it, and what drops one in a fight has not been found)
+- [x] 49. **Gore. Recovered**, and the switch is real: `OSWITCHES` toggles
+      DS:0x700 off the title's gore row, `DisplaySelect` prints `ON` for zero,
+      and every `TASKSKIP` and every part flagged 0x80 reads it. It goes through
+      as `Bout::bloodless`, into every task step, fighter or missile, and into
+      the plain opponent, which comes in for the finisher only with the gore on
+      (`TroggAttack` checks DS:0x700 before it). What the flag reaches: the
+      blood on every creature's blow-taken frames; `Knight_SwDeCap`, whose
+      `TASKSKIP` becomes the collapse; the trogg's `*_Split` deaths, which skip
+      to `*_CollapseDead`; and `Blood1`, the spray `AddBlood` starts at the
+      strike point on bank table 4 (`BLO.CEL`), which `TrollStruck`,
+      `BalokStruck` and `DragonStruck` call and nothing else does, and every
+      part of which is gated. **Dismemberment:** the knight kneels for twenty
+      frames of `Knight_SwDeath` with two `BODY` parts still on him, and a blow
+      that finds them in that window is the finisher: a swing takes the head
+      (`MudmenStruck1`, the path every creature's and the dagger's blow takes;
+      `KnightKnightStruck1` does it for any blow from a knight), anything else
+      is `Knight_SwCollapse`, the fall. The creatures' own decapitations are
+      already in their `*Hit` rows and come with 46: `Ratman_HitOnHead` and the
+      beast's `UpperHit` for a blow from above, each with its own death. **Not
+      built**: `Knight_Explode`, which `TrollOHead` plays for a troll's chop on
+      a dead knight, and the spear's `TroggSpear_Toss`, because both are the
+      creature's finisher and that is item 37; `DrDropHead` and `DrDropClaws`,
+      the dragon's, which are 36's; and the screen shake `ShakeADD` asks for
 
 ## Phase 5: the shell
 

@@ -10,8 +10,9 @@
 //! the seam networked play plugs into.
 
 use crate::arena::Bounds;
-use crate::combat::{line_hits_body, Fighter, Intent, State};
+use crate::combat::{line_hits_body, Attack, Fighter, Intent, State};
 use crate::content::ActorDef;
+use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
 use serde::{Deserialize, Serialize};
 
 /// Reported so a caller can play a sound, shake the screen, or log a replay,
@@ -24,6 +25,82 @@ pub struct HitEvent {
     pub fatal: bool,
 }
 
+/// A blow that was stopped: `blockflag` coming back set from `CheckBlock`.
+/// Reported beside the hits, and never as one, because nothing was hurt.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parry {
+    pub attacker: usize,
+    pub target: usize,
+    /// What stopped it.
+    pub with: Attack,
+}
+
+/// A task in the arena that is not a fighter: a thrown dagger, a spray of
+/// blood. The original keeps ten task slots and puts these in them beside the
+/// fighters, each with a controller of its own (`ControlKnife`, `ControlMisc`);
+/// here they are their own list, stepped by the same interpreter on the same
+/// bank tables, and just as deterministic.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Missile {
+    /// The fighter it came from, whose blows it deals and whom it cannot hit.
+    pub owner: usize,
+    /// Whose definition holds its scripts and banks.
+    pub actor: String,
+    pub task: Task,
+    pub record: TaskActor,
+    /// Where its feet would be, for depth: the y the owner had when it left.
+    pub depth: i32,
+    /// The attack kind it lands as, or none for something that only draws.
+    pub attack: Option<Attack>,
+    /// The script `ControlKnife` hands the task each time its frame ends:
+    /// `Knife`, twenty pixels forward and the blade. Empty for a task that
+    /// runs one script and kills itself, which is what `Blood1` does.
+    pub flight: String,
+    pub script_tick: u32,
+    /// Connected, or flown off the edge: gone at the end of the tick.
+    pub spent: bool,
+}
+
+impl Missile {
+    /// The blow of the frame being shown: the weapon parts, as rectangles.
+    fn hit_line(&self, def: &ActorDef) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        for p in self.task.shown.iter().filter(|p| p.is(taskvm::part_flags::WEAPON)) {
+            let Some(bank) = def.bank(p.table, p.bank) else { continue };
+            let t = &self.task;
+            let Some(r) = taskvm::place(p, bank, (t.x, t.y, t.z), t.mirror()) else { continue };
+            let (l, top) = (r.x, r.y);
+            let (rr, b) = (r.x + r.w as i32, r.y + r.h as i32);
+            out.extend([(l, top), (rr, top), (rr, b), (l, b), (l, top)]);
+        }
+        out
+    }
+
+    fn hash_into(&self, mix: &mut impl FnMut(i64)) {
+        mix(self.owner as i64);
+        for b in self.actor.as_bytes() {
+            mix(*b as i64);
+        }
+        self.task.hash_into(mix);
+        for (at, v) in &self.record.fields {
+            mix(*at as i64);
+            mix(*v as i64);
+        }
+        mix(self.depth as i64);
+        mix(self.attack.map_or(-1, |a| a.kind() as i64));
+        for b in self.flight.as_bytes() {
+            mix(*b as i64);
+        }
+        mix(self.script_tick as i64);
+        mix(self.spent as i64);
+    }
+}
+
+/// What `ControlKnife` stops the dagger at: past the right edge of the
+/// screen, or ten pixels past the left.
+const KNIFE_RIGHT_EDGE: i32 = 0x14a;
+const KNIFE_LEFT_EDGE: i32 = -10;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Bout {
     pub fighters: Vec<Fighter>,
@@ -31,11 +108,31 @@ pub struct Bout {
     pub damage: i32,
     /// Ticks since only one fighter (or none) was left standing.
     pub settled_for: u32,
+    /// The gore switch, off: the original's DS:0x700, which the title
+    /// screen's option row toggles and every `TASKSKIP` and `GATED` part
+    /// reads. Zero there is gore on, so this is false by default too.
+    #[serde(default)]
+    pub bloodless: bool,
+    /// Daggers in flight, and blood.
+    #[serde(default)]
+    pub missiles: Vec<Missile>,
+    /// The blows stopped on the last tick. Output, like the hits, and not
+    /// part of the fingerprint.
+    #[serde(default)]
+    pub parries: Vec<Parry>,
 }
 
 impl Bout {
     pub fn new(bounds: Bounds, fighters: Vec<Fighter>) -> Bout {
-        Bout { fighters, bounds, damage: 25, settled_for: 0 }
+        Bout {
+            fighters,
+            bounds,
+            damage: 25,
+            settled_for: 0,
+            bloodless: false,
+            missiles: Vec::new(),
+            parries: Vec::new(),
+        }
     }
 
     pub fn alive(&self) -> impl Iterator<Item = usize> + '_ {
@@ -75,11 +172,107 @@ impl Bout {
             })
     }
 
+    /// The nearest fallen fighter that can still be struck, for a finisher.
+    pub fn nearest_body<'a, F>(&self, me: usize, def_of: F) -> Option<usize>
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        let m = &self.fighters[me];
+        self.fighters
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != me && f.finishable(def_of(&f.actor)))
+            .min_by_key(|(_, f)| (f.x - m.x).abs() + (f.y - m.y).abs() * 2)
+            .map(|(i, _)| i)
+    }
+
+    /// Is a corpse still being dealt with: a finisher playing on a fallen
+    /// fighter, which a caller ending the bout on a count should wait for.
+    pub fn finishing<'a, F>(&self, def_of: F) -> bool
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        self.fighters.iter().any(|f| {
+            f.state == State::Dead
+                && def_of(&f.actor).finishes.values().any(|s| *s == f.script)
+                && f.task.as_ref().map_or(false, |t| t.active && t.running)
+        })
+    }
+
     /// One tick, with every fighter the same kind. `intents` is indexed to
     /// match `fighters`; a short slice is treated as idle for the rest, which
     /// keeps a caller honest without panicking mid-fight.
     pub fn step(&mut self, def: &ActorDef, intents: &[Intent]) -> Vec<HitEvent> {
         self.step_with(|_| def, intents)
+    }
+
+    /// What one fighter's blow of one kind takes off: the fighter's own
+    /// figure, or the bout's where the actor leaves it at zero, scaled by
+    /// the attack's `*Dam` entry against the default attack's. The knight's
+    /// chop is doubled by `CalcDamage` and his rear thrust is half a swing;
+    /// what `CalcDamage` adds for strength and the sword is item 40's.
+    fn blow(&self, attacker: usize, def: &ActorDef, attack: Attack) -> i32 {
+        let base = match self.fighters[attacker].damage {
+            0 => self.damage,
+            d => d,
+        };
+        let (num, den) = def.blow_ratio(attack);
+        (base * num / den).max(1)
+    }
+
+    /// `KnifeThrow`: one dagger off the thrower, and a task of its own on
+    /// `SpeedKnife` at the thrower's position and facing, on his banks.
+    fn throw_knife(&mut self, owner: usize, def: &ActorDef) {
+        let f = &mut self.fighters[owner];
+        let Some(task) = f.task.as_ref() else { return };
+        let daggers = f.record.get(field::DAGGERS);
+        if daggers <= 0 || !def.animation.contains_key("SpeedKnife") {
+            return;
+        }
+        f.record.set(field::DAGGERS, daggers - 1);
+        let mut knife = Task::new("SpeedKnife", task.x, task.y, task.facing);
+        knife.table = def.bank_table;
+        knife.z = task.z;
+        let mut m = Missile {
+            owner,
+            actor: f.actor.clone(),
+            task: knife,
+            record: TaskActor::default(),
+            depth: f.y,
+            attack: Some(Attack::Knife),
+            flight: "Knife".into(),
+            script_tick: 0,
+            spent: false,
+        };
+        // Its first frame now, so it is on screen the tick it leaves the hand.
+        m.task.step(&def.animation, &mut m.record, self.bloodless);
+        self.missiles.push(m);
+    }
+
+    /// `AddBlood`: a spray at the strike point, facing the way the knight
+    /// does, on bank table 4, which is `BLO.CEL` five times over. Every part
+    /// of `Blood1` is gated, so with the gore off the task runs its five
+    /// frames drawing nothing and kills itself.
+    fn add_blood(&mut self, owner: usize, at: (i32, i32), depth: i32, actor: &str, def: &ActorDef) {
+        if !def.animation.contains_key("Blood1") || !def.banks.contains_key(&4) {
+            return;
+        }
+        let facing = if self.fighters[owner].facing < 0 { FACING_LEFT } else { FACING_RIGHT };
+        let mut blood = Task::new("Blood1", at.0, at.1, facing);
+        blood.table = 4;
+        let mut m = Missile {
+            owner,
+            actor: actor.to_string(),
+            task: blood,
+            record: TaskActor::default(),
+            depth,
+            attack: None,
+            flight: String::new(),
+            script_tick: 0,
+            spent: false,
+        };
+        m.task.step(&def.animation, &mut m.record, self.bloodless);
+        self.missiles.push(m);
     }
 
     /// One tick, with each fighter looked up by the actor it is.
@@ -94,34 +287,119 @@ impl Bout {
     where
         F: Fn(&str) -> &'a ActorDef,
     {
-        let mut swings: Vec<(usize, Vec<(i32, i32)>)> = Vec::new();
+        self.parries.clear();
+        let bloodless = self.bloodless;
+
+        // A blow in the air this tick: who or what is swinging it, the shape,
+        // the kind, and whose feet it is judged level from.
+        struct Blow {
+            attacker: usize,
+            missile: Option<usize>,
+            line: Vec<(i32, i32)>,
+            attack: Option<Attack>,
+            depth: i32,
+        }
+        let mut blows: Vec<Blow> = Vec::new();
+
         for i in 0..self.fighters.len() {
             let intent = intents.get(i).copied().unwrap_or_default();
             let def = def_of(&self.fighters[i].actor);
-            let line = self.fighters[i].step(def, intent, self.bounds);
+            let line = self.fighters[i].step_gated(def, intent, self.bounds, bloodless);
             if !line.is_empty() {
-                swings.push((i, line));
+                let f = &self.fighters[i];
+                blows.push(Blow { attacker: i, missile: None, line, attack: f.attack, depth: f.y });
+            }
+            // What the script asked the game to do this tick. `KnifeThrow` is
+            // the one call the knight's own scripts make that puts something
+            // new in the arena; `TASKADDTASK` is the general form of it.
+            let effects: Vec<Effect> = self.fighters[i].effects.clone();
+            for e in effects {
+                match e {
+                    Effect::Gosub { routine, .. } if routine == "KnifeThrow" => {
+                        self.throw_knife(i, def);
+                    }
+                    Effect::Spawn { script } => {
+                        let f = &self.fighters[i];
+                        if let Some(t) = f.task.as_ref() {
+                            let mut task = Task::new(script, t.x, t.y, t.facing);
+                            task.table = t.table;
+                            task.z = t.z;
+                            let mut m = Missile {
+                                owner: i,
+                                actor: f.actor.clone(),
+                                task,
+                                record: TaskActor::default(),
+                                depth: f.y,
+                                attack: None,
+                                flight: String::new(),
+                                script_tick: 0,
+                                spent: false,
+                            };
+                            m.task.step(&def.animation, &mut m.record, bloodless);
+                            self.missiles.push(m);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
-        // Resolve every swing against every other fighter. A swing connects at
+        // The missiles: `ControlKnife` for a dagger, which flies until it
+        // touches something or leaves the screen; `ControlMisc` for the rest,
+        // which run their one script to its `TASKKILLTASK`.
+        for k in 0..self.missiles.len() {
+            let def = def_of(&self.missiles[k].actor);
+            let m = &mut self.missiles[k];
+            m.script_tick += 1;
+            if m.script_tick >= def.script_ticks.max(1) {
+                m.script_tick = 0;
+                if !m.task.running && !m.flight.is_empty() {
+                    m.task.replace(m.flight.clone());
+                }
+                m.task.step(&def.animation, &mut m.record, bloodless);
+            }
+            if !m.task.active {
+                m.spent = true;
+            }
+            if !m.flight.is_empty() {
+                let off = if m.task.mirror() {
+                    m.task.x <= KNIFE_LEFT_EDGE
+                } else {
+                    m.task.x >= KNIFE_RIGHT_EDGE
+                };
+                if off {
+                    m.spent = true;
+                }
+            }
+            if !m.spent && m.attack.is_some() {
+                let line = m.hit_line(def);
+                if !line.is_empty() {
+                    blows.push(Blow {
+                        attacker: m.owner,
+                        missile: Some(k),
+                        line,
+                        attack: m.attack,
+                        depth: m.depth,
+                    });
+                }
+            }
+        }
+
+        // Resolve every blow against every other fighter. A blow connects at
         // most once, so a single strike cannot damage two people, which matters
         // the moment there are more than two in the arena.
         let mut events = Vec::new();
-        for (attacker, line) in swings {
+        for blow in blows {
+            let attacker = blow.attacker;
             let a_def = def_of(&self.fighters[attacker].actor);
-            // The blow is the attacker's own, or the bout's when the actor
-            // leaves it to the bout, which is how the knight is tuned.
-            let damage = match self.fighters[attacker].damage {
-                0 => self.damage,
-                d => d,
-            };
+            let damage = blow.attack.map_or_else(
+                || match self.fighters[attacker].damage { 0 => self.damage, d => d },
+                |a| self.blow(attacker, a_def, a),
+            );
+            let mut connected = false;
             for target in 0..self.fighters.len() {
-                if target == attacker || !self.fighters[target].alive() {
+                if target == attacker {
                     continue;
-                }
-                if self.fighters[attacker].struck {
-                    break;
                 }
                 let t_def = def_of(&self.fighters[target].actor);
                 // Two kinds of fighter can disagree about how deep a plane
@@ -130,21 +408,66 @@ impl Bout {
                 // across the same ten, or a knight who cannot step to its
                 // row would be untouchable to it and it to him.
                 let plane = a_def.depth_tolerance.max(t_def.depth_tolerance);
-                let depth_ok = (self.fighters[attacker].y - self.fighters[target].y).abs() <= plane;
-                let body = self.fighters[target].body(t_def);
-                if !depth_ok || !line_hits_body(&line, body) {
+                if (blow.depth - self.fighters[target].y).abs() > plane {
                     continue;
                 }
-                self.fighters[attacker].struck = true;
-                self.fighters[target].take_hit(damage);
-                events.push(HitEvent {
-                    attacker,
-                    target,
-                    damage,
-                    fatal: self.fighters[target].state == State::Dead,
-                });
+                if self.fighters[target].alive() {
+                    let body = self.fighters[target].body(t_def);
+                    if !line_hits_body(&blow.line, body) {
+                        continue;
+                    }
+                    connected = true;
+                    // `CheckBlock`, for the blows that go through it.
+                    let a_facing = self.fighters[attacker].facing;
+                    let checked = blow.missile.is_none() && a_def.blockable;
+                    if let (true, Some(a)) = (checked, blow.attack) {
+                        if self.fighters[target].blocks(t_def, a_facing, a) {
+                            let with = self.fighters[target].guarding().unwrap_or(a);
+                            self.parries.push(Parry { attacker, target, with });
+                            self.fighters[attacker].recover(a_def);
+                            break;
+                        }
+                    }
+                    let evading = self.fighters[target].guarding() == Some(Attack::Evade);
+                    self.fighters[target].struck(t_def, damage, blow.attack);
+                    let fatal = !self.fighters[target].alive();
+                    events.push(HitEvent { attacker, target, damage, fatal });
+                    if t_def.bleeds {
+                        let at = strike_point(&blow.line, body);
+                        let depth = self.fighters[target].y;
+                        let actor = self.fighters[target].actor.clone();
+                        self.add_blood(attacker, at, depth, &actor, t_def);
+                    }
+                    // The swing is over the moment it lands, save for the
+                    // exceptions `KnightHitNormal` and `KnightHitKnight` make.
+                    if blow.missile.is_none() && blow.attack != Some(Attack::UThrust) && !evading {
+                        self.fighters[attacker].recover(a_def);
+                    }
+                    break;
+                }
+                // Down, but still a body while the kneel lasts.
+                let Some(body) = self.fighters[target].corpse_body(t_def) else { continue };
+                if !self.fighters[target].finishable(t_def) || !line_hits_body(&blow.line, body) {
+                    continue;
+                }
+                let own_kind = self.fighters[attacker].actor == self.fighters[target].actor;
+                if self.fighters[target].finish(t_def, blow.attack, own_kind) {
+                    connected = true;
+                    let decapitating = blow.attack == Some(Attack::Swing) && !bloodless;
+                    if blow.missile.is_none() && !decapitating {
+                        self.fighters[attacker].recover(a_def);
+                    }
+                    break;
+                }
+            }
+            if connected {
+                match blow.missile {
+                    Some(k) => self.missiles[k].spent = true,
+                    None => self.fighters[attacker].struck = true,
+                }
             }
         }
+        self.missiles.retain(|m| !m.spent);
 
         self.separate(&def_of);
         if self.settled() {
@@ -205,6 +528,7 @@ impl Bout {
             h ^= v as u64;
             h = h.wrapping_mul(0x1000_0000_01b3);
         };
+        mix(self.bloodless as i64);
         for f in &self.fighters {
             mix(f.x as i64);
             mix(f.y as i64);
@@ -213,6 +537,12 @@ impl Bout {
             mix(f.damage as i64);
             mix(f.state as i64);
             mix(f.struck as i64);
+            mix(f.attack.map_or(-1, |a| a.kind() as i64));
+            for b in f.script.as_bytes() {
+                mix(*b as i64);
+            }
+            mix(f.evaded as i64);
+            mix(f.restart as i64);
             mix(f.player.frame as i64);
             mix(f.player.ticks_in_frame as i64);
             mix(f.player.finished as i64);
@@ -230,8 +560,33 @@ impl Bout {
                 mix(*v as i64);
             }
         }
+        for m in &self.missiles {
+            m.hash_into(&mut mix);
+        }
         mix(self.settled_for as i64);
         h
+    }
+}
+
+/// Where a blow landed, for the blood: the middle of the overlap between the
+/// blow's extent and the body it found. The original has the pixel where the
+/// weapon pile and the body pile first met (`CXx`, `CY`); this is the same
+/// place at rectangle resolution.
+fn strike_point(line: &[(i32, i32)], body: (i32, i32, i32, i32)) -> (i32, i32) {
+    let (l, t, r, b) = body;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (x, y) in line {
+        x0 = x0.min(*x);
+        y0 = y0.min(*y);
+        x1 = x1.max(*x);
+        y1 = y1.max(*y);
+    }
+    let (ox0, oy0) = (x0.max(l), y0.max(t));
+    let (ox1, oy1) = (x1.min(r), y1.min(b));
+    if ox0 <= ox1 && oy0 <= oy1 {
+        ((ox0 + ox1) / 2, (oy0 + oy1) / 2)
+    } else {
+        ((l + r) / 2, (t + b) / 2)
     }
 }
 
@@ -426,6 +781,278 @@ mod tests {
         assert_eq!(restored.state_hash(), b.state_hash());
         for t in 60..200 {
             let intents: Vec<Intent> = (0..3).map(|i| script(t, i)).collect();
+            b.step(&d, &intents);
+            restored.step(&d, &intents);
+            assert_eq!(restored.state_hash(), b.state_hash(), "tick {t}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod depth {
+    use super::*;
+    use crate::combat::tests::depth_def;
+    use crate::taskvm::{field, part_flags};
+
+    fn bounds() -> Bounds {
+        Bounds { left: 0, right: 319, top: 10, bottom: 114 }
+    }
+
+    /// Two knights thirty pixels apart, facing each other.
+    fn pair(d: &ActorDef) -> Bout {
+        Bout::new(
+            bounds(),
+            vec![Fighter::new("k", d, 100, 100, 1), Fighter::new("k", d, 130, 100, -1)],
+        )
+    }
+
+    fn swing() -> Intent {
+        Intent { dx: 0, dy: 0, attack: true }
+    }
+
+    /// Down and back, for a knight facing left, is right and down.
+    fn block_for(f: &Fighter) -> Intent {
+        Intent { dx: -f.facing, dy: 1, attack: true }
+    }
+
+    /// `CheckBlock`: a block held against a swing from the front stops it.
+    /// Nobody is hurt, the parry is reported, and the attacker's swing is
+    /// cut short by his recovery.
+    #[test]
+    fn a_block_absorbs_a_swing_from_the_front() {
+        let d = depth_def();
+        let mut b = pair(&d);
+        let mut hits = 0;
+        let mut parries = 0;
+        // Three ticks: the wind-up, the blade, and the recovery it bounces
+        // into. Held longer, he would swing again.
+        for _ in 0..3 {
+            let intents = [swing(), block_for(&b.fighters[1])];
+            hits += b.step(&d, &intents).len();
+            parries += b.parries.len();
+        }
+        assert_eq!(hits, 0, "nothing landed");
+        assert_eq!(parries, 1, "one swing, one parry");
+        assert_eq!(b.fighters[0].state, State::Recover, "the swing bounced off");
+        assert_eq!(b.fighters[1].health, 100);
+        assert_eq!(b.fighters[1].state, State::Guard, "still holding it");
+        assert!(b.fighters[0].struck, "the swing was spent on the shield");
+    }
+
+    /// The same block with the defender facing away is no block: `CheckBlock`
+    /// clears `blockflag` when the two face the same way.
+    #[test]
+    fn a_block_does_not_stop_a_blow_from_behind() {
+        let d = depth_def();
+        let mut b = pair(&d);
+        b.fighters[1].facing = 1;
+        let mut hits = 0;
+        for _ in 0..3 {
+            let intents = [swing(), block_for(&b.fighters[1])];
+            hits += b.step(&d, &intents).len();
+        }
+        assert_eq!(hits, 1);
+        assert!(b.parries.is_empty());
+        assert_eq!(b.fighters[1].health, 75);
+    }
+
+    /// The table says which guard stops which blow: a block stops a swing
+    /// and not a chop; an evade stops a chop, once, and walking gives it
+    /// back.
+    #[test]
+    fn the_block_table_and_the_evades_one_use() {
+        let d = depth_def();
+        let chop = Intent { dx: 0, dy: -1, attack: true };
+        let evade = Intent { dx: 0, dy: 1, attack: true };
+
+        let mut b = pair(&d);
+        let mut hits = 0;
+        for _ in 0..2 {
+            let intents = [chop, block_for(&b.fighters[1])];
+            hits += b.step(&d, &intents).len();
+        }
+        assert_eq!(hits, 1, "a block is the wrong guard for a chop");
+        assert_eq!(b.fighters[1].health, 50, "and a chop is twice a swing");
+
+        let mut b = pair(&d);
+        let mut log = Vec::new();
+        // Three chops, spaced so the defender is on his feet for each, with
+        // a step to the side between the second and third.
+        for t in 0..40 {
+            let attacker = if matches!(t, 0 | 12 | 30) { chop } else { Intent::default() };
+            let defender = if t == 22 { Intent { dx: 0, dy: 1, attack: false } } else { evade };
+            let intents = [attacker, defender];
+            let hits = b.step(&d, &intents);
+            if !hits.is_empty() {
+                log.push((t, "hit"));
+            }
+            if !b.parries.is_empty() {
+                assert_eq!(b.parries[0].with, Attack::Evade);
+                log.push((t, "evaded"));
+            }
+        }
+        let kinds: Vec<&str> = log.iter().map(|(_, k)| *k).collect();
+        assert_eq!(kinds, ["evaded", "hit", "evaded"], "{log:?}");
+    }
+
+    /// The thrown dagger: `KnifeThrow` takes one off the belt and spawns a
+    /// task that flies until it touches somebody, connects once, and is
+    /// gone. With no dagger the script goes back to the stance and nothing
+    /// is thrown.
+    #[test]
+    fn a_dagger_flies_and_connects_once() {
+        let d = depth_def();
+        let mut b = Bout::new(
+            bounds(),
+            vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 220, 100, -1)],
+        );
+        b.fighters[0].record.set(field::DAGGERS, 2);
+        let throw = Intent { dx: -1, dy: -1, attack: true };
+        let mut hits = Vec::new();
+        let mut flew = Vec::new();
+        for t in 0..20 {
+            // Fire for the two frames of the throw, then let go: held, it
+            // would throw again the moment the script ends.
+            let me = if t < 2 { throw } else { Intent::default() };
+            hits.extend(b.step(&d, &[me, Intent::default()]));
+            if let Some(m) = b.missiles.first() {
+                flew.push(m.task.x);
+            }
+        }
+        assert_eq!(b.fighters[0].record.get(field::DAGGERS), 1, "one thrown");
+        assert_eq!(flew.len() > 2, true, "it was in the air for a while: {flew:?}");
+        assert!(flew.windows(2).all(|w| w[1] > w[0]), "and moving forward: {flew:?}");
+        assert_eq!(hits.len(), 1, "it connected once: {hits:?}");
+        assert_eq!(hits[0].damage, 18, "the knife's 3 against the swing's 4, of 25");
+        assert_eq!(hits[0].attacker, 0, "and the blow is the thrower's");
+        assert!(b.missiles.is_empty(), "and is gone once it has");
+        assert_eq!(b.fighters[1].health, 82);
+
+        // No dagger, no throw.
+        let mut empty = Bout::new(bounds(), vec![Fighter::new("k", &d, 100, 100, 1)]);
+        empty.fighters[0].record.set(field::DAGGERS, 0);
+        for _ in 0..6 {
+            empty.step(&d, &[throw]);
+        }
+        assert!(empty.missiles.is_empty());
+        assert_eq!(empty.fighters[0].record.get(field::DAGGERS), 0);
+    }
+
+    /// A dagger cannot be blocked: its blow lands through `KnightStruck1`,
+    /// which never asks `CheckBlock`.
+    #[test]
+    fn a_dagger_is_not_stopped_by_a_block() {
+        let d = depth_def();
+        let mut b = Bout::new(
+            bounds(),
+            vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 200, 100, -1)],
+        );
+        b.fighters[0].record.set(field::DAGGERS, 1);
+        let throw = Intent { dx: -1, dy: -1, attack: true };
+        let mut hits = 0;
+        for _ in 0..20 {
+            let intents = [throw, block_for(&b.fighters[1])];
+            hits += b.step(&d, &intents).len();
+        }
+        assert_eq!(hits, 1);
+        assert!(b.parries.is_empty());
+    }
+
+    /// Kill a knight and swing at the body while it kneels.
+    fn kneel_and_strike(bloodless: bool) -> Bout {
+        let d = depth_def();
+        let mut b = pair(&d);
+        b.bloodless = bloodless;
+        b.fighters[1].health = 1;
+        for _ in 0..40 {
+            b.step(&d, &[swing(), Intent::default()]);
+        }
+        b
+    }
+
+    /// The blow-taken script's own `TASKDEAD` picks the death, and a swing on
+    /// the kneeling body is the decapitation, whose gated parts show only
+    /// with the gore on. Bloodless, the same swing lands, and the script's
+    /// `TASKSKIP` turns it into the collapse.
+    #[test]
+    fn gore_parts_are_gated_by_the_switch() {
+        let d = depth_def();
+        let gory = kneel_and_strike(false);
+        let body = &gory.fighters[1];
+        assert_eq!(body.state, State::Dead);
+        assert!(!body.alive());
+        assert_eq!(body.script, "decap", "a swing on the kneeling body takes the head");
+        let shown = &body.task.as_ref().unwrap().shown;
+        assert!(shown.iter().any(|p| p.is(part_flags::GATED)), "the gore is drawn: {shown:?}");
+
+        let clean = kneel_and_strike(true);
+        let body = &clean.fighters[1];
+        assert_eq!(body.state, State::Dead);
+        let t = body.task.as_ref().unwrap();
+        assert_eq!(t.pc.script, "collapse", "TASKSKIP diverts the decapitation");
+        assert!(t.shown.iter().all(|p| !p.is(part_flags::GATED)), "and nothing gated is drawn");
+    }
+
+    /// `AddBlood`: a blow on a creature that bleeds spawns `Blood1` at the
+    /// strike point on bank table 4, and every part of it is gated.
+    #[test]
+    fn blood_is_spawned_on_a_bleeder_and_gated() {
+        let mut d = depth_def();
+        d.bleeds = true;
+        for bloodless in [false, true] {
+            let mut b = pair(&d);
+            b.bloodless = bloodless;
+            let mut spawned = None;
+            for _ in 0..6 {
+                b.step(&d, &[swing(), Intent::default()]);
+                if let Some(m) = b.missiles.iter().find(|m| m.attack.is_none()) {
+                    spawned = Some(m.clone());
+                }
+            }
+            let m = spawned.expect("a spray");
+            assert_eq!(m.task.table, 4, "on the blood bank");
+            assert_eq!(m.task.pc.script, "Blood1");
+            assert_eq!(!m.task.shown.is_empty(), !bloodless, "bloodless {bloodless}: {:?}", m.task.shown);
+            assert!(b.missiles.is_empty(), "and it killed itself");
+        }
+    }
+
+    /// A body with no `BODY` parts left cannot be struck, and a corpse is
+    /// finished once: after the decapitation the task is killed and draws
+    /// nothing, as the original's `TASKKILLTASK` takes it out of the table.
+    #[test]
+    fn a_body_is_finished_once() {
+        let d = depth_def();
+        let mut b = kneel_and_strike(false);
+        let script = b.fighters[1].script.clone();
+        for _ in 0..30 {
+            b.step(&d, &[swing(), Intent::default()]);
+        }
+        assert_eq!(b.fighters[1].script, script, "the finish was not restarted");
+        assert!(!b.fighters[1].finishable(&d));
+    }
+
+    /// The missiles are part of the fingerprint and survive a snapshot: a
+    /// bout saved with a dagger in the air agrees with itself afterwards.
+    #[test]
+    fn a_bout_with_a_dagger_in_flight_survives_a_round_trip() {
+        let d = depth_def();
+        let mut b = Bout::new(
+            bounds(),
+            vec![Fighter::new("k", &d, 60, 100, 1), Fighter::new("k", &d, 260, 100, -1)],
+        );
+        b.fighters[0].record.set(field::DAGGERS, 3);
+        let throw = Intent { dx: -1, dy: -1, attack: true };
+        for _ in 0..4 {
+            b.step(&d, &[throw, Intent::default()]);
+        }
+        assert!(!b.missiles.is_empty(), "a dagger is in the air");
+        let json = serde_json::to_string(&b).unwrap();
+        let mut restored: Bout = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, b);
+        assert_eq!(restored.state_hash(), b.state_hash());
+        for t in 0..30 {
+            let intents = [throw, Intent { dx: -1, dy: 0, attack: false }];
             b.step(&d, &intents);
             restored.step(&d, &intents);
             assert_eq!(restored.state_hash(), b.state_hash(), "tick {t}");

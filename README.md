@@ -43,6 +43,19 @@ need your own copy of the original, which the engine reads and converts locally.
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
+- **Eight attacks, chosen by the direction held with fire**, the way the
+  original's own joystick tables choose them: the swing forward, the chop up,
+  the lunge forward and down, the up thrust, the rear thrust, and the block and
+  the evade, which are the original's blocking (`CheckBlock`, reproduced as
+  written) and stop the blows its table says they stop. Fire with back and up
+  throws a dagger, which flies across the arena as a task of its own and comes
+  off the sheet. A creature takes each blow on the script its own table gives
+  that kind, and dies the way that script says: a trogg stabbed falls, one cut
+  at the waist is split
+- **Gore, and the switch on the title screen.** Blood where a sword lands on a
+  troll, and a knight left kneeling can lose his head to the next swing. Turn
+  the gore off and the same blow is a collapse, because the scripts themselves
+  branch on the switch
 - **The bestiary.** Troll, trogg with axe, hammer or spear, ratmen, mudmen, beast,
   Balok, demon and dragon, each running the original's own animation scripts on
   its own sprite banks, with the hit points, blows and ranges the original's own
@@ -52,7 +65,7 @@ need your own copy of the original, which the engine reads and converts locally.
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 178 tests, all of it verifiable headlessly with no display or sound card
+- 190 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -90,7 +103,10 @@ select screen, where left and right pick a knight and space takes him.
 Walking onto a town, the healer or the stone circle opens it. In a place, up and
 down move the highlight, space takes the option, and Tab is always a way back out.
 
-Player one uses the arrows and space. Player two uses `WASD` and `F`. `1` and `2` set
+Player one uses the arrows and space, and the direction held with space is the
+attack: forward swings, up chops, forward and down lunges, forward and up
+thrusts, back thrusts behind, back and down blocks, down evades, back and up
+throws a dagger. Player two uses `WASD` and `F`. `1` and `2` set
 how many people are playing; the remaining seats are filled by opponents. `C` shows
 the character sheet. Tab switches between the overworld and the arena, `[` and `]`
 change arena, `,` and `.` change which creature fills the opponents' seats, `R`
@@ -138,9 +154,12 @@ ambushes it on the way. `--at <place>` starts inside a place, `--hurt <hp>` star
 the run already wounded so a healer has something to do, `--gold <n>` starts it
 with coin so a stall can be reached without first winning the fights that pay for
 it, and `--input` feeds one key press per tick: `u`/`d` move the highlight, `s`
-takes the option, `hjkl` walk or move the highlight sideways, `.` waits. Presses
-arrive through the same edge-detected path the keyboard uses, so a script
-exercises the game rather than a stub.
+takes the option or swings, `hjkl` walk or move the highlight sideways, `.` waits,
+and a digit is fire held with a direction, laid out like a numpad (`8` up, `6`
+right, `1` down and left), which is how each of the eight attacks is reached.
+Presses arrive through the same edge-detected path the keyboard uses, so a
+script exercises the game rather than a stub. `--bloodless` is the title's gore
+switch, off; `--trace ... --scripts` names the script each fighter is on.
 
 `--start <title|select|map|arena>` says which screen to open on. It defaults to the
 map, so every recipe written before the shell existed still does what it did; the

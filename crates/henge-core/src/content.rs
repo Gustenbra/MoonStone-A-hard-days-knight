@@ -198,6 +198,62 @@ pub struct ActorDef {
     /// up with the ground he is crossing.
     #[serde(default = "one_tick")]
     pub script_ticks: u32,
+    /// The attacks this actor has, by the name of the attack kind
+    /// (`crate::combat::Attack::name`), each with its script and the damage
+    /// the original's `*Dam` table gives it.
+    ///
+    /// **Recovered.** The knight's is `KnightAttSw` and `KnightDamSw`; a
+    /// creature's is the scripts its own routine picks and the kind it writes
+    /// into `+0x28` when it does. An actor with none here plays
+    /// `scripts["attack"]` for every direction, which is how the bestiary
+    /// fought before this table existed.
+    #[serde(default)]
+    pub attacks: BTreeMap<String, AttackDef>,
+    /// Which of `attacks` the one button, and the plain opponent, gets: the
+    /// swing for the knight, the one attack each creature was fielded with.
+    /// Also what `damage` is the figure for, so another attack's blow is its
+    /// table damage against this one's.
+    #[serde(default)]
+    pub attack: String,
+    /// The blow-taken script by the attacker's attack kind: the `*Hit` table,
+    /// which `KnightSAnim` and `TroggStruck` index with the attacker's
+    /// `+0x28`. Each of these scripts carries its own `TASKDEAD`, so which
+    /// death an actor dies is decided here too: a trogg stabbed falls, one cut
+    /// at the waist is split. A kind with no entry plays `scripts["hurt"]`.
+    #[serde(default)]
+    pub hurt_by: BTreeMap<String, String>,
+    /// `KnightBloSw`, the block table: the incoming attack kind to the guard
+    /// that stops it. `CheckBlock` compares the entry for the attacker's kind
+    /// with what the defender is doing, and only a knight has one.
+    #[serde(default)]
+    pub blocks: BTreeMap<String, String>,
+    /// Whether this actor's blows go through `CheckBlock` at all. The knight's
+    /// and the troggs' do (`KnightKnightStruck1`, `TroggStruck1`,
+    /// `TroggSpearStruck1`); every other creature's, and a thrown dagger's,
+    /// land through `KnightStruck1`, which never asks.
+    #[serde(default)]
+    pub blockable: bool,
+    /// What a blow does to this actor's body once it is down, while its frame
+    /// still carries `BODY` parts: `collapse` and `decap`. `MudmenStruck1`
+    /// decapitates a fallen knight for a swing and collapses him for anything
+    /// else; `KnightKnightStruck1` decapitates him for any blow from another
+    /// knight.
+    #[serde(default)]
+    pub finishes: BTreeMap<String, String>,
+    /// Whether a blow on this actor spawns `Blood1` at the strike point.
+    /// `AddBlood` is called from `TrollStruck`, `BalokStruck` and
+    /// `DragonStruck` and from nowhere else.
+    #[serde(default)]
+    pub bleeds: bool,
+}
+
+/// One attack of an actor: the script it plays and what the `*Dam` table
+/// says it takes off, in the same units as [`ActorDef::damage`].
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AttackDef {
+    pub script: String,
+    #[serde(default)]
+    pub damage: i32,
 }
 
 fn one_tick() -> u32 {
@@ -235,6 +291,13 @@ impl Default for ActorDef {
             bank_table: one_table(),
             origin: [0, 0],
             script_ticks: one_tick(),
+            attacks: BTreeMap::new(),
+            attack: String::new(),
+            hurt_by: BTreeMap::new(),
+            blocks: BTreeMap::new(),
+            blockable: false,
+            finishes: BTreeMap::new(),
+            bleeds: false,
         }
     }
 }
@@ -278,15 +341,41 @@ impl ActorDef {
         }
         let mut pending: Vec<(String, u8)> = Vec::new();
         for state in ["idle", "walk", "attack", "hurt", "death"] {
-            let names = self.scripts_for(state);
-            if names.is_empty() {
+            if self.scripts_for(state).is_empty() {
                 return Err(format!("state {state} names no script"));
             }
+        }
+        // Those five and whatever else is listed, such as the recovery.
+        for (state, names) in &self.scripts {
             for n in names {
                 if !self.animation.contains_key(n) {
                     return Err(format!("state {state} names {n}, which is not in the script set"));
                 }
                 pending.push((n.clone(), self.bank_table));
+            }
+        }
+        // The tables added with combat depth name scripts too, and a typo in
+        // any of them would otherwise be an attack that stands still.
+        for (what, name) in self
+            .attacks
+            .iter()
+            .map(|(k, a)| (format!("attack {k}"), &a.script))
+            .chain(self.hurt_by.iter().map(|(k, s)| (format!("hurt_by {k}"), s)))
+            .chain(self.finishes.iter().map(|(k, s)| (format!("finish {k}"), s)))
+        {
+            if !self.animation.contains_key(name) {
+                return Err(format!("{what} names {name}, which is not in the script set"));
+            }
+            pending.push((name.clone(), self.bank_table));
+        }
+        if !self.attack.is_empty() && !self.attacks.contains_key(&self.attack) {
+            return Err(format!("the default attack {} is not in the attack table", self.attack));
+        }
+        for (k, g) in &self.blocks {
+            if crate::combat::Attack::from_name(k).is_none()
+                || crate::combat::Attack::from_name(g).map_or(true, |a| !a.is_guard())
+            {
+                return Err(format!("block table entry {k}: {g} is not an attack kind and a guard"));
             }
         }
         let mut seen: BTreeSet<(String, u8)> = BTreeSet::new();
@@ -355,6 +444,45 @@ impl ActorDef {
     /// The bank a part names, through the table `TASKCELBUF` last selected.
     pub fn bank(&self, table: u8, slot: u8) -> Option<&crate::taskvm::Bank> {
         self.banks.get(&table)?.get(slot as usize).filter(|b| !b.cels.is_empty())
+    }
+
+    /// The script and kind an attack resolves to, the way `KnightAttack`
+    /// indexes `KnightAttSw`: the entry for that kind if the actor has one,
+    /// else the actor's default attack, else the one `scripts["attack"]`
+    /// names, which is then taken to be a swing.
+    ///
+    /// The fallback is what lets the plain opponent, which only ever asks for
+    /// a swing, fight with a creature whose one attack is a lunge or a bite.
+    pub fn attack_for(&self, wanted: crate::combat::Attack) -> Option<(String, crate::combat::Attack)> {
+        use crate::combat::Attack;
+        if let Some(a) = self.attacks.get(wanted.name()) {
+            return Some((a.script.clone(), wanted));
+        }
+        if let Some(a) = self.attacks.get(&self.attack) {
+            let kind = Attack::from_name(&self.attack).unwrap_or(Attack::Swing);
+            return Some((a.script.clone(), kind));
+        }
+        self.scripts_for("attack").first().map(|s| (s.clone(), Attack::Swing))
+    }
+
+    /// The blow-taken script for a blow of that kind, or the one for any blow.
+    pub fn hurt_for(&self, by: Option<crate::combat::Attack>) -> Option<String> {
+        by.and_then(|a| self.hurt_by.get(a.name()).cloned())
+            .or_else(|| self.scripts_for("hurt").first().cloned())
+    }
+
+    /// What an attack takes off against the default attack's figure: the
+    /// `*Dam` table entry for it over the entry for [`ActorDef::attack`], so
+    /// the knight's chop is twice his swing and his rear thrust half of it.
+    /// One to one when the actor has no table to say otherwise.
+    pub fn blow_ratio(&self, attack: crate::combat::Attack) -> (i32, i32) {
+        let this = self.attacks.get(attack.name()).map_or(0, |a| a.damage);
+        let base = self.attacks.get(&self.attack).map_or(0, |a| a.damage);
+        if this > 0 && base > 0 {
+            (this, base)
+        } else {
+            (1, 1)
+        }
     }
 }
 

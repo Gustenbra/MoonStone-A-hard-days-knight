@@ -81,7 +81,17 @@ const SCRIPT_PREFIXES: [&str; 12] = [
     "Balok", "Mudman",
 ];
 
+/// Three scripts with no encounter prefix, because no encounter owns them:
+/// they are handed to a task the game's own code spawns. `KnifeThrow` starts
+/// the dagger on `SpeedKnife` and `ControlKnife` keeps it on `Knife`;
+/// `AddBlood` starts a spray on `Blood1`, on bank table 4. All three parse
+/// like the rest and end on `ff ff`.
+const SPAWNED_SCRIPTS: [&str; 3] = ["SpeedKnife", "Knife", "Blood1"];
+
 fn is_script_name(name: &str) -> bool {
+    if SPAWNED_SCRIPTS.contains(&name) {
+        return true;
+    }
     let Some(head) = name.split('_').next() else { return false };
     if head.len() == name.len() {
         return false; // no underscore at all

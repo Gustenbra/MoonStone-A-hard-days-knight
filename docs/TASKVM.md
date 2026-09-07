@@ -28,12 +28,16 @@ python3 tools/taskvm.py MAIN.EXE --composite Knight_SwWalkOn
 | the scripts | DGROUP, as named data symbols: `Knight_SwSwing`, `Troll_Walk1` |
 
 The scripts are ordinary data in the executable's data segment, and the symbol
-table names 236 of them. A script pointer is a near offset in DS. (The count was
+table names 239 of them. A script pointer is a near offset in DS. (The count was
 221 until the bestiary was built: the mudmen's prefix is `Mudmen`, where
 `MudmanTABLE` had suggested `Mudman`, so their fourteen scripts and
 `Rat_TreeBrush` were being filtered out. All fifteen parse like the rest, and
 they bring four more `TASKGOSUB` targets: `AddMudVoice`, `AddMudSound`,
-`AddCrushSnd` and `PlayScareMusic`.)
+`AddCrushSnd` and `PlayScareMusic`. It was 236 until combat depth was built:
+three scripts carry no encounter prefix because no encounter owns them, being
+handed to a task the game's own code spawns. `SpeedKnife` and `Knife` are the
+thrown dagger, `Blood1` the spray `AddBlood` starts. All three parse and end on
+`ff ff`, and `tools/taskvm.py --list` still shows the prefixed 236.)
 
 ### Reading the handler table needs the link-time offset correction
 
@@ -255,14 +259,19 @@ Everything above is read out of the code except the following.
   rather than certain. The opcode numbers, widths and behaviour do not depend
   on it.
 * **DS:`0x700`.** A word, set to zero by the code at image `0x7c` during
-  startup. Nothing else in the load image writes it, in any addressing form; it
-  is only ever compared. It gates `TASKSKIP`, the part flag `0x80`, and a few
-  combat decisions. What it gates fits a gore switch closely: when it is set,
-  `TASKSKIP` diverts four of its five targets to the bloodless
-  `*_CollapseDead` scripts, and the flag `0x80` parts are dropped. `GORESWITCH`
-  is a `PUBLIC` name with no address. Reading DS:`0x700` as `GORESWITCH` is
-  still an inference, and since nothing in the image ever sets it, the switch
-  appears to be permanently off in the shipped build.
+  startup. It gates `TASKSKIP`, the part flag `0x80`, and a few combat
+  decisions: when it is set, `TASKSKIP` diverts four of its five targets to the
+  bloodless `*_CollapseDead` scripts, and the flag `0x80` parts are dropped.
+  **This entry used to say nothing else in the image writes it, and that was
+  wrong**: the linear disassembly the claim rested on had lost sync before the
+  title code. `OSWITCHES` (image `0x1352`) does `xor word ptr [0x700], 1` when
+  the option cursor is on row 1, and `DisplaySelect` (`0x13a5`) prints `TEXTON`
+  for zero and `TEXTOFF` otherwise. So it is the title's gore switch, zero is
+  gore on, and the shipped game starts with the gore on. `GORESWITCH`, the
+  `PUBLIC` name with no address, is presumably this word. The combat decisions
+  it reaches are `TroggAttack` (the finisher on a fallen knight only with the
+  gore on), `TroggHit` (the spear's toss of the corpse), `KnightHitKnight`
+  (the decapitating swing carries through) and `BeastStruck1` (the impale).
 * **`TASKJUMP`'s first operand**, stored at `TaskCommand[0x10]`. Nothing in
   `_TASK` reads it back.
 * **Part flag bits `0x04` and `0x20`.** Present in the data, read by nothing in
@@ -416,7 +425,7 @@ the code with the same disassembler that read the handlers:
 | `*Att` (`KnightAttSw`, `TroggAttAxe`, `TroggAttHammer`) | attack kind | the attack script: knight 2 lunge, 4 swing, 6 knife, 8 block, 0xa right thrust, 0xc up thrust, 0xe evade, 0x10 chop |
 | `*Hit` (`KnightHitSw`, `TroggHitSp`, `TroggHitAxe`, `TroggHitHammer`, `BeastHit2`, `RatmenHit`, `DragonHit`, `MudmenHit`, `TrollHit`) | the attacker's attack kind, `[attacker+0x28]` | the blow-taken script, read in `TroggStruck` as `[[victim+0x14] + kind]` |
 | `*Dam` (`KnightDamSw`, `TroggDamAxe`, `TroggDamHammer`, `RatmenDam`, `TrollDam`, `MudmenDam`, `BalokDam`, `DragonDam`) | attack kind | the damage of that attack, before `CalcDamage` adds strength and weapon |
-| `*Blo` (`KnightBloSw`) | attack kind | not read; probably the blood |
+| `*Blo` (`KnightBloSw`) | the attacker's attack kind | **the block table**, not the blood: the defender's kind that stops that attack, read by `CheckBlock` through actor `+0x1e`. Chop, lunge and rear thrust are stopped by the evade (0xe), the swing by the block (8); the rest of the row is zero |
 
 The walk rows, exactly as filled:
 
@@ -482,8 +491,95 @@ image reads it back, so whether it is the frame delay is not known, and the
 six ticks a frame stands on the walk measurement rather than on it.
 
 What the pack does with all this: each creature's `walk` is its `*Wal` right
-row; its `hurt` is the `*Hit` entry for a swing, the one attack the knight has
-here; its `death` is where that script's own `TASKDEAD` goes; its `health`,
-`damage`, `approach`, `back_off` and `depth_tolerance` are the row above. Its
-`attack` is a choice among its own, and `reach`, `speed` and `bounty` are ours;
-the baker says which beside each.
+row; its `hurt_by` is its `*Hit` row by the knight's attack kind, and its
+`hurt` the entry for a swing; its `death` is where that script's own
+`TASKDEAD` goes, and the other entries' deaths follow their own branches; its
+`health`, `damage`, `approach`, `back_off` and `depth_tolerance` are the row
+above; its `attacks` are the scripts its routine picks, by the kind that
+routine writes into `+0x28`. Its default `attack` is a choice among its own,
+and `reach`, `speed` and `bounty` are ours; the baker says which beside each.
+
+## The knight's controller
+
+Read for build order items 46 to 49. The routines are in `MOON`, the
+controller table at DS:`0x6964` is filled by `InitGameStart` and indexed by the
+actor's kind (`+0x35`; the knight is 6), and the task loop at image `0x9702`
+calls the controller whenever the actor has hit something (`+0xc`), been struck
+(`+0xe`), or its animation has ended (`task+1` clear). The controller returns
+the next script in DS:`0x783a`, with `0xffff` meaning carry on and zero meaning
+remove the task.
+
+**`KnightAttack`** (`0x4098`): the input word at `+0x26` holds 1 right, 2 left,
+4 down, 8 up, 0x10 fire. Fire goes straight here, before any walking. The fire
+bit is stripped, the rest doubled, and `Rjoystick` (DS:`0xc32`) or `Ljoystick`
+(DS:`0xc48`) read by the facing at `+8`. The two tables are each other's
+mirror, so over forward and back:
+
+```
+                 up           level          down
+forward          0xc UThrust  0x4 Swing      0x2 Lunge
+neither          0x10 Chop    0 (stance)     0xe Evade
+back             0x6 Knife    0xa RThrust    0x8 Block
+```
+
+The result is stored at `+0x28` and indexes `KnightAttSw` (`+0x16`) for the
+script. Slot 0 is `Knight_SwStance`, so fire with no direction plays one frame
+of standing. `Knight_SwDThrust` and `Knight_SwOThrust` are not in the base
+table; `InitKnightvsRatmen` puts them in the block and evade slots for that
+fight, and `InitKnightvsTroggSpear` puts `Knight_SwEvade` in both.
+
+**`CheckBlock`** (`0x420d`), with `di` the struck knight and `si` the
+attacker:
+
+```
+blockflag = 0
+if KnightBloSw[attacker.kind] != knight.kind: return
+blockflag = 1
+if knight.kind == 0xe (evade):
+    blockflag = 0
+    if !(knight+0x48 & 0x80): blockflag = 1; knight+0x48 |= 0x80
+    return
+if knight.facing == attacker.facing: blockflag = 0
+```
+
+Bit 7 of `+0x48` is cleared in `ControlKnight` on any step that moved him. Only
+`TroggStruck1`, `TroggSpearStruck1`, `KnightKnightStruck1` and `BKnightStruck`
+call it; the other `*Struck1` routines subtract their damage straight off. A
+blocked blow replays the knight's own `KnightAttSw[kind]` and takes nothing
+off; against the spear it plays `Knight_SwEvade` whatever he held.
+
+**The struck table.** `KnightGotStruck` dispatches on the attacker's kind
+through `StruckTable`: beast, mudmen (which is also the generic
+`KnightStruck1`), demon, knight and hero, dragon, the two troggs, the spear
+trogg, ratmen, the dragon's fire, the claw, Balok, the knife (kind 0x1a), the
+troll. The generic one calls `CalcDamage` (the attacker's `*Dam` entry, plus
+strength, plus 2, 3 or 5 for the three better swords, doubled for a chop,
+doubled again by a talisman) and then plays `KnightHitSw[attacker.kind]`. When
+the knight is already down it plays `Knight_SwCollapse`, or `Knight_SwDeCap`
+for a swing; `KnightKnightStruck1` plays the decapitation for any blow.
+`TroggStruck1` decapitates for the axe trogg and collapses for the hammer;
+`TrollStruck1` takes seven and plays `Knight_Explode` for a chop on a dead
+knight.
+
+**What a landed blow does to the attacker.** `KnightHitSomething` runs when
+`+0xc` is set: the next script is the recovery at `+0x12` (`Knight_SwRecover`;
+every creature's is its stance, Balok's `Balok_Recover`, the beast's
+`Beast_TurnAround`), except for an up thrust, a blow on a knight who is
+evading, or a swing on a dead knight with the gore on, which carry through.
+
+**The knife.** `Knight_SwKnife` opens with `TASKTESTEQ` on the byte at
+`+0x34`, the dagger count `SetKnightEquipment` sets to ten, and goes to the
+stance when it is zero. Its last frame calls `KnifeThrow` (`0x3e28`): one off
+`+0x34`, then a task of kind 0x1a with `KnifeDam` (3, 3, 3, 3) at `+0x1a` and
+kind 6 at `+0x28`, started on `SpeedKnife` (DS:`0xe68`: sound 0x0b, five
+pixels forward, the blade `KN4.OB` cel 10 at 66 and cel 13 at 12) at the
+knight's position and facing on his bank table. `ControlKnife` hands it `Knife`
+(DS:`0xe80`: twenty pixels forward and cel 10 at 61) every frame until `+0xc`
+is set or its x passes `0x14a` facing right or falls below -10 facing left.
+
+**Blood.** `AddBlood` (`0x57a8`) is called by `TrollStruck`, `BalokStruck` and
+`DragonStruck` and by nothing else. It starts a task of kind 0x14
+(`ControlMisc`, which lets a script run to its `TASKKILLTASK`) on `Blood1` at
+the strike point the collision code left in the victim's `+0x58` and `+0x5a`,
+facing as the knight does, on bank table 4. `Blood1` is four frames of forty
+parts on `BLO.CEL`, every one of them flagged 0x80.

@@ -10,6 +10,7 @@ use henge_core::arena::Bounds;
 use henge_core::bout::{Bout, HitEvent};
 use henge_core::combat::{simple_ai, Fighter, Intent};
 use henge_core::content::{ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH};
+use henge_core::taskvm::{field, Task};
 
 const CELL_W: usize = 32;
 const CELL_H: usize = 25;
@@ -58,6 +59,12 @@ pub struct World {
     foe: String,
     /// The creatures the pack knows, in a fixed order, for cycling through.
     bestiary: Vec<String>,
+    /// The title screen's gore switch. On by default, as the original's
+    /// DS:0x700 starts at zero, which its option row reads as `ON`.
+    gore: bool,
+    /// What the player's knight carries into the next bout, off the run's
+    /// sheet. The other knights get the ten `SetKnightEquipment` hands out.
+    player_daggers: Option<u32>,
 }
 
 impl World {
@@ -88,6 +95,8 @@ impl World {
             roster: (0..4).collect(),
             foe: "knight".into(),
             bestiary,
+            gore: true,
+            player_daggers: None,
         };
         // One person by default. Two would leave the second knight controlled by
         // a keyboard nobody is pressing: it never attacks, never closes, and a
@@ -193,6 +202,34 @@ impl World {
         self.player_health = Some(health);
     }
 
+    /// The daggers the player's knight throws from, off the run's sheet.
+    pub fn set_player_daggers(&mut self, daggers: u32) {
+        self.player_daggers = Some(daggers);
+        if let Some(f) = self.bout.fighters.first_mut() {
+            f.record.set(field::DAGGERS, daggers as i32);
+        }
+    }
+
+    /// How many daggers a seat has left, for writing back to the sheet after
+    /// a fight. A thrown dagger is a dagger gone.
+    pub fn daggers_left(&self, seat: usize) -> u32 {
+        self.bout.fighters.get(seat).map_or(0, |f| f.record.get(field::DAGGERS).max(0) as u32)
+    }
+
+    /// The gore switch, from the title. Takes effect on the next reset, the
+    /// way the original reads DS:0x700 when a fight is set up.
+    pub fn set_gore(&mut self, on: bool) {
+        self.gore = on;
+        self.bout.bloodless = !on;
+    }
+
+    /// A finisher still playing on a fallen fighter, which the bout's end
+    /// should wait for rather than cut off mid-fall.
+    pub fn finishing(&self) -> bool {
+        let actors = &self.actors;
+        self.bout.finishing(|name| &actors[name])
+    }
+
     /// Fight at the chosen knight's scale rather than the arena's.
     ///
     /// Everyone in an arena is a knight, so one number does for all four. The
@@ -249,6 +286,7 @@ impl World {
             })
             .collect();
         self.bout = Bout::new(b, fighters);
+        self.bout.bloodless = !self.gore;
         // The scale every fight is at: a knight's health, and the blow that
         // takes a quarter of it. Every knight in an arena is worth the same,
         // so one number does for all of them, and the creatures, whose hit
@@ -264,6 +302,8 @@ impl World {
             if f.actor == "knight" {
                 f.max_health = knight_max;
                 f.health = knight_max;
+                // `SetKnightEquipment`: ten daggers on the belt.
+                f.record.set(field::DAGGERS, 10);
             } else {
                 let scale = |v: i32| (v * knight_max / ORIGINAL_KNIGHT_HEALTH).max(1);
                 f.max_health = scale(f.max_health);
@@ -274,6 +314,9 @@ impl World {
         }
         if let (Some(h), Some(f)) = (self.player_health, self.bout.fighters.first_mut()) {
             f.health = h.clamp(1, f.max_health);
+        }
+        if let (Some(d), Some(f)) = (self.player_daggers, self.bout.fighters.first_mut()) {
+            f.record.set(field::DAGGERS, d as i32);
         }
         for c in self.control.iter_mut() {
             if let Control::Ai { cooldown, .. } = c {
@@ -360,14 +403,22 @@ impl World {
                     intents[i] = local.get(slot).copied().unwrap_or_default();
                 }
                 Some(Control::Ai { .. }) => {
-                    if let Some(target) = self.bout.nearest_foe(i) {
+                    // Somebody standing, or failing that a body still worth
+                    // one more blow, which is the finisher with the gore on.
+                    let actors = &self.actors;
+                    let target = self
+                        .bout
+                        .nearest_foe(i)
+                        .or_else(|| self.bout.nearest_body(i, |name| &actors[name]));
+                    if let Some(target) = target {
                         let (me, foe) = (self.bout.fighters[i].clone(), self.bout.fighters[target].clone());
                         // The opponent judges spacing by its own reach, so a
                         // troll swings from where a troll's club lands.
                         let def = self.def_of(&me.actor).clone();
+                        let gore = self.gore;
                         if let Some(Control::Ai { cooldown, clock }) = self.control.get_mut(i) {
                             *clock += 1;
-                            intents[i] = simple_ai(&me, &foe, &def, cooldown, *clock);
+                            intents[i] = simple_ai(&me, &foe, &def, cooldown, *clock, gore);
                         }
                     }
                 }
@@ -404,7 +455,7 @@ impl World {
             _ => fb.clear(0),
         }
 
-        enum Item<'a> { Prop(&'a henge_core::arena::Prop), Fighter(usize) }
+        enum Item<'a> { Prop(&'a henge_core::arena::Prop), Fighter(usize), Missile(usize) }
         let props: Vec<henge_core::arena::Prop> = self.arena().terrain.placements.clone();
         let mut items: Vec<(i32, Item)> = props
             .iter()
@@ -412,6 +463,11 @@ impl World {
             .collect();
         for (i, f) in self.bout.fighters.iter().enumerate() {
             items.push((f.depth(), Item::Fighter(i)));
+        }
+        // A dagger in flight sorts by the feet it left from, a spray of blood
+        // just in front of the body it came off.
+        for (k, m) in self.bout.missiles.iter().enumerate() {
+            items.push((m.depth + 1, Item::Missile(k)));
         }
         items.sort_by_key(|(d, _)| *d);
 
@@ -422,6 +478,18 @@ impl World {
                     self.draw_prop(reg, fb, &sheet, p)
                 }
                 Item::Fighter(i) => self.draw_fighter(reg, fb, i)?,
+                Item::Missile(k) => {
+                    let m = &self.bout.missiles[k];
+                    // The knight's own dagger is in his colours; the blood is
+                    // the blood bank's own.
+                    let lut = if m.attack.is_some() && self.is_knight(m.owner) {
+                        self.luts[self.knight_at(m.owner) % 4]
+                    } else {
+                        henge_assets::recolour::IDENTITY
+                    };
+                    let def = self.def_of(&m.actor);
+                    Self::draw_parts(reg, fb, def, &m.task, &lut)?;
+                }
             }
         }
         Ok(())
@@ -508,6 +576,16 @@ impl World {
         } else {
             henge_assets::recolour::IDENTITY
         };
+        Self::draw_parts(reg, fb, def, task, &lut)
+    }
+
+    /// The parts of one task, whoever's it is. A task that has killed itself
+    /// draws nothing, as in the original, where it is no longer in the table.
+    fn draw_parts(reg: &mut Registry, fb: &mut Framebuffer, def: &ActorDef, task: &Task, lut: &Lut)
+        -> anyhow::Result<()> {
+        if !task.active {
+            return Ok(());
+        }
         let at = (task.x, task.y, task.z);
         for part in &task.shown {
             let Some(bank) = def.bank(part.table, part.bank) else { continue };
@@ -529,7 +607,7 @@ impl World {
                     px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
                 }
             }
-            fb.blit_lut(&px, w, h, placed.x, placed.y, placed.mirror, &lut);
+            fb.blit_lut(&px, w, h, placed.x, placed.y, placed.mirror, lut);
         }
         Ok(())
     }

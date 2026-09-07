@@ -60,6 +60,11 @@ pub mod field {
     pub const FACING: i16 = 0x08;
     /// Hit points. `TASKDEAD` branches when this is not greater than zero.
     pub const HEALTH: i16 = 0x38;
+    /// Daggers carried, a byte. `SetKnightEquipment` writes ten here,
+    /// `Knight_SwKnife` opens with a `TASKTESTEQ` on it and goes back to the
+    /// stance when it is zero, and `KnifeThrow` takes one off before it spawns
+    /// the blade.
+    pub const DAGGERS: i16 = 0x34;
 }
 
 /// Where execution is: a script by name, and an index into its instructions.

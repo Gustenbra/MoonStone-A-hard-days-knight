@@ -17,6 +17,16 @@ pub enum State {
     Attack,
     Hurt,
     Dead,
+    /// A block or an evade: an attack kind in the original's tables, played
+    /// through `KnightAttack` like any other, but one that carries no weapon
+    /// part and exists to be found by `CheckBlock`. Kept apart from `Attack`
+    /// so that a held block is not announced as a swing every frame.
+    Guard,
+    /// The recovery script after a blow has landed on something. The
+    /// original replaces the attacker's animation the moment his weapon pile
+    /// touches a body (`KnightHitNormal` hands over `+0x12`), so a swing
+    /// that connects is cut short rather than carried through.
+    Recover,
 }
 
 impl State {
@@ -27,13 +37,117 @@ impl State {
             State::Attack => "attack",
             State::Hurt => "hurt",
             State::Dead => "death",
+            State::Guard => "guard",
+            State::Recover => "recover",
         }
     }
 
     /// While these run, the fighter is committed: no turning, no new attack.
     /// Commitment is what gives a swing weight and makes spacing matter.
     pub fn is_committed(self) -> bool {
-        matches!(self, State::Attack | State::Hurt | State::Dead)
+        matches!(
+            self,
+            State::Attack | State::Hurt | State::Dead | State::Guard | State::Recover
+        )
+    }
+}
+
+/// The eight things a knight can do with the button, as `KnightAttSw` holds
+/// them: the offset into that table is the attack kind the original keeps in
+/// the actor record at `+0x28`, indexes every `*Hit` and `*Dam` table with,
+/// and compares in `CheckBlock`.
+///
+/// **Recovered**, from `SetKnightAnims`: 2 lunge, 4 swing, 6 knife, 8 block,
+/// 0xa rear thrust, 0xc up thrust, 0xe evade, 0x10 chop. Slot 0 holds the
+/// stance, which is what fire with no direction plays in the original.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Attack {
+    Lunge,
+    Swing,
+    Knife,
+    Block,
+    RThrust,
+    UThrust,
+    Evade,
+    Chop,
+}
+
+impl Attack {
+    pub const ALL: [Attack; 8] = [
+        Attack::Lunge, Attack::Swing, Attack::Knife, Attack::Block,
+        Attack::RThrust, Attack::UThrust, Attack::Evade, Attack::Chop,
+    ];
+
+    /// The original's kind code: the byte offset into `KnightAttSw`.
+    pub fn kind(self) -> u8 {
+        match self {
+            Attack::Lunge => 0x02,
+            Attack::Swing => 0x04,
+            Attack::Knife => 0x06,
+            Attack::Block => 0x08,
+            Attack::RThrust => 0x0a,
+            Attack::UThrust => 0x0c,
+            Attack::Evade => 0x0e,
+            Attack::Chop => 0x10,
+        }
+    }
+
+    /// The key the data tables use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Attack::Lunge => "lunge",
+            Attack::Swing => "swing",
+            Attack::Knife => "knife",
+            Attack::Block => "block",
+            Attack::RThrust => "rthrust",
+            Attack::UThrust => "uthrust",
+            Attack::Evade => "evade",
+            Attack::Chop => "chop",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Attack> {
+        Attack::ALL.iter().copied().find(|a| a.name() == name)
+    }
+
+    /// A block or an evade: no blade out, and a thing `CheckBlock` looks for.
+    pub fn is_guard(self) -> bool {
+        matches!(self, Attack::Block | Attack::Evade)
+    }
+
+    /// The attack the joystick chooses when fire is held with a direction.
+    ///
+    /// **Recovered.** `KnightAttack` strips the fire bit from the input word,
+    /// doubles what is left (1 right, 2 left, 4 down, 8 up) and reads
+    /// `Rjoystick` or `Ljoystick` by the knight's facing; the two tables are
+    /// each other's mirror, so this is one table over forward and back:
+    ///
+    /// ```text
+    ///              up          level       down
+    /// forward      up thrust   swing       lunge
+    /// neither      chop        (nothing)   evade
+    /// back         knife       rear thrust block
+    /// ```
+    ///
+    /// `forward` is the direction held relative to the facing: 1 towards
+    /// where the knight looks, -1 behind him, 0 neither. `dy` is 1 for down.
+    /// Fire with no direction is slot 0 of `KnightAttSw`, the stance, so the
+    /// original does nothing for it; that is the `None` here, and what a
+    /// caller puts in its place is the caller's choice.
+    pub fn for_direction(forward: i32, dy: i32) -> Option<Attack> {
+        match (forward.signum(), dy.signum()) {
+            (1, -1) => Some(Attack::UThrust),
+            (1, 0) => Some(Attack::Swing),
+            (1, 1) => Some(Attack::Lunge),
+            (0, -1) => Some(Attack::Chop),
+            (0, 0) => None,
+            (0, 1) => Some(Attack::Evade),
+            (-1, -1) => Some(Attack::Knife),
+            (-1, 0) => Some(Attack::RThrust),
+            (-1, 1) => Some(Attack::Block),
+            _ => None,
+        }
     }
 }
 
@@ -83,6 +197,29 @@ pub struct Fighter {
     /// handed out through a channel the simulation would have to know about.
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// The attack kind the fighter is doing, the original's `+0x28`. `None`
+    /// while standing or walking, which the original keeps as a zero and
+    /// `CheckBlock` reads as such.
+    #[serde(default)]
+    pub attack: Option<Attack>,
+    /// The script the current state was entered on, where a state has a
+    /// choice: the attack the joystick picked, the blow-taken script the
+    /// attacker's kind picked, the finish a corpse was given. Empty for the
+    /// states that cycle their own list.
+    #[serde(default)]
+    pub script: String,
+    /// The evade's one use, bit 7 of `+0x48`: an evade stops one blow, and
+    /// the bit stays set until the knight walks, which `ControlKnight` clears
+    /// it on. Without this a held evade would be a wall.
+    #[serde(default)]
+    pub evaded: bool,
+    /// The state changed and the task has not yet been handed the new
+    /// state's script. The old frame stays on screen until it has, the way
+    /// the original's `REPLACEANIM` swaps one script for the next between
+    /// two draws; dropping the task instead left a fighter invisible for
+    /// the one tick between a blow and the recoil.
+    #[serde(default)]
+    pub restart: bool,
 }
 
 impl Fighter {
@@ -113,6 +250,10 @@ impl Fighter {
             cycle: 0,
             script_tick: 0,
             effects: Vec::new(),
+            attack: None,
+            script: String::new(),
+            evaded: false,
+            restart: false,
         };
         // Run the first frame of the standing script now, so a fighter is
         // visible before anything has ticked. Without it a screenshot taken at
@@ -131,8 +272,28 @@ impl Fighter {
         f
     }
 
+    /// Standing, or at least not yet down. A fighter whose hit points are
+    /// gone is dead from the moment of the blow, even while the blow-taken
+    /// script is still deciding how he falls.
     pub fn alive(&self) -> bool {
-        self.state != State::Dead
+        self.state != State::Dead && self.health > 0
+    }
+
+    /// Down, but with a body still on the pile: the frame being shown carries
+    /// `BODY` parts, so a blow can still find it. The knight kneels for twenty
+    /// frames of `Knight_SwDeath` with two of them before the collapse takes
+    /// them away, and that is the window a finisher has.
+    pub fn finishable(&self, def: &ActorDef) -> bool {
+        self.state == State::Dead
+            && !def.finishes.is_empty()
+            && self.task.as_ref().map_or(false, |t| {
+                t.active && t.shown.iter().any(|p| p.is(taskvm::part_flags::BODY))
+            })
+    }
+
+    /// Holding a block or an evade.
+    pub fn guarding(&self) -> Option<Attack> {
+        if self.state == State::Guard { self.attack } else { None }
     }
 
     fn enter(&mut self, state: State) {
@@ -142,11 +303,31 @@ impl Fighter {
         self.state = state;
         self.player.restart();
         self.struck = false;
-        // A new state starts its script cycle from the beginning, and drops the
-        // running task so the next tick builds one on the new state's script.
+        // A new state starts its script cycle from the beginning, and asks
+        // for the task to be put on the new state's script at the next tick.
         self.cycle = 0;
         self.script_tick = 0;
-        self.task = None;
+        self.restart = true;
+        self.script.clear();
+        if !matches!(state, State::Attack | State::Guard) {
+            self.attack = None;
+        }
+    }
+
+    /// Enter a state on a particular script of it.
+    fn enter_on(&mut self, state: State, script: String) {
+        if self.state == state && self.script == script {
+            // The same thing again: a held block is replayed frame by frame
+            // in the original, and here it simply carries on.
+            return;
+        }
+        if self.state == state {
+            // A different script of the same state, which `enter` would
+            // treat as nothing to do.
+            self.state = State::Idle;
+        }
+        self.enter(state);
+        self.script = script;
     }
 
     /// Has the animation of the current state run out?
@@ -159,12 +340,15 @@ impl Fighter {
         if !def.scripted() {
             return self.player.finished;
         }
+        // A state entered from outside a tick, which is what taking a blow
+        // is, has not had its animation begin, and something that has not
+        // begun has not finished. Reading it as finished is what would make a
+        // recoil last exactly one tick.
+        if self.restart {
+            return self.script.is_empty() && def.scripts_for(self.state.sequence_name()).is_empty();
+        }
         match &self.task {
             Some(t) => !t.running,
-            // No task yet. A state entered from outside a tick, which is what
-            // taking a blow is, has not had its animation begin, and something
-            // that has not begun has not finished. Reading a missing task as a
-            // finished one is what would make a recoil last exactly one tick.
             None => def.scripts_for(self.state.sequence_name()).is_empty(),
         }
     }
@@ -176,28 +360,86 @@ impl Fighter {
     /// One tick. Returns the hit line this fighter is sweeping, in world space,
     /// if the current frame carries one and it has not already connected.
     pub fn step(&mut self, def: &ActorDef, intent: Intent, bounds: Bounds) -> Vec<(i32, i32)> {
+        self.step_gated(def, intent, bounds, false)
+    }
+
+    /// One tick, with the gore switch. `bloodless` is the original's
+    /// DS:0x700, which the title screen toggles: set, every part flagged
+    /// `GATED` is dropped and every `TASKSKIP` is taken, which is how the
+    /// decapitation turns into a collapse.
+    pub fn step_gated(
+        &mut self,
+        def: &ActorDef,
+        intent: Intent,
+        bounds: Bounds,
+        bloodless: bool,
+    ) -> Vec<(i32, i32)> {
         self.effects.clear();
-        if self.state == State::Dead {
+        // The dead, and the dying. A scripted fighter whose hit points are
+        // gone is still on his blow-taken script, whose own `TASKDEAD` picks
+        // the death: the same recoil ends in a fall for a stab and a split
+        // for a cut, because that is where each script's branch goes. The
+        // state follows the script rather than the other way round.
+        let dying = self.state == State::Hurt && self.health <= 0 && def.scripted();
+        if self.state == State::Dead || dying {
             if def.scripted() {
-                self.run_task(def, bounds);
+                self.run_task(def, bounds, bloodless);
+                if dying {
+                    let (branched, ended) = self
+                        .task
+                        .as_ref()
+                        .map_or((false, true), |t| (t.pc.script != self.script, !t.running));
+                    if branched {
+                        // The script chose the death; keep the task on it.
+                        self.state = State::Dead;
+                    } else if ended {
+                        // A recoil with no branch of its own: the plain death.
+                        self.enter(State::Dead);
+                    }
+                }
             } else if let Some(seq) = self.sequence(def) {
                 self.player.advance(seq);
             }
             return Vec::new();
         }
 
-        // A committed action runs to completion before input is looked at again.
+        // A committed action runs to completion before input is looked at
+        // again. It is looked at on the tick the action ends, the way the
+        // original's controller runs on the frame `task+1` clears, which is
+        // what lets a held block stay up with no gap in it.
+        if self.state.is_committed() && self.animation_done(def) {
+            self.enter(State::Idle);
+        }
         if self.state.is_committed() {
-            if self.animation_done(def) {
-                self.enter(State::Idle);
-            }
+            // still busy
         } else if intent.attack {
-            self.enter(State::Attack);
+            // `KnightAttack`: the direction held with fire, relative to the
+            // facing, picks the attack. Fire alone is the stance in the
+            // original, which is to say nothing; here it is the swing, so
+            // that one button still fights, and so that the plain opponent,
+            // which only knows one button, does too.
+            let forward = intent.dx * self.facing;
+            let wanted = Attack::for_direction(forward, intent.dy).unwrap_or(Attack::Swing);
+            match def.attack_for(wanted) {
+                Some((script, kind)) => {
+                    let state = if kind.is_guard() { State::Guard } else { State::Attack };
+                    self.enter_on(state, script);
+                    self.attack = Some(kind);
+                }
+                None => {
+                    // A frame-list actor: one attack, and no kinds to choose
+                    // between.
+                    self.enter(State::Attack);
+                    self.attack = Some(Attack::Swing);
+                }
+            }
         } else if intent.dx != 0 || intent.dy != 0 {
             if intent.dx != 0 {
                 self.facing = intent.dx.signum();
             }
             self.enter(State::Walk);
+            // Walking is what gives the evade its one use back.
+            self.evaded = false;
         } else {
             self.enter(State::Idle);
         }
@@ -214,7 +456,7 @@ impl Fighter {
         }
 
         if def.scripted() {
-            return self.run_task(def, bounds);
+            return self.run_task(def, bounds, bloodless);
         }
 
         let Some(seq) = def.sequence(self.state.sequence_name()) else {
@@ -250,8 +492,13 @@ impl Fighter {
     /// figure and this engine positions everything by the feet. Anything the
     /// script does to that position with `TASKMOVE` is carried back out, so a
     /// script that walks itself walks the fighter.
-    fn run_task(&mut self, def: &ActorDef, bounds: Bounds) -> Vec<(i32, i32)> {
-        let names = def.scripts_for(self.state.sequence_name());
+    fn run_task(&mut self, def: &ActorDef, bounds: Bounds, bloodless: bool) -> Vec<(i32, i32)> {
+        // The state's own list, or the one script the state was entered on.
+        let names: Vec<String> = if self.script.is_empty() {
+            def.scripts_for(self.state.sequence_name()).to_vec()
+        } else {
+            vec![self.script.clone()]
+        };
         if names.is_empty() {
             return Vec::new();
         }
@@ -260,10 +507,20 @@ impl Fighter {
 
         let mut step_now = false;
         match &mut self.task {
+            Some(t) if self.restart => {
+                // The new state's script, `REPLACEANIM`: the VM state is
+                // zeroed and the first frame is stepped now.
+                t.replace(names[0].clone());
+                t.table = def.bank_table;
+                self.restart = false;
+                self.script_tick = 0;
+                step_now = true;
+            }
             None => {
                 let mut task = Task::new(&names[0], self.x + ox, self.y + oy, facing);
                 task.table = def.bank_table;
                 self.task = Some(task);
+                self.restart = false;
                 self.script_tick = 0;
                 step_now = true;
             }
@@ -272,11 +529,13 @@ impl Fighter {
                 if self.script_tick >= def.script_ticks.max(1) {
                     self.script_tick = 0;
                     step_now = true;
-                    if !t.running {
-                        // The script ended. A state with more than one script
-                        // is a cycle, and this is where the next one is handed
-                        // over, which is what `TASKHANDLE` does when it sees
-                        // `task+1` cleared.
+                    // The script ended. A state with more than one script
+                    // is a cycle, and this is where the next one is handed
+                    // over, which is what `TASKHANDLE` does when it sees
+                    // `task+1` cleared. A death is not handed anything: it
+                    // ended, and a corpse that replays its fall is a corpse
+                    // that will not lie still.
+                    if !t.running && self.state != State::Dead {
                         self.cycle = (self.cycle + 1) % names.len();
                         let next = names[self.cycle].clone();
                         t.replace(next);
@@ -291,7 +550,7 @@ impl Fighter {
         task.y = self.y + oy;
         if step_now {
             self.record.set_health(self.health);
-            let frame = task.step(&def.animation, &mut self.record, false);
+            let frame = task.step(&def.animation, &mut self.record, bloodless);
             self.effects = frame.effects;
             // Whatever the script moved, the fighter moved.
             let (nx, ny) = bounds.clamp(task.x - ox, task.y - oy);
@@ -360,6 +619,130 @@ impl Fighter {
         }
     }
 
+    /// A blow of a particular kind, the way `KnightSAnim` and `TroggStruck`
+    /// deal one: the blow-taken script is the `*Hit` entry for the attacker's
+    /// kind, and that script's own `TASKDEAD` decides whether the fighter
+    /// gets up or which way he goes down. A frame-list actor has neither
+    /// table and takes the blow the plain way.
+    pub fn struck(&mut self, def: &ActorDef, damage: i32, by: Option<Attack>) {
+        if !self.alive() {
+            return;
+        }
+        let hurt = if def.scripted() { def.hurt_for(by) } else { None };
+        self.health -= damage;
+        match hurt {
+            Some(script) => {
+                if self.health < 0 {
+                    self.health = 0;
+                }
+                // Struck again while reeling: the script starts over, which
+                // `enter_on` would decline to do for the same script.
+                self.state = State::Idle;
+                self.enter_on(State::Hurt, script);
+            }
+            None => {
+                if self.health <= 0 {
+                    self.health = 0;
+                    self.enter(State::Dead);
+                } else {
+                    self.enter(State::Hurt);
+                }
+            }
+        }
+    }
+
+    /// A blow on a body that is already down: the corpse is given the
+    /// finish. `MudmenStruck1`, the path every creature's and a thrown
+    /// dagger's blow on a fallen knight takes, decapitates for a swing and
+    /// collapses him for anything else; `KnightKnightStruck1` decapitates
+    /// for any blow, so a knight's is any blow from the same kind of
+    /// fighter. Whether the head actually comes off is the script's own
+    /// `TASKSKIP`, which the gore switch decides.
+    pub fn finish(&mut self, def: &ActorDef, by: Option<Attack>, by_own_kind: bool) -> bool {
+        if !self.finishable(def) {
+            return false;
+        }
+        let which = if by == Some(Attack::Swing) || by_own_kind { "decap" } else { "collapse" };
+        let Some(script) = def.finishes.get(which).cloned() else { return false };
+        if let Some(t) = self.task.as_mut() {
+            t.replace(script.clone());
+        }
+        self.script = script;
+        true
+    }
+
+    /// `CheckBlock`. Does what the defender is holding stop this blow?
+    ///
+    /// **Recovered.** The defender's block table is read at the attacker's
+    /// kind, and the entry has to equal the defender's own kind: `Block` for a
+    /// swing, `Evade` for a chop, a lunge or a rear thrust. An evade stops one
+    /// blow and is then spent until the defender walks; a block only works
+    /// against a blow from the front, which is to say when the two are not
+    /// facing the same way. A kind with no entry in the table is a zero, and
+    /// a zero is also what a knight who is doing nothing holds, so an up
+    /// thrust from the front is stopped by a knight standing still and lands
+    /// only on one who is mid-swing or turned away. That reads as a quirk and
+    /// is reproduced, because it is what the code does.
+    ///
+    /// Returns whether the blow was stopped, and marks the evade spent when
+    /// it was the evade that stopped it. What the original does not do is
+    /// consult the kind a reeling or recovering knight is left holding; here
+    /// those states never block, which is a simplification.
+    pub fn blocks(&mut self, def: &ActorDef, attacker_facing: i32, attack: Attack) -> bool {
+        if def.blocks.is_empty() {
+            return false;
+        }
+        let holding = match self.state {
+            State::Guard | State::Attack => self.attack,
+            State::Idle | State::Walk => None,
+            _ => return false,
+        };
+        let wanted = def.blocks.get(attack.name()).and_then(|g| Attack::from_name(g));
+        if wanted != holding {
+            return false;
+        }
+        if wanted == Some(Attack::Evade) {
+            if self.evaded {
+                return false;
+            }
+            self.evaded = true;
+            return true;
+        }
+        self.facing != attacker_facing
+    }
+
+    /// The moment the weapon touches something, the swing is over and the
+    /// recovery script takes its place, unless the actor has none to give.
+    /// `KnightHitNormal` keeps the swing going for an up thrust; `KnightHitKnight`
+    /// for a blow on a knight who is evading, and for a swing on a fallen knight
+    /// with the gore on, which is the swing that takes the head.
+    pub fn recover(&mut self, def: &ActorDef) {
+        if let Some(script) = def.scripts_for("recover").first().cloned() {
+            self.enter_on(State::Recover, script);
+        }
+    }
+
+    /// The body a blow can find on a fighter that is down: the union of the
+    /// `BODY` parts of the frame being shown, placed where they are drawn.
+    /// The original walks exactly this pile; the living use `body`, the
+    /// authored box, because that is what makes a strike something to aim.
+    pub fn corpse_body(&self, def: &ActorDef) -> Option<(i32, i32, i32, i32)> {
+        let task = self.task.as_ref()?;
+        let mut out: Option<(i32, i32, i32, i32)> = None;
+        for p in task.shown.iter().filter(|p| p.is(taskvm::part_flags::BODY)) {
+            let Some(bank) = def.bank(p.table, p.bank) else { continue };
+            let Some(r) = taskvm::place(p, bank, (task.x, task.y, task.z), task.mirror()) else {
+                continue;
+            };
+            let (l, t, rr, b) = (r.x, r.y, r.x + r.w as i32, r.y + r.h as i32);
+            out = Some(match out {
+                None => (l, t, rr, b),
+                Some((ol, ot, or, ob)) => (ol.min(l), ot.min(t), or.max(rr), ob.max(b)),
+            });
+        }
+        out
+    }
+
     /// Depth key. Everything in an arena sorts by where its feet are.
     pub fn depth(&self) -> i32 {
         self.y
@@ -419,8 +802,21 @@ fn segments_cross(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32), p4: (i32, i32)
 ///
 /// `clock` is any counter that advances once a tick. Real behaviour, per
 /// creature, comes with the bestiary; this exists so combat can be felt.
-pub fn simple_ai(me: &Fighter, foe: &Fighter, def: &ActorDef, cooldown: &mut i32, clock: i32) -> Intent {
-    if !me.alive() || !foe.alive() {
+///
+/// One thing here is the original's rather than ours: with the gore on, a
+/// creature that has put a knight down comes in for one more blow while he
+/// is still kneeling (`TroggAttack`, on `DeCapFLAG`, inside a hundred
+/// pixels), which is the swing that takes the head. `gore` is that switch,
+/// and `foe` may be a body for as long as it can still be struck.
+pub fn simple_ai(
+    me: &Fighter,
+    foe: &Fighter,
+    def: &ActorDef,
+    cooldown: &mut i32,
+    clock: i32,
+    gore: bool,
+) -> Intent {
+    if !me.alive() {
         return Intent::default();
     }
     *cooldown = (*cooldown - 1).max(0);
@@ -429,6 +825,22 @@ pub fn simple_ai(me: &Fighter, foe: &Fighter, def: &ActorDef, cooldown: &mut i32
     let reach = def.reach;
     let toward = dx.signum();
     let level = dy.abs() <= def.depth_tolerance;
+
+    if !foe.alive() {
+        // The finisher, or nothing.
+        let body = foe.state == State::Dead
+            && foe.task.as_ref().map_or(false, |t| {
+                t.active && t.shown.iter().any(|p| p.is(taskvm::part_flags::BODY))
+            });
+        if !gore || !body || *cooldown > 0 {
+            return Intent::default();
+        }
+        if dx.abs() <= reach && level {
+            *cooldown = def.attack_cooldown;
+            return Intent { dx: 0, dy: 0, attack: true };
+        }
+        return Intent { dx: if dx.abs() > reach - 4 { toward } else { 0 }, dy: if !level { dy.signum() } else { 0 }, attack: false };
+    }
 
     // Recovering from a swing: back off, then wait it out.
     if *cooldown > 0 {
@@ -541,6 +953,114 @@ pub(crate) mod tests {
             banks: BTreeMap::from([(1u8, vec![Bank { sheet: "test".into(), base: 0, cels }])]),
             ..ActorDef::default()
         }
+    }
+
+    /// The scripted actor with the combat depth tables on it: the eight
+    /// attacks by kind, a block table, a recovery, a kneeling death with a
+    /// body still on it, the two finishes, the dagger's scripts and a blood
+    /// spray on bank table 4. Shaped like the baked knight, in miniature.
+    pub(crate) fn depth_def() -> ActorDef {
+        use crate::content::AttackDef;
+        use crate::taskvm::field;
+        let mut d = scripted_def();
+        let body = |cel: u8| {
+            Instr::Part(Part { table: 1, bank: 0, cel, x: -8, y: 0, flags: part_flags::BODY })
+        };
+        let blade = Instr::Part(Part {
+            table: 1, bank: 0, cel: 8, x: 10, y: 20, flags: part_flags::WEAPON,
+        });
+        let stop = Instr::EndFrame { end: End::Stop };
+        let next = Instr::EndFrame { end: End::Next };
+        let a = &mut d.animation;
+        // One frame with the blade out, held for two, so a chop can be told
+        // from a swing by its script and lands on its first frame.
+        a.insert("chop".into(), Script::new(vec![Instr::Hold { count: 2 }, body(6), blade.clone(), stop.clone()]));
+        a.insert("block".into(), Script::new(vec![body(9), stop.clone()]));
+        a.insert("evade".into(), Script::new(vec![body(9), stop.clone()]));
+        a.insert("recover".into(), Script::new(vec![body(9), stop.clone()]));
+        // The throw: nothing without a dagger, else the call that spawns one.
+        a.insert(
+            "throw".into(),
+            Script::new(vec![
+                Instr::TestEq { mode: 1, field: field::DAGGERS, target: "stance".into() },
+                body(6),
+                next.clone(),
+                Instr::Gosub { routine: "KnifeThrow".into() },
+                body(7),
+                stop.clone(),
+            ]),
+        );
+        a.insert(
+            "SpeedKnife".into(),
+            Script::new(vec![
+                Instr::Sound { sample: 0x0b },
+                Instr::Move { flags: 0x01, x: 5, y: 0, z: 0 },
+                blade.clone(),
+                stop.clone(),
+            ]),
+        );
+        a.insert(
+            "Knife".into(),
+            Script::new(vec![Instr::Move { flags: 0x01, x: 20, y: 0, z: 0 }, blade.clone(), stop.clone()]),
+        );
+        // The death kneels with a body on it for ten frames, then lies flat
+        // with none, the way `Knight_SwDeath` does before its collapse.
+        a.insert(
+            "fall".into(),
+            Script::new(vec![
+                Instr::Hold { count: 10 },
+                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 20, flags: part_flags::BODY }),
+                next.clone(),
+                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }),
+                stop.clone(),
+            ]),
+        );
+        a.insert(
+            "decap".into(),
+            Script::new(vec![
+                Instr::Skip { target: "collapse".into() },
+                Instr::Part(Part { table: 1, bank: 0, cel: 5, x: 0, y: -10, flags: part_flags::GATED }),
+                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }),
+                stop.clone(),
+            ]),
+        );
+        a.insert(
+            "collapse".into(),
+            Script::new(vec![Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }), stop.clone()]),
+        );
+        a.insert(
+            "Blood1".into(),
+            Script::new(vec![
+                Instr::Part(Part { table: 4, bank: 4, cel: 0, x: -5, y: -5, flags: part_flags::GATED }),
+                next.clone(),
+                Instr::KillTask,
+                stop.clone(),
+            ]),
+        );
+        for (name, script, damage) in [
+            ("swing", "swing", 4),
+            ("chop", "chop", 8),
+            ("knife", "throw", 3),
+            ("block", "block", 0),
+            ("evade", "evade", 0),
+        ] {
+            d.attacks.insert(name.into(), AttackDef { script: script.into(), damage });
+        }
+        d.attack = "swing".into();
+        d.scripts.insert("recover".into(), vec!["recover".into()]);
+        d.blocks = [("swing", "block"), ("chop", "evade"), ("lunge", "evade")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        d.blockable = true;
+        d.finishes = [("decap", "decap"), ("collapse", "collapse")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let blood = Bank { sheet: "blood".into(), base: 0, cels: vec![[12, 12]; 4] };
+        d.banks.insert(4, vec![blood; 5]);
+        assert_eq!(d.validate(), Ok(()));
+        d
     }
 
     fn def() -> ActorDef {
@@ -822,21 +1342,98 @@ pub(crate) mod tests {
         assert_eq!(lines, [false, false, false, true, true, true, false, false, false]);
     }
 
+    /// `Rjoystick` and `Ljoystick`, as one table over forward and back. The
+    /// nine cells are the recovered ones; fire alone is the one cell the
+    /// original leaves at the stance.
+    #[test]
+    fn the_direction_held_with_fire_picks_the_attack() {
+        use Attack::*;
+        let table = [
+            ((1, -1), Some(UThrust)), ((1, 0), Some(Swing)), ((1, 1), Some(Lunge)),
+            ((0, -1), Some(Chop)), ((0, 0), None), ((0, 1), Some(Evade)),
+            ((-1, -1), Some(Knife)), ((-1, 0), Some(RThrust)), ((-1, 1), Some(Block)),
+        ];
+        for ((fwd, dy), want) in table {
+            assert_eq!(Attack::for_direction(fwd, dy), want, "forward {fwd}, dy {dy}");
+        }
+        assert_eq!(Attack::Chop.kind(), 0x10, "the kinds are KnightAttSw offsets");
+        assert_eq!(Attack::Lunge.kind(), 2);
+        assert_eq!(Attack::from_name("rthrust"), Some(RThrust));
+    }
+
+    /// The same key is a different attack depending on which way the knight
+    /// faces: `KnightAttack` picks the table by `+8`. Left held by a knight
+    /// facing left is forward, and a swing; by one facing right it is back.
+    #[test]
+    fn the_attack_is_chosen_relative_to_the_facing() {
+        let d = depth_def();
+        let mut left = Fighter::new("k", &d, 100, 100, -1);
+        left.step(&d, Intent { dx: -1, dy: 0, attack: true }, bounds());
+        assert_eq!(left.attack, Some(Attack::Swing));
+        assert_eq!(left.task.as_ref().unwrap().pc.script, "swing");
+        assert_eq!(left.facing, -1, "attacking does not turn him");
+
+        let mut right = Fighter::new("k", &d, 100, 100, 1);
+        right.step(&d, Intent { dx: -1, dy: 1, attack: true }, bounds());
+        assert_eq!(right.state, State::Guard, "back and down is the block");
+        assert_eq!(right.attack, Some(Attack::Block));
+        assert_eq!(right.task.as_ref().unwrap().pc.script, "block");
+
+        let mut up = Fighter::new("k", &d, 100, 100, 1);
+        up.step(&d, Intent { dx: 0, dy: -1, attack: true }, bounds());
+        assert_eq!(up.attack, Some(Attack::Chop));
+        assert_eq!(up.task.as_ref().unwrap().pc.script, "chop");
+
+        // Fire alone is the stance in the original; here it is the swing, so
+        // that one button still fights.
+        let mut plain = Fighter::new("k", &d, 100, 100, 1);
+        plain.step(&d, Intent { dx: 0, dy: 0, attack: true }, bounds());
+        assert_eq!(plain.attack, Some(Attack::Swing));
+
+        // An actor with fewer attacks than the table falls back to its own.
+        let mut one = scripted_def();
+        one.attacks.insert(
+            "lunge".into(),
+            crate::content::AttackDef { script: "swing".into(), damage: 3 },
+        );
+        one.attack = "lunge".into();
+        let mut f = Fighter::new("t", &one, 100, 100, 1);
+        f.step(&one, Intent { dx: 0, dy: -1, attack: true }, bounds());
+        assert_eq!(f.attack, Some(Attack::Lunge), "no chop of its own, so its one attack");
+    }
+
+    /// A held guard has no gap in it: the block script is one frame ending
+    /// on `ff ff`, and the original's controller reads the joystick on the
+    /// frame it ends, so the kind stays a block for as long as fire is held.
+    #[test]
+    fn a_held_block_stays_up_between_frames() {
+        let d = depth_def();
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        for t in 0..8 {
+            f.step(&d, Intent { dx: -1, dy: 1, attack: true }, bounds());
+            assert_eq!(f.state, State::Guard, "tick {t}");
+            assert_eq!(f.guarding(), Some(Attack::Block), "tick {t}");
+        }
+        f.step(&d, Intent::default(), bounds());
+        assert_eq!(f.state, State::Idle, "and it comes down when fire does");
+        assert_eq!(f.attack, None);
+    }
+
     #[test]
     fn the_opponent_closes_distance_then_swings() {
         let d = def();
         let me = Fighter::new("a", &d, 0, 100, 1);
         let far = Fighter::new("b", &d, 200, 100, -1);
         let mut cd = 0;
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 31).dx, 1, "walks toward a distant foe");
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 33).dx, 0, "but not every tick: slower than a person");
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 10).dx, 0, "and it hesitates now and then");
+        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 31, true).dx, 1, "walks toward a distant foe");
+        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 33, true).dx, 0, "but not every tick: slower than a person");
+        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 10, true).dx, 0, "and it hesitates now and then");
 
         let near = Fighter::new("b", &d, 20, 100, -1);
         let mut cd = 0;
-        assert!(simple_ai(&me, &near, &d, &mut cd, 31).attack, "swings when in reach");
+        assert!(simple_ai(&me, &near, &d, &mut cd, 31, true).attack, "swings when in reach");
         assert_eq!(cd, d.attack_cooldown);
-        let after = simple_ai(&me, &near, &d, &mut cd, 32);
+        let after = simple_ai(&me, &near, &d, &mut cd, 32, true);
         assert!(!after.attack, "one swing, then it recovers");
         assert_eq!(after.dx, -1, "and gives ground while it does");
     }

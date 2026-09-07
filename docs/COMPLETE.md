@@ -231,27 +231,42 @@ hardware. Nothing to port. Listed so the symbol list is complete.
 
 # 3. Combat
 
-## 3.1 Core `partial`
+## 3.1 Core `done, but for experience and the sheathed sword`
 
 | Original | What it is | Status |
 |---|---|---|
 | `CALCHIT` | resolve a strike | done, positional hit lines |
 | `CALCMOVE` | movement and bounds | done |
-| `CLEARCOLLISIONS`, `TASKCOLLISION`, `TASKWALKCOLLIDE` | collision | partial |
-| `SWORDFLAG` | weapon state | todo |
-| `BLOW` | a landed blow | done as `HitEvent` |
-| `GORESWITCH`, `BLOODBUFFER` | dismemberment and blood | **todo** |
+| `CLEARCOLLISIONS`, `TASKCOLLISION`, `TASKWALKCOLLIDE` | collision | partial; the strike point `CXx`/`CY` is the overlap's middle here |
+| `ControlKnight`, `KnightAttack`, `Rjoystick`, `Ljoystick`, `KnightAttSw` | the attack the direction picks | **done**, recovered: `Attack::for_direction` |
+| `KnightHitSw`, `KnightDamSw`, `*Hit`, `*Dam`, `KnightSAnim`, `CalcDamage` | blow taken and damage by kind | done, as `hurt_by` and `attacks` on every actor; `CalcDamage`'s strength and sword are item 40 |
+| `CheckBlock`, `blockflag`, `KnightBloSw` | blocking | **done**, recovered; `KnightBloSw` is the block table |
+| `KnightHitNormal`, `KnightHitKnight`, `TroggHit`, actor `+0x12` | the recovery a landed blow cuts a swing into | done as `State::Recover` |
+| `SWORDFLAG` | weapon state, drawn and sheathed | todo |
+| `KnifeThrow`, `ControlKnife`, `Knife`, `SpeedKnife`, `KnifeDam`, `SetKnightEquipment` | the thrown dagger | **done**, as a `Missile` in the bout |
+| `BLOW` | a landed blow | done as `HitEvent`; a stopped one is a `Parry` |
+| `GORESWITCH` (DS:0x700), `OSWITCHES`, `GOREOPT` | the gore switch | **done**: the title row toggles it, `Bout::bloodless` carries it |
+| `AddBlood`, `Blood1`, `BloodFile`, `BLOODBUFFER` | blood | done: the spray at the strike point on bank table 4, from the three `*Struck` that call it |
+| `DeCapFLAG`, `SetDecapFLAG`, `Knight_SwDeCap`, `Knight_SwCollapse`, `MudmenStruck1`, `KnightKnightStruck1`, `TroggChopHead` | the finisher on a fallen knight | done; the plain opponent comes in for it with the gore on |
+| `Knight_Explode`, `TrollOHead`, `TroggSpear_Toss`, `DrDropHead`, `DrDropClaws` | the creatures' own finishers | todo, with 37 and 36 |
 | `ALLDEAD` | everyone down | done as `Bout::settled` |
 | `KNIGHTREFRESH`, `KNIGHTLOC`, `KNIGHTBUFFER`, `ENEMYBUFFER` | actor state | done as `Fighter` |
 | `NUM_PLAYERS`, `PLAYER1`-`PLAYER4`, `PLAYERPOINTER` | up to four players | done |
 | `GAME_XP` | experience | **todo** |
 
-- [ ] **Attack variety.** We have one attack. The original has several by direction and
-      button. Recover from the animation scripts once 1.1 lands
-- [ ] **Blocking and parrying.** No defence exists at all
-- [ ] Gore and dismemberment. The sprite banks are full of severed parts, currently unused
+The knight's controller was read in full for build order items 46 to 49, and it is
+where the pieces that had been taken for design turned out to live. The account of
+what each routine does, what was reproduced and what was simplified, is against
+those items in `BUILD_ORDER.md`; the tables themselves are in `TASKVM.md`.
+
+- [x] **Attack variety.** Eight, by the direction held with fire, from `Rjoystick` and
+      `Ljoystick`; fire alone, which the original leaves at the stance, is the swing here
+- [x] **Blocking.** `CheckBlock` as written, one quirk included; a reeling knight
+      never blocks, which is a simplification
+- [x] Gore and dismemberment: the switch, the gated parts, the blood, the knight's
+      decapitation and collapse. The creatures' own finishers wait on their behaviour
 - [ ] Experience and levelling
-- [ ] Weapon state: drawn, sheathed, dropped, thrown
+- [ ] Weapon state: the thrown dagger is done; drawn, sheathed and dropped are not
 
 ## 3.2 Creatures `done, on the standard states`
 
@@ -271,8 +286,8 @@ stat block. These are recovered and in the pack:
 | Original | What it is | Status |
 |---|---|---|
 | `TroggWalAxe`, `TrollWal`, `MudmenWal`, `RatmenWal`, `KnightWalSw` ... | walk cycles, right at +0, up at +0x10, down at +0x20 | done, right row; up and down rows wait on 37 |
-| `KnightAttSw`, `TroggAttAxe`, `TroggAttHammer` | attack script by attack kind | recovered; one attack per creature fielded |
-| `KnightHitSw`, `TroggHitAxe`, `RatmenHit`, `MudmenHit`, `DragonHit`, `BeastHit2` ... | blow-taken script by the attacker's attack kind | done for the swing, the one attack in play |
+| `KnightAttSw`, `TroggAttAxe`, `TroggAttHammer` | attack script by attack kind | done, as each actor's `attacks`; which of its own a creature picks when is still 37 |
+| `KnightHitSw`, `TroggHitAxe`, `RatmenHit`, `MudmenHit`, `DragonHit`, `BeastHit2` ... | blow-taken script by the attacker's attack kind | done, as `hurt_by`, with each script's own `TASKDEAD` choosing the death |
 | `KnightDamSw`, `TroggDamAxe`, `TroggDamHammer`, `RatmenDam`, `TrollDam`, `MudmenDam`, `BalokDam`, `DragonDam` | damage by attack kind | done, on each actor as `damage` |
 | actor record `+0x38`, `+0x3c`, `+0x52`, `+0x54`, `+0x56`, `+0x35`, `+0x18` | health, maximum, approach, back-off, plane, kind, bank table | done; approach and back-off carried, not yet read |
 | `TroggWALKR`/`U`/`D`, `TrollWALKR`, `MudmenWALK`, `BKnightWALKR`/`U`/`D`, `BeastChargeOffsets` | pixels moved per walk frame | read; speeds set from them |

@@ -19,7 +19,7 @@ use henge_assets::Registry;
 use henge_audio::{Clips, Sink, Voices};
 use map::MapScene;
 use text::Font;
-use henge_core::combat::Intent;
+use henge_core::combat::{Intent, State};
 use henge_core::item::{Items, Loss};
 use henge_core::knight::Knights;
 use henge_core::place::{Answer, Approach, Places};
@@ -69,6 +69,14 @@ fn carrying(run: &Run) -> String {
 ///   --sheet           hold the character sheet open over whatever is drawn
 ///   --foe <actor>     fill the opponents' seats with that creature, so each
 ///                     of the bestiary can be captured on its own
+///   --bloodless       the title's gore switch, off: gated parts are dropped
+///                     and the decapitation becomes a collapse
+///   --scripts         (trace only) name the script each fighter is on, so a
+///                     death variant can be told from another
+///
+/// In `--input`, a digit is the joystick held with fire, laid out like a
+/// numpad: 8 up, 2 down, 4 left, 6 right, 7 9 1 3 the diagonals, 5 fire on
+/// its own. That is how the direction chosen attacks are reached headlessly.
 fn hurt_arg(a: &[String]) -> Option<i32> {
     a.iter().position(|s| s == "--hurt").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
 }
@@ -200,6 +208,12 @@ fn prepare(app: &mut App, a: &[String]) {
         }
     }
     app.sheet = a.iter().any(|s| s == "--sheet");
+    if a.iter().any(|s| s == "--bloodless") {
+        app.title.state.gore = false;
+        if let Some(w) = app.world.as_mut() {
+            w.set_gore(false);
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -213,6 +227,7 @@ fn main() -> anyhow::Result<()> {
         let arena: i32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
         if let Some(w) = app.world.as_mut() { w.step_arena(arena); }
         let script = Script::from_args(&a);
+        let scripts = a.iter().any(|s| s == "--scripts");
         app.peaceful = script.peaceful;
         prepare(&mut app, &a);
         if let Some(id) = script.at.as_deref() { app.enter(id); }
@@ -258,13 +273,40 @@ fn main() -> anyhow::Result<()> {
                 }
                 Mode::Combat => {
                     let Some(w) = app.world.as_ref() else { break };
-                    let who: Vec<String> = w
+                    let mut who: Vec<String> = w
                         .bout
                         .fighters
                         .iter()
-                        .map(|f| format!("{:<6} {:<6}{:>4} @{:>3},{:>3}",
-                            f.actor, format!("{:?}", f.state), f.health, f.x, f.y))
+                        .map(|f| {
+                            // The state, and the attack kind when there is one:
+                            // `Attack:chop`, `Guard:block`, so a trace shows which
+                            // of the eight the direction chose.
+                            let state = match f.attack {
+                                Some(a) if matches!(f.state, State::Attack | State::Guard) => {
+                                    format!("{:?}:{}", f.state, a.name())
+                                }
+                                _ => format!("{:?}", f.state),
+                            };
+                            // `--scripts` adds the script each task is on, which
+                            // is how a death variant is told from another.
+                            let script = if scripts {
+                                f.task.as_ref().map_or(String::new(), |t| format!(" {}", t.pc.script))
+                            } else {
+                                String::new()
+                            };
+                            format!("{:<6} {:<12}{:>4} @{:>3},{:>3}{}", f.actor, state, f.health, f.x, f.y, script)
+                        })
                         .collect();
+                    // A dagger in the air is a line of its own, and a blow
+                    // stopped is said so, since nothing else would show it.
+                    for m in &w.bout.missiles {
+                        if m.attack.is_some() {
+                            who.push(format!("knife @{:>3},{:>3}", m.task.x, m.depth));
+                        }
+                    }
+                    for p in &w.bout.parries {
+                        who.push(format!("{} blocked {} with {}", p.target, p.attacker, p.with.name()));
+                    }
                     // The arena's own name as well as its family, because which of
                     // the eight a family rotates to is now a thing worth seeing.
                     format!("{:>5}  COMBAT  {:<5} {:<8} {}", t, w.name(), w.family(), who.join(" | "))
@@ -757,6 +799,7 @@ impl App {
                     // through its eight in order rather than rolling for one.
                     let pick = self.run.next_arena(&family, w.rotation_len(&family));
                     w.set_player_health(self.run.health_for_fight());
+                    w.set_player_daggers(self.run.knight.daggers);
                     // Who waits on this ground is the family's own list,
                     // brought round by the same counter as its arenas.
                     let foe = w.foe_for(&family, pick);
@@ -835,8 +878,14 @@ impl App {
                         // What the fallen were carrying. The run decides whether
                         // it is collected; a corpse collects nothing.
                         self.run.finished_fight(health, won, w.purse());
+                        // And what was thrown is gone: the sheet's daggers are
+                        // whatever is left on the belt.
+                        self.run.knight.daggers = w.daggers_left(0);
                     }
-                    if w.settled_for() > 120 {
+                    // A finisher on a fallen knight is allowed to play out, as
+                    // the original's `StopCombat` is at the end of that script
+                    // and not at the moment of death.
+                    if w.settled_for() > 120 && !w.finishing() {
                         self.voices.reset();
                         if practice {
                             // Nothing to carry back. Practice is over when the
@@ -939,9 +988,11 @@ impl App {
         // A duel when one person is at the keyboard; otherwise the people
         // who are, and nobody else.
         let humans = self.title.state.players.max(1);
+        let gore = self.title.state.gore;
         if let Some(w) = self.world.as_mut() {
             // Practice is knight against knight, whatever the road last put
             // in the arena.
+            w.set_gore(gore);
             w.set_foe("knight");
             w.set_seats(humans, if humans == 1 { 1 } else { 0 });
         }
@@ -990,14 +1041,18 @@ impl App {
             m.state.y = def.home[1].clamp(0, MAX_Y);
         }
         let humans = self.title.state.players.max(1);
+        let gore = self.title.state.gore;
+        let daggers = self.run.knight.daggers;
         if let Some(w) = self.world.as_mut() {
             // One opponent on the road. Ambushes are creatures in the original,
             // and until the bestiary lands they are knights standing in; three
             // knights of equal strength on twenty health is not an ambush, it
             // is an execution.
+            w.set_gore(gore);
             w.set_seats(humans, 1);
             w.set_roster(roster);
             w.set_sheet_health(self.run.max_health);
+            w.set_player_daggers(daggers);
         }
     }
 
@@ -1028,7 +1083,18 @@ impl App {
         match c {
             Some('u') => self.pressed[0] = true,
             Some('d') => self.pressed[1] = true,
-            Some('s') => self.pressed[6] = true,
+            // Fire is held as well as pressed, so that in an arena it swings
+            // and in a menu it takes.
+            Some('s') => { self.keys[6] = true; self.pressed[6] = true; }
+            // The numpad chords: a direction held with fire.
+            Some(c @ '1'..='9') => {
+                let n = c as u8 - b'0';
+                self.keys[6] = true;
+                self.keys[0] = matches!(n, 7 | 8 | 9);
+                self.keys[1] = matches!(n, 1 | 2 | 3);
+                self.keys[2] = matches!(n, 1 | 4 | 7);
+                self.keys[3] = matches!(n, 3 | 6 | 9);
+            }
             // 'e' is Enter, so the headless driver can prove Enter takes a menu
             // option and not only that space does.
             Some('e') => self.pressed[12] = true,
