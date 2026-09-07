@@ -1,5 +1,8 @@
 # Everything left to build
 
+> Organised by subsystem. For the same work as one flat checklist in build order,
+> see [BUILD_ORDER.md](BUILD_ORDER.md).
+
 An exhaustive plan for a complete Rust reimplementation.
 
 This is built around the **334 symbols left in the original executable's debug info**, which

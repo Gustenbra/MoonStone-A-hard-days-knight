@@ -188,6 +188,7 @@ networked play plugs into without touching combat. See `docs/ROADMAP.md`.
 
 - [`docs/FORMATS.md`](docs/FORMATS.md) — the original's file formats, fully documented
 - [`docs/REVERSING.md`](docs/REVERSING.md) — unpacking the executable, and what is still unknown
+- [`docs/BUILD_ORDER.md`](docs/BUILD_ORDER.md) — every item once, in the order to do it
 - [`docs/COMPLETE.md`](docs/COMPLETE.md) — everything left to build, against the original's own 334 function names
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is next, including the multiplayer architecture
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — including the rules that keep the simulation networkable
