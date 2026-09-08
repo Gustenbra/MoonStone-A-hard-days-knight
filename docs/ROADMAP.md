@@ -10,14 +10,17 @@ Ordered by what the project is missing most, not by what is easiest.
 - [x] **N fighters instead of two.** Done. Combat resolution moved out of the renderer
       and into `henge-core` as `Bout`, which holds a `Vec<Fighter>` and takes one
       `Intent` each. Four-player local works; a network peer slots into the same seam.
-- [x] **Four knight colours.** Done, by palette substitution rather than by using the
-      separate banks. Arena palettes are fixed at 32 entries, so a recolour has to be a
-      substitution within the colours already present: preserve luminance, move hue, and
-      never touch greys, which carry the armour and the ground shadows. Status bars are
-      drawn from the same ranked hues, so a bar cannot drift from its knight.
-      *Limitation: a palette supports as many knights as it has hue groups. Three of the
-      four arena families have six; the glade has four, two of them thin, so its fourth
-      knight is washed out.*
+- [x] **Four knight colours.** Done, the way the original does it, which is by writing
+      palette entries and not by substituting pixels. The knight is painted in indices 6
+      to 8 and `ColourKnight` writes his three shades there at the start of every bout;
+      a second knight is the same figure painted in 9 to 11 (`HE1.OB`..`HE3.OB`) with
+      `Colour2ndKnight` writing his; each creature's block goes in from 9, the trogg's
+      by the ground it stands on. `henge_core::battle_palette` applies the recovered
+      tables in the original's order and `KnightGlowOn` breathes the knight's own
+      entries when he is nearly dead. The hue substitution that stood in for all this
+      for a long time is deleted. *Limitation, the original's own: two knights per
+      palette, so a browser brawl of three or four puts the extras in the second's
+      colours.* `BUILD_ORDER.md` item 78.
 - [x] **Audio.** Done. `henge-audio` splits deciding *what* to play from *where it comes
       out*: cues are derived by watching the fight and are pure testable logic, while the
       backend is behind a trait so a browser or a server swaps only that half. All 49

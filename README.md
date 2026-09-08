@@ -45,8 +45,9 @@ need your own copy of the original, which the engine reads and converts locally.
   one lair of each family, and a lair you have beaten but could not carry out of
   stays on the map to come back to
 - **The quest, and the end of it.** One of the four keys is in one lair of each kind of
-  ground, and four of them open the Valley of the Gods, where the Guardian waits on marsh
-  ground because the original's own set-up routine colours the backdrop that way. Beating
+  ground, and four of them open the Valley of the Gods, where the Guardian waits on the
+  wastes, because its own loader opens with `LoadWasteBack` and its palette is the
+  waste's browns with blues where the greens were. Beating
   it spends all four keys and pays one of the four moonstones, and standing in the stone
   circle with the stone whose night it is ends the game. Short of that, five life points:
   a knight put down is whole again and one point poorer, and only the last of them is
@@ -100,7 +101,12 @@ need your own copy of the original, which the engine reads and converts locally.
   leaves empty here. One plate per fighter along the bottom of an arena, and the
   whole sheet on a key
 - **Up to four fighters in one arena**, the original's player count, in any mix of
-  people at the keyboard and opponents, each in their own colour
+  people at the keyboard and opponents. A knight is the colour the original makes
+  him, by the original's own mechanism: `ColourKnight` writes his three shades into
+  palette entries 6 to 8 at the start of every bout, a second knight is the same
+  figure painted in 9 to 11, and each creature's block goes in from 9, so a forest
+  trogg and a wasteland trogg are one sheet in two palettes. Two knights per palette
+  is the original's limit, so a brawl of four puts the extras in the second's colours
 - Movement, committed attacks, positional hit resolution, damage, death
 - **Eight attacks, chosen by the direction held with fire**, the way the
   original's own joystick tables choose them: the swing forward, the chop up,

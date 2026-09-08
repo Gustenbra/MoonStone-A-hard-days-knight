@@ -1,9 +1,10 @@
 //! Who a knight is, and what that is worth in a fight.
 //!
-//! Four knights ride out. Until now they were four copies of one figure in four
-//! substituted colours, with no name, no history and nothing to choose between
-//! them. This is the other half: an identity, a stat block, and the arithmetic
-//! the original actually used to turn that block into health, reach and damage.
+//! Four knights ride out. Until now they were four copies of one figure told
+//! apart by colour alone, with no name, no history and nothing to choose
+//! between them. This is the other half: an identity, a stat block, and the
+//! arithmetic the original actually used to turn that block into health, reach
+//! and damage. The colour itself is [`crate::battle_palette`]'s business.
 //!
 //! **What is recovered.** `_STATUS` and the knight record in `MOON` give the
 //! whole sheet. A knight record carries three ability bytes at `+0x2e`, `+0x2f`
@@ -135,6 +136,10 @@ pub struct KnightDef {
     /// knight: blue, gold, emerald and red, in that order. The initials on the
     /// original's four name buffers (`BNAME`, `GNAME`, `ENAME`, `RNAME`) are
     /// those colours, which is how the pairing is known rather than guessed.
+    /// These are the brighter shades he pulses towards when nearly dead; the
+    /// ones his armour is drawn in are `ColourKnight`'s, which the pack
+    /// carries in its battle palette (`crate::battle_palette`) by the same
+    /// index, so a fight never reads this field.
     pub shades: Vec<u32>,
     /// Where on the overworld this knight begins. One corner each, from
     /// `InitKnights`.

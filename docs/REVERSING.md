@@ -826,6 +826,81 @@ One reading was wrong and shows: `DisplayKnight` draws the life points as cel
 two more added when `knight[0x3a]` says the wizard has made a toad of him. `KI.CEL` 17
 and 18 are a helmed head and 19 and 20 are a frog. This project drew 19.
 
+## The fight palette is written, not substituted
+
+`MOON` has a family of `Colour*` routines, and for a long time this project had read one
+of them (`ColourKnight`) and left the mechanism it belongs to unbuilt, recolouring the
+knights instead by a hue substitution of its own. Reading the family whole settles how a
+bout gets its colours, and the answer is that **nothing is ever substituted**: every
+fighter's artwork is painted against fixed palette indices, and the bout writes colours
+into those indices before it starts.
+
+`ColourBackDrop` (image 0x460f, capital D) is the entry. Its first instruction is
+`mov si, 0x80bb; mov di, 0x7a80; mov cx, 0x20; rep movsw`, which copies thirty two words
+from `DS:0x80bb` into `BattlePal`. `DS:0x80bb` is where the picture loader at 0x875e
+leaves a picture's palette (`mov di, 0x80bb; rep movsb` after the header, then a loop
+that byte swaps each word), and the landscape generators at 0x8cd3, 0x8d02, 0x8d31 and
+0x8d60 each load their backdrop, `GLB1.CMP`, `FOB1.CMP`, `SWB1.CMP` or `WAB1.CMP`, through
+it before the layout. So the base is the backdrop picture's own palette. It then stores
+`ax` in `COLOURS`, sets `si = 0x7a92`, which is entry 9, and dispatches: 0 to
+`ColourBeast`, 2 `ColourMudmen`, 4 `ColourDemon`, 6 `Colour2ndKnight`, 0xa `ColourDragon`,
+0xc and 0x10 `ColourTroggAxe`, 0x12 `ColourRatmen`, 0x18 `ColourBalok`, 0x20
+`ColourTroll`, anything else straight to `ColourMainKnight`. The thirteen `InitKnightvs*`
+routines each end on `mov ax, <code>; jmp ColourBackDrop`, which is where the codes were
+read: both trogg loaders with axe and hammer pass 0xc and the spear passes 0x10.
+
+Every creature routine is a run of `mov word ptr [si + 2k], imm` stores, so the colours are
+immediates in the code and were read off it directly. `ColourTroggAxe` (0x46c0) is the
+one that tests something first: `[0x694e]`, the landscape code, against 6 and 0, so a
+trogg has one block on the wastes, another on the moors and a third everywhere else.
+`ColourTroll` stores six words and not seven. `ColourDemon` is `mov di, 0x7992; mov cx,
+0x17; xchg si, di; rep movsw`, twenty three words from `BlueDemon` over 9 to 31.
+`ColourDragon` stores its seven and then `mov si, 0x7aba` and three more, which is entry
+29. `Colour2ndKnight` is `mov di, [0x897b]; call ColourKnight`, the second knight's
+record, with `si` still at entry 9.
+
+All of them fall into `ColourMainKnight` (0x47e4): a fade out, `mov di, [0x8979]; mov si,
+0x7a8c; call ColourKnight`, the main knight's record and entry 6; `call ColourBackdrop`;
+`mov word ptr [0x7a80], 0`; `cmp [COLOURS], 0xa; je; mov word ptr [si + 0x1e], 0xc00`,
+which is entry 15 made red for everyone but the dragon; then the fade in.
+`ColourBackdrop` (0x4879, lower case d) returns at once when `COLOURS` is 4 and otherwise
+branches on `[0x694e]`: 0 and 2 copy `PlainsCOLOUR` or `ForestCOLOUR` to entry 16, 4 and
+6 first write `ffd 998 776 443` to entries 1 to 4 and then copy `SwampCOLOUR` or
+`WasteCOLOUR`. `ColourBACKDROP` (capitals) is the shared tail, `mov si, 0x7aa0; mov cx,
+0xd; xchg di, si; rep movsw`, thirteen words to entry 16. The four tables are in the data
+segment and the baker reads them out of the image; they match the entries 16 to 28 of
+the four backdrop pictures word for word, which is the corroboration.
+
+**How the second knight is a different colour.** `InitKnightvsKnight` calls a loader at
+0x89cd, which loads `HE1.OB`, `HE2.OB` and `HE3.OB` into the creature table in place of
+`KN1` to `KN3`, sharing `KN4` and `KN5`. Counting the indices in the baked sheets says
+what they are: `KN1`..`KN3` put 13 percent of their pixels on each of 6, 7 and 8 and
+none on 9 to 11; `HE1`..`HE3` put 17 percent on each of 9, 10 and 11 and none on 6 to 8.
+The same knight, painted in the other three entries. Every creature sheet uses 9 upwards
+and none of them uses 6 to 8, and every one of them uses entry 5, which is the black
+outline in all four backdrops.
+
+**The call trap bit again here**, and the note above is the fix. `SetUpDKL`'s call reads
+as `0x8e80` and `InitKnightvsKnight`'s as `0x8b9a`; taken as image offsets the first is
+mid-instruction and the second lands inside the knight loader. Undoing the callers' own
+`-12` and applying `-473` gives `GENERATELANDSCAPE` at 0x8cb3 and the second knight's
+loader at 0x89cd, both on an entry point.
+
+**What was wrong on screen, exactly.** `FOB1.CMP` was saved with `d00 900 600` at 6 to 8
+and the mudmen's `332 ccb b81 851 630 f52` at 9 to 14, so with nothing written a knight
+drawn over it is red and a trogg is grey and gold. The hue substitution then moved the
+red into the nearest populated hue bucket, which on the forest palette was the browns,
+and that was the gold knight the screenshot showed.
+
+**Left alone.** `ColourEn4Knight` (`_TAVERN`, 0xb4b2) writes four words at `si + ax` into
+the henge picture's palette, `0x80bb + 0x10`, entries 8 to 11, for the knight at the
+stones: `05d 028 016 003` blue, `fa0 b40 930 710` gold, `e00 900 600 300` red, `0c5 082
+061 040` emerald. Its red branch tests `[si + 0x20]` where the other three test
+`[di + 0x20]`, which with `si` already at entry 8 of the palette is entry 24 of the
+picture and not the knight's colour index, so as shipped the red knight probably never
+gets his red there. Not built,
+not the arena.
+
 ## Consequence for the port
 
 The bestiary is unblocked. All eight creatures are composed the same way, and their

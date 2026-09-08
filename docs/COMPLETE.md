@@ -166,7 +166,7 @@ All 386 files decode. See `FORMATS.md`.
 | `LOADPALETTE`, `SETCOLOR`, `CHANGE_DAC`, `IFF_PAL`, `RGB_PAL` | palette loading | done |
 | `FADEPALETTEIN`, `FADEPALETTEOUT`, `FADEOUTDAY` | palette fades | done, recovered: sixteen linear steps, one a frame |
 | `ADDCOL`, `COLCON`, `DYNAMIC`, `COLOURCYCLE`, `COLOURGLOW`, `_installcycle`, `_installglow`, `CYCLES`, `GLOWS`, `PALLOC` | animated palette entries | done, recovered: `henge_assets::palette` |
-| `COLOURENKNIGHT` | per-player knight recolour | done (by hue substitution) |
+| `COLOURENKNIGHT`, `ColourBackDrop`, `ColourKnight`, `Colour2ndKnight`, `ColourBeast`..`ColourDragon`, `ColourBackdrop`, `BattlePal` | the fight palette: knight, second knight, creature and ground colours written into the backdrop's palette | done, recovered: `henge_core::battle_palette`, below |
 | `SCROLL`, `PAN`, `SETSCREENOFFSET`, `AROFFSET` | scrolling the map | **settled: the overworld map does not scroll** |
 | `BORD`, `BORDERS`, `SETDEMONBORD` | `bord` (0x5828) is the VGA overscan colour, attribute register 0x11, and nothing to do with movement. `SETDEMONBORD` writes a movement border; `SBORD` (0x4552) and `CheckBorder` (0x40d0) are the two routines that read them | **done**, item 60 and `henge_core::arena` |
 | `CLS`, `VBI`, `WAITVSYNC`, `WAITVBS` | clear, vblank sync | done via the frame loop |
@@ -195,13 +195,42 @@ All 386 files decode. See `FORMATS.md`.
       knight and nothing else, because the screen is cleared to entry 0 and cel 1 of
       `SEL.CEL` is the only thing on it drawn in 15. A third, `MudmenGlowOn`, is `COLOURGLOW(0x0e, 0x100, 2, 0)` and
       hangs off `InitCombat` rather than off a screen. All three are built
-- [ ] `KnightGlowOn` and `KnightGlowColours`, which flash a knight down to ten health in
-      his own colour on entries 6, 7 and 8, and 9 to 11 for a second knight. Recovered
-      and not wired, because `ColourKnight` *writes* the knight's armour into entries 6
-      to 8 (`0x00a`, `0x007`, `0x004` for the blue knight, `0xf80`/`0xc50`/`0xa30` gold,
-      `0x8c6`/`0x593`/`0x251` emerald, `0xf22`/`0xb22`/`0x700` red, and
-      `0x206`/`0x103`/`0x001` for a fifth) and henge recolours by hue substitution
-      instead, so those entries are backdrop colours here. **Which also answers 8.2's
+- [x] **The fight palette, `BattlePal`, and it is how the knights get their colours.**
+      The original does not recolour a knight by substituting pixels, and henge no longer
+      does either. Every fighter is painted against fixed indices and the bout writes
+      colours into them. `ColourBackDrop` (image 0x460f) copies the backdrop picture's
+      thirty two words from `DS:0x80bb`, where the picture loader (0x875e) left them, into
+      `BattlePal` (`DS:0x7a80`), then dispatches on the code each `InitKnightvs*` passes
+      in `ax` with `si` at entry 9: beast 0, mudmen 2, demon 4, second knight 6, dragon
+      0xa, trogg with axe or hammer 0xc, trogg with spear 0x10, ratmen 0x12, balok 0x18,
+      troll 0x20. The creature routines write their block from 9: seven words for most,
+      six for the troll (0x4762), twenty three for the demon (0x4781, copied from
+      `BlueDemon` at `DS:0x7992`), and the dragon (0x47b1) adds `fc0 f80 c50` at 29 to
+      31; the trogg (0x46c0) is the one that looks at the landscape code, with one block
+      on the wastes, one on the moors and one everywhere else. A second knight
+      (`Colour2ndKnight`, 0x4691) gets `ColourKnight` at 9 to 11, and is drawn from
+      `HE1.OB`..`HE3.OB`, the knight painted in 9 to 11 instead of 6 to 8, which
+      `InitKnightvsKnight`'s loader (0x89cd) puts in the creature table. Then
+      `ColourMainKnight` (0x47e4): `ColourKnight` (0x480e) at entries 6 to 8, `00a 007
+      004` blue, `f80 c50 a30` gold, `8c6 593 251` emerald, `f22 b22 700` red, `206 103
+      001` on the unguarded last branch that the computer's knights take; `ColourBackdrop`
+      (0x4879), which the demon skips, and which writes `PlainsCOLOUR`, `ForestCOLOUR`,
+      `SwampCOLOUR` or `WasteCOLOUR` (thirteen words at `DS:0x78d6`, `0x78f0`, `0x7924`,
+      `0x790a`) to 16 to 28, and `ffd 998 776 443` to 1 to 4 on the swamp and the wastes;
+      entry 0 black; entry 15 `c00` unless the dragon's. Every backdrop in the release was
+      saved with its own ground table already at 16 to 28, so those writes change nothing
+      on the original's pictures, and the baker checks that they agree. All of it is
+      `data/battle-palette.json`, applied by `henge_core::battle_palette::compose` in
+      that order, and the knight is blitted in his own indices with no table between
+- [x] **`KnightGlowOn` and `KnightGlowColours`**, which flash a knight down to ten health
+      in his own colour on entries 6, 7 and 8, and 9 to 11 for a second knight. Wired
+      now that those entries are the knight: the combat loop calls it once a frame
+      (0x369), and with `KGT` clear and the main knight's health at ten or less it
+      installs `COLOURGLOW(6, glow[0], 2, 0)`, `COLOURGLOW(7, glow[1], 1, 0)` and
+      `COLOURGLOW(8, glow[2], 1, 0)`, then the same on 9 to 11 every frame for a second
+      knight when `COLOURS` says there is one. The glow triples are `00c 009 006`, `fa0
+      e70 c50`, `ae8 6b5 473`, `d00 900 500` and `408 305 003`. `KnightGlowOff` writes
+      zero into the six handles at the end of the bout. **Which also answers 8.2's old
       open question**: the knight palette is recovered after all
 - [x] Map scrolling: confirmed, and there is none. `MAP.CMP` is one 320x200 picture,
       `_MAP:SHOW` passes the token's position straight to the blitter with nothing
@@ -1043,7 +1072,8 @@ Item 75 read `ColourKnight`, which writes three 12-bit words into `BattlePal+12`
 `0x206`, `0x103`, `0x001` for a fifth case. So **the original recolours a knight by
 rewriting three palette entries, not by substituting pixels**, and `KnightGlowColours`'
 brighter triple is what those same three entries pulse towards when he is nearly dead.
-Whoever revisits `COLOURENKNIGHT` should start there rather than with hue substitution.
+That is now how henge does it, for the knights and for the creatures alike; the hue
+substitution that stood in for it is gone. Section 2.2 has the whole of `BattlePal`.
 
 **The four knights do not differ in stats.** `InitKnights` gives each one a name, a colour,
 one corner of the map at (10, 10), (300, 5), (26, 180) or (300, 185), and the same stat

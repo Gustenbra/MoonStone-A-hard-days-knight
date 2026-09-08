@@ -20,12 +20,10 @@
 
 pub mod manifest;
 pub mod palette;
-pub mod recolour;
 pub mod registry;
 
 pub use manifest::{FrameRect, Manifest, Provenance, Sheet, RECIPE};
 pub use palette::{Cycle, EffectTable, Effects, Fade, Glow, SceneEffects};
-pub use recolour::{player_colours, player_luts, ramp, Lut, IDENTITY};
 pub use registry::{Coverage, Registry, Resolved};
 
 /// A decoded, palette-indexed image. Index 0 is transparent, as it is throughout

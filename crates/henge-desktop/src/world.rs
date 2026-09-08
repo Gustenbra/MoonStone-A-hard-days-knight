@@ -5,12 +5,14 @@
 //! the reference art is replaced by our own.
 
 use crate::framebuffer::Framebuffer;
-use henge_assets::{player_colours, player_luts, recolour, Lut, Registry};
+use henge_assets::Registry;
 use henge_core::arena::{Field, GLOBAL};
+use henge_core::battle_palette::{self, BattleColours, Sides};
 use henge_core::bout::{Bout, HitEvent};
 use henge_core::combat::{Fighter, Intent};
 use henge_core::content::{ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH};
-use henge_core::taskvm::{field, Task};
+use henge_core::taskvm::{field, Bank, BankTables, Task};
+use std::collections::BTreeMap;
 
 const CELL_W: usize = 32;
 const CELL_H: usize = 25;
@@ -50,12 +52,18 @@ pub struct World {
     pub control: Vec<Control>,
     /// Hits from the last tick, for whoever wants to play a sound.
     pub events: Vec<HitEvent>,
-    /// One colour substitution per seat, rebuilt when the arena changes because
-    /// each arena brings its own palette.
-    luts: [Lut; 4],
-    lut_arena: Option<usize>,
-    /// A representative colour per seat, for status bars.
-    seat_colours: [u8; 4],
+    /// `BattlePal`'s tables: what a bout writes over the backdrop's palette
+    /// for the knight, a second knight, each creature and the ground. See
+    /// `henge_core::battle_palette`.
+    colours: BattleColours,
+    /// The second knight's banks: `HE1.OB` to `HE3.OB` and the shared `KN4`
+    /// and `KN5`, which is the creature table as `InitKnightvsKnight` loads
+    /// it. The same figure painted in indices 9 to 11 instead of 6 to 8, so a
+    /// second knight is a different colour without a single pixel changing.
+    second_banks: Option<Vec<Bank>>,
+    /// `BattlePal` as last composed, for whoever names a fighter by one of
+    /// its colours after the frame is drawn.
+    palette: [u32; battle_palette::ENTRIES],
     /// What the player brings into the next bout. Wounds carry between fights,
     /// so this is not always full.
     player_health: Option<i32>,
@@ -95,6 +103,17 @@ impl World {
         let arenas: Arenas = reg.read_data("data.arenas")?;
         let families: Families = reg.read_data("data.families")?;
         let actors: ActorData = reg.read_data("data.actors")?;
+        // A pack without the tables fights in the backdrop's own colours,
+        // which is wrong but visible, rather than refusing to fight.
+        let colours: BattleColours = reg.read_data("data.battle_palette").unwrap_or_else(|e| {
+            eprintln!("no battle palette in the pack, fighters keep the backdrop's colours: {e}");
+            BattleColours::default()
+        });
+        let second_banks = reg
+            .read_data::<BTreeMap<String, BankTables>>("data.banks")
+            .ok()
+            .and_then(|mut b| b.remove("hero"))
+            .and_then(|mut tables| tables.remove(&2));
         let mut order: Vec<String> = arenas.keys().cloned().collect();
         order.sort();
         anyhow::ensure!(!order.is_empty(), "no arenas in the pack");
@@ -110,9 +129,9 @@ impl World {
             bout: Bout::new(field, Vec::new()),
             control: Vec::new(),
             events: Vec::new(),
-            luts: [henge_assets::recolour::IDENTITY; 4],
-            lut_arena: None,
-            seat_colours: [1; 4],
+            colours,
+            second_banks,
+            palette: [0; battle_palette::ENTRIES],
             player_health: None,
             sheet: None,
             roster: (0..4).collect(),
@@ -327,9 +346,130 @@ impl World {
         self.roster.get(seat).copied().unwrap_or(seat % 4)
     }
 
-    /// The colour that seat's knight wears in the loaded palette.
+    /// The seat drawn as the first knight, in entries 6 to 8. Seat zero
+    /// whenever a knight is in it, which is every bout but the browser's.
+    fn main_knight_seat(&self) -> Option<usize> {
+        self.bout.fighters.iter().position(|f| f.actor == "knight")
+    }
+
+    /// The first knight who is not the main one. He is drawn from the second
+    /// knight's banks, in entries 9 to 11, as `Colour2ndKnight` colours him.
+    fn second_knight_seat(&self) -> Option<usize> {
+        let main = self.main_knight_seat()?;
+        self.bout.fighters.iter().enumerate().position(|(i, f)| i != main && f.actor == "knight")
+    }
+
+    /// Whether a seat draws through the second knight's banks. Every knight
+    /// but the main one does: the original never fields more than two, and
+    /// the palette has room for two, so a third and fourth in the browser's
+    /// brawl wear the second's colours.
+    fn draws_as_second(&self, seat: usize) -> bool {
+        self.is_knight(seat) && self.main_knight_seat() != Some(seat)
+    }
+
+    /// The creature whose block is in entries 9 upwards: the first fighter
+    /// the tables know, which in every bout the road produces is the one
+    /// kind of creature in it.
+    fn creature_in_palette(&self) -> Option<&str> {
+        self.bout
+            .fighters
+            .iter()
+            .map(|f| f.actor.as_str())
+            .find(|a| self.colours.creatures.contains_key(*a))
+    }
+
+    /// Who the palette is composed for.
+    fn sides(&self) -> Sides<'_> {
+        let main = self.main_knight_seat();
+        Sides {
+            main_knight: main.map_or_else(|| self.knight_at(0), |s| self.knight_at(s)),
+            second_knight: self.second_knight_seat().map(|s| self.knight_at(s)),
+            creature: self.creature_in_palette(),
+            family: self.family(),
+        }
+    }
+
+    /// `BattlePal` for the bout that is up: the backdrop's own thirty two
+    /// colours with the fighters' written over them, in the original's order.
+    pub fn battle_palette(&self, backdrop: &[u32]) -> [u32; battle_palette::ENTRIES] {
+        let mut base = [0u16; battle_palette::ENTRIES];
+        for (slot, c) in base.iter_mut().zip(backdrop) {
+            *slot = battle_palette::narrow(*c);
+        }
+        let pal = self.colours.compose(&base, &self.sides());
+        let mut out = [0u32; battle_palette::ENTRIES];
+        for (slot, w) in out.iter_mut().zip(pal) {
+            *slot = battle_palette::widen(w);
+        }
+        out
+    }
+
+    /// The entry a seat's plate is drawn in: the first, brightest, of the
+    /// knight's three shades, or the brightest of a creature's own block. The
+    /// strip is ours; that it names a fighter by a colour he is wearing is
+    /// what keeps it honest.
     pub fn seat_colour(&self, seat: usize) -> u8 {
-        self.seat_colours[self.knight_at(seat) % 4]
+        if self.is_knight(seat) {
+            return if self.draws_as_second(seat) {
+                battle_palette::SECOND_AT as u8
+            } else {
+                battle_palette::MAIN_KNIGHT_AT as u8
+            };
+        }
+        let Some(f) = self.bout.fighters.get(seat) else { return battle_palette::SECOND_AT as u8 };
+        let pal = &self.palette;
+        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
+        self.colours
+            .creature_entries(&f.actor, self.family())
+            .into_iter()
+            .filter(|i| *i != battle_palette::BLOOD_AT)
+            .max_by_key(|i| luma(pal[*i]))
+            .unwrap_or(battle_palette::SECOND_AT) as u8
+    }
+
+    /// The glow a knight's entries walk towards below ten health, and the
+    /// entries: `KnightGlowOn` (0x8f8) installs three `COLOURGLOW`s on 6, 7
+    /// and 8 for the main knight, the first every other frame and the other
+    /// two every frame, and the same on 9, 10 and 11 for a second knight,
+    /// all three every frame. None for a creature, and none for a third or
+    /// fourth knight in the browser's brawl: the original has handles for two.
+    pub fn knight_glow(&self, seat: usize) -> Vec<henge_assets::Glow> {
+        let main = self.main_knight_seat();
+        if main != Some(seat) && self.second_knight_seat() != Some(seat) {
+            return Vec::new();
+        }
+        let Some(target) = self.colours.glow_for(self.knight_at(seat)) else { return Vec::new() };
+        let (first, slow) = if self.draws_as_second(seat) {
+            (battle_palette::SECOND_AT as u8, 1)
+        } else {
+            (battle_palette::MAIN_KNIGHT_AT as u8, 2)
+        };
+        target
+            .iter()
+            .enumerate()
+            .map(|(k, t)| henge_assets::Glow {
+                index: first + k as u8,
+                target: *t,
+                period: if k == 0 { slow } else { 1 },
+                repeat: 0,
+            })
+            .collect()
+    }
+
+    /// `KnightGlowOn`'s test: `cmp ax, 0xa; jg` on the knight's health, so
+    /// ten or fewer of the original's twenty, dead included, which is why a
+    /// fallen knight keeps breathing until the bout is over. Without a sheet
+    /// the browser's knight stands at a hundred, and the line moves with him.
+    pub fn knight_is_low(&self, seat: usize) -> bool {
+        let Some(f) = self.bout.fighters.get(seat) else { return false };
+        if !self.is_knight(seat) {
+            return false;
+        }
+        let threshold = match self.sheet {
+            Some(_) => 10,
+            None => 10 * self.actors["knight"].health / ORIGINAL_KNIGHT_HEALTH,
+        };
+        f.health <= threshold
     }
 
     pub fn reset(&mut self) {
@@ -505,11 +645,6 @@ impl World {
             .sum()
     }
 
-    /// How many visibly different knights this arena's palette can support.
-    pub fn distinct_players(&self, palette: &[u32]) -> usize {
-        recolour::max_distinct_players(palette)
-    }
-
     pub fn arena(&self) -> &ArenaData { &self.arenas[&self.order[self.index]] }
     pub fn name(&self) -> &str { &self.order[self.index] }
     /// The ground of the arena that is up: every rectangle nobody may walk
@@ -623,11 +758,12 @@ impl World {
         // coherent picture.
         let tiles = family.tiles.clone();
 
-        // The backdrop owns the palette everything else is drawn in, which is how
-        // the original recoloured the same creature per region for free.
+        // The backdrop's own palette is the base, and `BattlePal` is that with
+        // the fighters written over it: the knight in 6 to 8, the creature or
+        // the second knight from 9, the ground, black at 0 and red at 15.
         if let Some(p) = reg.palette(&format!("palette.{backdrop_id}")).map(|r| r.value.clone()) {
-            fb.set_palette(&p);
-            self.refresh_luts(&p);
+            self.palette = self.battle_palette(&p);
+            fb.set_palette(&self.palette);
         }
         match reg.image(&backdrop_id) {
             Ok(img) if img.width == 320 && img.height == 200 => {
@@ -661,15 +797,16 @@ impl World {
                 Item::Fighter(i) => self.draw_fighter(reg, fb, i)?,
                 Item::Missile(k) => {
                     let m = &self.bout.missiles[k];
-                    // The knight's own dagger is in his colours; the blood is
-                    // the blood bank's own.
-                    let lut = if m.attack.is_some() && self.is_knight(m.owner) {
-                        self.luts[self.knight_at(m.owner) % 4]
+                    // A dagger comes out of the banks of whoever threw it,
+                    // so a second knight's is in his table; the blood is the
+                    // blood bank's own.
+                    let banks = if m.attack.is_some() && self.draws_as_second(m.owner) {
+                        self.second_banks.as_deref()
                     } else {
-                        henge_assets::recolour::IDENTITY
+                        None
                     };
                     let def = self.def_of(&m.actor);
-                    Self::draw_parts(reg, fb, def, &m.task, &lut)?;
+                    Self::draw_parts(reg, fb, def, &m.task, banks)?;
                 }
             }
         }
@@ -692,17 +829,6 @@ impl World {
             }
         }
         fb.blit(&cell, CELL_W, CELL_H, p.x as i32, p.y as i32, false);
-    }
-
-    /// Rebuild the seat colours when the arena, and therefore the palette,
-    /// changes. Recomputing every frame would be wasteful and pointless.
-    pub fn refresh_luts(&mut self, palette: &[u32]) {
-        if self.lut_arena == Some(self.index) {
-            return;
-        }
-        self.luts = player_luts(palette);
-        self.seat_colours = player_colours(palette);
-        self.lut_arena = Some(self.index);
     }
 
     fn draw_fighter(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
@@ -733,7 +859,7 @@ impl World {
         let ox = if flip { -(rect.ox + w as i32) } else { rect.ox };
         let x = f.x + ox + frame.offset_x as i32;
         let y = f.y + rect.oy + frame.offset_y as i32;
-        fb.blit_lut(&px, w, h, x, y, flip, &self.luts[self.knight_at(index) % 4]);
+        fb.blit(&px, w, h, x, y, flip);
         Ok(())
     }
 
@@ -749,27 +875,35 @@ impl World {
         let f = &self.bout.fighters[index];
         let def = self.def_at(index);
         let Some(task) = f.task.as_ref() else { return Ok(()) };
-        // A knight wears his seat's colours. A creature is drawn as its sheet
-        // has it: the arena's palette already recolours it per region, which
-        // is how the original got a swamp trogg and a forest trogg for free.
-        let lut = if self.is_knight(index) {
-            self.luts[self.knight_at(index) % 4]
-        } else {
-            henge_assets::recolour::IDENTITY
-        };
-        Self::draw_parts(reg, fb, def, task, &lut)
+        // Everyone is drawn in their own pixel indices, and the palette says
+        // what those are this bout: the knight's 6 to 8 hold his colours, a
+        // creature's 9 upwards hold its block for this ground, which is how
+        // the original got a swamp trogg and a forest trogg from one sheet.
+        // A second knight is the one figure drawn from other banks, the
+        // `HE*.OB` set painted in 9 to 11.
+        let banks = if self.draws_as_second(index) { self.second_banks.as_deref() } else { None };
+        Self::draw_parts(reg, fb, def, task, banks)
     }
 
     /// The parts of one task, whoever's it is. A task that has killed itself
     /// draws nothing, as in the original, where it is no longer in the table.
-    fn draw_parts(reg: &mut Registry, fb: &mut Framebuffer, def: &ActorDef, task: &Task, lut: &Lut)
-        -> anyhow::Result<()> {
+    ///
+    /// `banks`, when given, stands in for the actor's own starting table, the
+    /// way the creature table stands in for the knight's when a second knight
+    /// is loaded into it.
+    fn draw_parts(
+        reg: &mut Registry, fb: &mut Framebuffer, def: &ActorDef, task: &Task, banks: Option<&[Bank]>,
+    ) -> anyhow::Result<()> {
         if !task.active {
             return Ok(());
         }
         let at = (task.x, task.y, task.z);
         for part in &task.shown {
-            let Some(bank) = def.bank(part.table, part.bank) else { continue };
+            let swapped = banks
+                .filter(|_| part.table == def.bank_table)
+                .and_then(|b| b.get(part.bank as usize))
+                .filter(|b| !b.cels.is_empty());
+            let Some(bank) = swapped.or_else(|| def.bank(part.table, part.bank)) else { continue };
             let Some(placed) = henge_core::taskvm::place(part, bank, at, task.mirror()) else {
                 continue;
             };
@@ -788,7 +922,7 @@ impl World {
                     px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
                 }
             }
-            fb.blit_lut(&px, w, h, placed.x, placed.y, placed.mirror, lut);
+            fb.blit(&px, w, h, placed.x, placed.y, placed.mirror);
         }
         Ok(())
     }

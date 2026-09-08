@@ -26,7 +26,9 @@ The engine and a vertical slice. Roughly a quarter of the game.
 - [x] 8. Asset packs: logical ids, pack stacking, provenance, shippability check
 - [x] 9. The baker: original files to indexed PNG, WAV and JSON
 - [x] 10. Palette-indexed 320x200 framebuffer, presented at 4:3
-- [x] 11. Sprite drawing: transparency, mirroring, masking, colour substitution
+- [x] 11. Sprite drawing: transparency, mirroring, masking. Colour substitution was
+      here too, and is gone: the original colours a fighter by writing palette entries,
+      item 78, and a sprite is blitted in its own indices
 - [x] 12. Text: glyph map read off the artwork, silhouette rendering
 - [x] 13. Arenas: 56 of them, scenery, the header's own border list, depth sorting
 - [x] 14. Combat: positional hit lines, committed attacks, damage, death
@@ -897,15 +899,14 @@ Any time. None of it blocks anything.
       fade out: the between-days screen, which is `FADEOUTDAY`, and a message chain,
       which all three of `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` end on. The
       original's other fade outs cover a disk read that does not happen here.
-      **Recovered and not wired**: `KnightGlowOn`, which glows palette entries 6, 7 and 8
-      towards the knight's own colour triple when he is down to ten health, and 9, 10 and
-      11 for a second knight. It is not wired because in the original those entries *are*
-      the knight: `ColourKnight` writes his three armour colours into `BattlePal+12`
-      (0x00a/0x007/0x004 blue, 0xf80/0xc50/0xa30 gold, 0x8c6/0x593/0x251 emerald,
-      0xf22/0xb22/0x700 red, 0x206/0x103/0x001 for a fifth), whereas henge recolours by
-      hue substitution and leaves 6 to 8 as backdrop colours. **That is a real find for
-      whoever revisits `COLOURENKNIGHT`**: the knight palette was recorded as
-      unrecovered, and it is not
+      **Recovered, and wired since item 78**: `KnightGlowOn`, which glows palette
+      entries 6, 7 and 8 towards the knight's own brighter triple when he is down to ten
+      health, and 9, 10 and 11 for a second knight. It could not be wired while henge
+      recoloured by hue substitution, because those entries were backdrop colours here;
+      in the original they *are* the knight, `ColourKnight` having written his three
+      armour colours into `BattlePal+12` (0x00a/0x007/0x004 blue, 0xf80/0xc50/0xa30
+      gold, 0x8c6/0x593/0x251 emerald, 0xf22/0xb22/0x700 red, 0x206/0x103/0x001 for a
+      fifth), and since 78 they are here too
 - [x] 76. **Gamepads, with calibration and debounce; and rebindable controls.**
       The reading is recovered and the binding table is ours.
       **Recovered.** The whole game runs on one five-bit word, `0x01` right, `0x02` left,
@@ -985,6 +986,38 @@ Any time. None of it blocks anything.
       tune 3 on 310.8, 278.2 and 245.8, which are the D sharp, C sharp and B of the B
       major chord its own note stream plays). `henge-bake --render-music <dir>` writes
       them out as WAVs for anyone who does have speakers
+- [x] 78. **The fight palette. Recovered: `BattlePal`, and the hue substitution is
+      gone.** Henge used to tell four knights apart by a substitution table built from
+      the backdrop's hues, which was this project's invention, and it drew every
+      creature in whatever the backdrop's palette happened to hold at its indices: a
+      gold knight came out brown and a forest trogg in the mudmen's grey and gold,
+      because `FOB1.CMP` was saved with a red knight at 6 to 8 and the mudmen's block
+      at 9 to 15. The original writes those entries at the start of every bout.
+      `ColourBackDrop` (image 0x460f) copies the backdrop picture's palette from
+      `DS:0x80bb`, where the picture loader at 0x875e leaves it, into `BattlePal`
+      (`DS:0x7a80`), and dispatches on the code each `InitKnightvs*` hands it in `ax`:
+      beast 0, mudmen 2, demon 4, second knight 6, dragon 0xa, trogg 0xc and 0x10,
+      ratmen 0x12, balok 0x18, troll 0x20. The creature routine writes its block from
+      entry 9, the second knight's writes `ColourKnight` at 9 to 11, and all of them
+      fall into `ColourMainKnight` (0x47e4): `ColourKnight` (0x480e) at 6 to 8, the
+      ground from `ColourBackdrop` (0x4879), black at 0, `c00` at 15. The words
+      themselves, the second knight's `HE*.OB` banks painted in 9 to 11, and the
+      trogg's three blocks by landscape code are all in `henge-bake`'s
+      `battle_palette`, with the addresses; `henge_core::battle_palette` applies them in
+      the original's order; `world.rs` composes the palette every frame and blits every
+      fighter in its own pixels. `recolour.rs` and `blit_lut` are deleted.
+      **Two things came out of reading it that were not the question.** The demon is
+      fought over `WAB1.CMP`: its loader (0x8bfa) opens with `LoadWasteBack`, and
+      `BlueDemon`'s twenty three words are the waste's browns with blues for its greens,
+      so the Valley now fights on the waste rather than the swamp. And every backdrop in
+      the release was saved with its family's ground table already at 16 to 28, which
+      is why the ground writes were invisible and why the baker can check them.
+      **Ours, and said so**: the browser's brawl of three or four knights. The original
+      never fields more than two and the palette has room for two, so a third and
+      fourth wear the second's colours. **Not touched**: `ColourEn4Knight` in `_TAVERN`
+      (0xb4b2), which writes a four shade triple into the henge picture's entries 8 to
+      11 for the knight at the stones, and `ColourStatus`, which the status panel
+      already does
 
 ---
 

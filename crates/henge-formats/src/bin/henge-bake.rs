@@ -1054,6 +1054,9 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/palette-effects.json"), palette_effects())?;
     m.data.insert("data.palette.effects".into(), "data/palette-effects.json".into());
 
+    fs::write(out.join("data/battle-palette.json"), battle_palette(&src)?)?;
+    m.data.insert("data.battle_palette".into(), "data/battle-palette.json".into());
+
     fs::write(out.join("data/music-places.json"), music_places())?;
     m.data.insert("data.music.places".into(), "data/music-places.json".into());
 
@@ -2439,8 +2442,14 @@ fn place_definitions(
     // Gods`, and what the gate says when it is shut is `NoKeysMessage`, whose
     // three lines are `henge_core::quest::NO_KEYS`. **The Guardian is
     // recovered too**: `MOON:FightDemon` calls `InitKnightvsDemon`, which sets
-    // 250 health, one monster and `ColourBackDrop` 4. The arena is left empty
-    // so the swamp's own rotation picks one, the way the road does.
+    // 250 health, one monster and `ColourBackDrop` 4. **The ground is the
+    // wastes'**: the demon's loader at image 0x8bfa opens with `LoadWasteBack`
+    // (0x8d89), which loads `WAB1.CMP` and nothing else, and `BlueDemon`'s
+    // ground words are `WasteCOLOUR`'s browns with blues where its greens
+    // were, so over any other backdrop the demon's palette is wrong. The
+    // loader reads no `.T` layout at all, so the original fights it on the
+    // bare backdrop; here the arena is left empty and the waste's own
+    // rotation picks one, which is scenery the original does not draw.
     //
     // **Recovered too, now**: where it stands. Frame 0x1c of `MapIconsTABLE`
     // puts it on the green ring in the mountains that the map picture already
@@ -2466,7 +2475,7 @@ fn place_definitions(
                         "effect": {
                             "do": "valley",
                             "arena": "",
-                            "family": "swamp",
+                            "family": "waste",
                             "guardian": "demon",
                             "count": 1
                         }
@@ -2739,7 +2748,10 @@ fn item_definitions() -> String {
 /// One corner each. `KnightGlowColours` branches on the same index and gives
 /// the colours those initials stand for, as three 12-bit shades apiece: blue,
 /// gold, emerald, red. The fifth entry in that routine, a dark purple, is the
-/// one every computer knight wears.
+/// one every computer knight wears. Those are the shades a knight glows
+/// towards when nearly dead; the shades his armour is actually painted in
+/// are `ColourKnight`'s, and they are in `battle_palette` below with the
+/// glow triples beside them.
 ///
 /// **The names themselves are read out of the bottom of DGROUP**, which the
 /// unpacker used to leave stale and now does not (`docs/REVERSING.md`):
@@ -2876,6 +2888,157 @@ fn bake_music(out: &Path, m: &mut Manifest) -> anyhow::Result<usize> {
     Ok(n)
 }
 
+/// `BattlePal`: the colours a bout writes over its backdrop's palette.
+///
+/// **Recovered, all of it.** The original does not recolour a knight by
+/// substituting pixels; it rewrites palette entries, and every fighter's
+/// artwork is painted against fixed indices. `MOON:ColourBackDrop` (image
+/// 0x460f) copies the backdrop picture's thirty two words from `DS:0x80bb`,
+/// where the picture loader at 0x875e leaves them, into `BattlePal`
+/// (`DS:0x7a80`), stores the creature code in `COLOURS` and dispatches on it
+/// with `si = BattlePal + 18`, entry 9. Each `InitKnightvs*` routine ends by
+/// jumping there with the code in `ax`: beast 0, mudmen 2, demon 4, a second
+/// knight 6, dragon 0xa, trogg with axe or hammer 0xc, trogg with spear
+/// 0x10, ratmen 0x12, balok 0x18, troll 0x20. The routines it lands on:
+///
+/// ```text
+/// 0x466c ColourBeast      9..15  776 443 731 520 300 09a c00
+/// 0x4691 Colour2ndKnight  9..11  ColourKnight on the second knight's record
+/// 0x469b ColourRatmen     9..15  653 942 720 500 a96 875 c00
+/// 0x46c0 ColourTroggAxe   9..15  on the wastes  025 004 001 830 400 f80 c00
+///                                on the moors   104 102 000 600 300 693 c00
+///                                anywhere else  500 200 000 b40 610 895 c00
+/// 0x473d ColourBalok      9..15  f96 c63 930 842 521 f63 c00
+/// 0x4762 ColourTroll      9..14  55a 347 123 001 f00 800
+/// 0x4781 ColourDemon      9..31  twenty three words copied from BlueDemon, DS:0x7992
+/// 0x478d ColourMudmen     9..15  332 ccb b81 851 630 f52 900
+/// 0x47b1 ColourDragon     9..15  c00 976 700 500 754 c30 a00, then 29..31 fc0 f80 c50
+/// ```
+///
+/// All of them fall into `ColourMainKnight` (0x47e4), which fades out, sets
+/// `si = BattlePal + 12` and calls `ColourKnight` (0x480e) on the main
+/// knight's record. That writes entries 6, 7 and 8 by the colour index at
+/// `+0x20`: `00a 007 004` for 0, `f80 c50 a30` for 1, `8c6 593 251` for 2,
+/// `f22 b22 700` for 3, and `206 103 001` on the last branch, which is not
+/// guarded, so it is what every other index gets; the computer's knights carry
+/// 4. `KnightGlowColours` (0x9a5) is the same shape and gives the brighter
+/// triple each knight pulses towards below ten health: `00c 009 006`,
+/// `fa0 e70 c50`, `ae8 6b5 473`, `d00 900 500`, `408 305 003`.
+///
+/// Then `ColourBackdrop` (0x4879), lower case d, writes the ground. It returns
+/// at once when `COLOURS` is 4, the demon, and otherwise branches on the
+/// landscape code at `DS:0x694e`: 0 copies `PlainsCOLOUR` to entries 16 to 28,
+/// 2 copies `ForestCOLOUR`, 4 writes `ffd 998 776 443` into 1 to 4 and copies
+/// `SwampCOLOUR`, 6 writes the same four and copies `WasteCOLOUR`. The four
+/// tables are thirteen words each at `DS:0x78d6`, `0x78f0`, `0x7924` and
+/// `0x790a`, and they are read out of the image here rather than retyped.
+/// The landscape codes are the families in the order `GENERATELANDSCAPE`
+/// dispatches them, so 0 is the moors, which this project files as the glade.
+/// Last, entry 0 is made black and, unless `COLOURS` is the dragon's 0xa,
+/// entry 15 is made `c00`, which is why blood is the same red in every arena.
+///
+/// The second knight is not a recolour either. `InitKnightvsKnight` loads
+/// `HE1.OB`, `HE2.OB` and `HE3.OB` (0x89cd) into the creature table in place
+/// of `KN1` to `KN3`, and those banks are the knight painted in 9, 10 and 11
+/// instead of 6, 7 and 8. The pack's `hero` bank table is that table.
+///
+/// Every backdrop picture in the release already carries its own family's
+/// ground table at 16 to 28 and the four greys at 1 to 4, so the ground
+/// writes change nothing on the original's pictures; they are here because
+/// they are what the code does, and a pack with its own backdrops gets them.
+fn battle_palette(src: &str) -> anyhow::Result<String> {
+    let Some(bytes) = unpacked_image(src) else {
+        anyhow::bail!("the battle palette is read out of MAIN.EXE, and there is no image");
+    };
+    let words = |at: usize, n: usize| -> Vec<u16> {
+        (0..n).map(|i| u16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]])).collect()
+    };
+    const DGROUP: usize = 0x123b0;
+    let ground_table = |ds: usize| words(DGROUP + ds, 13);
+    let plains = ground_table(0x78d6);
+    let forest = ground_table(0x78f0);
+    let waste = ground_table(0x790a);
+    let swamp = ground_table(0x7924);
+    let blue_demon = words(DGROUP + 0x7992, 23);
+    for (name, table) in [("PlainsCOLOUR", &plains), ("ForestCOLOUR", &forest), ("WasteCOLOUR", &waste), ("SwampCOLOUR", &swamp), ("BlueDemon", &blue_demon)] {
+        anyhow::ensure!(
+            table.iter().all(|w| *w <= 0x0fff) && table.iter().any(|w| *w != 0),
+            "{name} does not read as twelve bit colour words: the image is not the one the \
+             symbol table describes"
+        );
+    }
+    // Two words checked by content so a wrong image fails here and not on screen:
+    // `ForestCOLOUR` opens `210 321` and `WasteCOLOUR` opens `322 432`.
+    anyhow::ensure!(
+        forest[..2] == [0x210, 0x321] && waste[..2] == [0x322, 0x432],
+        "ForestCOLOUR or WasteCOLOUR is not where the symbol table says"
+    );
+    let write = |at: u8, words: &[u16]| serde_json::json!({ "at": at, "words": words });
+    let greys = [0xffdu16, 0x998, 0x776, 0x443];
+    let block = |words: &[u16]| serde_json::json!({ "writes": [write(9, words)] });
+    Ok(serde_json::json!({
+        "knights": [
+            [0x00a, 0x007, 0x004],
+            [0xf80, 0xc50, 0xa30],
+            [0x8c6, 0x593, 0x251],
+            [0xf22, 0xb22, 0x700],
+            [0x206, 0x103, 0x001],
+        ],
+        "glow": [
+            [0x00c, 0x009, 0x006],
+            [0xfa0, 0xe70, 0xc50],
+            [0xae8, 0x6b5, 0x473],
+            [0xd00, 0x900, 0x500],
+            [0x408, 0x305, 0x003],
+        ],
+        "ground": {
+            "glade":  [write(16, &plains)],
+            "forest": [write(16, &forest)],
+            "swamp":  [write(1, &greys), write(16, &swamp)],
+            "waste":  [write(1, &greys), write(16, &waste)],
+        },
+        "creatures": {
+            "beast":  block(&[0x776, 0x443, 0x731, 0x520, 0x300, 0x09a, 0xc00]),
+            "ratmen": block(&[0x653, 0x942, 0x720, 0x500, 0xa96, 0x875, 0xc00]),
+            // `ColourTroggAxe` serves all three troggs: axe and hammer come in
+            // as 0xc, the spear as 0x10, and both codes land on it.
+            "trogg_axe": {
+                "writes": [write(9, &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00])],
+                "by_family": {
+                    "waste": [write(9, &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00])],
+                    "glade": [write(9, &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00])],
+                },
+            },
+            "trogg_hammer": {
+                "writes": [write(9, &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00])],
+                "by_family": {
+                    "waste": [write(9, &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00])],
+                    "glade": [write(9, &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00])],
+                },
+            },
+            "trogg_spear": {
+                "writes": [write(9, &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00])],
+                "by_family": {
+                    "waste": [write(9, &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00])],
+                    "glade": [write(9, &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00])],
+                },
+            },
+            "balok":  block(&[0xf96, 0xc63, 0x930, 0x842, 0x521, 0xf63, 0xc00]),
+            "troll":  block(&[0x55a, 0x347, 0x123, 0x001, 0xf00, 0x800]),
+            "demon":  { "writes": [write(9, &blue_demon)], "keeps_ground": true },
+            "mudmen": block(&[0x332, 0xccb, 0xb81, 0x851, 0x630, 0xf52, 0x900]),
+            "dragon": {
+                "writes": [
+                    write(9, &[0xc00, 0x976, 0x700, 0x500, 0x754, 0xc30, 0xa00]),
+                    write(29, &[0xfc0, 0xf80, 0xc50]),
+                ],
+                "keeps_blood": true,
+            },
+        },
+    })
+    .to_string())
+}
+
 /// Which palette entries move on which screen.
 ///
 /// **Recovered.** The original installs exactly two things through
@@ -2906,10 +3069,12 @@ fn bake_music(out: &Path, m: &mut Manifest) -> anyhow::Result<usize> {
 ///   (`select_palette` above), it puts `0x066` at entry 15, and the glow walks
 ///   that to `0x088` and back.
 ///
-/// The other two glows in the game hang off the fight rather than the screen:
-/// `MudmenGlowOn` (entry 14, wired in `main.rs`) and `KnightGlowOn`, which is
-/// entries 6, 7 and 8 for a knight down to ten health. See `BUILD_ORDER.md`
-/// item 75 for why the second is recovered but not wired.
+/// The other two glows in the game hang off the fight rather than the screen,
+/// and both are wired in `main.rs`: `MudmenGlowOn` (entry 14) and
+/// `KnightGlowOn`, which is entries 6, 7 and 8 for a knight down to ten
+/// health, and 9 to 11 for a second knight, walking towards the `glow`
+/// triples in `battle_palette` below. Neither is keyed by screen, so neither
+/// is in this table.
 fn palette_effects() -> String {
     serde_json::json!({
         "map": {
@@ -2936,6 +3101,62 @@ mod tests {
         let scripts = fs::read_to_string(root.join("scripts.json")).ok()?;
         let banks = fs::read_to_string(root.join("banks.json")).ok()?;
         Some((serde_json::from_str(&scripts).ok()?, serde_json::from_str(&banks).ok()?))
+    }
+
+    /// The ground tables read out of the image are the ones the backdrop
+    /// pictures were saved with: `ForestCOLOUR` is `FOB1.CMP`'s entries 16 to
+    /// 28, and so on for each family, which corroborates both the addresses
+    /// and the reading of `ColourBackdrop`. Every creature the bestiary
+    /// fields has a block, and every knight index a triple, so no fighter is
+    /// left in the backdrop's colours.
+    #[test]
+    fn the_battle_palette_agrees_with_the_backdrops() {
+        use henge_core::battle_palette::{narrow, BattleColours};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/reference");
+        let Ok(text) = fs::read_to_string(root.join("data/battle-palette.json")) else {
+            eprintln!("no baked pack under packs/reference: battle palette check skipped");
+            return;
+        };
+        let colours: BattleColours = serde_json::from_str(&text).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("manifest.json")).unwrap()).unwrap();
+        let palette = |id: &str| -> Vec<u16> {
+            manifest["palettes"][id]
+                .as_array()
+                .unwrap_or_else(|| panic!("no palette {id}"))
+                .iter()
+                .map(|v| narrow(v.as_u64().unwrap() as u32))
+                .collect()
+        };
+        for (family, _, _, backdrop, _) in ARENAS {
+            let stem = backdrop.split('.').next().unwrap().to_lowercase();
+            let pic = palette(&format!("palette.scene.{stem}"));
+            let ground = &colours.ground[*family];
+            let table = ground.iter().find(|w| w.at == 16).expect("thirteen words at 16");
+            assert_eq!(table.words.len(), 13, "{family}");
+            assert_eq!(&pic[16..29], &table.words[..], "{family}: {backdrop} was not saved with its ground table");
+            if let Some(greys) = ground.iter().find(|w| w.at == 1) {
+                assert_eq!(&pic[1..5], &greys.words[..], "{family}: the four greys");
+            }
+        }
+        assert_eq!(colours.knights.len(), 5);
+        assert_eq!(colours.glow.len(), 5);
+        assert_eq!(colours.knights[1], [0xf80, 0xc50, 0xa30], "the gold knight");
+        for c in CREATURES {
+            if c.id == "dragon_claw" {
+                continue;
+            }
+            let block = colours.creatures.get(c.id).unwrap_or_else(|| panic!("{}: no colour block", c.id));
+            for family in ["glade", "forest", "swamp", "waste"] {
+                let first = block.on(family).first().unwrap_or_else(|| panic!("{}: nothing written", c.id));
+                assert_eq!(first.at, 9, "{}: a creature begins at entry 9", c.id);
+            }
+        }
+        // The demon's twenty three words are `WasteCOLOUR`'s browns with blues
+        // for its greens, which is how it was known to be fought over `WAB1`.
+        let demon = &colours.creatures["demon"].writes[0].words;
+        let waste = &colours.ground["waste"].iter().find(|w| w.at == 16).unwrap().words;
+        assert_eq!(&demon[7..12], &waste[..5]);
     }
 
     /// Every creature in the bestiary builds and validates against the real

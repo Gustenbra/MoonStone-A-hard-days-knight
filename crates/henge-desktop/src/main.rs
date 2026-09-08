@@ -648,6 +648,10 @@ fn main() -> anyhow::Result<()> {
 /// `MudmenGlowOn`: `COLOURGLOW(0x0e, 0x100, 2, 0)`. Palette entry fourteen
 /// breathes towards a dark red every other frame for as long as the bout runs.
 /// Recovered, and installed by `InitCombat` when mudmen are in the arena.
+///
+/// The other glow a fight installs is `KnightGlowOn`, which the combat loop
+/// calls every frame and which puts three glows on the knight's own entries
+/// once he is down to ten health; see [`App::knight_glow_tick`].
 const MUDMEN_GLOW: henge_assets::Glow =
     henge_assets::Glow { index: 0x0e, target: 0x100, period: 2, repeat: 0 };
 
@@ -658,6 +662,10 @@ struct App {
     fx: henge_assets::Effects,
     /// What each screen installs, out of the pack rather than out of code.
     fx_table: henge_assets::EffectTable,
+    /// The seats whose `KnightGlowOn` glows are installed, and the entries
+    /// they sit on. The original keeps the handles in `KGT`, `KGT1`, `KGT2`
+    /// and `KnightHANDLE1` to `3`, and tests them before installing again.
+    knight_glows: std::collections::BTreeMap<usize, Vec<u8>>,
     /// Which screen is up, so a change of screen can fade the new one in the
     /// way every one of the original's own loaders does.
     scene: String,
@@ -1002,6 +1010,7 @@ impl App {
             fb,
             fx: henge_assets::Effects::new(),
             fx_table,
+            knight_glows: std::collections::BTreeMap::new(),
             scene: String::new(),
             music_places,
             tick: 0,
@@ -1257,8 +1266,12 @@ impl App {
             if self.mudmen_present() {
                 self.fx.install_glow(MUDMEN_GLOW, &base);
             }
+            // `install` emptied the glow table, and the knight's went with it,
+            // which is `KnightGlowOff` at the end of every bout.
+            self.knight_glows.clear();
             self.fx.set_fade(henge_assets::Fade::In(0));
         }
+        self.knight_glow_tick();
         self.fx.tick();
         // `FADEOUTDAY`, and the fade a message chain ends on. Both are screens
         // that go out on their own rather than being walked away from, which
@@ -1307,6 +1320,45 @@ impl App {
         match want {
             Some(id) => self.audio.play_music(&id),
             None => self.audio.stop_music(),
+        }
+    }
+
+    /// `KnightGlowOn` (0x8f8), which the combat loop calls once a frame after
+    /// the fighters have moved.
+    ///
+    /// **Recovered.** With the handle in `KGT` still zero and the main
+    /// knight's health at ten or less, it takes his `KnightGlowColours` triple
+    /// and installs `COLOURGLOW(6, glow[0], 2, 0)`, `COLOURGLOW(7, glow[1],
+    /// 1, 0)` and `COLOURGLOW(8, glow[2], 1, 0)`; when `COLOURS` says a
+    /// second knight is in the bout and `KnightHANDLE1` is zero, the same on
+    /// 9, 10 and 11 for him, every frame. A glow walks the entry towards the
+    /// brighter shade a step a period and swaps its ends on arrival, so the
+    /// armour breathes between its colour and the brighter one until the
+    /// bout ends and `KnightGlowOff` writes zero into every handle. Here a
+    /// knight whose health has come back, which is a restart, loses his glow
+    /// the same way, since the scene does not change.
+    fn knight_glow_tick(&mut self) {
+        let Some(w) = self.world.as_ref() else { return };
+        if self.mode != Mode::Combat {
+            return;
+        }
+        let base = self.fb.palette;
+        for seat in 0..w.bout.fighters.len() {
+            let low = w.knight_is_low(seat);
+            let on = self.knight_glows.contains_key(&seat);
+            if low && !on {
+                let glows = w.knight_glow(seat);
+                for g in &glows {
+                    self.fx.install_glow(*g, &base);
+                }
+                self.knight_glows.insert(seat, glows.iter().map(|g| g.index).collect());
+            } else if !low && on {
+                if let Some(entries) = self.knight_glows.remove(&seat) {
+                    for e in entries {
+                        self.fx.remove_glow(e);
+                    }
+                }
+            }
         }
     }
 

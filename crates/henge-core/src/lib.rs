@@ -5,6 +5,7 @@
 
 pub mod anim;
 pub mod arena;
+pub mod battle_palette;
 pub mod bout;
 pub mod combat;
 pub mod content;

@@ -232,6 +232,13 @@ impl Effects {
         });
     }
 
+    /// Frees every glow on one entry, which is what writing zero into a
+    /// glow's handle does: `KnightGlowOff` and `MudmenGlowOff` both end that
+    /// way, and nothing else in the game takes a glow out early.
+    pub fn remove_glow(&mut self, index: u8) {
+        self.glows.retain(|g| g.def.index != index);
+    }
+
     /// Installs everything one scene asks for, after clearing what the last one had.
     pub fn install(&mut self, fx: &SceneEffects, base: &[u32; ENTRIES]) {
         self.clear();
@@ -404,6 +411,31 @@ mod tests {
                 assert_eq!(out[i], base[i], "entry {i} moved");
             }
         }
+    }
+
+    /// `KnightGlowOn` puts the knight's three entries on three slots, and
+    /// `KnightGlowOff` writes zero into each handle. Taking one out must leave
+    /// the others, and the mudmen's, breathing.
+    #[test]
+    fn a_glow_can_be_taken_out_by_its_entry_and_the_rest_stay() {
+        let base = ramp();
+        let mut fx = Effects::new();
+        for (index, target, period) in [(6u8, 0xfa0u16, 2u16), (7, 0xe70, 1), (8, 0xc50, 1), (14, 0x100, 2)] {
+            fx.install_glow(Glow { index, target, period, repeat: 0 }, &base);
+        }
+        assert_eq!(fx.glows(), 4);
+        for _ in 0..4 {
+            fx.tick();
+        }
+        fx.remove_glow(7);
+        assert_eq!(fx.glows(), 3);
+        let out = fx.apply(&base);
+        assert_eq!(out[7], base[7], "a freed slot leaves its entry as the palette has it");
+        assert_ne!(out[6], base[6], "the entries still installed keep walking");
+        assert_ne!(out[8], base[8]);
+        assert_ne!(out[14], base[14]);
+        fx.remove_glow(7);
+        assert_eq!(fx.glows(), 3, "freeing an entry with no glow on it is nothing");
     }
 
     #[test]
