@@ -168,7 +168,7 @@ All 386 files decode. See `FORMATS.md`.
 | `ADDCOL`, `COLCON`, `DYNAMIC`, `COLOURCYCLE`, `COLOURGLOW`, `_installcycle`, `_installglow`, `CYCLES`, `GLOWS`, `PALLOC` | animated palette entries | done, recovered: `henge_assets::palette` |
 | `COLOURENKNIGHT` | per-player knight recolour | done (by hue substitution) |
 | `SCROLL`, `PAN`, `SETSCREENOFFSET`, `AROFFSET` | scrolling the map | **settled: the overworld map does not scroll** |
-| `BORD`, `BORDERS`, `SETDEMONBORD` | screen border, and a special one for the demon | **todo** |
+| `BORD`, `BORDERS`, `SETDEMONBORD` | `bord` (0x5828) is the VGA overscan colour, attribute register 0x11, and nothing to do with movement. `SETDEMONBORD` writes a movement border; `SBORD` (0x4552) and `CheckBorder` (0x40d0) are the two routines that read them | **done**, item 60 and `henge_core::arena` |
 | `CLS`, `VBI`, `WAITVSYNC`, `WAITVBS` | clear, vblank sync | done via the frame loop |
 | `CONVERTSCREEN` | planar to linear conversion | done at bake time |
 
@@ -208,7 +208,12 @@ All 386 files decode. See `FORMATS.md`.
       addresses, so where they are used is not established; `_MAP:ScrollINPUT` reads the
       keyboard despite its name, and `SCROLLX` in `_STATUS` is the status panel's own
       icon cursor
-- [ ] Screen borders
+- [x] **Borders, and there is no screen border.** `bord` (image 0x5828) writes attribute
+      controller register 0x11, the overscan colour, and is the only thing in the set that
+      touches the display. The other two are movement: `CheckBorder` (0x40d0) holds an
+      actor inside columns 10 to 320 and depths 30 to 155, and `SBORD` (0x4552) walks the
+      arena's own list of impassable rectangles. Both work by clearing bits in a per-actor
+      byte of allowed directions rather than by clamping. Item 60
 
 ## 2.3 Text `done`
 
@@ -352,7 +357,7 @@ stat block. These are recovered and in the pack:
 | actor record `+0x0a`, `+0x0b`, `+0x48`, `+0x49`, `+0x4a` | a controller's walk frame, timer, flags and cooldown | **done**, as `monster::Brain` on the fighter, in the fingerprint |
 | `TroggTABLE`, `BeastTABLE`, `RatmanTABLE`, `MudmanTABLE`, `BalokTABLE`, `DemonTABLE` | the spawn tables `InitNewMO` reads position and facing from | not readable: they sit in the first 2,906 bytes of `DGROUP`, which the unpacked image holds as a stale copy of another region |
 | `TotalMonsters`, `MaxMonsters`, `AdjustLevel`, `lev_adjust`, `KLTAB` | how many come, in waves, scaled to the knight | read in outline; one at a time is fielded |
-| `SETDEMONBORD` | **not a screen border**: one record written over the arena's own border list, 0 to 309 across and 10 to 99 deep, which is the ground the demon may be fought on. Never called in the shipped image | **done**, as `ActorDef::border` and `Bout::apply_actor_borders` |
+| `SETDEMONBORD` | **not a screen border**: one record written over the arena's own border list, 0 to 309 across and 10 to 99 deep, which is the ground the demon may be fought on. `InitKnightvsDemon` calls it after the arena is loaded and `GENERATELANDSCAPE` calls it before, so only the first of the two survives | **done**, as `ActorDef::border` and `Bout::apply_actor_borders` |
 | `Demon_Evolve`, `AddDemonWhirl`, `FlipDemonWhirl`, `StopDemonWhirl`, `KnightOFF`, `KnightON`, `DemonOFollowT`, `DemonOWhipFollow`, `DemonUFollowT`, `DemonUWhipFollow` | the demon's entrance, its whirl, and the whip's four phases | **done**, item 33 |
 
 - [x] Troll, trogg with axe (and hammer), trogg with spear, ratmen, mudmen, beast, Balok
@@ -881,10 +886,22 @@ than wrapping), a gore switch (`GOREOPT`, thrown by left, right or fire alike th
 `OSWITCHES`), `StartPractice` and `StartMoonQuest`. Up and down clamp at both ends. The
 arrow is `SEL.CEL` frame 0 at `ARX` = 50.
 
-What the original drew all this over is still unknown: `LOADTITLE` is a name, `TitleMes`
-and its neighbours are text records, and the picture is in `INTR.EXE`, which has never been
-examined. Ours goes over an intro plate, and **attract mode** cycles the other ten. Those
-eleven screens had been sitting in the pack unused.
+**What the original drew all this over is `CH.PIV`**, and it was in `MAIN.EXE` all along.
+`_LOADER:MoonPic` is the string `CH.PIV` and `MoonFont` is `BOLD.F`; the routine at image
+`0x87c3` loads both, keeps a copy of the picture in the segment at `DS:0x88fb`, blits cel
+0x49 at (5, 20), cel 0x4a at (22, 181) and cel 0x4b at (110, 190), and walks `TitleMes`
+over it (`created by` at y 90, `Rob Anderson` at 105, `Loading...` at 150). `DoOptions`
+calls `0x890c`, which loads `Sel.cel` and restores that picture through `0x8e3f`, and
+`DisplaySelect` blits cel 0x49 again at (5, 10). So the option screen is the same picture
+with the wordmark ten pixels higher, and it is the select screen's night sky. The earlier
+note that the picture must be in `INTR.EXE` was wrong.
+
+`CH.PIV` also reserves the bold face's five entries, so the wordmark, the credit lines and
+the option rows are all blitted in their own indices. The row `y` values are still ours:
+`DisplaySelect` takes them off a table at `DS:0x706`, inside the stale span of `DGROUP`.
+
+**Attract mode** cycles the other ten plates, which is ours; those write the five caption
+entries first, the way `INTR.EXE`'s `0x0cfb` does, because no other plate reserves them.
 
 ## 8.2 Character select `done`
 
@@ -920,6 +937,28 @@ had. The names are `Enemy1Name`..`Enemy4Name`, `SIR BANNER`, `SIR DWAIN`, `SIR B
 own over the top. Which name goes with which of the four is an assumption.
 
 ## 8.3 The status panel `done`
+
+**The screen is two ivied stone arches and it has its own palette.**
+`_STATUS:DisplayPillars` clears the screen to index 0 and falls into `StatusSetup`, which
+walks eight-byte records `[cel][x][y][mirror]` until the first word goes negative.
+`TradingData` (`DS:0xf37c`, seven records) has no terminator of its own, so walking it
+walks `SingleData`'s eight as well and stops on that one's `ff ff`; `OffsetValues` is
+`{9, 3}` and only those two status types take `SingleData` alone with the knight's numbers
+shifted right by `0x4a`. Fifteen cels of `KI.CEL`: cel 26 is a 25 by 117 pillar at x 0,
+148 and 296, and cels 34, 35 and 36 a column, a corner and an arch head, each once and
+once mirrored. `ABorders` is a third table of the same shape and it is the row labels,
+cels 38, 39, 40 at x 41 and 41, 42, 43 at x 89 on rows 35, 42 and 49, reading `STR :`,
+`CON :`, `END :`, `XP :`, `GOLD :` and `HIT :`.
+
+The palette is `STAPAL` (twenty eight words) plus `STAKNP` (four), and `ColourStatus`
+overwrites the first two of `STAKNP` on `knight[0x20]`: `03f/028` blue, `fb0/b60` gold,
+`4c3/160` emerald, `f00/800` red. Loaded, every cel on the screen draws in its own
+colours, which is what makes the ivy green and the labels gold.
+
+**A correction:** the life point figure is cel `StatACEL + 0x11` and `_displayknight` sets
+`StatACEL` to 1, so it is cel 18, and 20 when `knight[0x3a]` is set. `KI.CEL` 17 and 18
+are a helmed head, 19 and 20 a frog. This project drew 19, so five lives came up as five
+frogs.
 
 The knight record, from `DisplayKnight`, `SetKnightEquipment` and `_STATUS`:
 

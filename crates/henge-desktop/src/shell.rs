@@ -11,13 +11,30 @@
 //! reserved`. That is the original's title screen, and this project had decoded
 //! it on the first day and never drawn it.
 //!
-//! What it was drawn *over* is still unknown. `LOADTITLE` is a name in the
-//! symbol list and `TitleMes` and its neighbours are text records, but the
-//! picture behind them lives in `INTR.EXE`, which has never been examined, so
-//! ours goes over one of the eleven intro plates that are on disk. The option
-//! list is recovered: `DoOptions` has four rows, a player count of one to four,
-//! a gore switch and two ways to start, and the arrow is `SEL.CEL` frame 0 at
-//! x 50, which is the `ARX` the original uses.
+//! **What it is drawn over is `CH.PIV`**, the same night sky the select screen
+//! stands its knights against. `_LOADER:MoonPic` is the string `CH.PIV` and
+//! `MoonFont` is `BOLD.F`; the routine at image `0x87c3` loads both, keeps a
+//! copy of the picture in the segment at `DS:0x88fb`, and blits cel 0x49 at
+//! (5, 20), cel 0x4a at (22, 181) and cel 0x4b at (110, 190). Those are the
+//! wordmark and the two credit lines, at the coordinates the registers are
+//! loaded with. `DoOptions` then calls `0x890c`, which loads `Sel.cel` and
+//! restores that same picture through `0x8e3f`, and `DisplaySelect` blits the
+//! wordmark again at (5, 10) with the option list under it. So the option
+//! screen is the title screen with the wordmark ten pixels higher, and the
+//! plate behind it was never an intro plate at all.
+//!
+//! The option list is recovered too: `DoOptions` has four rows, a player count
+//! of one to four, a gore switch and two ways to start, and the arrow is
+//! `SEL.CEL` frame 0 at x 50, which is the `ARX` `DoOptions` writes with
+//! `mov word ptr [ARX], 0x32`. The four row `y` values come out of a table at
+//! `DS:0x706`, which is inside the 2,906 bytes of `DGROUP` the unpacked image
+//! carries as a stale duplicate, so the spacing below is ours.
+//!
+//! **Nothing on it is flattened to one colour.** `CH.PIV` reserves the bold
+//! face's five entries the way `MESSAGE.PIV` does: black at 5 and `dee`,
+//! `dc9`, `c95`, `832` at 9 to 12. So the wordmark, the two credit lines and
+//! the four option rows are all blitted with their own indices, and the black
+//! bands that used to sit behind them are gone.
 //!
 //! **Attract mode** cycles the other ten plates. Those eleven screens have been
 //! sitting in the pack unused since the baker first decoded them; showing them
@@ -64,7 +81,10 @@ const COPYRIGHT: usize = 74;
 const RESERVED: usize = 75;
 
 /// The plate the title is drawn over, and the ones attract mode cycles.
-const TITLE_PLATE: &str = "scene.bg2a";
+///
+/// `_LOADER:MoonPic` is the string `CH.PIV`, and the routine at `0x87c3` loads
+/// it, keeps a copy and draws the wordmark and the two credit lines on it.
+const TITLE_PLATE: &str = "scene.ch";
 const ATTRACT: [&str; 10] = [
     "scene.bg1a", "scene.bg1b", "scene.bg1c", "scene.bg2", "scene.bg3",
     "scene.bg4", "scene.bg5", "scene.bg5a", "scene.bg7", "scene.bg8",
@@ -77,8 +97,18 @@ const PLATE_TICKS: u32 = 220;
 
 /// `ARX` in the original. The arrow's left edge on the option list.
 const ARROW_X: i32 = 50;
+/// Ours: `DisplaySelect` takes the arrow's `y` off a four word table at
+/// `DS:0x706`, which is in the stale span of `DGROUP` and cannot be read.
 const FIRST_ROW_Y: i32 = 100;
 const ROW_STEP: i32 = 18;
+
+/// `DisplaySelect`: `mov ax, 0x49; mov bx, 5; mov cx, 0xa`. The wordmark is
+/// not centred; its left edge is five pixels in.
+const LOGO_AT: (i32, i32) = (5, 10);
+/// `0x8850` onwards, on the screen the same picture is first put up on:
+/// `mov ax, 0x4a; mov bx, 0x16; mov cx, 0xb5` and then `0x4b` at (110, 190).
+const COPYRIGHT_AT: (i32, i32) = (22, 181);
+const RESERVED_AT: (i32, i32) = (110, 190);
 
 pub struct TitleScene {
     pub state: Title,
@@ -117,65 +147,59 @@ impl TitleScene {
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts) {
         let plate = self.plate();
         show(reg, fb, plate);
-        let (dark, light) = status::extremes(fb);
-        let faint = status::faint(fb);
+        // An attract plate is one of the intro's, and its palette owes the bold
+        // face nothing. The intro itself solves that: `0x0cfb` writes the five
+        // entries a glyph is drawn in before it puts a caption up, and those
+        // are the five words in `CAPTION_INK`. `CH.PIV` already carries them,
+        // so on the title proper this changes nothing.
+        if plate != TITLE_PLATE {
+            for (i, rgb) in henge_core::intro::CAPTION_INK {
+                fb.palette[i as usize] = rgb;
+            }
+        }
+        let (_, light) = status::extremes(fb);
 
-        // The wordmark, on a plate of its own so it reads over eleven different
-        // pictures rather than over one. It is drawn as a silhouette with a halo
-        // under it, for the reason every other sprite over a foreign palette is:
-        // its own indices mean nothing here.
-        let (lw, lh) = sprite::size(reg, TITLE_BANK, LOGO);
-        let lx = (SCREEN_W as i32 - lw) / 2;
-        // With its own pixels, over whatever is behind it. The wordmark is
-        // artwork with a drawn outline and a shaded face; drawing it as a flat
-        // silhouette lost all of that, and the black band and the four way
-        // outline were both invented to make the silhouette read. Neither is
-        // the original's, and the band is what made the title look like a
-        // caption stuck on a black banner.
-        sprite::draw(reg, fb, TITLE_BANK, LOGO, lx, 10, false);
-        let _ = (lh, dark);
+        // In its own pixels, at its own corner. The wordmark is artwork with a
+        // drawn outline and a shaded face; flattened to one colour all of that
+        // went, and the black band and the four way outline were both invented
+        // to make the silhouette read.
+        sprite::draw(reg, fb, TITLE_BANK, LOGO, LOGO_AT.0, LOGO_AT.1, false);
 
         if self.attracting() {
             if let Some(small) = fonts.small {
-                small.draw_centred(reg, fb, "Press fire", 180, light);
+                small.draw_own_centred(reg, fb, "Press fire", 180);
             }
             return;
         }
 
-        // The option list. A plate behind it for the same reason. The arrow's
-        // left edge is `ARX`, which the original sets to 50; the words follow
-        // it.
+        // The option list. The arrow's left edge is `ARX`, which `DoOptions`
+        // sets to 50; the words follow it.
         let rows = self.rows();
         let (aw, _) = sprite::size(reg, SEL, ARROW);
         let text_x = ARROW_X + aw + 6;
-        // Down to the credit band, so no strip of picture is left between them.
-        fb.rect(ARROW_X - 8, FIRST_ROW_Y - 8, 308 - ARROW_X, 184 - FIRST_ROW_Y, dark);
         let Some(bold) = fonts.bold else { return };
         for (i, label) in rows.iter().enumerate() {
             let y = FIRST_ROW_Y + i as i32 * ROW_STEP;
             let on = i == self.state.row;
             if on {
-                sprite::draw_mask(reg, fb, SEL, ARROW, ARROW_X, y + 3, light);
+                // `Sel.cel` frame 0 in its own colours, the way
+                // `DisplaySelect` blits it: one `call` with `ax` the cel and
+                // nothing said about colour.
+                sprite::draw(reg, fb, SEL, ARROW, ARROW_X, y + 3, false);
             }
-            // Two tones, so the counters stay open. One flat colour paints a
-            // glyph's outline and its face alike, and every o and e fills in.
-            bold.draw_two_tone(reg, fb, label, text_x, y, dark, if on { light } else { faint });
+            // In the glyphs' own five indices. The row the arrow is against is
+            // the one that is chosen, which is the whole of how the original
+            // says so; a second colour for it would be one more than the
+            // original has.
+            bold.draw_own(reg, fb, label, text_x, y);
         }
 
-        // The original's own two credit lines, which are frames 74 and 75 of the
-        // same bank. They belong on this screen because it is this screen they
-        // were drawn for, and they are the accurate statement of whose game the
-        // artwork on it is.
-        fb.rect(0, 176, SCREEN_W as i32, 24, dark);
-        for (cel, y) in [(COPYRIGHT, 180), (RESERVED, 190)] {
-            let (w, _) = sprite::size(reg, TITLE_BANK, cel);
-            // With their own pixels, not as a silhouette. These two lines are
-            // eight pixels tall and carry six shades apiece; flattened to one
-            // colour every letter closes up into a blob and the line cannot be
-            // read at all. The wordmark above them survived that treatment only
-            // because it is 54 pixels tall.
-            sprite::draw_shaded(reg, fb, TITLE_BANK, cel, (SCREEN_W as i32 - w) / 2, y, faint, light);
-        }
+        // The original's own two credit lines, frames 74 and 75 of the same
+        // bank, at the corners `0x8860` and `0x8870` load: (22, 181) and
+        // (110, 190). In their own pixels like everything else on the screen.
+        let _ = light;
+        sprite::draw(reg, fb, TITLE_BANK, COPYRIGHT, COPYRIGHT_AT.0, COPYRIGHT_AT.1, false);
+        sprite::draw(reg, fb, TITLE_BANK, RESERVED, RESERVED_AT.0, RESERVED_AT.1, false);
     }
 
     fn rows(&self) -> Vec<String> {
@@ -249,11 +273,14 @@ impl SelectScene {
     ) {
         show(reg, fb, "scene.ch");
         fb.set_palette(&self.palette);
-        let (dark, light) = status::extremes(fb);
+        let (_, light) = status::extremes(fb);
 
-        fb.rect(0, 12, SCREEN_W as i32, 24, dark);
+        // In the glyphs' own indices, over the sixteen `CH.PIV` brings: black
+        // at 5 and the warm ramp at 9 to 12, the same five `MESSAGE.PIV`
+        // reserves. The black band these two lines used to sit on was there
+        // only because they were flattened to one colour.
         if let Some(bold) = fonts.bold {
-            bold.draw_centred(reg, fb, "Choose your knight", 16, light);
+            bold.draw_own_centred(reg, fb, "Choose your knight", 16);
         }
         if let Some(small) = fonts.small {
             let line = if self.state.done() {
@@ -261,7 +288,7 @@ impl SelectScene {
             } else {
                 format!("Player {}", self.state.seat + 1)
             };
-            small.draw_centred(reg, fb, &line, 40, light);
+            small.draw_own_centred(reg, fb, &line, 40);
         }
 
         for i in 0..SEATS {
@@ -276,16 +303,21 @@ impl SelectScene {
                     if let Some(s) = seat {
                         let line = format!("Player {}", s + 1);
                         let w = small.width(reg, &line);
-                        small.draw(reg, fb, &line, x + (PORTRAIT_W - w) / 2, PORTRAIT_Y + 32, light);
+                        small.draw_own(reg, fb, &line, x + (PORTRAIT_W - w) / 2, PORTRAIT_Y + 32);
                     }
                 }
             }
             let colour = (16 + i * 4 + 3) as u8;
             if i == self.state.cursor && !self.state.done() {
-                // In the brightest colour the screen has rather than the
-                // knight's own: every portrait already carries a coloured frame
-                // of its own, so a highlight in one more colour would be one
-                // frame among five instead of the answer to which is chosen.
+                // The one sprite on this screen that has to be given a colour.
+                // `SEL.CEL` frame 1 is drawn in a single index, 15, and what 15
+                // is belongs to `SelectPAL`, whose bytes did not survive into
+                // the unpacked image; in `CH.PIV`'s own sixteen it is very
+                // nearly black. So the brightest entry the screen has, rather
+                // than the knight's own: every portrait already carries a
+                // coloured frame, and a highlight in one more colour would be
+                // one frame among five instead of the answer to which is
+                // chosen.
                 sprite::draw_mask(reg, fb, SEL, BORDER, x, PORTRAIT_Y, light);
             }
             if let (Some(small), Some(k)) = (fonts.small, knights.get(i)) {
@@ -309,8 +341,7 @@ impl SelectScene {
             k.gold,
             live.weapon_name(items),
         );
-        fb.rect(0, 174, SCREEN_W as i32, 14, dark);
-        small.draw_centred(reg, fb, &line, 178, light);
+        small.draw_own_centred(reg, fb, &line, 178);
     }
 }
 
@@ -359,7 +390,7 @@ const POINTER: &str = "bank.po";
 
 /// `MESSAGE.PIV`: the stone circle in silhouette against a night sky, black
 /// under it, which is what all three kinds of message are drawn over.
-const MESSAGE_PLATE: &str = "scene.message";
+pub const MESSAGE_PLATE: &str = "scene.message";
 
 /// One message, over the original's own message picture.
 ///
@@ -367,37 +398,47 @@ const MESSAGE_PLATE: &str = "scene.message";
 /// every one of them is set in (`les si, ptr [0x8915]` before the chain walk,
 /// which is the bold font pointer).
 ///
-/// **Ours:** the colour an instruction message comes up in. `INSTRUCTMESSAGE`
-/// installs its own six-word palette ramp (0x800, 0x600, 0x400, 0, 0x200,
-/// 0x100) before it fades, and the fade machinery those words drive is not
-/// built, so the difference between the kinds is made here instead: an
-/// instruction is written in the picture's own brightest colour and the other
-/// two in white, which is the same distinction the ramp draws.
+/// **Recovered too: the colour an instruction message comes up in.** The six
+/// words `INSTRUCTMESSAGE` writes at `0x8f3b` go to `DS:0x80bb + 2` onwards,
+/// and `DS:0x80bb` is the 32-entry palette the fade routine at the end of the
+/// same call clocks out to the DAC three bytes at a time, ninety six of them.
+/// So the words are palette entries 1 to 6, and an instruction repaints
+/// `MESSAGE.PIV`'s four purples and the font's own black outline as a red ramp.
+/// The picture goes red, which is the difference a player sees; nothing about
+/// the lettering changes but the colour of the ring round it.
+pub const INSTRUCT_RAMP: [u32; 6] = [0x880000, 0x660000, 0x440000, 0x000000, 0x220000, 0x110000];
+
 pub fn draw_message(
     reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, msg: &henge_core::message::Message,
 ) {
     use henge_core::message::{Align, Kind};
     show(reg, fb, MESSAGE_PLATE);
-    let (_, light) = status::extremes(fb);
-    // An instruction message is the one that arrives in another colour.
-    let ink = match msg.kind {
-        Kind::Instruction => warmest(fb),
-        _ => light,
-    };
+    if msg.kind == Kind::Instruction {
+        for (i, rgb) in INSTRUCT_RAMP.iter().enumerate() {
+            fb.palette[i + 1] = *rgb;
+        }
+    }
     // Every message is set in the bold face, because every one of the three
     // routines does `les si, ptr [0x8915]` into the current font pointer before
     // it walks the chain, and `[0x8915]` is `BOLD.F`. The record's own bit 3 is
     // `CheckBOLD`'s kerning, not a choice of face.
+    //
+    // In the glyphs' own five indices, because `TextP` blits a glyph through
+    // the same routine every other cel goes through and `MESSAGE.PIV` carries
+    // `000`, `fed`, `dc9`, `b95`, `842` at exactly 5 and 9 to 12 and uses none
+    // of them in its own picture. Flattened to one colour the ring round each
+    // letter and the face inside it become the same colour, every counter fills
+    // in, and a line reads as a row of blobs.
     let Some(font) = fonts.bold.or(fonts.small) else { return };
     for line in msg.shown() {
         match line.align {
-            Align::Centre => font.draw_centred(reg, fb, &line.text, line.y, ink),
+            Align::Centre => font.draw_own_centred(reg, fb, &line.text, line.y),
             Align::Right => {
                 let w = font.width(reg, &line.text);
-                font.draw(reg, fb, &line.text, TEXT_RIGHT - w, line.y, ink);
+                font.draw_own(reg, fb, &line.text, TEXT_RIGHT - w, line.y);
             }
             Align::Left => {
-                font.draw(reg, fb, &line.text, line.x, line.y, ink);
+                font.draw_own(reg, fb, &line.text, line.x, line.y);
             }
         }
     }
@@ -406,18 +447,6 @@ pub fn draw_message(
 /// `TextRightBorder`, which the alignment is measured against.
 const TEXT_RIGHT: i32 = SCREEN_W as i32;
 
-/// The most saturated colour the palette has, for an instruction message.
-fn warmest(fb: &Framebuffer) -> u8 {
-    (1..32)
-        .max_by_key(|i| {
-            let c = fb.palette[*i];
-            let (r, g, b) = ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
-            let hi = r.max(g).max(b);
-            let lo = r.min(g).min(b);
-            (hi - lo) * 4 + hi
-        })
-        .unwrap_or(1) as u8
-}
 
 /// The intro, as `INTR.EXE`'s own main module plays it.
 ///
@@ -563,31 +592,42 @@ const MOON_AT: (i32, i32) = (119, 12);
 /// **Ours:** the day number under the heading, and the hint below it. The hint
 /// is one of `WAITMESSAGE`'s fourteen, taken through `henge_core::message`, and
 /// the original's own hint screen has its lines at y 75, 95, 115 and 135; here
-/// the heading keeps its recovered 95 and the hint takes the same four slots
-/// starting one below it, because both cannot have y 95. The `Loading...` line
-/// every one of the fourteen ends on is left out, because nothing here loads.
+/// the heading takes its recovered 95 and the hint follows underneath, because
+/// both cannot have y 95 and a bold line is nineteen pixels tall. The
+/// `Loading...` line every one of the fourteen ends on is left out, because
+/// nothing here loads.
+///
+/// Every line is drawn in its own indices rather than flattened to one colour.
+/// `TextP` hands a glyph to the same blitter every other cel goes through, and
+/// `CH.PIV` carries the bold face's five entries: black at 5, then `fed`,
+/// `dc9`, `c95`, `832` at 9 to 12. Flattened, `Next Day` came out as a row of
+/// blobs with its counters closed.
+const HEADING_Y: i32 = 95;
+const DAY_Y: i32 = 118;
+const HINT_Y: i32 = 136;
+const HINT_STEP: i32 = 14;
+
 pub fn draw_interlude(
     reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, day: u32, phase: henge_core::moon::Phase,
     hint: &henge_core::message::Message, note: Option<&str>,
 ) {
     show(reg, fb, "scene.ch");
     sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
-    let (_, light) = status::extremes(fb);
     if let Some(bold) = fonts.bold {
-        bold.draw_centred(reg, fb, "Next Day", 88, light);
+        bold.draw_own_centred(reg, fb, "Next Day", HEADING_Y);
     }
     let Some(small) = fonts.small else { return };
-    small.draw_centred(reg, fb, &format!("Day {day}   {}", phase.name()), 112, light);
-    let mut y = 132;
+    small.draw_own_centred(reg, fb, &format!("Day {day}   {}", phase.name()), DAY_Y);
+    let mut y = HINT_Y;
     // A day the run had no say in says so, in the hint's place: being turned
     // into a toad and losing three turns is the sort of thing a player has to
     // be told about, and this is the screen those three days go past on.
     if let Some(note) = note {
-        small.draw_centred(reg, fb, note, y, light);
+        small.draw_own_centred(reg, fb, note, y);
         return;
     }
     for line in hint.shown() {
-        small.draw_centred(reg, fb, &line.text, y, light);
-        y += 14;
+        small.draw_own_centred(reg, fb, &line.text, y);
+        y += HINT_STEP;
     }
 }

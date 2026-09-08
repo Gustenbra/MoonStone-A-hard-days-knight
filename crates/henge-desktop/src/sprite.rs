@@ -56,11 +56,16 @@ pub fn draw_lut(
 
 /// Draw a frame as a flat silhouette.
 ///
-/// Sheet pixels are palette indices and nothing records which palette they were
-/// baked against, so a sprite drawn over an unrelated screen comes out as noise.
-/// The fonts already solve this by drawing a shape in a chosen colour; the
-/// status furniture is small and needs to read over any backdrop, so it does the
-/// same.
+/// **Nothing the original draws is drawn this way**, so every use of it is this
+/// project's own and each one has to earn its place. Sheet pixels are palette
+/// indices and nothing records which palette they were baked against, so a
+/// sprite put over a screen it was not authored for comes out as noise; where
+/// henge shows a sprite somewhere the original never shows it, a silhouette in
+/// a chosen colour is the honest answer. What is left after the audit is the
+/// select screen's highlight border, which is a one index sprite whose index
+/// belongs to a palette that did not survive; the pointer, which henge puts on
+/// screens the original has no pointer on; the Valley's marker on the map; and
+/// the in-fight name plates, which the original does not have at all.
 pub fn draw_mask(
     reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
     x: i32, y: i32, colour: u8,
@@ -72,47 +77,6 @@ pub fn draw_mask(
         }
         None => (0, 0),
     }
-}
-
-/// Draw a frame keeping its own shading, but in the current screen's colours.
-///
-/// A frame like the title's copyright line is not a silhouette: it is a dark
-/// panel with lettering shaded across several indices on top of it. Flattening
-/// all of that to one colour paints the panel and the letters the same, which
-/// closes every letter up into a blob. Blitting the raw indices instead keeps
-/// the shape but takes the colours from whatever palette happens to be up,
-/// which is how the line came out pink.
-///
-/// So the frame's own distinct indices are ranked and mapped onto a ramp the
-/// caller chooses: the lowest becomes the background and is not drawn, and the
-/// rest run from `faint` to `light`. That keeps the letters legible against any
-/// backdrop without inventing a palette for the bank.
-pub fn draw_shaded(
-    reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
-    x: i32, y: i32, faint: u8, light: u8,
-) -> (i32, i32) {
-    let Some(c) = cut(reg, sheet, index) else { return (0, 0) };
-
-    let mut seen: Vec<u8> = c.pixels.iter().copied().filter(|p| *p != 0).collect();
-    seen.sort_unstable();
-    seen.dedup();
-    let mut lut: Lut = [0; 32];
-    // Three roles, not a gradient: interpolating between two palette indices
-    // means nothing, because neighbouring entries are not neighbouring colours.
-    // The lowest index is the panel the lettering sits on and is dropped; the
-    // next is the letters' own outline; everything above is the letter face.
-    for (rank, idx) in seen.iter().enumerate() {
-        if *idx as usize >= lut.len() {
-            continue;
-        }
-        lut[*idx as usize] = match rank {
-            0 => 0,
-            1 if seen.len() > 2 => faint,
-            _ => light,
-        };
-    }
-    fb.blit_lut(&c.pixels, c.w, c.h, x, y, false, &lut);
-    (c.w as i32, c.h as i32)
 }
 
 /// How big a frame is, without drawing it.

@@ -346,6 +346,77 @@ everything from `FO2` gives a black tangle where the canopy should be, everythin
 `FO1` gives blue-black blobs, and 4 from `FO2` with the rest from `FO1` gives a tree with a
 trunk, a canopy and a stump. The same test on `FO3.T` puts 0xfe with 3 rather than with 4.
 
+### Nothing walkable is a rectangle, and the tree line is a border list
+
+This is the arena's own half of the same idea the overworld solves with `MapSLOW`, and
+this project had it inside out until it was read properly. **The `.T` header is a count
+and that many eight-byte rectangles, each of them ground a fighter may not stand on**, and
+the walkable ground is what is left below them. `docs/FORMATS.md` has the layout and the
+four layouts that carry more than one rectangle.
+
+Two routines share the work, and neither of them clamps a coordinate. Both clear bits in a
+per-actor byte at `+0x26` which holds **the directions still allowed this frame**: bit 0
+right, bit 1 left, bit 2 down, bit 3 up. `ControlKnight` (`0x3ec4`) fills that byte from
+`GetInputDevice` at the top of the frame, and if it comes back empty the frame ends there.
+Bit 4 is fire.
+
+**`CheckBorder`, image `0x40d0`**, is the global limit and is the same in every arena:
+
+```asm
+mov ax, 0x19            ; 25
+test byte [si+8], 2     ; facing: 1 right, 3 left, bit 1 is left
+je +4
+neg ax
+add ax, [si+2]          ; ax = anchor x, 25 ahead of himself by his facing
+mov bx, 9
+add bx, [si+6]          ; bx = anchor depth + 9
+cmp ax, 0x0a  / jge  ->  and [si+0x26], 0xfd ; no left    / mov word [si+2], 0x0a
+cmp ax, 0x140 / jle  ->  and [si+0x26], 0xfe ; no right   / mov word [si+2], 0x140
+cmp bx, 0x9b  / jle  ->  and [si+0x26], 0xfb ; no down
+cmp bx, 0x1e  / jge  ->  and [si+0x26], 0xf7 ; no up
+```
+
+The x tests **write the coordinate back**, and to the raw limit rather than to where the
+probe stopped, so the twenty five pixel lead decides *when* a fighter is stopped and not
+*where*: a knight walking left is refused at column 34 and put at 10, and one walking right
+is refused at 296 and put at 320. `KnightSLAP`, the knockback, clamps the task's own x to
+the same 10 and 320, which is the second witness that those two are meant as resting
+columns. So the facing offset does not leave a fighter standing in a different column
+depending on which way he faces; both ways he ends on the wall.
+
+**`SBORD`, image `0x4552`**, walks the arena's own list. `es` comes from DS:`0x88ff`, the
+segment the `.T` was loaded into, the count is the big-endian word at `es:0`, and the
+records follow it. Per record, with `ax` the step's dx and `bx` its dy:
+
+* the actor's body box `[+0x22, +0x24]`, moved by dx, against the record's `left`/`right`
+  through the overlap counter at `0x9f0d`. No overlap, next record;
+* the body box's lowest row `+0x50` against the band from 30 to the record's `bottom`. If
+  it is inside, the sideways step is refused: facing left clears bit 1, facing right clears
+  bit 0. Both refusals are guarded by a comparison of the moved box against the unmoved
+  one that is true for any step shorter than the actor is wide, so in practice a fighter
+  whose feet are inside a rectangle cannot walk sideways at all;
+* `bottom` against `[si+6] + dy + 0x2f`. At or below it, bit 3 goes and he may not walk up.
+
+`top` is loaded and then thrown away (`mov bx, es:[di+6]` immediately followed by
+`mov bx, ax`), and the constant 30 stands in for it. It is 10 in every shipped record, so
+nothing depends on the difference.
+
+The depth both routines test is the **task anchor** rather than the feet. The knight's
+standing frame hangs from `-9` to `+45` about that anchor with a shadow to `+52`, so
+`+0x2f` lands five rows above his feet and `+9` lands forty three above them. The three
+places `AddKnight` stands an arrival, through `FindQuarterBORD`, `FindHalfBORD` and
+`Find3QuarterBORD`, are a quarter, a half and three quarters of the way from the deepest
+`bottom` down to row 200, less that same `0x2f`. Row 200 is the foot of the screen, so the
+original fights over the whole of it and has no status panel along the bottom at all.
+
+**Only the knight is bordered.** `SBORD` has exactly one caller, `ControlKnight`, and
+`CheckBorder` has three, all of them the knight's: `ControlKnight` and the two halves of
+`KnightSLAP`. `MonsterWalk` (`0x4e8b`) calls neither, and DS:`0x88ff` is read at combat
+time by `SBORD` and by nothing else. In the DOS game a troll walks through the tree line.
+
+`bord` (`0x5828`) is not part of any of this: it writes attribute controller register
+`0x11`, the overscan colour.
+
 ## `INTR.EXE` unpacks the same way, and it is the same program
 
 The intro is a separate executable and had never been looked at. It is packed identically,
@@ -529,11 +600,87 @@ The metrics come with it. `TextP` advances by the glyph's own cel width, except 
 `TextP` then does `sub word ptr [textwidth], 3`. So the bold face tracks three pixels tight
 and the small face not at all, and a space is glyph 69 drawn like any other character.
 
+## What `TextP` does with a glyph, and what follows from it
+
+`TextP` looks the glyph up, puts its width and height in the blitter's registers and
+calls the same routine every other cel in the game goes through. **There is no ink
+anywhere in the text path.** A glyph is a sprite, and its colours are its own five
+palette entries.
+
+That is checkable against the artwork, and it holds. Of the thirty seven full-screen
+pictures the bake produces, exactly three keep 5 and 9 to 12 out of their own painting
+and hold the face's ramp there instead:
+
+```text
+MESSAGE.PIV   000 / fed dc9 b95 842     every message in the game
+CH.PIV        000 / fed dc9 c95 842     the title, the select and the next-day screen
+bg8.piv       000 / fee dc9 b95 842     the victory plate
+```
+
+Everything else uses those five entries for its picture, which is why a caption over an
+intro plate has to write them first, and `INTR.EXE`'s `0x0cfb` is the original doing
+exactly that. So a line of text is legible in its own colours on those three plates and
+nowhere else, and the three are precisely the plates the game writes on.
+
+## The title screen is `CH.PIV`, and it was never in `INTR.EXE`
+
+This file and `COMPLETE.md` section 8.1 recorded that what the option list was drawn over
+was unknown, and that the picture must live in `INTR.EXE`. It does not. It is named twice
+over in `MAIN.EXE`'s own loader:
+
+```text
+_LOADER:MoonPic    "CH.PIV"        _LOADER:MoonFont   "BOLD.F"
+```
+
+The routine at image `0x87c3` loads the font, loads the picture, keeps a copy of it in
+the segment at `DS:0x88fb`, and then blits three cels of the bold bank on it:
+
+```text
+mov ax, 0x49 ; mov bx, 5   ; mov cx, 0x14   the wordmark at (5, 20)
+mov ax, 0x4a ; mov bx, 0x16; mov cx, 0xb5   the copyright line at (22, 181)
+mov ax, 0x4b ; mov bx, 0x6e; mov cx, 0xbe   `All rights reserved` at (110, 190)
+```
+
+and walks `TitleMes` over it, which is `created by` centred at y 90, `Rob Anderson` at
+105 and `Loading...` at 150. `MOON:DoOptions` then calls `0x890c`, which loads `Sel.cel`
+and puts the same stored picture back through `0x8e3f`, and `DisplaySelect` blits cel
+0x49 again at (5, 10) with the arrow and the option list under it. So the option screen
+is the loading title with the wordmark ten pixels higher, the plate is the select
+screen's own night sky, and the wordmark is not centred.
+
+The four option rows take their `y` from a table at `DS:0x706`, which is inside the
+stale span of `DGROUP`, so their spacing is still ours. `ARX` is not: `DoOptions` writes
+`0x32` into it.
+
+## The status screen is a pair of stone arches, and it has its own palette
+
+`_STATUS:DisplayPillars` clears the screen and falls into `StatusSetup`, which walks
+eight-byte records `[cel][x][y][mirror]` and blits each until the first word goes
+negative. `TradingData` at `DS:0xf37c` has seven records and **no terminator**, so
+walking it walks `SingleData`'s eight as well and stops on that one's `ff ff`;
+`OffsetValues` is `{9, 3}` and only those two status types take `SingleData` alone with
+the knight's numbers shifted right by `0x4a`. The plain sheet takes both tables, which is
+fifteen cels of `KI.CEL`: cel 26 is a 25 by 117 pillar at x 0, 148 and 296, and cels 34,
+35 and 36 are a column, a corner and an arch head, each placed once and once mirrored.
+Two ivied arches on three pillars, the knight's numbers in the left one.
+
+`ABorders` is a third such table and it is the row labels: cels 38, 39 and 40 at x 41 and
+41, 42 and 43 at x 89, on rows 35, 42 and 49. They read `STR :`, `CON :`, `END :`,
+`XP :`, `GOLD :` and `HIT :`.
+
+The palette is `STAPAL`, twenty eight twelve-bit words, and `STAKNP`, the four after it,
+which together are the screen's thirty two colours; `ColourStatus` overwrites the first
+two of `STAKNP` on `knight[0x20]` with `03f/028` blue, `fb0/b60` gold, `4c3/160` emerald
+and `f00/800` red. With that loaded every cel on the screen draws in its own colours and
+nothing on it has to be flattened.
+
+One reading was wrong and shows: `DisplayKnight` draws the life points as cel
+`StatACEL + 0x11`, and `_displayknight` sets `StatACEL` to 1, so the cel is **18**, with
+two more added when `knight[0x3a]` says the wizard has made a toad of him. `KI.CEL` 17
+and 18 are a helmed head and 19 and 20 are a frog. This project drew 19.
+
 ## Consequence for the port
 
 The bestiary is unblocked. All eight creatures are composed the same way, and their
-scripts are recovered along with the knight's.
-
-The animation sequences currently in this project are **authored, not recovered**: read
-off the sprite banks frame by frame, with timings chosen by feel. Replacing them with the
-real scripts is build-order item 27, and now only needs the VM written in Rust.
+scripts are recovered along with the knight's, and the port now runs them: the animation
+sequences are the executable's own, not authored, which was build-order item 27.

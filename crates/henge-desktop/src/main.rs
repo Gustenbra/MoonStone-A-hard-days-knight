@@ -2556,17 +2556,15 @@ impl App {
         // again here rather than breathing between the wrong two colours.
         self.fx.reseed(&self.fb.palette);
         if self.sheet {
-            let seat = self.run.knight.seat;
-            let colour = henge_assets::player_colours(&self.fb.palette)[seat % 4];
+            // The sheet brings its own palette (`_STATUS:STAPAL`), so the ink
+            // does not come off whatever was on screen behind it.
             let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
             // The menu is live on the map, where the sheet is modal; in an
             // arena the sheet is a card held up over the fight.
             let rows: Vec<(String, bool)> =
                 self.sheet_rows().into_iter().map(|(l, lit, _)| (l, lit)).collect();
             let cursor = (self.mode == Mode::Map && !rows.is_empty()).then_some(self.sheet_cursor);
-            status::draw_sheet(
-                &mut self.reg, &mut self.fb, font, &self.run, &self.items, colour, &rows, cursor,
-            );
+            status::draw_sheet(&mut self.reg, &mut self.fb, font, &self.run, &rows, cursor);
         }
         // The pointer goes on last, over whatever it is pointing at, and only
         // on a screen that has boxes for it to be over.

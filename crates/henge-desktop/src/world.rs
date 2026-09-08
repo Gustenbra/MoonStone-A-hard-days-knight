@@ -6,7 +6,7 @@
 
 use crate::framebuffer::Framebuffer;
 use henge_assets::{player_colours, player_luts, recolour, Lut, Registry};
-use henge_core::arena::Bounds;
+use henge_core::arena::{Field, GLOBAL};
 use henge_core::bout::{Bout, HitEvent};
 use henge_core::combat::{Fighter, Intent};
 use henge_core::content::{ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH};
@@ -100,14 +100,14 @@ impl World {
         anyhow::ensure!(!order.is_empty(), "no arenas in the pack");
         anyhow::ensure!(actors.contains_key("knight"), "no knight definition in the pack");
 
-        let bounds = arenas[&order[0]].bounds();
+        let field = arenas[&order[0]].field();
         // Everyone the pack can field, the knight first so cycling from the
         // default goes straight to the creatures.
         let mut bestiary: Vec<String> = vec!["knight".into()];
         bestiary.extend(actors.keys().filter(|k| k.as_str() != "knight").cloned());
         let mut w = World {
             arenas, families, actors, order, index: 0,
-            bout: Bout::new(bounds, Vec::new()),
+            bout: Bout::new(field, Vec::new()),
             control: Vec::new(),
             events: Vec::new(),
             luts: [henge_assets::recolour::IDENTITY; 4],
@@ -333,10 +333,26 @@ impl World {
     }
 
     pub fn reset(&mut self) {
-        let b = self.bounds();
-        // Near the front of the walkable band: the band runs from the horizon
-        // down, so its bottom edge is the ground closest to the viewer.
-        let ground = b.bottom - 8;
+        let mut field = self.arena().field();
+        // `InitKnightvsDemon` calls `SETDEMONBORD` before it stands anybody
+        // up, so the demon's own rectangle is the ground the standing places
+        // are measured from as well as the ground the fight is fought on.
+        if let Some(g) = self
+            .actors
+            .get(&self.foe)
+            .and_then(|d| d.ground())
+            .filter(|g| g.is_sane())
+        {
+            field.narrow_to(g);
+        }
+        let b = GLOBAL;
+        // `AddKnight` stands each arrival one quarter, one half or three
+        // quarters of the way from the deepest border down to the foot of the
+        // screen, through `FindQuarterBORD`, `FindHalfBORD` and
+        // `Find3QuarterBORD`. The three quarter row is behind our own status
+        // strip, which the original has no equivalent of, so the two nearer
+        // ones are the ones used here and the seats alternate between them.
+        let places = [field.standing_row(1), field.standing_row(2)];
         let knight = self.actors["knight"].clone();
         let foe = self.actors.get(&self.foe).cloned().unwrap_or_else(|| knight.clone());
         let n = self.control.len().max(2) as i32;
@@ -346,7 +362,7 @@ impl World {
                 // Spread them across the arena, alternating which way they face
                 // so nobody starts with their back to the fight.
                 let x = b.left + 50 + span * i / (n - 1).max(1);
-                let y = ground - (i % 2) * 10;
+                let y = places[(i % 2) as usize];
                 let facing = if i % 2 == 0 { 1 } else { -1 };
                 // People are knights. The seats the machine fills are whatever
                 // the road, or the browser, asked for.
@@ -367,7 +383,7 @@ impl World {
         // in front of it. Nothing else in the game is set up this way.
         if self.foe == "dragon" && self.actors.contains_key("dragon_claw") {
             let claw = self.actors["dragon_claw"].clone();
-            let mid = (b.top + b.bottom) / 2;
+            let mid = field.standing_row(2);
             fighters.retain(|f| f.actor == "knight" || f.actor == "dragon");
             fighters.truncate(2);
             if let Some(d) = fighters.iter_mut().find(|f| f.actor == "dragon") {
@@ -392,7 +408,7 @@ impl World {
                 .map(|i| if i == 0 { Control::Local(0) } else { Control::Ai })
                 .collect();
         }
-        self.bout = Bout::new(b, fighters);
+        self.bout = Bout::new(field, fighters);
         self.bout.bloodless = !self.gore;
         // `SETDEMONBORD`: an actor may narrow the ground the fight is fought
         // on, and one does.
@@ -496,7 +512,9 @@ impl World {
 
     pub fn arena(&self) -> &ArenaData { &self.arenas[&self.order[self.index]] }
     pub fn name(&self) -> &str { &self.order[self.index] }
-    pub fn bounds(&self) -> Bounds { self.arena().bounds() }
+    /// The ground of the arena that is up: every rectangle nobody may walk
+    /// into. The global limits are the same in every arena and are [`GLOBAL`].
+    pub fn field(&self) -> Field { self.arena().field() }
 
     /// How many arenas a family's rotation has in it. Eight, in every family
     /// the original ships; asked for rather than assumed so a pack can differ.

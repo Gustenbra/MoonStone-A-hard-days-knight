@@ -64,9 +64,16 @@ fn main() -> anyhow::Result<()> {
     let mut arenas = serde_json::Map::new();
     for name in lib.with_extension(&["t"]) {
         if let Ok(t) = lib.terrain(&name) {
+            let borders: Vec<String> = t
+                .borders
+                .iter()
+                .map(|b| format!("x {}..{} down to {}", b.left, b.right, b.bottom))
+                .collect();
             report.push(format!(
-                "{name}: {} pieces, walkable x {}..{} y {}..{}",
-                t.placements.len(), t.left, t.right, t.top, t.bottom
+                "{name}: {} pieces, {} impassable [{}]",
+                t.placements.len(),
+                t.borders.len(),
+                borders.join("; ")
             ));
             arenas.insert(name.clone(), serde_json::to_value(&t)?);
         }

@@ -161,14 +161,45 @@ u8  packed[]
 and once unpacked:
 
 ```
-u16 _
-u16 left, right, bottom, top       walkable bounds
+u16be count                        how many border rectangles follow
+border[count]                      eight bytes each:
+    i16be left, right, bottom, top
 placement[]                         six bytes each, until sheet == 0xff:
     u8  sheet
     u8  cell
     i16 x
     i16 y
 ```
+
+**The header is a list, not one rectangle, and a rectangle is impassable ground rather
+than the walkable box.** The loader at image `0x8d93` reads the count, skips `count * 8`
+bytes to reach the placements, and walks the records again taking the deepest `bottom`
+into DS:`0x80b5`; `SBORD` (`0x4552`) walks the same list every frame. The walkable ground
+is everything *below* the rectangles.
+
+Fifty two of the fifty six layouts hold exactly one record, the tree line, which is why
+reading the header as `u16 _; u16 left, right, bottom, top` looked right for years. **Four
+do not**, and each extra record is a patch of scenery that hangs lower than the tree line
+in its own columns:
+
+| file | records |
+|---|---|
+| `FO7.T` | `0..319` down to 91, and `66..164` down to 103 |
+| `SW6.T` | `0..319` down to 110, and `150..359` down to 124 |
+| `SWL2.T` | `0..319` down to 115, and `222..541` down to 128 |
+| `GLL4.T` | `0..319` down to 97, `42..132` down to 123, and `217..468` down to 112 |
+
+`right` is not clipped to the screen: `SWL2` and `GLL4` both name a rectangle that runs off
+the right edge. Reading those four files as one record leaves the placement walk eight or
+sixteen bytes out of step, which is not a small error: it turns the first placements into
+nonsense and stops the walk on the first one that is off screen. It cost `FO7`, `SW6` and
+`GLL4` most of their scenery, and it cost `SWL2` **all** of it. `SWL2` is not, as this
+project used to record, a lair floor with no scenery on purpose; it has eighty nine
+placements, a rune wall and a chest among them.
+
+The two stub layouts, which ship three times over as `F09.T`, `SW9.T` and `INTRO1.STI`,
+declare a count of 19,342. A count above about sixteen is how they are told apart from a
+layout.
 
 **`x` and `y` are signed.** Scenery may start above or left of the screen, so a tree can
 be cut off by the top edge. Reading them unsigned produces values like 65532 for -4.
@@ -182,9 +213,9 @@ whatever the family, and 3 and 0xfe from the family's own sheet. Compositing `GL
 three ways settles it: the mixed reading is the only one that makes a tree rather than a
 tangle. Props sort by `y` so that actors occlude correctly.
 
-Every arena shares the same walkable rectangle except for its depth: `x` always spans the
-full width and the band always begins at the same `y`, while the bottom edge varies per
-arena. That one number is what makes some fights feel cramped and others open.
+Every arena's first record spans the full width and starts at the same `y`, 10, and only
+its `bottom` varies, from 80 in `GLL2` to 159 in `WA6`. That one number is the tree line,
+and it is what makes some fights a strip of ground and others most of the screen.
 
 ## `.STI`: tile maps
 

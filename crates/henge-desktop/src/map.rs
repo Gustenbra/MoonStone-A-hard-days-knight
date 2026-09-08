@@ -7,11 +7,17 @@ use henge_core::overworld::{
     terrain_of_patch, Landscape, Overworld, Step, Terrain, MAP_H, MAP_W, TOKEN_H, TOKEN_W,
 };
 
-/// The map's icon set. Frames 0-9 are the knights' tokens in player colours,
-/// 10-14 crystals, 43-46 creatures.
+/// The map's icon set. Frames 0-4 are the four knights' tokens and a fifth in
+/// dark purple, each in its own colour out of `MAP.CMP`'s palette: 30 blue, 29
+/// gold, 8 green, 28 red. Frames 5-9 are the same five with index 1 and index
+/// 31 added, and 31 is the entry `_MAP:MapEffects` puts a glow on
+/// (`mov ax, 0x1f; mov bx, 0xff; mov cx, 1`), so the token that carries it
+/// breathes. That is how the original says which of the tokens is you.
 const TOKEN_SHEET: &str = "bank.mi";
-/// The red knight, matching player one's colours in the arena.
-const TOKEN_FRAME: usize = 3;
+/// `_MAP:SHOW`: `mov ax, [di+0x20]; add ax, 5`, so the traveller's own token is
+/// his seat plus five, which is the glowing one. `DisplayOtherKnights` blits
+/// the same seat without the five, so the other three do not glow.
+const TOKEN_FIRST: usize = 5;
 const MAP_SCENE: &str = "scene.map";
 /// `_MAP:DisplayLairs` blits this one, and it is the only icon in the bank
 /// that is a picture rather than an outline.
@@ -120,7 +126,7 @@ impl MapScene {
         // gives way.
         self.draw_status(reg, fb, fonts.get("small").or_else(|| fonts.get("bold")), run, here);
         self.draw_purse(reg, fb, fonts.get("small"), run, notice);
-        self.draw_token(reg, fb);
+        self.draw_token(reg, fb, run.knight.seat);
         Ok(())
     }
 
@@ -136,13 +142,19 @@ impl MapScene {
     /// **The rest of `MI.C` from 0x15 up are not pictures, they are outlines**:
     /// frame 0x19 is the silhouette of a town wall, 0x1b a ring of stones, 0x1c
     /// the Valley of the Gods and 0x1e the wizard's tower, each one pixel wide
-    /// and drawn entirely in a single palette index. Those are the shapes
-    /// `MOON:CheckGROOC` measures a place's box from, and the index they use
-    /// reads as magenta against the map's palette, so nothing in the original
-    /// can be blitting them onto the map picture as they are. They are drawn
-    /// here as silhouettes in the map's own brightest colour, the way the
-    /// character sheet draws `KI.CEL`, which is the same problem and the same
-    /// answer.
+    /// and drawn entirely in palette index 31, which `MAP.CMP` holds as
+    /// magenta. Nothing in the original blits them: `SHOW`, `DisplayLairs` and
+    /// `DisplayOtherKnights` are the whole of what goes on the map picture, and
+    /// those are the shapes `MOON:CheckGROOC` measures a place's box from
+    /// through `MOON:GetWIDTH`. The towns, the ruin, the ring and the tower are
+    /// painted into `MAP.CMP` itself and need no icon.
+    ///
+    /// **Ours, and only one of them:** the Valley of the Gods. Where it stands
+    /// is this project's, because `MapIconsTABLE` is in the unreadable span of
+    /// `DGROUP`, so nothing on the map picture marks it and a player with four
+    /// keys would have nowhere to aim. It is drawn as a silhouette in the map's
+    /// own brightest colour, which is a marker rather than a reading of the
+    /// artwork.
     fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer, icons: &[(i32, i32, usize)]) {
         let ink = crate::status::extremes(fb).1;
         for (x, y, frame) in icons {
@@ -184,20 +196,17 @@ impl MapScene {
         font.draw(reg, fb, &line, 8, 7, light as u8);
     }
 
-    /// Draw the traveller.
+    /// Draw the traveller, as `_MAP:SHOW` draws him: his own token, in his own
+    /// colours, at his own top left corner, with nothing added.
     ///
-    /// Not with the sprite's own colours. Sheet pixels are palette *indices*,
-    /// and nothing records which palette they were baked against, so blitting
-    /// them onto the map writes indices that mean entirely different colours
-    /// here. The result was a smear of browns and blues that read as map
-    /// dithering, which is why the traveller looked absent rather than wrong.
-    ///
-    /// A map marker wants to be found at a glance anyway, so it is drawn as a
-    /// silhouette in whichever colour stands furthest from the ground beneath
-    /// it, outlined in the opposite extreme. That keeps it legible over dark
-    /// forest and over snow without either being a special case.
-    fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer) {
-        let Some(rect) = reg.sheet(TOKEN_SHEET).and_then(|r| r.value.frames.get(TOKEN_FRAME).copied())
+    /// The halo this used to draw underneath was a compensation for the wrong
+    /// frame. `MI.C` is authored against `MAP.CMP`'s own palette, which is the
+    /// palette loaded here, and the seat plus five carries index 31, the entry
+    /// `MapEffects` glows. So the token lifts off the ground by breathing,
+    /// which is the original's answer and not an outline.
+    fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer, seat: usize) {
+        let frame = TOKEN_FIRST + seat.min(4);
+        let Some(rect) = reg.sheet(TOKEN_SHEET).and_then(|r| r.value.frames.get(frame).copied())
         else { return };
         let Ok(img) = reg.image(TOKEN_SHEET) else { return };
 
@@ -214,24 +223,7 @@ impl MapScene {
         // is what `_MAP:SHOW` hands the blitter, so there is nothing to offset.
         let (x, y) = (self.state.x, self.state.y);
 
-        // These icons are authored against the map's own palette, which is the
-        // palette loaded here, so their indices already mean the right colours.
-        // No translation, and no silhouette: the token draws as the little
-        // helmeted knight it was drawn as.
-        //
-        // A dark halo first, so it does not dissolve into dithered ground.
-        let shadow = Self::darkest(fb);
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            fb.blit_mask(&px, w, h, x + ox, y + oy, shadow);
-        }
         fb.blit(&px, w, h, x, y, false);
-    }
-
-    /// The darkest entry in the loaded palette, for a halo that lifts a token
-    /// off dithered ground without recolouring it.
-    fn darkest(fb: &Framebuffer) -> u8 {
-        let luma = |c: u32| (((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff)) / 6;
-        (1..32).min_by_key(|i| luma(fb.palette[*i])).unwrap_or(1) as u8
     }
 
     fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer,

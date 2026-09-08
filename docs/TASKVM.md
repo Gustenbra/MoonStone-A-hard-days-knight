@@ -682,7 +682,7 @@ es:[2] <- 0              left
 es:[4] <- 309            right
 es:[6] <- 99             bottom
 es:[8] <- 10             top
-[0x80b5] <- 99           the deepest walkable row
+[0x80b5] <- 99           the deepest border row, which is where the ground starts
 ```
 
 That segment is the arena. The loader at `0x8d93` reads a count out of its
@@ -691,23 +691,38 @@ and walks them again taking the deepest `rec+4` into DS:`0x80b5`, which
 `FindHalfBORD`, `FindQuarterBORD` and `Find3QuarterBORD` divide up. `SBORD`
 (`0x4552`) walks the same list every frame and clears the walk bits in `+0x26`
 that would carry an actor across one. So **a `.T` file's header is a count and
-a list of border rectangles, not one walkable box**; every arena the game ships
-holds exactly one, which is why reading it as `u16 _; u16 left, right, bottom,
-top` worked.
+a list of border rectangles, not one walkable box**, and a rectangle is ground
+you may not stand on rather than ground you may.
 
-`SETDEMONBORD` therefore does not draw anything. It replaces the arena's border
-list with a single rectangle, 0 to 309 across and 10 to 99 deep, so the demon
-narrows the ground you may fight it on. **Nothing in the shipped image calls
-it**: no `call` or `jmp` anywhere in the code resolves to `0x7ff9`, and the
-address appears as an immediate nowhere either. In the DOS release it is dead
-code. Here it is the demon's own `ActorDef::border`, applied by
-`Bout::apply_actor_borders` when a demon is in the arena and by nothing else.
+**Correction, and it is two corrections.** The earlier note here said every
+shipped arena holds exactly one record. Four do not: `FO7`, `SW6` and `SWL2`
+hold two and `GLL4` holds three, and reading those four as one record threw
+their scenery away. See `docs/FORMATS.md`.
 
-The identification rests on two things and neither is a name in the file:
-the routine is the last in `GFX` and `SETDEMONBORD` is the last of the twenty
-one `GFX` publics, in the blob's own order; and it writes a border record and
-nothing else. Treat it as very likely rather than certain, the same way the
-command names are treated above.
+And the earlier note said nothing calls `SETDEMONBORD`. Two things do, and the
+claim was an artefact of reading `call` displacements without the link-time
+correction this document ends by warning about. Corrected, `0x2752` in
+`InitKnightvsDemon` and `0x8cb5` in `GENERATELANDSCAPE` both resolve to it.
+`InitKnightvsDemon` calls it **after** `0x2746` has loaded the arena, so there
+the record really does replace the arena's list and the demon is fought on 0 to
+309 across and 10 to 99 deep; `GENERATELANDSCAPE` calls it **before** it
+dispatches to the family's own loader, so there the write is overwritten by the
+`.T` a moment later. That second caller is worth knowing: it makes the routine
+read more like "write the default border" than like anything to do with the
+demon, and the demon path is simply the one place it is called where it
+survives.
+
+Here it is the demon's own `ActorDef::border`, applied by
+`Bout::apply_actor_borders`, which replaces the arena's list rather than
+intersecting with it, and applied before the fighters are stood up so that the
+three standing places are measured from the demon's floor rather than the
+arena's.
+
+The name still rests on two things and neither is a name in the file: the
+routine is the last in `GFX` and `SETDEMONBORD` is the last of the twenty one
+`GFX` publics, in the blob's own order; and it writes a border record and
+nothing else. With `GENERATELANDSCAPE` calling it too, treat the name as
+weaker than that argument made it look, and the behaviour as certain.
 
 ## One more thing about the link-time correction
 

@@ -28,7 +28,7 @@ The engine and a vertical slice. Roughly a quarter of the game.
 - [x] 10. Palette-indexed 320x200 framebuffer, presented at 4:3
 - [x] 11. Sprite drawing: transparency, mirroring, masking, colour substitution
 - [x] 12. Text: glyph map read off the artwork, silhouette rendering
-- [x] 13. Arenas: 57 of them, scenery, walkable bounds, depth sorting
+- [x] 13. Arenas: 56 of them, scenery, the header's own border list, depth sorting
 - [x] 14. Combat: positional hit lines, committed attacks, damage, death
 - [x] 15. Bouts of up to four fighters, in the simulation, deterministic and serializable
 - [x] 16. Overworld: travel, day cycle, ambushes, terrain classification
@@ -192,13 +192,18 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       `INSTALLKBD`, and it writes a count of one and a single eight-byte record into
       the segment at DS:`0x88ff` and sets DS:`0x80b5` to match. That segment is the
       arena's own `.T` file: the loader at 0x8d93 reads a count and that many
-      border records out of it and takes the deepest for the walkable floor, and
+      border records out of it and takes the deepest for the row the ground starts at, and
       `SBORD` walks the same list every frame clearing the walk bits that would
       cross it. So the demon's border is the ground you may fight it on, 0 to 309
-      across and 10 to 99 deep, not a frame around the screen. **Nothing in the
-      shipped image calls it**: no near call anywhere in the code lands on 0x7ff9,
-      so in the DOS release it is dead code. It is alive here, on the demon's own
-      `ActorDef::border`, and `Bout::apply_actor_borders` is what applies it
+      across and 10 to 99 deep, not a frame around the screen. **Corrected under
+      item 60: it is not dead code.** Two calls land on 0x7ff9 once their
+      displacements are put through the link-time correction, and the claim that
+      none did was made without it: `InitKnightvsDemon` at 0x2752, after 0x2746 has
+      loaded the arena, so the record really does replace the arena's list; and
+      `GENERATELANDSCAPE` at 0x8cb5, before it dispatches to the family's loader, so
+      there the `.T` overwrites it a moment later. It lives here on the demon's own
+      `ActorDef::border`, applied by `Bout::apply_actor_borders`, which replaces the
+      list rather than intersecting it and runs before the fighters are stood up
 - [x] 34. **Beast.** `Beast_Drool1` to stand (its `+0x10` stance), `Run1`..`4`,
       `LowerHit`, `LowerDead`. Ten hit points, a tracker that closes to two pixels. It
       has no swing: every run frame carries a weapon part, so the first run frame is
@@ -623,7 +628,31 @@ each one is sited on a cell of its own family in the real `MapType` grid, which 
       `_MAP:CheckSLOW` refuses the step when `counter & mask` is not zero, having already
       charged it to the day. Forest and marsh are half speed, the mountain spine a quarter.
       The only hard limit is a rectangle: `_MAP:HawkBorders` clamps the token to
-      `0..=310` by `0..=190`
+      `0..=310` by `0..=190`.
+      **That is the overworld, and it is right. The arena is nothing like it, and what
+      this item used to imply about arenas was wrong.** An arena's `.T` header is a count
+      and that many impassable rectangles, not one walkable box, and the ground is what is
+      left below them. `CheckBorder` (image `0x40d0`) and `SBORD` (`0x4552`) both work by
+      clearing bits in a per-actor byte of allowed directions, `+0x26`, recomputed every
+      frame: bit 0 right, bit 1 left, bit 2 down, bit 3 up. `CheckBorder` probes the actor
+      twenty five pixels ahead in whichever way he faces and holds him inside columns 10
+      to 320, writing the column back to the limit it crossed, and holds the task anchor
+      between depths 30 and 155; `SBORD` walks the arena's own rectangles and refuses up
+      to anyone whose anchor plus `0x2f` has reached a rectangle's bottom in that
+      rectangle's own columns. So **the tree line is a ceiling, not a wall**: walk into it
+      and you keep your other three directions and slide along it.
+      Three things fell out of reading it. `FO7`, `SW6`, `SWL2` and `GLL4` carry more than
+      one rectangle, and reading their headers as one had been costing them their
+      scenery, `SWL2` all of it: it is not an empty lair floor, it has eighty nine
+      placements. `AddKnight` stands each arrival a quarter, a half or three quarters of
+      the way from the deepest rectangle down to row 200, through `FindQuarterBORD`,
+      `FindHalfBORD` and `Find3QuarterBORD`, which is where the fighters now start.
+      And **only the knight is bordered in the original**: `SBORD` has one caller and
+      `MonsterWalk` is not it. Running the creatures through the same gate is ours.
+      **Still not right**: row 200 is the foot of the screen, so the original fights over
+      the whole of it, while this engine draws its own status strip over the bottom
+      thirty two rows. The strip is ours, the original has no equivalent of it, and a
+      fighter who walks all the way down now goes behind it
 - [x] 61. **Settled, and negative: the overworld map does not scroll or pan.** `MAP.CMP`
       is one 320x200 picture, `_MAP:SHOW` hands the token's position straight to the
       blitter with nothing subtracted, and `HawkBorders` bounds that position to exactly

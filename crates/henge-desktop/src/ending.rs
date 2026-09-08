@@ -12,12 +12,22 @@
 //!
 //! The victory plate is `bg8.piv`, the only full-screen picture MOON names by
 //! file, and it sits in the text pool between the victory lines and the next
-//! message. That is where it comes from and it is an inference, not a traced
-//! reference. A loss is drawn over whatever was on screen, which is the map,
-//! because the game-over routine draws no picture of its own either.
+//! message. That was an inference when it was written and the palette has since
+//! settled it: of the thirty seven pictures the bake produces, exactly three
+//! reserve the bold face's five entries rather than using them for their own
+//! artwork, and they are `MESSAGE.PIV`, `CH.PIV` and `bg8.piv`. The first two
+//! are the plates the game writes on. So `bg8` is the third, and its text is
+//! drawn in the glyphs' own indices like theirs.
+//!
+//! **A loss goes over `MESSAGE.PIV` in the instruction colour**, because that
+//! is what shows it. `MOON:0x617` is `mov si, GameOverMes; call 0x8f17`, and
+//! `0x8f17` is `INSTRUCTMESSAGE`: it restores the message picture, sets the
+//! bold face, walks the chain and repaints palette entries 1 to 6 as a red
+//! ramp before it fades. The words themselves are in the stale span of
+//! `DGROUP` and cannot be read, so those are ours; the screen they go on is
+//! not.
 
 use crate::framebuffer::Framebuffer;
-use crate::status;
 use crate::text::Font;
 use henge_assets::Registry;
 use henge_core::quest::{Ending, Tally, VICTORY_PLATE};
@@ -43,45 +53,34 @@ pub fn draw(
 ) {
     if matches!(tally.ending, Ending::Won { .. }) {
         show(reg, fb, VICTORY_PLATE);
+    } else {
+        show(reg, fb, crate::shell::MESSAGE_PLATE);
+        for (i, rgb) in crate::shell::INSTRUCT_RAMP.iter().enumerate() {
+            fb.palette[i + 1] = *rgb;
+        }
     }
-    let (dark, light) = status::extremes(fb);
-    let faint = status::faint(fb);
     let body = small.or(bold);
     let Some(body) = body else { return };
     let head = bold.unwrap_or(body);
 
+    // Every line in the glyphs' own indices: both plates reserve the five
+    // entries a glyph is drawn in, so there is nothing to flatten and no panel
+    // to put under it.
     let lines = tally.lines();
     let heading = tally.heading_lines();
-    // Size the panel to the longest line rather than hoping the words fit
-    // inside a fixed one.
-    let widest = lines
-        .iter()
-        .map(|l| body.width(reg, l))
-        .chain(heading.iter().map(|l| head.width(reg, l)))
-        .max()
-        .unwrap_or(0);
-    let w = (widest + 24).min(SCREEN_W as i32 - 4);
-    let x = (SCREEN_W as i32 - w) / 2;
-    let top = HEAD_Y - 16;
-    let first = HEAD_Y + HEAD_STEP * heading.len() as i32 + 4;
-    let bottom = (first + LINE_STEP * (lines.len() as i32 + 1) + 8).min(SCREEN_H as i32 - 2);
-    fb.rect(x, top, w, bottom - top, dark);
-    fb.rect(x, top, w, 1, light);
-    fb.rect(x, bottom - 1, w, 1, light);
-
     let mut y = HEAD_Y;
     for line in &heading {
-        head.draw_centred(reg, fb, line, y, light);
+        head.draw_own_centred(reg, fb, line, y);
         y += HEAD_STEP;
     }
-    let mut y = first;
+    let mut y = HEAD_Y + HEAD_STEP * heading.len() as i32 + 4;
     for line in &lines {
-        body.draw_centred(reg, fb, line, y, light);
+        body.draw_own_centred(reg, fb, line, y);
         y += LINE_STEP;
     }
     // `Press fire to continue`, which is the original's own line and is in
     // MOON's text pool three messages above the victory one.
-    body.draw_centred(reg, fb, "Press fire to continue", y + 2, faint);
+    body.draw_own_centred(reg, fb, "Press fire to continue", y + 2);
 }
 
 /// A full-screen picture and its own palette. `shell::show` does the same

@@ -209,7 +209,9 @@ impl Messages {
             },
         );
         // `_LOADER:TitleMes`, drawn with the plain `MESSAGE` rather than by one
-        // of the three, and the only place the original names its author.
+        // of the three, and the only place the original names its author. Its
+        // own `Loading...` record is at y 150, not the 182 the fourteen wait
+        // chains put theirs at, so it is written out rather than shared.
         named.insert(
             "title.credit".to_string(),
             Message {
@@ -217,7 +219,7 @@ impl Messages {
                 lines: vec![
                     Line::new("created by", 0, 90, FLAG_CENTRE | FLAG_BOLD),
                     Line::new("Rob Anderson", 0, 105, FLAG_CENTRE | FLAG_BOLD),
-                    loading(),
+                    Line::new("Loading...", 0, 150, FLAG_CENTRE | FLAG_BOLD),
                 ],
             },
         );

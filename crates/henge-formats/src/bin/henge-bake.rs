@@ -478,7 +478,7 @@ const CREATURES: &[Creature] = &[
         rows: &[("evolve", &["Demon_Evolve"])],
         // **Recovered: `SETDEMONBORD`.** The last routine in `GFX` writes one
         // record into the border list the arena's `.T` file otherwise fills,
-        // and sets the deepest walkable row to match: 0 to 309 across, 10 to
+        // and sets the deepest border row to match: 0 to 309 across, 10 to
         // 99 deep. Nothing in the shipped image calls it, so the border is
         // dead code there; it is real here, and it is what the demon does to
         // the screen.
@@ -784,14 +784,15 @@ fn main() -> anyhow::Result<()> {
     let mut arenas = BTreeMap::new();
     for name in lib.with_extension(&["t"]) {
         let Ok(t) = lib.terrain(&name) else { continue };
-        // The F09/SW9 stubs carry garbage bounds. An arena with no scenery at
-        // all is still an arena, and `SWL2.T` is one: it has the same bounds
-        // as its neighbours and a placement list that is empty on purpose.
-        // Dropping it left the fourteenth lair with no layout to fight in.
-        let sane = t.left < t.right
-            && t.top < t.bottom
-            && t.right < 640
-            && t.bottom < 400;
+        // The F09/SW9 stubs carry a garbage border list. An arena with no
+        // scenery at all is still an arena, and `SWL2.T` is one: it has the
+        // same borders as its neighbours and a placement list that is empty on
+        // purpose. Dropping it left the fourteenth lair with no layout to
+        // fight in.
+        let sane = !t.borders.is_empty()
+            && t.borders.iter().all(|b| {
+                b.left < b.right && b.top < b.bottom && b.right < 640 && b.bottom < 400
+            });
         if !sane {
             continue;
         }
@@ -2596,6 +2597,55 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "an id is listed twice");
+    }
+
+    /// The `.T` header is a border list, and four layouts have more than one
+    /// record in it.
+    ///
+    /// Reading it as a single rectangle put the placement walk eight or
+    /// sixteen bytes out of step in exactly those four, which cost three of
+    /// them most of their scenery and `SWL2` all of it. Any regression in the
+    /// header parse shows up here as a short border list or an empty layout.
+    #[test]
+    fn the_arena_headers_carry_a_border_list_and_four_of_them_carry_more_than_one() {
+        use henge_core::content::Arenas;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/reference/data");
+        let Ok(text) = fs::read_to_string(root.join("arenas.json")) else {
+            eprintln!("no baked pack under packs/reference: arena header check skipped");
+            return;
+        };
+        let arenas: Arenas = serde_json::from_str(&text).expect("arenas.json parses");
+        assert_eq!(arenas.len(), 56, "the pack should hold 56 layouts");
+        for (name, a) in &arenas {
+            assert!(!a.terrain.borders.is_empty(), "{name}: no border list");
+            let first = a.terrain.borders[0];
+            assert_eq!((first.left, first.right, first.top), (0, 319, 10),
+                "{name}: the first record is the tree line across the whole screen");
+            assert!((80..=159).contains(&first.bottom), "{name}: tree line at {}", first.bottom);
+        }
+        let counts = |n: &str| arenas[n].terrain.borders.len();
+        assert_eq!(counts("fo7"), 2);
+        assert_eq!(counts("sw6"), 2);
+        assert_eq!(counts("swl2"), 2);
+        assert_eq!(counts("gll4"), 3);
+        for (name, a) in &arenas {
+            if counts(name) == 1 {
+                continue;
+            }
+            assert!(a.terrain.placements.len() > 30,
+                "{name}: {} placements, so the walk went out of step again",
+                a.terrain.placements.len());
+        }
+        // `FO7`'s second record is the root mass in the middle of the screen.
+        assert_eq!(
+            (arenas["fo7"].terrain.borders[1].left,
+             arenas["fo7"].terrain.borders[1].right,
+             arenas["fo7"].terrain.borders[1].bottom),
+            (66, 164, 103)
+        );
+        // And the deepest of a layout's records is the row its fighters stand
+        // below, which is what `FindHalfBORD` measures from.
+        assert_eq!(arenas["fo7"].field().floor(), 103);
     }
 
     /// Every creature runs one of the original's controllers, and every

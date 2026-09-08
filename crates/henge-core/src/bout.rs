@@ -9,7 +9,7 @@
 //! from. A keyboard, an AI and a network packet are interchangeable, which is
 //! the seam networked play plugs into.
 
-use crate::arena::Bounds;
+use crate::arena::{Border, Field, GLOBAL};
 use crate::combat::{line_hits_body, Attack, Fighter, Intent, Order, State};
 use crate::content::ActorDef;
 use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
@@ -110,7 +110,10 @@ const KNIFE_LEFT_EDGE: i32 = -10;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Bout {
     pub fighters: Vec<Fighter>,
-    pub bounds: Bounds,
+    /// The ground of the arena: the rectangles nobody may walk up into, as the
+    /// `.T` header lists them. Applied every frame to every fighter.
+    #[serde(default)]
+    pub field: Field,
     pub damage: i32,
     /// Ticks since only one fighter (or none) was left standing.
     pub settled_for: u32,
@@ -140,10 +143,10 @@ fn default_rng() -> u16 {
 }
 
 impl Bout {
-    pub fn new(bounds: Bounds, fighters: Vec<Fighter>) -> Bout {
+    pub fn new(field: Field, fighters: Vec<Fighter>) -> Bout {
         Bout {
             fighters,
-            bounds,
+            field,
             damage: 25,
             settled_for: 0,
             bloodless: false,
@@ -361,30 +364,30 @@ impl Bout {
         self.missiles.push(m);
     }
 
-    /// `SETDEMONBORD`: a fight narrows to the border of any actor that brings
-    /// one of its own.
+    /// `SETDEMONBORD`: a fight is fought on the border of any actor that
+    /// brings one of its own.
     ///
     /// **Recovered.** The arena's `.T` file opens with a count and that many
     /// eight-byte border records, and the loader takes the deepest of them as
-    /// the walkable floor; `SBORD` walks the same list every frame and clears
-    /// the walk bits that would cross it. `SETDEMONBORD`, the last routine in
-    /// `GFX`, overwrites the whole list with one record: 0 to 309 across, 10 to
-    /// 99 deep. So the demon does not decorate the screen, it shrinks the
-    /// ground you can fight it on.
+    /// the row the knights are stood below; `SBORD` walks the same list every
+    /// frame and clears the walk bits that would carry a fighter into one.
+    /// `SETDEMONBORD`, the last routine in `GFX`, **overwrites** the whole
+    /// list with one record: 0 to 309 across, 10 to 99 deep. So the demon does
+    /// not decorate the screen and it does not add to the tree line, it
+    /// replaces the ground the fight is fought on. `InitKnightvsDemon` calls
+    /// it at image `0x2752`.
     pub fn apply_actor_borders<'a, F>(&mut self, def_of: F)
     where
         F: Fn(&str) -> &'a ActorDef,
     {
-        let mut b = self.bounds;
-        for f in &self.fighters {
-            let Some(n) = def_of(&f.actor).bounds() else { continue };
-            b.left = b.left.max(n.left);
-            b.right = b.right.min(n.right);
-            b.top = b.top.max(n.top);
-            b.bottom = b.bottom.min(n.bottom);
-        }
-        if b.is_sane() {
-            self.bounds = b;
+        let own: Vec<Border> = self
+            .fighters
+            .iter()
+            .filter_map(|f| def_of(&f.actor).ground())
+            .filter(|b| b.is_sane())
+            .collect();
+        if let Some(b) = own.first() {
+            self.field.narrow_to(*b);
         }
     }
 
@@ -423,7 +426,7 @@ impl Bout {
             match head {
                 Some(h) => {
                     let (y, off) = (self.fighters[h].y, self.fighters[me].brain.timer);
-                    let (_, ny) = self.bounds.clamp(self.fighters[me].x, y + off);
+                    let (_, ny) = GLOBAL.clamp(self.fighters[me].x, y + off);
                     self.fighters[me].y = ny;
                 }
                 None if self.fighters[me].alive() => {
@@ -458,7 +461,7 @@ impl Bout {
                 me: &self.fighters[me],
                 foe,
                 def,
-                bounds: self.bounds,
+                bounds: GLOBAL,
                 gore,
                 body: foe.finishable(t_def),
                 decapped,
@@ -496,7 +499,7 @@ impl Bout {
             Act::Stand(script) => order(State::Idle, script, None),
             Act::Play(script) => order(State::Attack, script, None),
             Act::Appear { x, facing, script } => {
-                let b = self.bounds;
+                let b = GLOBAL;
                 let f = &mut self.fighters[me];
                 let (nx, ny) = b.clamp(x, f.y);
                 f.x = nx;
@@ -568,7 +571,7 @@ impl Bout {
             }
             let intent = intents.get(i).copied().unwrap_or_default();
             let def = def_of(&self.fighters[i].actor);
-            let line = self.fighters[i].step_gated(def, intent, self.bounds, bloodless);
+            let line = self.fighters[i].step_gated(def, intent, &self.field, bloodless);
             if !line.is_empty() {
                 let f = &self.fighters[i];
                 blows.push(Blow { attacker: i, missile: None, line, attack: f.attack, depth: f.y });
@@ -605,7 +608,7 @@ impl Bout {
                             let f = &self.fighters[i];
                             (f.x, f.y, f.facing)
                         };
-                        let bounds = self.bounds;
+                        let bounds = GLOBAL;
                         for t in 0..self.fighters.len() {
                             if t == i || !self.fighters[t].hidden {
                                 continue;
@@ -869,7 +872,7 @@ impl Bout {
                 }
                 let push = (min_gap - gap.abs() + 1) / 2;
                 let dir = if gap >= 0 { 1 } else { -1 };
-                let bounds = self.bounds;
+                let bounds = GLOBAL;
                 let (ix, _) = bounds.clamp(self.fighters[i].x - push * dir, self.fighters[i].y);
                 let (jx, _) = bounds.clamp(self.fighters[j].x + push * dir, self.fighters[j].y);
                 self.fighters[i].x = ix;
@@ -898,6 +901,7 @@ impl Bout {
             mix(f.damage as i64);
             mix(f.state as i64);
             mix(f.struck as i64);
+            mix(f.blocked as i64);
             mix(f.attack.map_or(-1, |a| a.kind() as i64));
             for b in f.script.as_bytes() {
                 mix(*b as i64);
@@ -1013,14 +1017,16 @@ mod tests {
         }
     }
 
-    fn bounds() -> Bounds {
-        Bounds { left: 0, right: 319, top: 10, bottom: 114 }
+    /// One arena's ground. The tree line is put high enough that every
+    /// fighter in these tests stands below it and is free to walk.
+    fn arena_field() -> Field {
+        Field::new(vec![Border { left: 0, right: 319, bottom: 60, top: 10 }])
     }
 
     fn four() -> Bout {
         let d = def();
         Bout::new(
-            bounds(),
+            arena_field(),
             (0..4)
                 .map(|i| Fighter::new("k", &d, 40 + i * 70, 100, 1))
                 .collect(),
@@ -1040,7 +1046,7 @@ mod tests {
         // arena to nothing.
         ugly.border = Some([200, 100, 90, 10]);
 
-        let arena = bounds();
+        let arena = arena_field();
         let pick = |name: &str| -> &ActorDef {
             match name {
                 "demon" => Box::leak(Box::new(demon.clone())),
@@ -1049,26 +1055,28 @@ mod tests {
             }
         };
 
-        let mut b = Bout::new(arena, vec![Fighter::new("k", &plain, 40, 100, 1)]);
+        let mut b = Bout::new(arena.clone(), vec![Fighter::new("k", &plain, 40, 100, 1)]);
         b.apply_actor_borders(pick);
-        assert_eq!(b.bounds, arena, "an ordinary fight is fought on the whole arena");
+        assert_eq!(b.field, arena, "an ordinary fight is fought on the arena's own ground");
 
         let mut b = Bout::new(
-            arena,
+            arena.clone(),
             vec![Fighter::new("k", &plain, 40, 100, 1), Fighter::new("demon", &demon, 200, 100, -1)],
         );
         b.apply_actor_borders(pick);
-        assert_eq!(b.bounds.right, 309, "the demon takes ten pixels off the width");
-        assert_eq!(b.bounds.bottom, 99, "and fifteen rows off the depth");
-        assert_eq!(b.bounds.left, arena.left);
-        assert_eq!(b.bounds.top, arena.top);
+        assert_eq!(
+            b.field.borders,
+            vec![Border { left: 0, right: 309, bottom: 99, top: 10 }],
+            "the demon's record replaces the arena's list rather than joining it"
+        );
+        assert_eq!(b.field.floor(), 99, "and the ground begins fifteen rows higher");
 
         let mut b = Bout::new(
-            arena,
+            arena.clone(),
             vec![Fighter::new("k", &plain, 40, 100, 1), Fighter::new("ugly", &ugly, 200, 100, -1)],
         );
         b.apply_actor_borders(pick);
-        assert_eq!(b.bounds, arena, "an inverted border is refused");
+        assert_eq!(b.field, arena, "an inverted border is refused");
     }
 
     /// A creature does not press a button: its own controller names the
@@ -1090,7 +1098,7 @@ mod tests {
             }
         };
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![
                 Fighter::new("k", &knight, 0, 100, 1),
                 Fighter::new("trogg", &trogg, 110, 100, -1),
@@ -1140,7 +1148,7 @@ mod tests {
         let d = def();
         // Two targets stacked on the same spot, both inside one swing's line.
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![
                 Fighter::new("k", &d, 100, 100, 1),
                 Fighter::new("k", &d, 125, 100, -1),
@@ -1162,7 +1170,7 @@ mod tests {
     fn the_last_one_standing_wins() {
         let d = def();
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![
                 Fighter::new("k", &d, 100, 100, 1),
                 Fighter::new("k", &d, 160, 100, -1),
@@ -1241,7 +1249,7 @@ mod tests {
     fn a_scripted_bout_survives_a_round_trip_through_serialization() {
         let d = crate::combat::tests::scripted_def();
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![
                 Fighter::new("k", &d, 100, 100, 1),
                 Fighter::new("k", &d, 130, 100, -1),
@@ -1279,14 +1287,16 @@ mod depth {
     use crate::combat::tests::depth_def;
     use crate::taskvm::{field, part_flags};
 
-    fn bounds() -> Bounds {
-        Bounds { left: 0, right: 319, top: 10, bottom: 114 }
+    /// One arena's ground. The tree line is put high enough that every
+    /// fighter in these tests stands below it and is free to walk.
+    fn arena_field() -> Field {
+        Field::new(vec![Border { left: 0, right: 319, bottom: 60, top: 10 }])
     }
 
     /// Two knights thirty pixels apart, facing each other.
     fn pair(d: &ActorDef) -> Bout {
         Bout::new(
-            bounds(),
+            arena_field(),
             vec![Fighter::new("k", d, 100, 100, 1), Fighter::new("k", d, 130, 100, -1)],
         )
     }
@@ -1460,7 +1470,7 @@ mod depth {
     fn a_dagger_flies_and_connects_once() {
         let d = depth_def();
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 220, 100, -1)],
         );
         b.fighters[0].record.set(field::DAGGERS, 2);
@@ -1486,7 +1496,7 @@ mod depth {
         assert_eq!(b.fighters[1].health, 82);
 
         // No dagger, no throw.
-        let mut empty = Bout::new(bounds(), vec![Fighter::new("k", &d, 100, 100, 1)]);
+        let mut empty = Bout::new(arena_field(), vec![Fighter::new("k", &d, 100, 100, 1)]);
         empty.fighters[0].record.set(field::DAGGERS, 0);
         for _ in 0..6 {
             empty.step(&d, &[throw]);
@@ -1501,7 +1511,7 @@ mod depth {
     fn a_dagger_is_not_stopped_by_a_block() {
         let d = depth_def();
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 200, 100, -1)],
         );
         b.fighters[0].record.set(field::DAGGERS, 1);
@@ -1595,7 +1605,7 @@ mod depth {
     fn a_bout_with_a_dagger_in_flight_survives_a_round_trip() {
         let d = depth_def();
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![Fighter::new("k", &d, 60, 100, 1), Fighter::new("k", &d, 260, 100, -1)],
         );
         b.fighters[0].record.set(field::DAGGERS, 3);
@@ -1622,8 +1632,10 @@ mod mixed {
     use super::*;
     use crate::combat::tests::scripted_def;
 
-    fn bounds() -> Bounds {
-        Bounds { left: 0, right: 319, top: 10, bottom: 114 }
+    /// One arena's ground. The tree line is put high enough that every
+    /// fighter in these tests stands below it and is free to walk.
+    fn arena_field() -> Field {
+        Field::new(vec![Border { left: 0, right: 319, bottom: 60, top: 10 }])
     }
 
     /// A troll and a knight in one bout: each fighter is stepped and struck by
@@ -1639,7 +1651,7 @@ mod mixed {
         let def_of = |name: &str| if name == "troll" { &troll } else { &knight };
 
         let mut b = Bout::new(
-            bounds(),
+            arena_field(),
             vec![
                 Fighter::new("knight", &knight, 100, 100, 1),
                 Fighter::new("troll", &troll, 130, 100, -1),
@@ -1666,7 +1678,7 @@ mod mixed {
         let d = scripted_def();
         let mk = || {
             Bout::new(
-                bounds(),
+                arena_field(),
                 vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 130, 100, -1)],
             )
         };

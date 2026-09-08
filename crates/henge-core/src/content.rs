@@ -2,17 +2,18 @@
 //! content will eventually be authored as, so the game reads one shape either way.
 
 use crate::anim::Sequence;
-use crate::arena::{Bounds, Prop};
+use crate::arena::{Border, Field, Prop};
 use crate::taskvm::{BankTables, ScriptSet};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// One arena's `.T` file, as the baker writes it out.
+///
+/// `borders` is the header's own list, and it is a list: four of the fifty six
+/// shipped layouts hold more than one rectangle. See `crate::arena`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TerrainData {
-    pub left: u16,
-    pub right: u16,
-    pub bottom: u16,
-    pub top: u16,
+    pub borders: Vec<Border>,
     pub placements: Vec<Prop>,
 }
 
@@ -23,13 +24,9 @@ pub struct ArenaData {
 }
 
 impl ArenaData {
-    pub fn bounds(&self) -> Bounds {
-        Bounds {
-            left: self.terrain.left as i32,
-            right: self.terrain.right as i32,
-            top: self.terrain.top as i32,
-            bottom: self.terrain.bottom as i32,
-        }
+    /// The ground of this arena: every rectangle its header names.
+    pub fn field(&self) -> Field {
+        Field::new(self.terrain.borders.clone())
     }
 }
 
@@ -278,9 +275,10 @@ pub struct ActorDef {
     ///
     /// **Recovered**, and there is exactly one: `SETDEMONBORD`, the last
     /// routine of `GFX`, writes a single record into the buffer the arena's
-    /// `.T` file fills and `SBORD` walks, and sets the deepest walkable row
-    /// with it. A fight against the demon is therefore fought in the demon's
-    /// own rectangle rather than the arena's. See `docs/TASKVM.md`.
+    /// `.T` file fills and `SBORD` walks, and sets the deepest border row
+    /// with it. It replaces the arena's whole list rather than joining it, so
+    /// a fight against the demon is fought on the demon's own ground.
+    /// `InitKnightvsDemon` calls it, at image `0x2752`. See `docs/TASKVM.md`.
     #[serde(default)]
     pub border: Option<[i32; 4]>,
 }
@@ -488,13 +486,8 @@ impl ActorDef {
     }
 
     /// The rectangle this actor narrows a fight to, if it has one.
-    pub fn bounds(&self) -> Option<crate::arena::Bounds> {
-        self.border.map(|[left, right, top, bottom]| crate::arena::Bounds {
-            left,
-            right,
-            top,
-            bottom,
-        })
+    pub fn ground(&self) -> Option<Border> {
+        self.border.map(|[left, right, top, bottom]| Border { left, right, top, bottom })
     }
 
     /// Whether this actor is animated by the task VM rather than by frame lists.

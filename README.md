@@ -12,7 +12,12 @@ need your own copy of the original, which the engine reads and converts locally.
 
 ## What works
 
-- 56 combat arenas across four families, with real terrain, scenery and depth sorting
+- 56 combat arenas across four families, with real terrain, scenery and depth sorting.
+  **The ground you may stand on is what an arena's own header says is not tree**: the
+  header is a count and that many impassable rectangles, four layouts carry more than
+  one, and walking into the tree line takes away that one direction and leaves you the
+  other three, the way the original's `CheckBorder` and `SBORD` clear bits in a byte of
+  allowed directions rather than clamping anybody to a box
 - An overworld you travel across, with a day cycle and ambushes, laid out by the
   original's own two map tables: which of the four kinds of ground each 8x8 block
   is, and how hard that block is to cross. Nothing on the map is impassable; the
@@ -55,17 +60,29 @@ need your own copy of the original, which the engine reads and converts locally.
   healer in the woods still charges only days, and one inside the walls wants
   coin as well. What you carry can leave you too, to a cutpurse on the road
 - **A title screen, and a knight to choose.** The game opens on its own wordmark,
-  which turned out to be the last three frames of the bold font's bank, over an
-  option list that is the original's: one to four players, gore on or off,
-  practice combat or the moon quest. Leave it alone and it starts showing you the
-  intro plates. The four knights are Sir Banner, Sir Dwain, Sir Balain and Sir
+  which turned out to be the last three frames of the bold font's bank, over the
+  picture the original draws it on: `_LOADER:MoonPic` is `CH.PIV`, the same night
+  sky the select screen stands its knights against, and the wordmark sits at the
+  corner `DisplaySelect` loads into its registers rather than centred. Under it is
+  an option list that is the original's: one to four players, gore on or off,
+  practice combat or the moon quest. Every word on it is drawn in the letters' own
+  five colours, because `CH.PIV` reserves those five entries the way `MESSAGE.PIV`
+  does and the original's text path has no ink in it at all. Leave it alone and it
+  starts showing you the intro plates. The four knights are Sir Banner, Sir Dwain, Sir Balain and Sir
   Gunther, blue, gold, emerald and red because the executable's own colour table
   says so, and each begins in his own corner of the map
-- **A status panel with something on it.** Strength, constitution and endurance,
-  life points, daggers, gold, experience, health, the sword in your hand and the
-  armour on your back, at the coordinates the original's own routine places them
-  and drawn with its own icons. One plate per fighter along the bottom of an
-  arena, and the whole sheet on a key
+- **The status screen, which is a pair of stone arches.** `DisplayPillars` clears
+  the screen and `StatusSetup` walks two tables of `[cel][x][y][mirror]` records
+  that run into each other, and what they draw is fifteen cels of `KI.CEL`: three
+  pillars and two ivied arches. `ABorders` is a third such table and it is the row
+  labels, `STR :`, `CON :`, `END :`, `XP :`, `GOLD :` and `HIT :`, in the
+  original's own five-pixel lettering. Strength, constitution and endurance, life
+  points, daggers, gold, experience, health, the sword in your hand and the armour
+  on your back go where `DisplayKnight` puts them, in the colours of `STAPAL`, the
+  screen's own thirty two, with two entries of it repainted for whichever knight
+  you are. The menu goes in the right hand arch, which is the one the original
+  leaves empty here. One plate per fighter along the bottom of an arena, and the
+  whole sheet on a key
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents, each in their own colour
 - Movement, committed attacks, positional hit resolution, damage, death
@@ -99,8 +116,8 @@ need your own copy of the original, which the engine reads and converts locally.
 - **The two set pieces.** The demon arrives rather than walking on, breathes
   through its four stances with its whirl at its feet, and slaps, zaps and
   whips you by range; its zap takes you off the board and puts you back beside
-  it. The ground it is fought on is narrowed to the rectangle `SETDEMONBORD`
-  writes, which turns out to be a movement border and not a decoration. The
+  it. The ground it is fought on is the rectangle `SETDEMONBORD` writes over the
+  arena's own border list, which is a movement border and not a decoration. The
   dragon is a head on a neck at the far end of the arena with two claws in
   front of it that take no harm at all: it lifts its head when you close and
   lowers it when you back off, bites when you are near and breathes fire the
@@ -373,8 +390,16 @@ ornaments at the end are unidentified and left unmapped rather than guessed at; 
 glyph is simply never drawn.
 
 The mapping lives in the pack as content, so a replacement font needs no code change.
-Glyphs draw as a silhouette in a chosen colour, since a glyph's own shades are legible
-over one arena's palette and invisible over the next.
+
+**A glyph is a sprite and it is drawn in its own colours.** `TextP` looks the glyph up,
+puts its width and height in the blitter's registers and calls the same routine every
+other cel goes through; there is no ink anywhere in the original's text path. A bold
+glyph carries five indices, 5 the ring round the letter and 9 to 12 the face inside it,
+and three of the game's thirty seven pictures keep those five entries out of their own
+painting and hold the face's ramp there instead: `MESSAGE.PIV`, `CH.PIV` and `bg8.piv`.
+Those three are exactly the plates the game writes on, which is a check on both. Text
+over one of them is blitted, not flattened; over an arena, whose palette owes the font
+nothing, henge still draws a silhouette in a chosen colour, and that part is ours.
 
 ```sh
 henge --screenshot out.png 5 0 --say "Day 1|forest|100 of 100"
