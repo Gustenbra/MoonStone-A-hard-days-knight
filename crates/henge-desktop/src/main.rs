@@ -276,6 +276,13 @@ fn prepare(app: &mut App, a: &[String]) {
     if let Some(stone) = stone_arg(a) {
         app.run.kit.take(stone.item(), 1);
     }
+    // `--won`: end the run as a victory, so the winning tally can be looked at
+    // without beating the Guardian first. The losing one is one lost fight
+    // away, but the winning one is the end of a whole quest, and a screen
+    // nobody can reach in testing is a screen nobody checks.
+    if a.iter().any(|s| s == "--won") {
+        app.run.won = true;
+    }
     if let Some(n) = lives_arg(a) {
         app.run.lives = n;
         app.run.max_lives = n.max(app.run.max_lives);
