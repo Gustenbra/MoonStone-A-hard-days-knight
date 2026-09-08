@@ -731,6 +731,12 @@ impl Run {
             .find(|m| m.phase() == phase && self.kit.count(m.item()) > 0)
         {
             self.won = true;
+            // The quest is done, and `MOON:KnightWonGame` does not go back to
+            // the map: it shows its two lines and quits the program. So a run
+            // that has won is a run that is over, and everything that asks
+            // whether it is still going gets the same answer as it does for a
+            // knight out of life points.
+            self.over = true;
             return Rite::Won(stone);
         }
         let chosen = match offer {

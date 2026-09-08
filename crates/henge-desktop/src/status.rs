@@ -62,6 +62,22 @@ const SWORD_CEL: usize = 0x16;
 const ARMOURS: [&str; 4] = ["padded_armour", "chain_mail", "plate_armour", "battle_armour"];
 const ARMOUR_CEL: usize = 0x1b;
 
+/// The four keys of the Valley, and where they go.
+///
+/// **Recovered.** `_STATUS:StatCheckKeys` reads byte `+0x14` of the item
+/// record and draws one cel per bit set: bit 1 is cel 5 at x 0x4c, bit 2 cel 6
+/// at 0x5e, bit 4 cel 7 at 0x70 and bit 8 cel 8 at 0x82, all on row 0x6f, each
+/// through its own colour replacement (0x11, 0x21, 0x41, 0x81). So the x
+/// spacing of eighteen and the slot order are the original's, and a slot left
+/// empty is a key you have not found.
+///
+/// **The row is ours**, because henge's sheet is not laid out where the
+/// original's is: y 0x6f runs the cels straight through the armour's name.
+const KEY_CEL: usize = 5;
+const KEY_X: i32 = 0x4c;
+const KEY_STEP: i32 = 0x12;
+const KEY_Y: i32 = 131;
+
 fn luma(c: u32) -> i32 {
     (((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff)) as i32
 }
@@ -174,9 +190,14 @@ pub fn draw_sheet(
     // set to its own left edge so a long line never runs into the pips.
     let wide = !menu.is_empty();
     let width = if wide { 300 } else { 212 };
-    fb.rect(20, 12, width, 132, dark);
+    // The panel grows a row when there is a key on it, because the four cels
+    // are sixteen pixels tall and the original's own row for them runs through
+    // where henge puts the armour.
+    let keys = run.keys_held();
+    let height = if keys.is_empty() { 132 } else { 156 };
+    fb.rect(20, 12, width, height, dark);
     fb.rect(20, 12, width, 1, colour);
-    fb.rect(20, 143, width, 1, colour);
+    fb.rect(20, 11 + height, width, 1, colour);
     let Some(font) = font else { return };
     draw_menu(reg, fb, font, menu, cursor, light, faint, colour);
 
@@ -227,11 +248,46 @@ pub fn draw_sheet(
         sprite::draw_mask(reg, fb, UI, ARMOUR_CEL + cel, 29, 112, faint);
     }
     font.draw(reg, fb, &k.armour_name(items), 75, 122, light);
+
+    // The keys of the Valley, one slot each, in the original's own order and
+    // spacing. Four filled slots is the Valley open.
+    for key in keys {
+        // The slot is the bit, not the order the keys are planted in: the
+        // original tests bit 1 first and gives it cel 5 and the leftmost x, so
+        // the glade's key is the left hand slot and the forest's the right.
+        let slot = key.bit().trailing_zeros() as i32;
+        sprite::draw_mask(
+            reg, fb, UI, KEY_CEL + slot as usize,
+            KEY_X + slot * KEY_STEP, KEY_Y, colour,
+        );
+    }
 }
 
 /// The sheet's menu, down the right hand side: eleven rows of seven pixels
 /// between the top rule and the bottom one, windowed on the cursor when there
 /// are more lines than that. An unlit line is drawn faint, like a shut door.
+/// The sheet's menu rows, as boxes a pointer can be over.
+///
+/// The same `X`, `TOP`, row height and scroll `draw_menu` uses, and the
+/// scrolling matters: the sheet shows eleven rows of a list that can be longer,
+/// so a gadget has to be registered for the row that is actually on screen.
+/// This is the screen the original's gadgets belong to: `AddIconGadget`,
+/// `HotGadget` and `GadgetSlot` are all in `_STATUS`.
+pub fn sheet_menu_rects(len: usize, cursor: Option<usize>) -> Vec<(usize, i32, i32, i32, i32)> {
+    const ROWS: usize = 11;
+    const X: i32 = 176;
+    const TOP: i32 = 28;
+    if len == 0 {
+        return Vec::new();
+    }
+    let at = cursor.unwrap_or(0);
+    let first = at.saturating_sub(ROWS - 1).min(len.saturating_sub(ROWS));
+    (first..len.min(first + ROWS))
+        .enumerate()
+        .map(|(row, i)| (i, X - 8, TOP + row as i32 * 9 - 1, 300 - (X - 8) + 20, 9))
+        .collect()
+}
+
 fn draw_menu(
     reg: &mut Registry, fb: &mut Framebuffer, font: &Font, menu: &[(String, bool)],
     cursor: Option<usize>, light: u8, faint: u8, colour: u8,

@@ -366,12 +366,19 @@ ACTOR_SLOTS = {
     'balok':       {0: ('actor.balok', 0), 1: ('actor.balok', 2),
                     2: ('actor.balok', 1)},
     'gore':        {n: ('actor.gore', 0) for n in range(5)},
+    # `DrBuffer`, the table the dragon's flight over the map runs on.
+    # `_MAP:ContinueDragon` writes the pointer at DS:0x8975 into all five of
+    # its slots, and that pointer is `MI.C`: the loader at 0x88b5 stores the
+    # address the *next* file will be loaded at, and the next file after
+    # `ki.cel` is `mi.c`. Cels 34 to 41 are a beating wing.
+    'dragon_flight': {n: ('bank.mi', 0) for n in range(5)},
 }
 
 # Which loader a script's name implies. The prefix names the encounter, not the
 # bank table, so it is only a default: `Knight_HangSd` is played on the ratman's
-# banks and `Dragon_Flight*` on a table with DRAGON5 in slot 0. Both are caught
-# by the cel bounds check rather than drawn wrong. Use --actor to override.
+# banks and `Dragon_Flight*` on `DrBuffer`, which is `MI.C` in every slot. Both
+# are caught by the cel bounds check rather than drawn wrong, and `--actor`
+# overrides: `--actor dragon_flight` puts the flight right.
 PREFIX_ACTOR = {
     'Knight': 'knight', 'Hero': 'hero', 'Troll': 'troll',
     'TroggAxe': 'trogg_axe', 'TroggHammer': 'trogg_axe',

@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 61 done, 2 partial, 14 remaining.**
+**77 items. 73 done, 1 partial, 3 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -171,13 +171,34 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       80/75/5. `MudmenWALK` moves it eleven across and thirteen deep a frame, so it
       comes at you on a diagonal. `Mudmen_Appear` and `IBury`, the rising out of the
       ground, are behaviour and wait on 37
-- [ ] 33. **Demon: partial.** It stands (`Demon_Stance1`), slaps (`Demon_Slap`, whose
-      own five frames carry the whip; the script runs on into `Demon_Zap` and
-      `Demon_Whip` on disk but its `TASKGOTO` to `Stance2` ends it first), is hurt
-      (`Demon_Hurt`) and dies (`Demon_Death`). 250 hit points, ranges 95/90/2; its
-      blow is not in a `*Dam` table, four stands in. **Missing**: `SETDEMONBORD`, the
-      screen border; `Demon_Evolve`, the entrance; `Demon_Whirl` and `AddDemonWhirl`;
-      the zap and the whip as separate attacks; `KnightOFF`/`KnightON`
+- [x] 33. **Demon.** It arrives (`Demon_Evolve`, which is what `InitKnightvsDemon`
+      writes into its stance slot at `+0x10`, and whose last frame calls
+      `AddDemonWhirl`), breathes through the four stances `Demon_Stance1`'s own
+      `TASKSAVE` into `+0x10` cycles, and fights on the three ranges `DemonAttack`
+      gives it: the slap inside a hundred (kind 0x10, nine frames of cooldown, and
+      two turns of `demonbodge` between slaps), the zap out to a hundred and thirty
+      (kind 4, six frames), and the whip out to a hundred and forty (kind 2, five).
+      The whip's four-phase follow-through is the four `DemonFLAGS` bits
+      `DemonOFollowT`, `DemonOWhipFollow`, `DemonUFollowT` and `DemonUWhipFollow`
+      turn into `Demon_OWhipMiss`, `OWhipHit`, `UWhipMiss` and `UWhipHit`, with
+      `OWhipKnight` and `UWhipKnight` when the crack finds him between 120 and 140,
+      or 130 and 150, and the caught knight is handed `Knight_SwSlapped` outright
+      rather than through a weapon part, as the original hands it. The zap's
+      `KnightOFF` and `KnightON` are built: ten hit points off him, off the board,
+      and back 0x89 pixels to the demon's side. 250 hit points, ranges 95/90/2; its
+      blow is not in a `*Dam` table, four stands in.
+      **`SETDEMONBORD` is recovered, and it is not a decoration.** It is the last
+      routine in `GFX`, at image 0x7ff9, sitting after `CLIPHIEGHT` and before
+      `INSTALLKBD`, and it writes a count of one and a single eight-byte record into
+      the segment at DS:`0x88ff` and sets DS:`0x80b5` to match. That segment is the
+      arena's own `.T` file: the loader at 0x8d93 reads a count and that many
+      border records out of it and takes the deepest for the walkable floor, and
+      `SBORD` walks the same list every frame clearing the walk bits that would
+      cross it. So the demon's border is the ground you may fight it on, 0 to 309
+      across and 10 to 99 deep, not a frame around the screen. **Nothing in the
+      shipped image calls it**: no near call anywhere in the code lands on 0x7ff9,
+      so in the DOS release it is dead code. It is alive here, on the demon's own
+      `ActorDef::border`, and `Bout::apply_actor_borders` is what applies it
 - [x] 34. **Beast.** `Beast_Drool1` to stand (its `+0x10` stance), `Run1`..`4`,
       `LowerHit`, `LowerDead`. Ten hit points, a tracker that closes to two pixels. It
       has no swing: every run frame carries a weapon part, so the first run frame is
@@ -186,20 +207,94 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
 - [x] 35. **Balok.** `Balok_Stance`, `Jump` and `Jumping` for a walk, `UpperCut`,
       `UpperHit`, `Dead`. Thirty hit points, a blow of four (`BalokDam`), ranges
       80/60/10. The grab and the three things it does to a held knight wait on 37
-- [ ] 36. **Dragon: partial.** `Dragon_Stance`, `HighBite`, `Hit`, `Dead`, on the
-      standard states; it creeps a pixel a tick on its standing frame so a plain
-      opponent can reach it, which is ours. 200 hit points against a maximum of 120,
-      as `SetUpDragonTables` writes them; a bite of ten (`DragonDam` gives 10 for a
-      lunge and 30 for a swing). **Missing, and not invented**: the set piece.
-      `BATTLEDRAGON` runs it with `DragonFLAGS`; the head lifts and lowers through
-      the `DragonWal` rows; `LowBreath` and `HighBreath` are the fire with
-      `TrackKnight`; the two claws are their own actors at fifty hit points each
-      (`Claw1TABLE`, `Claw2TABLE`, `Dragon_Claw`, `ClawSlap`, `ClawDead`); and
-      `Dragon_Flight1`..`8` are its map animation on `DRAGON5.CEL`
-- [ ] 37. Per-creature behaviour. The tracker's ranges are recovered and carried on
-      every actor (`approach`, `back_off`); what each creature does inside them
-      (`TroggAttacks` picks by distance, the ratman leaps, the mudman rises, the beast
-      charges) is read in outline and not built
+- [x] 36. **Dragon: the set piece, and it was all readable.** `InitKnightvsDragon`
+      (0x2438) and `ControlDragon` (0x3843) give the whole encounter, and none of it
+      had to be invented. The dragon is not an opponent that walks up to you: its
+      record sits at a fixed address, `InitKnightvsDragon` places the head at x 80
+      and z 100 and then builds **two more actors of its own** through `FindTABLE`,
+      `Claw1TABLE` and `Claw2TABLE`, at x 5 and ten rows either side of the head,
+      which `DragonMoveClaw1` keeps there. `ControlClaw` never calls `CalcDamage`,
+      so the claws take no harm at all; they slap anything that comes inside x 100
+      on their plane (kind 0xa, `Dragon_ClawSlap`) and play `Dragon_ClawDead` when
+      the dragon falls. `TrackKnight` shifts the head five pixels at a time inside a
+      corridor 30 to 100 wide and follows the knight in depth. `DragonMove` lifts
+      the head when he comes inside 140 and lowers it when he goes back out, over
+      the thirteen and nine frames `[di+0x4a]` counts, walking the `DragonWal` rows
+      at +0x10 and +0x20 as it goes; `Dragon_LiftHead1` and `LowerHead1` swap the
+      stance itself by writing `Dragon_HighStance` or `Dragon_Stance` into `+0x10`.
+      `DragonAttack` then picks by where the head is: head up and past seventy, or
+      head up and already struck (`DragonFLAGS` bit 7, which `DragonStruck` sets on
+      any blow from a knight), is `Dragon_HighBreath` with `AddDragonFIRE` beside
+      it; head up and closer is `Dragon_HighBite`; head down is `Dragon_LowBreath`,
+      whose own weapon parts run 43 to 259 pixels out, which is why the fire crosses
+      the arena. `InitKnightvsDragon` also overwrites the knight's `*Hit` and the
+      `DragonDam` rows for this fight: `Knight_Burn` for the fire, `Knight_SwSlapped`
+      for a claw, 10 for the bite and the claw and 30 for either breath, against a
+      knight who starts on twenty. 200 hit points and a maximum of 120.
+      **`Dragon_Flight1`..`8` and the loader nobody had found.** They are not on
+      `DRAGON5.CEL`: `_MAP:ContinueDragon` builds `DrBuffer` at DS:`0xccbc` by
+      writing the pointer at DS:`0x8975` into all five of its slots, and that
+      pointer is `MI.C`, the map icon bank. The loader at 0x88b5 stores the address
+      the *next* file will be loaded at before loading it, and the file after
+      `ki.cel` is `mi.c`; cels 34 to 41 of `MI.C` composite to a dragon seen from
+      above with its wings beating. `DRAGON5.CEL` is slot 4 of the creature table
+      and it is the fire. The flight bank is in the pack as the dragon's table 5 and
+      `tools/taskvm.py --actor dragon_flight` draws it. **Not built**: flying it
+      over the map, which is `_MAP`'s `InitDragon`, `DragonWander` and
+      `DragonTRACK`, and `Dragon_BitKnight`, the chewing a bite that connects goes
+      into (`KillKnight` is wired, the eating animation is not)
+- [x] 37. **Per-creature behaviour, and it is translation, not design.** Every
+      controller is a named routine in `MOON` and every one of them reads. They are
+      in `henge-core/src/monster.rs`, dispatched by the `controller` each actor now
+      carries, which is the original's own `CONTROLTABLE` indexed by the kind at
+      `+0x35`. A creature does not press a button: its routine writes the kind into
+      `+0x28` and the script into `DS:0x783a`, so here it hands the fighter an
+      `Order` and the joystick path is never reached. Its cooldowns, timers and
+      flags are the actor record's `+0x0a`, `+0x0b`, `+0x48`, `+0x49` and `+0x4a`
+      and live on the fighter as a `Brain`, in the fingerprint with everything else.
+      A controller runs once per script frame, which is when the original's task
+      loop calls one at all, so a cooldown of ten is ten frames and not ten sixtieths
+      of a second.
+      - **`MonsterTrack`** as written: `CheckZAxis` for the plane, `CheckXAxis`
+        against `+0x54` for `TrackBack` and against `+0x52` for in-range,
+        `TrackOpponent` beyond that, and `FaceKnight` first. Every controller sets
+        its opponent to the knight and to nothing else, which is why a dragon does
+        not take its own claws for an enemy
+      - **Trogg** (`TroggAttacks`): the overhead from a hundred to a hundred and
+        twenty, the swing inside a hundred, ten frames between blows, and a roll of
+        `GETPERCENT` at 30 or under that chops through a held block rather than
+        swinging into it. `TroggAttack`'s finisher on a fallen knight is kept
+      - **Trogg with spear**: the kind 0x10 branch, one lunge inside 130, twenty frames
+      - **Troll** (`TrollAttack`): the club inside a hundred, the overhead from a
+        hundred to a hundred and fifty, and never two overheads running, because it
+        compares `+0x28` before it chooses
+      - **Ratman** (`ControlRatCollide`): it does not use the tracker. Slash inside
+        forty, bite from forty to fifty, leap at anything further, and fifteen frames
+        of `HitDelay` after a blow of its own lands
+      - **Mudman** (`ControlMudmen`): it comes at you on a diagonal, reaches between
+        seventy five and a hundred, and goes under the ground inside that
+        (`MudmenIBury`) to come up seventy five pixels to your far side
+        (`MudmenAppear`). An arm that lands **takes hold of you**: `MudmenHit2`
+        removes the knight's own task and draws him inside
+        `Mudmen_EntangleKnight` for forty frames, and fire and down together are
+        the only thing that tears him loose, exactly the two bits `MudmenEntangle`
+        tests. Fail and it is `Mudmen_ChokeKnight` and `KillKnight`
+      - **Balok** (`ControlBalok`): it closes in hops, uppercuts from seventy to
+        eighty, grabs out to a hundred and twenty, and then stands off until you are
+        past a hundred and eighty or you take a dagger out, which it reads off
+        `[knight+0x34]`
+      - **Beast** (`ControlBeast`, `BeastCharge`, `SetBEASTZ`, `SetBeastTimer`): it
+        never tracks at all. It runs from one side of the arena to the other, turns
+        round off the edge, waits the five to twenty frames `RND & 0xf | 5` gives
+        it, and picks its next line: dead on him one pass, up to twenty eight rows
+        off the next, because `BeastFLAGS` bit 0 alternates
+      - **Demon** and **dragon**: items 33 and 36
+      What is **not** built, and is honest about it: the ratman's ballistic leap into
+      a tree and onto the knight's head (`RatmanInitLeap`, `RatHangKnight`,
+      `RatmanOnHead`, `RatmanGouge`), which is a whole second fight; Balok's grab and
+      the three things it does to a held knight, and the landing on him that plays
+      `Knight_Explode`; the beast's `Beast_BackToss` and `ChestToss`; and the waves
+      (`TotalMonsters`, `MaxMonsters`), which are still one at a time
 
 ## Phase 3: economy and character
 
@@ -380,10 +475,78 @@ Independent of everything. Makes it feel like a game rather than a demo.
       daggers, experience, health and its maximum, the weapon and the armour, with the
       arithmetic that turns them into a fight. One plate per fighter along the bottom of an
       arena, and the sheet itself on a key
-- [ ] 53. Mouse pointer and clickable widgets
-- [ ] 54. The message system: wait, occurrence and instruction messages
-- [ ] 55. The intro sequence (`INTR.EXE`, never examined)
-- [ ] 56. Save and load. The original has none, so this is ours to design
+- [x] 53. **Recovered: the pointer and the gadget table, both.** `_STATUS:MovePointer` is
+      the whole pointer: two pixels a frame in whichever direction is held, clamped to
+      `0..0x13a` by `0..0xc2`, with fire clearing `PointerFLAG`. It is driven by the
+      **stick, not by a mouse**. `PO.CEL` is the art, one 16 by 18 arrow the packs had
+      decoded and never drawn. The gadgets are `GadgetSlot` (98 records of twenty bytes,
+      a zero width meaning empty), `CLEARGADGETS`, `AddIconGadget` (position, an id, a
+      payload word, a pointer to a ten-byte text record, and a size taken from the
+      **icon's own cel header**), `CHECKGADGET` (the same two-rectangle overlap helper at
+      0x9f0d that `CheckGROOC` uses, with the pointer's rectangle **one pixel square**)
+      and `HotGadget` (what fire does with the one underneath). All of it is in
+      `henge_core::pointer`, hit test reproduced as written including its asymmetry.
+      **Ours:** what a gadget's payload means. The original's nibbles name its own
+      trading screen's operations; here a gadget carries an id the screen that registered
+      it interprets, because our screens are already menus with a highlight. The pointer
+      reaches the title's option list, the four portraits on select, a town's menu and the
+      character sheet, which is the screen `_STATUS`'s own gadgets belong to. A real mouse
+      moves it as well, because a window with a mouse in it should behave like one
+- [x] 54. **Recovered whole: one record, one chain walk, three routines.** A message is a
+      linked list of ten-byte records: text pointer, x, y, flags, next. `GFX:TextPTop`
+      reads the flags (bit 0 centre between `TextLeftBorder` and `TextRightBorder`, bit 2
+      right, bit 3 the bold face's three-pixel kerning) and `TextPDone` follows `+8` until
+      it is zero. The three kinds are three routines in `_LOADER` and they differ by one
+      thing each: `WAITMESSAGE` takes **no argument** and reads `WaitMES[WaitCOUNT]`,
+      stepping and wrapping at fourteen; `OCCURMESSAGE` takes a chain; `INSTRUCTMESSAGE`
+      takes a chain and installs its own six-word palette ramp before the fade, so it
+      arrives in another colour. All three blit `MESSAGE.PIV`, which turns out to be the
+      stone circle in silhouette against a night sky. Every caller was found by scanning
+      for the calls, so which door shows which kind is recovered and not assigned: the two
+      cities and the Valley are occurrences, the stone circle and the game over are
+      instructions, and the wizard's tower is the one door that takes one off the wait
+      pile. **Also recovered on the way: `GFX:TextASCII`**, the 95-byte glyph map the
+      project had read off the artwork instead. It agrees with the reading exactly; the
+      only correction is the bold font's glyph 71, a slash and not a bar, and glyph 63 is
+      the one entry no character maps to. The metrics come with it: `TextP` advances by
+      the cel's own width, less three for the bold face, which is why a recovered line
+      now fits the screen it was written for. **Ours:** the colour an instruction message
+      comes up in, since the fade machinery its ramp drives is not built; and showing the
+      fourteen on the between-days screen, which is where they were already
+- [~] 55. **`INTR.EXE` examined, and it gives up a great deal.** It unpacks with
+      `tools/symbolmap.py` unchanged: 56,128 bytes, four modules, **319 symbols**, 262
+      corroborated. Module 2 is `_TASK` symbol for symbol, so **the intro runs the same
+      animation VM**; module 0 is `GFX` with a tile engine beside the text engine. Its
+      asset list is recovered by name and every file is already in the packs: eleven
+      plates in the original's own numbering (`panfile1..3` are `bg1a`, `bg1c`, `bg1b`;
+      `picfile1..8` are `bg4`, `bg5a`, `bg3`, `bg2`, `bg2a`, `bg5`, `bg7`, `bg8`), nine
+      cast banks, `bold.f` and `message.piv`. **Its words are recovered**: the credits,
+      `MINDSCAPE PRESENTS`, `The End` and three story cards, verbatim. What is built is
+      an intro that plays: the eleven plates in the recovered order with the recovered
+      words over them and then the credits, skippable, and the title behind it, which is
+      what a window now opens on. The six credit headings and the six names are two
+      adjacent blocks in the image and pairing them off positionally would put a composer
+      on the programming line, so the names are shown without headings rather than under
+      guessed ones. **What remains**, and it is most of the sequence: `intro.sti` and
+      `co.sti` (960 bytes each) and `intro1.sti` (105) are not decoded and neither is the
+      tile engine that reads them; the cast's animation scripts are in the intro's own
+      DGROUP and are not extracted, so none of the nine banks moves; the captions' own
+      coordinates are not recovered, because nothing in the image points at those strings
+      and the code that draws them builds its record from registers; and `MINDSCAP`, the
+      publisher's logo, is not baked. Which word goes over which plate, and for how long,
+      is therefore ours and is marked so in `henge_core::intro`
+- [x] 56. **Save and load, ours by design.** The original has none: `MOON.CFG` is a
+      sound-card profile and there is no slot, no file and no routine anywhere in the
+      2,223 symbols. What made it small is that the simulation was already built for it.
+      A save is `Run` plus `Overworld` plus the title's settings plus `WaitCOUNT`, with a
+      magic string, a format number and a fingerprint over the lot; `Overworld` gained
+      `Serialize` and both gained a `state_hash` beside `Bout`'s. **Both seeds go in**, so
+      a reloaded run is robbed and mends on the same steps a continued one would have.
+      Three refusals that are told apart on purpose and none of which loads half a game:
+      not a save, a save this build cannot read, and a save whose contents do not match
+      its fingerprint. **No path of any kind is in the file**, and a test asserts it. The
+      format lives in `henge_core::save`; reading and writing the file is
+      `henge-desktop`'s, because core does no I/O and keeps its one dependency
 
 ## Phase 6: the world
 
@@ -423,7 +586,31 @@ each one is sited on a cell of its own family in the real `MapType` grid, which 
       sheet, and a placement whose selector byte is 4 draws from `FO2` instead, whatever
       the family. Checked by compositing an arena all three ways and looking: only that
       one makes a coherent picture
-- [ ] 59. The moors arena family, which we do not render at all
+- [x] 59. **The moors, settled: it is not a fifth family, it is the one this
+      project calls the glade.** `_LOADER`'s public list runs `LOADREGION`,
+      `GENERATELANDSCAPE`, `GENERATEMOORES`, `GENERATEFOREST`, `GENERATESWAMP`,
+      `GENERATEWASTE`, `LOADTILEV`: one dispatcher and four families, in landscape
+      code order. `GENERATELANDSCAPE` (image 0x8cb3) reads the code out of
+      `[0x694e]` and calls through a four-word table whose entries are link
+      addresses, so it takes the same correction every other stored code address
+      does; corrected, they are 0x8cd3, 0x8d02, 0x8d31 and 0x8d60. The first of
+      them loads `GLB1.CMP` and reads `PlainTable[PLAINCOUNT]`, which is
+      `GL1.t`..`GL8.t`. So the moors is landscape code 0, the `GL` layouts over the
+      `GLB1` sky, and `MapType` holds only 0, 2, 4 and 6, so there is no fifth code
+      and no missing `MO*` file. It renders, and it always did, under a name of
+      ours.
+      **Two real faults came out of looking, and both are fixed.** The baker
+      decided which family a layout belonged to by the first two letters of the
+      *family's own name*, which worked only by the accident that this project
+      named the moors after its `GL` files; a family renamed to what the original
+      calls it would have sent all fourteen of its layouts to the fallback and
+      drawn them over the forest's sky. Each family now declares its own file
+      prefix, and a test holds the two together. And the baker dropped any layout
+      with an empty placement list, which was meant for the `F09`/`SW9` stubs and
+      also threw away `SWL2.T`, a real swamp lair floor that has bounds like its
+      neighbours and no scenery on purpose: the fourteenth lair had no ground to be
+      fought on. The stubs are caught by their bounds, which is what was always
+      catching them, and the pack is 56 layouts rather than 55
 - [x] 60. **Recovered: nothing on the map is impassable; ground is slow instead.**
       `_MAP:MapSLOW` is a second grid on the same index holding a two-bit mask, and
       `_MAP:CheckSLOW` refuses the step when `counter & mask` is not zero, having already
@@ -522,22 +709,70 @@ each one is sited on a cell of its own family in the real `MapType` grid, which 
 
 ## Phase 7: the quest
 
-**The point of the game.** Needs lairs (62) and inventory (39), and both are now done:
-the four keys are planted one to a family and come out of a lair into the pack. Almost
-none of the rest is recoverable from the symbols, so most of it is design and playtesting
-rather than porting.
+**Done, and it was translation after all.** The plan said "almost none of the rest is
+recoverable from the symbols, so most of it is design and playtesting rather than
+porting". That was wrong, and it is the third time on this project that a phase written
+off as design turned out to be sitting in the executable: `MOON:Valley`, `MOON:Henge`,
+`MOON:KnightWonGame`, `MOON:WhoLived` and the routine at 0x617 are the whole chain, and
+MOON's text pool at image 0xd6e0 has the words for every step of it.
 
-- [ ] 70. The four keys, one per lair. **Half done by 62**: the lair initialiser plants
-      one in each family's six, `LairWon` hands it over, and `Run::keys_held` reads them
-      back the way `MOON:Valley` tests the four bits of `+0x14`. What is missing is the
-      Valley of the Gods itself, which is what four keys are for
-- [ ] 71. The moonstone: where it is, what retrieving it takes. Everything that reads
-      one is built and waiting: `MOON:Henge` ends the game for a knight in the circle
-      with the stone of the night, `CalcDamage` doubles his blow while he carries it, and
-      the temple's own `pu18` and `se18` lines buy and sell it. Nothing hands one out
-- [ ] 72. Win condition and ending
-- [ ] 73. Scoring and the final tally
-- [ ] 74. Losing properly, rather than a run simply stopping
+**Every screen was checked by looking**: the Valley's ring on the map, the gate shut with
+the message that shuts it, the Guardian standing in a marsh arena, the moonstone page
+after he fell, the keys of a real lair on the character sheet, the beating that costs
+three life points, the stone circle on the stone's own night, the victory page over
+`BG8.PIV` and the game-over page over the map.
+
+- [x] 70. **The four keys, and what they are for.** 62 planted them; this is the door
+      they open. `MOON:Valley` is `cmp byte ptr [si+0x14], 0xf` and nothing else will do:
+      three keys is `NoKeysMessage`, which is recovered verbatim, `You must have all four
+      keys / to enter the / Valley of the Gods`. The map line is recovered too,
+      `_MAP:knvalley` `Enter Valley of the Gods`. Beating the Guardian writes
+      `mov byte ptr [si+0x14], 0`, so **the keys are spent**, and a second moonstone means
+      four more lairs. The keys are also on the character sheet now, which is
+      `_STATUS:StatCheckKeys`: `KI.CEL` cels 5 to 8 at x 0x4c, 0x5e, 0x70 and 0x82,
+      eighteen apart, one slot per bit, an empty slot for a key you have not found. Its
+      row, y 0x6f, is the one thing not kept: henge's panel puts the armour there
+- [x] 71. **The moonstone, and where it comes from.** The Valley of the Gods, which is
+      the fourth thing on `MOON:StackMessages`' list and had no door until now. Behind
+      the gate is the demon: `MOON:FightDemon` calls `InitKnightvsDemon`, which writes
+      250 health, one monster and `ColourBackDrop` 4, so **the Guardian is fought on
+      marsh**. Winning is `add word ptr [si+0x36], 3`, the keys cleared, and
+      `al = 1 << (rnd & 3)` OR'd into `+0x16`: **one of the four stones, at random**.
+      What it says is `ValleyEnter`, recovered verbatim. Losing is
+      `sub byte ptr [si+0x31], 2`, on top of the one `MOON:Combat`'s own closing
+      `call WhoLived` already took, so a beating there costs three of the five life
+      points and leaves the keys where they are. **Ours**: where the Valley stands, by
+      the same terrain search the lairs use but on marsh and as far from either town as
+      the marsh allows; and the picture behind the gate. Also recovered and not built:
+      `BuyMoonstone` and `SellMoonstone` are a trade between two knights' records, not a
+      shop, so the recovered prices (`Buy Moonstone for 20 GP`, `Sell Moonstone for 10
+      GP`, `Buy Key for 12 GP`, `Sell Key for 6 GP`, and the half is `GoldSell`'s own
+      `shr ax, 1`) are on the items and no counter in a one-knight run will take them
+- [x] 72. **Win condition and ending.** `MOON:Henge` was already built and waiting;
+      handing out a moonstone is what let it fire. `KnightWonGame` shows `VICTORY`,
+      `You have completed / the quest`, and then **quits to DOS** with a byte in `al`:
+      the low nibble is which moon (0x2e -> 2, 0x2d -> 4, 0x31 -> 3, else 1) and the high
+      nibble which knight (3 -> 0x10, 0 -> 0x20, 1 -> 0x30, 2 -> 0x40). Whatever reads
+      that byte is in `INTR.EXE`, which is item 55 and has never been examined, so the
+      ending screen is **ours**; `Tally::code` works the byte out anyway. It is drawn
+      over `BG8.PIV`, the only full-screen picture MOON names by file, which sits in the
+      text pool immediately after the victory lines. That placement is an inference and
+      not a traced reference, and it is marked as one in `quest.rs`
+- [x] 73. **Scoring and the final tally.** **Ours, all of it**: the original counts
+      nothing and neither of its two endings is a page you can read. Seven lines, every
+      number already on the run: the day, wins out of fights, lairs cleared, gold and
+      experience, life points left, keys, and the moonstone. One label is the
+      original's, `Life points left`, off the status panel
+- [x] 74. **Losing properly.** **Recovered: `MOON:WhoLived`**, which every fight ends on
+      because `MOON:Combat`'s loop closes with `call WhoLived`. A knight on nothing is
+      not finished: his health goes back to its maximum and `sub byte ptr [si+0x31], 1`
+      takes a life point. The run ends when the last one goes, which is what
+      `_MAP:CheckEncounterDone` tests when it decides a knight on the map is a grave
+      (`cmp byte ptr [si+0x31], 0; jg`), and the routine at image 0x617 answers with
+      `GameOverMes`, recovered as `Player      ` and `GAME OVER`, and `jmp StartAgain`,
+      which is the title screen. So five deaths to a run rather than one, and the game
+      goes back to the title rather than restarting where it stood. A run that ends
+      indoors walks back out to the map first, because that is where the tally is
 
 ## Phase 8: polish
 
@@ -552,12 +787,18 @@ Any time. None of it blocks anything.
 
 ## If you only did three things
 
-**37** is what makes the nine creatures fight like themselves rather than like a
-knight in a costume, and the ranges it needs are already on every actor. **70** and
-**71** are next to free now: the four keys are already hidden, planted and carried, and
-the stone circle and `CalcDamage` are both already waiting for a moonstone that nothing
-hands out. **54** would give every one of the doors that opened in phase 6 somewhere
-better to put its words than a box the renderer picks a colour for.
+**76** is the one that changes how the game feels rather than what is in it: the
+creatures fight on their own routines now, and a keyboard is a poor way to answer a
+mudman that has hold of you. **75** is what the palette work has been waiting for, and
+the demon's own `ColourDemon` and the arena fades both want it. **55** is half done and
+the other half is the intro, which is the only screen the game opens with that this
+one does not.
+
+**37, 33, 59 and most of 36 were the three things, and they were all translation.**
+Every creature's controller is a named routine in `MOON` and every one of them reads;
+`SETDEMONBORD` is nine stores at the end of `GFX`; the moors is the family this
+project had already named after its own files. The lesson is the one 20, 64 and 69
+taught: grep before you invent.
 
 ## What is not portable
 
@@ -567,14 +808,19 @@ the symbol coverage is checkable, and deliberately absent here.
 
 ## What is design rather than translation
 
-Items 37 and 56, and all of phase 7, and which creature waits on which ground, and
+The ending screen and the final tally, which creature waits on which ground,
 where everything but the two towns stands on the map, and which guardian each lair
 holds. These were never recovered from the executable, so finishing them means designing
 and playtesting, not translating. Worth knowing before anyone estimates the end of this
 list.
 
-**64 and 69 were on this list and are not any more.** What the moon gates is spelled out
-in `SetRatmenTables`, `CalcDamage` and `Henge`; the dice game's odds are eleven records
-in `_TAVERN`. Both were taken for design because the plan was written against the 334
-`PUBLIC` names, before the other 1,889 symbols were recovered. Anything still marked
-design here is worth a grep before it is invented.
+**37, 64, 69 and the whole of phase 7 were on this list and are not any more.**
+Item 37 came off it last: `ControlTrogg`, `ControlTroll`, `ControlRatmen`,
+`ControlMudmen`, `ControlBalok`, `ControlBeast`, `ControlDemon`, `ControlDragon` and
+`ControlClaw` are nine routines in `MOON` and none of them needed inventing. What the moon
+gates is spelled out in `SetRatmenTables`, `CalcDamage` and `Henge`; the dice game's odds
+are eleven records in `_TAVERN`; and the quest is `Valley`, `Henge`, `KnightWonGame` and
+`WhoLived`, with its words in MOON's text pool. All three were taken for design because
+the plan was written against the 334 `PUBLIC` names, before the other 1,889 symbols were
+recovered. **Anything still marked design here is worth a grep before it is invented**,
+and that has now been true three times running.

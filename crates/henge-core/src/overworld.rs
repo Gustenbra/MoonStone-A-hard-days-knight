@@ -212,7 +212,11 @@ pub struct Step {
     pub encounter: bool,
 }
 
-#[derive(Clone, Debug)]
+/// Serializable because a save is a serialization of the simulation, and where
+/// the traveller stands and what day it is are as much of it as the purse:
+/// `seed` included, so a reloaded run is robbed on the same step a continued
+/// one would have been.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Overworld {
     /// The traveller's token, by its top-left corner on the map picture. This
     /// is the original's own convention: `knight[0x5c]` and `knight[0x5e]` are
@@ -255,6 +259,23 @@ impl Overworld {
 
     pub fn set_seed(&mut self, seed: u32) {
         self.seed = seed | 1;
+    }
+
+    /// A fingerprint of where the traveller is and when, for a save to check
+    /// itself against. The seed goes in with the rest, because two travellers
+    /// standing on the same square with different seeds are not in the same
+    /// place in the same game.
+    pub fn state_hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in [
+            self.x as i64, self.y as i64, self.day as i64, self.steps as i64,
+            self.steps_per_day as i64, self.encounter_odds as i64,
+            self.going_counter as i64, self.seed as i64,
+        ] {
+            h ^= v as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h
     }
 
     /// Days spent standing still: under a healer, or waiting somewhere out of

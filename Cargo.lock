@@ -689,6 +689,7 @@ dependencies = [
  "henge-core",
  "henge-formats",
  "png",
+ "serde_json",
  "softbuffer",
  "winit",
 ]

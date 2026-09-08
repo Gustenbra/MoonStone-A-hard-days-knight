@@ -13,6 +13,9 @@ const TOKEN_SHEET: &str = "bank.mi";
 /// The red knight, matching player one's colours in the arena.
 const TOKEN_FRAME: usize = 3;
 const MAP_SCENE: &str = "scene.map";
+/// `_MAP:DisplayLairs` blits this one, and it is the only icon in the bank
+/// that is a picture rather than an outline.
+const LAIR_FRAME: usize = 0x14;
 
 /// What the map has to be told about the world before it can draw it: the place
 /// under the traveller's feet, whatever a cutpurse just took, and the icons the
@@ -127,11 +130,27 @@ impl MapScene {
     /// painted into `MAP.CMP` and need nothing. A lair is not: `_MAP:DisplayLairs`
     /// walks the lair table and blits `MI.C` frame 0x14 at every one whose x is
     /// not negative, which is how a lair leaves the map when it has been beaten
-    /// and stripped. These icons are authored against the map's own palette, so
-    /// they draw in their own colours with nothing translated.
+    /// and stripped. That one is authored against the map's own palette, so it
+    /// draws in its own colours with nothing translated.
+    ///
+    /// **The rest of `MI.C` from 0x15 up are not pictures, they are outlines**:
+    /// frame 0x19 is the silhouette of a town wall, 0x1b a ring of stones, 0x1c
+    /// the Valley of the Gods and 0x1e the wizard's tower, each one pixel wide
+    /// and drawn entirely in a single palette index. Those are the shapes
+    /// `MOON:CheckGROOC` measures a place's box from, and the index they use
+    /// reads as magenta against the map's palette, so nothing in the original
+    /// can be blitting them onto the map picture as they are. They are drawn
+    /// here as silhouettes in the map's own brightest colour, the way the
+    /// character sheet draws `KI.CEL`, which is the same problem and the same
+    /// answer.
     fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer, icons: &[(i32, i32, usize)]) {
+        let ink = crate::status::extremes(fb).1;
         for (x, y, frame) in icons {
-            crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
+            if *frame == LAIR_FRAME {
+                crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
+            } else {
+                crate::sprite::draw_mask(reg, fb, TOKEN_SHEET, *frame, *x, *y, ink);
+            }
         }
     }
 

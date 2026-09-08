@@ -121,6 +121,28 @@ impl Framebuffer {
     }
 
     /// Expands to 0RGB for presentation, letterboxed and scaled by the caller.
+    /// Where a window pixel lands on the 320x200 screen, or nothing when it is
+    /// in the letterbox. The inverse of [`Framebuffer::present_into`]'s
+    /// arithmetic, kept beside it so the two cannot drift: a pointer that
+    /// disagrees with the picture by a few pixels is worse than no pointer.
+    pub fn to_screen(dw: usize, dh: usize, px: f64, py: f64) -> Option<(i32, i32)> {
+        if dw == 0 || dh == 0 {
+            return None;
+        }
+        let target = 4.0 / 3.0;
+        let (mut vw, mut vh) = (dw, (dw as f32 / target) as usize);
+        if vh > dh {
+            vh = dh;
+            vw = (dh as f32 * target) as usize;
+        }
+        let (ox, oy) = ((dw - vw) / 2, (dh - vh) / 2);
+        let (x, y) = (px as i64 - ox as i64, py as i64 - oy as i64);
+        if x < 0 || y < 0 || x >= vw as i64 || y >= vh as i64 {
+            return None;
+        }
+        Some(((x as usize * SCREEN_W / vw) as i32, (y as usize * SCREEN_H / vh) as i32))
+    }
+
     pub fn present_into(&self, dst: &mut [u32], dw: usize, dh: usize, palette: &[u32; 32]) {
         if dw == 0 || dh == 0 {
             return;

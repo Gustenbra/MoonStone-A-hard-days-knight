@@ -23,6 +23,9 @@
 *.HIT
 *.voc
 
+# A saved game, which a player's run makes wherever they run the game from.
+/henge-save.json
+
 # Python bytecode from the research tools
 __pycache__/
 *.pyc

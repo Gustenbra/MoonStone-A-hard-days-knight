@@ -10,7 +10,7 @@
 //! the seam networked play plugs into.
 
 use crate::arena::Bounds;
-use crate::combat::{line_hits_body, Attack, Fighter, Intent, State};
+use crate::combat::{line_hits_body, Attack, Fighter, Intent, Order, State};
 use crate::content::ActorDef;
 use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,11 @@ pub struct Missile {
     pub script_tick: u32,
     /// Connected, or flown off the edge: gone at the end of the tick.
     pub spent: bool,
+    /// This task rides on its owner rather than flying: `ControlDemon` copies
+    /// the demon's position into the whirl's task every frame, and takes the
+    /// whirl away when the demon dies (`StopDemonWhirl`).
+    #[serde(default)]
+    pub follow: bool,
 }
 
 impl Missile {
@@ -87,6 +92,7 @@ impl Missile {
             mix(*v as i64);
         }
         mix(self.depth as i64);
+        mix(self.follow as i64);
         mix(self.attack.map_or(-1, |a| a.kind() as i64));
         for b in self.flight.as_bytes() {
             mix(*b as i64);
@@ -120,6 +126,17 @@ pub struct Bout {
     /// part of the fingerprint.
     #[serde(default)]
     pub parries: Vec<Parry>,
+    /// `_WIZARD:RND`'s shift register, which the creatures' controllers roll
+    /// against. The original keeps one word for the whole game at DS:`0xe22f`;
+    /// here it belongs to the bout, so a fight replays and two machines agree.
+    #[serde(default = "default_rng")]
+    pub rng: u16,
+}
+
+/// Any non-zero start; the original seeds its register off the BIOS tick,
+/// which is exactly the sort of thing this engine may not do.
+fn default_rng() -> u16 {
+    0x2f1d
 }
 
 impl Bout {
@@ -132,6 +149,7 @@ impl Bout {
             bloodless: false,
             missiles: Vec::new(),
             parries: Vec::new(),
+            rng: default_rng(),
         }
     }
 
@@ -165,7 +183,7 @@ impl Bout {
     pub fn nearest_foe(&self, me: usize) -> Option<usize> {
         let m = &self.fighters[me];
         self.alive()
-            .filter(|i| *i != me)
+            .filter(|i| *i != me && !self.fighters[*i].hidden)
             .min_by_key(|i| {
                 let f = &self.fighters[*i];
                 (f.x - m.x).abs() + (f.y - m.y).abs() * 2
@@ -248,8 +266,70 @@ impl Bout {
             flight: "Knife".into(),
             script_tick: 0,
             spent: false,
+            follow: false,
         };
         // Its first frame now, so it is on screen the tick it leaves the hand.
+        m.task.step(&def.animation, &mut m.record, self.bloodless);
+        self.missiles.push(m);
+    }
+
+    /// A task that rides on a fighter: the demon's whirl. It is a missile like
+    /// any other, stepped by the same interpreter, but its position is the
+    /// owner's rather than its own, which is what `ControlDemon` does to it
+    /// every frame.
+    fn attach(&mut self, owner: usize, script: &str, def: &ActorDef) {
+        if !def.animation.contains_key(script) {
+            return;
+        }
+        if self.missiles.iter().any(|m| m.follow && m.owner == owner) {
+            return;
+        }
+        let f = &self.fighters[owner];
+        let Some(t) = f.task.as_ref() else { return };
+        let mut task = Task::new(script, t.x, t.y, t.facing);
+        task.table = def.bank_table;
+        task.z = t.z;
+        let mut m = Missile {
+            owner,
+            actor: f.actor.clone(),
+            task,
+            record: TaskActor::default(),
+            depth: f.y,
+            attack: None,
+            flight: String::new(),
+            script_tick: 0,
+            spent: false,
+            follow: true,
+        };
+        m.task.step(&def.animation, &mut m.record, self.bloodless);
+        self.missiles.push(m);
+    }
+
+    /// `AddDragonFIRE`: a task on `Dragon_Fire` at the dragon's own position
+    /// plus 0x37 across and five deeper, which burns whatever it touches.
+    fn breathe(&mut self, owner: usize, script: &str, def: &ActorDef) {
+        if !def.animation.contains_key(script) {
+            return;
+        }
+        let f = &self.fighters[owner];
+        let Some(t) = f.task.as_ref() else { return };
+        let facing = t.facing;
+        let dir = if f.facing < 0 { -1 } else { 1 };
+        let mut task = Task::new(script, t.x + 0x37 * dir, t.y, facing);
+        task.table = def.bank_table;
+        task.z = t.z;
+        let mut m = Missile {
+            owner,
+            actor: f.actor.clone(),
+            task,
+            record: TaskActor::default(),
+            depth: f.y + 5,
+            attack: Some(Attack::Chop),
+            flight: String::new(),
+            script_tick: 0,
+            spent: false,
+            follow: false,
+        };
         m.task.step(&def.animation, &mut m.record, self.bloodless);
         self.missiles.push(m);
     }
@@ -275,9 +355,185 @@ impl Bout {
             flight: String::new(),
             script_tick: 0,
             spent: false,
+            follow: false,
         };
         m.task.step(&def.animation, &mut m.record, self.bloodless);
         self.missiles.push(m);
+    }
+
+    /// `SETDEMONBORD`: a fight narrows to the border of any actor that brings
+    /// one of its own.
+    ///
+    /// **Recovered.** The arena's `.T` file opens with a count and that many
+    /// eight-byte border records, and the loader takes the deepest of them as
+    /// the walkable floor; `SBORD` walks the same list every frame and clears
+    /// the walk bits that would cross it. `SETDEMONBORD`, the last routine in
+    /// `GFX`, overwrites the whole list with one record: 0 to 309 across, 10 to
+    /// 99 deep. So the demon does not decorate the screen, it shrinks the
+    /// ground you can fight it on.
+    pub fn apply_actor_borders<'a, F>(&mut self, def_of: F)
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        let mut b = self.bounds;
+        for f in &self.fighters {
+            let Some(n) = def_of(&f.actor).bounds() else { continue };
+            b.left = b.left.max(n.left);
+            b.right = b.right.min(n.right);
+            b.top = b.top.max(n.top);
+            b.bottom = b.bottom.min(n.bottom);
+        }
+        if b.is_sane() {
+            self.bounds = b;
+        }
+    }
+
+    /// Whether anyone is being finished off: the original's `DeCapFLAG`, which
+    /// `TroggAttack` tests so that only one creature comes in for the head.
+    fn decapping<'a, F>(&self, def_of: &F) -> bool
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        self.fighters
+            .iter()
+            .any(|f| def_of(&f.actor).finishes.values().any(|s| *s == f.script))
+    }
+
+    /// One tick of one fighter's own controller, for a seat the machine plays.
+    ///
+    /// The bout still cannot tell a controller from a keyboard: this hands
+    /// back an [`Intent`] like any other, and what it writes on the fighter is
+    /// the same thing the original writes into the actor record. It runs only
+    /// on the tick a script frame ended, which is when the original's task
+    /// loop calls a controller at all, so a cooldown of ten is ten frames
+    /// rather than ten sixtieths of a second.
+    pub fn monster_intent<'a, F>(&mut self, me: usize, target: usize, def_of: F, gore: bool) -> Intent
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        use crate::monster::{decide, Act, Controller, Sight};
+        // `DragonMoveClaw1` and `ControlClaw`: the two forelimbs sit ten rows
+        // either side of the head's own depth and follow it, and when the
+        // dragon is down they play `Dragon_ClawDead` and go.
+        if def_of(&self.fighters[me].actor).controller() == Controller::Claw {
+            let head = self
+                .fighters
+                .iter()
+                .position(|f| def_of(&f.actor).controller() == Controller::Dragon && f.alive());
+            match head {
+                Some(h) => {
+                    let (y, off) = (self.fighters[h].y, self.fighters[me].brain.timer);
+                    let (_, ny) = self.bounds.clamp(self.fighters[me].x, y + off);
+                    self.fighters[me].y = ny;
+                }
+                None if self.fighters[me].alive() => {
+                    let t_def = def_of(&self.fighters[me].actor);
+                    let left = self.fighters[me].health.max(1);
+                    self.fighters[me].health = left;
+                    self.fighters[me].take_hit(left);
+                    let _ = t_def;
+                    return Intent::default();
+                }
+                None => return Intent::default(),
+            }
+        }
+        self.fighters[me].brain.flags |= crate::monster::flag::DRIVEN;
+        let free = {
+            let f = &self.fighters[me];
+            // A held fighter is not free, but its controller still runs: the
+            // struggle out of a hold is the one thing it is allowed to say.
+            f.alive() && (f.holder.is_some() || f.ready(def_of(&f.actor))) && f.brain.rest <= 0
+        };
+        if !free {
+            let mut i = self.fighters[me].drive;
+            i.attack = false;
+            return i;
+        }
+        let decapped = self.decapping(&def_of);
+        let (act, mut intent) = {
+            let def = def_of(&self.fighters[me].actor);
+            let foe = &self.fighters[target];
+            let t_def = def_of(&foe.actor);
+            let sight = Sight {
+                me: &self.fighters[me],
+                foe,
+                def,
+                bounds: self.bounds,
+                gore,
+                body: foe.finishable(t_def),
+                decapped,
+            };
+            let mut brain = self.fighters[me].brain;
+            let mut seed = self.rng;
+            let act = decide(&sight, &mut brain, &mut seed);
+            self.fighters[me].brain = brain;
+            self.rng = seed;
+            (act, Intent::default())
+        };
+        let order = |state, script: String, attack| Some(Order { state, script, attack });
+        self.fighters[me].ordered = match act {
+            Act::Idle => order(State::Idle, String::new(), None),
+            Act::Walk { dx, dy, script } => {
+                intent.dx = dx;
+                intent.dy = dy;
+                order(State::Walk, script.unwrap_or_default(), None)
+            }
+            Act::Attack { kind, spawn } => {
+                let def = def_of(&self.fighters[me].actor);
+                // `AddDragonFIRE`: the breath is a task of its own, started
+                // ahead of the head and one row deeper.
+                if let Some(script) = spawn {
+                    self.breathe(me, &script, def);
+                }
+                match def.attack_for(kind) {
+                    Some((script, k)) => {
+                        let state = if k.is_guard() { State::Guard } else { State::Attack };
+                        order(state, script, Some(k))
+                    }
+                    None => order(State::Attack, String::new(), Some(kind)),
+                }
+            }
+            Act::Stand(script) => order(State::Idle, script, None),
+            Act::Play(script) => order(State::Attack, script, None),
+            Act::Appear { x, facing, script } => {
+                let b = self.bounds;
+                let f = &mut self.fighters[me];
+                let (nx, ny) = b.clamp(x, f.y);
+                f.x = nx;
+                f.y = ny;
+                f.facing = facing;
+                order(State::Attack, script, None)
+            }
+            Act::Seize { script, ticks } => {
+                self.fighters[target].holder = Some(me);
+                self.fighters[target].hidden = true;
+                self.fighters[me].brain.timer = ticks;
+                order(State::Attack, script, None)
+            }
+            // Fire and down together, which is all `MudmenEntangle` reads.
+            Act::Struggle => {
+                intent.dy = 1;
+                intent.attack = true;
+                None
+            }
+            Act::Strike { script, damage, fatal } => {
+                let t_def = def_of(&self.fighters[target].actor);
+                self.fighters[target].holder = None;
+                self.fighters[target].hidden = false;
+                if fatal {
+                    let left = self.fighters[target].health.max(1);
+                    self.fighters[target].struck(t_def, left, None);
+                } else if damage > 0 {
+                    self.fighters[target].struck(t_def, damage, None);
+                }
+                order(State::Attack, script, None)
+            }
+        };
+        // The standing order is the walk, never the press: a struggle is
+        // read on the frame it is made and not held down for six ticks.
+        self.fighters[me].brain.rest = def_of(&self.fighters[me].actor).script_ticks.max(1) as i32;
+        self.fighters[me].drive = Intent { attack: false, ..intent };
+        intent
     }
 
     /// One tick, with each fighter looked up by the actor it is.
@@ -307,6 +563,9 @@ impl Bout {
         let mut blows: Vec<Blow> = Vec::new();
 
         for i in 0..self.fighters.len() {
+            if self.fighters[i].brain.rest > 0 {
+                self.fighters[i].brain.rest -= 1;
+            }
             let intent = intents.get(i).copied().unwrap_or_default();
             let def = def_of(&self.fighters[i].actor);
             let line = self.fighters[i].step_gated(def, intent, self.bounds, bloodless);
@@ -322,6 +581,51 @@ impl Bout {
                 match e {
                     Effect::Gosub { routine, .. } if routine == "KnifeThrow" => {
                         self.throw_knife(i, def);
+                    }
+                    // `AddDemonWhirl`: a second task on the demon's own banks
+                    // that rides along with it until `StopDemonWhirl`.
+                    Effect::Gosub { routine, .. } if routine == "AddDemonWhirl" => {
+                        self.attach(i, "Demon_Whirl", def);
+                    }
+                    Effect::Gosub { routine, .. } if routine == "StopDemonWhirl" => {
+                        self.missiles.retain(|m| !(m.follow && m.owner == i));
+                    }
+                    // The demon's zap: `KnightOFF` takes ten off him and
+                    // takes him off the board, `KnightON` puts him back a
+                    // hundred and thirty seven pixels to the demon's side.
+                    Effect::Gosub { routine, .. } if routine == "KnightOFF" => {
+                        if let Some(t) = self.nearest_foe(i) {
+                            let t_def = def_of(&self.fighters[t].actor);
+                            self.fighters[t].struck(t_def, 10, None);
+                            self.fighters[t].hidden = true;
+                        }
+                    }
+                    Effect::Gosub { routine, .. } if routine == "KnightON" => {
+                        let (x, y, facing) = {
+                            let f = &self.fighters[i];
+                            (f.x, f.y, f.facing)
+                        };
+                        let bounds = self.bounds;
+                        for t in 0..self.fighters.len() {
+                            if t == i || !self.fighters[t].hidden {
+                                continue;
+                            }
+                            let (nx, ny) = bounds.clamp(x + 0x89 * facing, y);
+                            let f = &mut self.fighters[t];
+                            f.x = nx;
+                            f.y = ny;
+                            f.facing = -facing;
+                            f.hidden = false;
+                        }
+                    }
+                    // `KillKnight`, which the dragon's own chewing calls.
+                    Effect::Gosub { routine, .. } if routine == "KillKnight" => {
+                        if let Some(t) = self.nearest_foe(i) {
+                            let t_def = def_of(&self.fighters[t].actor);
+                            let left = self.fighters[t].health.max(1);
+                            self.fighters[t].holder = None;
+                            self.fighters[t].struck(t_def, left, None);
+                        }
                     }
                     Effect::Spawn { script } => {
                         let f = &self.fighters[i];
@@ -339,6 +643,7 @@ impl Bout {
                                 flight: String::new(),
                                 script_tick: 0,
                                 spent: false,
+                                follow: false,
                             };
                             m.task.step(&def.animation, &mut m.record, bloodless);
                             self.missiles.push(m);
@@ -354,6 +659,25 @@ impl Bout {
         // which run their one script to its `TASKKILLTASK`.
         for k in 0..self.missiles.len() {
             let def = def_of(&self.missiles[k].actor);
+            // A task riding on a fighter follows him, and goes when he does.
+            if self.missiles[k].follow {
+                let owner = self.missiles[k].owner;
+                let (alive, at) = match self.fighters.get(owner) {
+                    Some(f) => (f.alive(), f.task.as_ref().map(|t| (t.x, t.y, t.z, t.facing))),
+                    None => (false, None),
+                };
+                let m = &mut self.missiles[k];
+                match (alive, at) {
+                    (true, Some((x, y, z, facing))) => {
+                        m.task.x = x;
+                        m.task.y = y;
+                        m.task.z = z;
+                        m.task.facing = facing;
+                        m.depth = y;
+                    }
+                    _ => m.spent = true,
+                }
+            }
             let m = &mut self.missiles[k];
             m.script_tick += 1;
             if m.script_tick >= def.script_ticks.max(1) {
@@ -419,6 +743,9 @@ impl Bout {
                 if (blow.depth - self.fighters[target].y).abs() > plane {
                     continue;
                 }
+                if self.fighters[target].hidden {
+                    continue;
+                }
                 if self.fighters[target].alive() {
                     let body = self.fighters[target].body(t_def);
                     if !line_hits_body(&blow.line, body) {
@@ -438,6 +765,10 @@ impl Bout {
                     }
                     let evading = self.fighters[target].guarding() == Some(Attack::Evade);
                     self.fighters[target].struck(t_def, damage, blow.attack);
+                    // `DragonStruck` sets `DragonFLAGS` bit 7 the moment a
+                    // knight lands anything, and from then on the dragon
+                    // breathes rather than bites. Nothing else reads the bit.
+                    self.fighters[target].brain.flags |= crate::monster::flag::STRUCK;
                     let fatal = !self.fighters[target].alive();
                     events.push(HitEvent { attacker, target, damage, fatal });
                     if t_def.bleeds {
@@ -445,6 +776,28 @@ impl Bout {
                         let depth = self.fighters[target].y;
                         let actor = self.fighters[target].actor.clone();
                         self.add_blood(attacker, at, depth, &actor, t_def);
+                    }
+                    // `MudmenHit2`: the mudman's arm does not stagger a
+                    // knight, it takes hold of him. Forty frames to tear free
+                    // by pressing fire and down, and the choke at the end.
+                    let seizes = a_def.controller().seizes().filter(|(script, _)| {
+                        blow.missile.is_none()
+                            && self.fighters[target].alive()
+                            && a_def.animation.contains_key(*script)
+                    });
+                    if let Some((script, ticks)) = seizes {
+                        self.fighters[target].holder = Some(attacker);
+                        // The original removes the knight's own task and draws
+                        // him inside `Mudmen_EntangleKnight` instead.
+                        self.fighters[target].hidden = true;
+                        let f = &mut self.fighters[attacker];
+                        f.brain.flags |= crate::monster::flag::ENTANGLING;
+                        f.brain.timer = ticks;
+                        f.ordered = Some(Order {
+                            state: State::Attack,
+                            script: script.to_string(),
+                            attack: None,
+                        });
                     }
                     // The swing is over the moment it lands, save for the
                     // exceptions `KnightHitNormal` and `KnightHitKnight` make.
@@ -553,6 +906,26 @@ impl Bout {
             mix(f.restart as i64);
             mix(f.bonus as i64);
             mix(f.cursed as i64);
+            mix(f.brain.cooldown as i64);
+            mix(f.brain.timer as i64);
+            mix(f.brain.flags as i64);
+            mix(f.brain.walk as i64);
+            mix(f.brain.phase as i64);
+            mix(f.brain.rest as i64);
+            mix(f.holder.map_or(-1, |h| h as i64));
+            mix(f.hidden as i64);
+            mix(f.drive.dx as i64);
+            mix(f.drive.dy as i64);
+            match &f.ordered {
+                None => mix(-1),
+                Some(o) => {
+                    mix(o.state as i64);
+                    mix(o.attack.map_or(-1, |a| a.kind() as i64));
+                    for b in o.script.as_bytes() {
+                        mix(*b as i64);
+                    }
+                }
+            }
             mix(f.player.frame as i64);
             mix(f.player.ticks_in_frame as i64);
             mix(f.player.finished as i64);
@@ -574,6 +947,7 @@ impl Bout {
             m.hash_into(&mut mix);
         }
         mix(self.settled_for as i64);
+        mix(self.rng as i64);
         h
     }
 }
@@ -651,6 +1025,107 @@ mod tests {
                 .map(|i| Fighter::new("k", &d, 40 + i * 70, 100, 1))
                 .collect(),
         )
+    }
+
+    /// `SETDEMONBORD`, and the gate on it: a fight narrows to the demon's own
+    /// rectangle when a demon is in it, and to nothing otherwise.
+    #[test]
+    fn a_demon_brings_its_own_border_and_nothing_else_does() {
+        use crate::combat::tests::scripted_def;
+        let plain = scripted_def();
+        let mut demon = scripted_def();
+        demon.border = Some([0, 309, 10, 99]);
+        let mut ugly = scripted_def();
+        // A border the data got wrong is refused rather than shrinking the
+        // arena to nothing.
+        ugly.border = Some([200, 100, 90, 10]);
+
+        let arena = bounds();
+        let pick = |name: &str| -> &ActorDef {
+            match name {
+                "demon" => Box::leak(Box::new(demon.clone())),
+                "ugly" => Box::leak(Box::new(ugly.clone())),
+                _ => Box::leak(Box::new(plain.clone())),
+            }
+        };
+
+        let mut b = Bout::new(arena, vec![Fighter::new("k", &plain, 40, 100, 1)]);
+        b.apply_actor_borders(pick);
+        assert_eq!(b.bounds, arena, "an ordinary fight is fought on the whole arena");
+
+        let mut b = Bout::new(
+            arena,
+            vec![Fighter::new("k", &plain, 40, 100, 1), Fighter::new("demon", &demon, 200, 100, -1)],
+        );
+        b.apply_actor_borders(pick);
+        assert_eq!(b.bounds.right, 309, "the demon takes ten pixels off the width");
+        assert_eq!(b.bounds.bottom, 99, "and fifteen rows off the depth");
+        assert_eq!(b.bounds.left, arena.left);
+        assert_eq!(b.bounds.top, arena.top);
+
+        let mut b = Bout::new(
+            arena,
+            vec![Fighter::new("k", &plain, 40, 100, 1), Fighter::new("ugly", &ugly, 200, 100, -1)],
+        );
+        b.apply_actor_borders(pick);
+        assert_eq!(b.bounds, arena, "an inverted border is refused");
+    }
+
+    /// A creature does not press a button: its own controller names the
+    /// script and the kind, the bout carries the order, and the fighter plays
+    /// it. This is the seam item 37 hangs on.
+    #[test]
+    fn a_creature_takes_its_orders_from_its_own_controller() {
+        use crate::combat::tests::depth_def;
+        let mut trogg = depth_def();
+        trogg.controller = "trogg".into();
+        trogg.approach = 100;
+        trogg.back_off = 90;
+        trogg.depth_tolerance = 5;
+        let knight = depth_def();
+        let pick = |name: &str| -> &ActorDef {
+            match name {
+                "trogg" => Box::leak(Box::new(trogg.clone())),
+                _ => Box::leak(Box::new(knight.clone())),
+            }
+        };
+        let mut b = Bout::new(
+            bounds(),
+            vec![
+                Fighter::new("k", &knight, 0, 100, 1),
+                Fighter::new("trogg", &trogg, 110, 100, -1),
+            ],
+        );
+        // A hundred and ten away is `TroggChop`'s range, and it is the chop
+        // the controller hands over, not the swing the one button would give.
+        let intent = b.monster_intent(1, 0, pick, true);
+        assert!(!intent.attack, "the order carries the attack, not the intent");
+        let order = b.fighters[1].ordered.clone().expect("the controller said nothing");
+        assert_eq!(order.attack, Some(Attack::Chop));
+        assert_eq!(order.script, "chop");
+        b.step_with(pick, &[Intent::default(), intent]);
+        assert_eq!(b.fighters[1].state, State::Attack);
+        assert_eq!(b.fighters[1].attack, Some(Attack::Chop));
+        // And the cooldown it set is in the fingerprint, so two machines
+        // running the same fight agree about when it may strike again.
+        assert_eq!(b.fighters[1].brain.cooldown, 10);
+        let mut other = b.clone();
+        assert_eq!(other.state_hash(), b.state_hash());
+        other.fighters[1].brain.cooldown = 3;
+        assert_ne!(other.state_hash(), b.state_hash(), "a brain is state");
+    }
+
+    /// `ControlClaw` never calls `CalcDamage`: the dragon's forelimbs take a
+    /// blow and are unmoved by it.
+    #[test]
+    fn a_dragons_claw_takes_no_harm_from_anything() {
+        use crate::combat::tests::depth_def;
+        let mut claw = depth_def();
+        claw.controller = "claw".into();
+        let mut f = Fighter::new("claw", &claw, 0, 100, 1);
+        f.struck(&claw, 40, Some(Attack::Swing));
+        assert_eq!(f.health, claw.health, "a claw is not whittled down");
+        assert_eq!(f.state, State::Hurt, "but it does flinch");
     }
 
     #[test]

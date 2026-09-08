@@ -303,6 +303,100 @@ everything from `FO2` gives a black tangle where the canopy should be, everythin
 `FO1` gives blue-black blobs, and 4 from `FO2` with the rest from `FO1` gives a tree with a
 trunk, a canopy and a stump. The same test on `FO3.T` puts 0xfe with 3 rather than with 4.
 
+## `INTR.EXE` unpacks the same way, and it is the same program
+
+The intro is a separate executable and had never been looked at. It is packed identically,
+and `tools/symbolmap.py` reads it with no change at all:
+
+```sh
+python3 tools/symbolmap.py INTR.EXE intro-symbols.json --image intro.final.bin
+```
+
+```text
+image 56128 bytes, 4 blocks, 319 symbols
+  module0    131 symbols  code 0fe4-35ca
+  module1     95 symbols  code 369e-3d3e
+  module2     73 symbols  code 3de2-43f9
+  module3     20 symbols  code 447e-453a
+262/319 symbols independently corroborated
+```
+
+**It is built from the same source modules.** Module 2 is `_TASK`: `PerformCOMMAND`,
+`PerformLOOP`, `TaskGoto`, `TaskHold`, `TaskGosub`, `TaskCelBuf`, `TaskTestEq`,
+`TaskCommandTable`, name for name with `MAIN.EXE`'s. Module 0 is `GFX`, with `TextPTop`,
+`TextP`, `TextLen`, `CheckBOLD`, `TextASCII` and, beside them, a tile engine `MAIN.EXE`
+also carries: `PlaceTile`, `FindTile`, `CalcOffset`, `ClipTile`, `Dump_Tile`, `TileScreen`,
+`TileNum`, `TileX`, `TileY`. Module 1 is `_LOADER` and module 3 the DOS error table. So the
+intro is not a separate engine; it is the game's engine with a different program on top.
+
+### Its data segment sits somewhere else, and the tool does not know that
+
+`symbolmap.py` resolves a data symbol as `seg * 16 + offset`, which is right for
+`MAIN.EXE`. In `INTR.EXE` that lands 14,911 bytes past where the bytes actually are: the
+true base is image 13,025. The check is unambiguous once found. `MesFILE`, `MoonFont`,
+`aufile1`, `lifile1`, `dafile1` and the rest are consecutive symbols, and at the corrected
+base they are consecutive NUL-terminated filenames of exactly the right lengths.
+
+The tool is left as it is, because it is fitted to `MAIN.EXE` and a second executable does
+not justify guessing at a general rule from one sample. Anything reading `INTR.EXE`'s data
+subtracts 14,911.
+
+### What its symbols give
+
+**The asset list, by name and in order.** The numbering is a real ordering, not an
+artefact: the filenames are not in alphabetical order and the symbols are.
+
+```text
+panfile1..3   bg1a.piv  bg1c.piv  bg1b.piv
+picfile1..8   bg4.piv  bg5a.piv  bg3.piv  bg2.piv  bg2a.piv  bg5.piv  bg7.piv  bg8.piv
+cast          au1.cel  li1.cel  da1.cel  dw1.cel  ha1.cel  ov1.cel  co1.cel  dg1.cel
+              klift1.cel
+also          bold.f  message.piv  mindscap  blo.cel  be1.c
+mapfile1,2    intro.sti  co.sti
+```
+
+Every one of those except `mindscap` is already decoded in the packs.
+
+**Its words**, plain in the image from offset 18,551: `MOONSTONE`, `Mindscape`, `presents`,
+the eight credit headings and the eight names under them, `MINDSCAPE PRESENTS`, `The End`,
+and three story cards: `The ceremony of the / Moonstone / is about to begin`,
+`The druids sent their / best knights to Stonehenge / so they may be dubbed / into the /
+Quest for the / MOONSTONE`, and `And so, the tale of the / Moonstone and the courage / of
+the knights that fought / for it is passed on from / one generation to the next`.
+
+### Where the trail stops on the intro
+
+- **`.STI` is not decoded.** `INTRO.STI` and `CO.STI` are 960 bytes, `INTRO1.STI` 105.
+  `INTRO.STI` reads as 480 big-endian words of small indices with consecutive runs in it,
+  which is what a tile map looks like, and the intro carries a tile engine; 960 is also
+  40 by 24 bytes, which is a screen of 8 by 8 tiles minus a row. Neither reading is
+  confirmed. `CO.STI` is almost entirely zero and `INTRO1.STI` looks compressed.
+- **The cast's animation scripts are not extracted.** They are ordinary data in the
+  intro's own DGROUP, as `MAIN.EXE`'s are, but no symbol names them, so finding them means
+  walking the data for well-formed scripts rather than reading a name off a list.
+- **The captions' coordinates are not recovered.** Unlike the message chains, nothing in
+  the image points at these strings, and there are no ten-byte records around them. They
+  are drawn by the path that builds a `TextTemp` record from registers, so the numbers are
+  immediates in code, and finding them means disassembling module 0's main body.
+
+## The glyph map was in the executable after all
+
+`GFX:TextASCII` at image 107,446 in `MAIN.EXE` is 95 bytes indexed by `character - 32`, and
+`TextP` reads it with `sub al, 0x20; mov di, TextASCII; add di, ax; mov al, [di]`. That is
+the table this project had recorded as not recovered and reconstructed by looking at the
+artwork.
+
+**The reconstruction was right.** A-Z at 0..25, a-z at 26..51, 0-9 at 52..61, then `!` 62,
+`.` 64, `,` 65, `#` 66, `$` 67, `%` 68, blank 69, `'` 70 and `/` 71. One correction: the
+bold bank's glyph 71 had been read as a horizontal bar and is a slash, the same as the
+small bank's. One gap: **no character maps to glyph 63**, so the `?` there is the single
+entry the table cannot confirm.
+
+The metrics come with it. `TextP` advances by the glyph's own cel width, except that
+`CheckBOLD` sets bit 3 of the record's flag word whenever the current font is `BOLD.F` and
+`TextP` then does `sub word ptr [textwidth], 3`. So the bold face tracks three pixels tight
+and the small face not at all, and a space is glyph 69 drawn like any other character.
+
 ## Consequence for the port
 
 The bestiary is unblocked. All eight creatures are composed the same way, and their

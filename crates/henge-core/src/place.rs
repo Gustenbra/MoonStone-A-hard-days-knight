@@ -16,6 +16,7 @@
 
 use crate::item::{Items, Purchase};
 use crate::lair::Raid;
+use crate::quest::Gate;
 use crate::overworld::{TOKEN_H, TOKEN_W};
 use crate::run::{Run, Used};
 use crate::service::{Gift, Rite, Sale, Wager};
@@ -84,6 +85,10 @@ pub enum Effect {
     /// Walk into a lair. The guardian is fought in the lair's own arena, and
     /// its floor is yours once it is down. `lair` indexes the run's table.
     Raid { lair: usize, arena: String, family: String, guardian: String, count: u32 },
+    /// The gate of the Valley of the Gods. `MOON:Valley`: four keys or
+    /// nothing, and beyond it the Guardian, which `InitKnightvsDemon` builds
+    /// with 250 health, one of it, and `ColourBackDrop` 4, the marsh.
+    Valley { arena: String, family: String, guardian: String, count: u32 },
     /// On the sign, not built yet. The game admits it rather than pretending.
     Closed { said: String },
     /// Back out onto the map.
@@ -116,6 +121,7 @@ impl Effect {
             | Effect::Wizard
             | Effect::Offer
             | Effect::Raid { .. }
+            | Effect::Valley { .. }
             | Effect::Leave => true,
         }
     }
@@ -323,6 +329,12 @@ pub enum Answer {
     /// A guardian is waiting. The caller sets the bout up in `arena` with
     /// `count` of `guardian` and comes back to `lair` with the outcome.
     Fight { lair: usize, arena: String, family: String, guardian: String, count: u32 },
+    /// The Valley gate stood open. The caller sets the bout up the same way
+    /// and comes back through [`Run::valley_won`] or [`Run::valley_lost`].
+    ///
+    /// [`Run::valley_won`]: crate::run::Run::valley_won
+    /// [`Run::valley_lost`]: crate::run::Run::valley_lost
+    Guardian { arena: String, family: String, guardian: String, count: u32 },
 }
 
 impl Visit {
@@ -484,6 +496,18 @@ impl Visit {
                     Answer::Stayed { days: 0 }
                 }
             },
+            Effect::Valley { arena, family, guardian, count } => match run.valley() {
+                Gate::Barred => {
+                    self.said = Gate::Barred.describe();
+                    Answer::Stayed { days: 0 }
+                }
+                Gate::Guardian => Answer::Guardian {
+                    arena: arena.clone(),
+                    family: family.clone(),
+                    guardian: guardian.clone(),
+                    count: *count,
+                },
+            },
         }
     }
 
@@ -492,6 +516,19 @@ impl Visit {
     pub fn won_lair(&mut self, lair: usize, items: &Items, run: &mut Run) {
         let spoils = run.lair_won(lair, items);
         self.said = format!("The guardian is slain. {}", spoils.describe(items));
+    }
+
+    /// The Valley's Guardian is down: the keys are spent and a moonstone is in
+    /// the pack. What it says is `ValleyEnter`, the original's own four lines.
+    pub fn won_valley(&mut self, items: &Items, run: &mut Run) {
+        let stone = run.valley_won(items);
+        self.said = format!("{} The {} is yours.", crate::quest::VALLEY_ENTER.join(" "), stone.name());
+    }
+
+    /// The Guardian won. Two life points, and the keys stay in the pack.
+    pub fn lost_valley(&mut self, run: &mut Run) {
+        run.valley_lost();
+        self.said = "The Guardian drives you back out of the Valley.".into();
     }
 }
 
@@ -903,5 +940,80 @@ mod tests {
         // And a hole is a hole, not a shift.
         places.remove("z");
         assert_eq!(lair_families(&places), vec!["forest", "", "swamp"]);
+    }
+    /// The Valley gate, from the outside: shut until four keys, and then it is
+    /// the Guardian rather than a menu.
+    #[test]
+    fn the_valley_gate_is_a_menu_line_that_wants_four_keys() {
+        let mut items = shop();
+        for k in crate::moon::Key::ALL {
+            items.insert(
+                k.item().into(),
+                ItemDef {
+                    name: k.name().into(),
+                    price: 12,
+                    virtue: Virtue::Inert,
+                    consumed: false,
+                },
+            );
+        }
+        let def = PlaceDef {
+            name: "Valley of the Gods".into(),
+            scene: "scene.bg4".into(),
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            hidden: false,
+            intro: String::new(),
+            icon: Some(0x1c),
+            menu: [8, 12, 168, 40],
+            text: None,
+            dice: false,
+            options: vec![
+                Choice {
+                    // `_MAP:knvalley`, verbatim.
+                    label: "Enter Valley of the Gods".into(),
+                    effect: Effect::Valley {
+                        arena: String::new(),
+                        family: "swamp".into(),
+                        guardian: "demon".into(),
+                        count: 1,
+                    },
+                },
+                Choice { label: "Leave".into(), effect: Effect::Leave },
+            ],
+        };
+        let mut run = Run::new(100);
+        run.kit.capacity = 20;
+        let mut visit = Visit::open("valley");
+        // The gate is always offered; what it does depends on the pack.
+        assert!(def.options[0].effect.offered(&items, &run));
+        assert_eq!(visit.choose(&def, &items, &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(visit.said, crate::quest::NO_KEYS.join(" "));
+        for k in crate::moon::Key::ALL {
+            run.kit.take(k.item(), 1);
+        }
+        assert_eq!(
+            visit.choose(&def, &items, &mut run),
+            Answer::Guardian {
+                arena: String::new(),
+                family: "swamp".into(),
+                guardian: "demon".into(),
+                count: 1,
+            },
+            "four keys, and the Guardian is what is behind it"
+        );
+        // And back from the bout, both ways.
+        let mut beaten = run.clone();
+        let mut page = visit.clone();
+        page.won_valley(&items, &mut beaten);
+        assert_eq!(beaten.key_bits(), 0, "the keys are spent");
+        assert_eq!(beaten.stones_held().len(), 1);
+        assert!(page.said.starts_with("You have proven your skill"));
+        let before = run.lives;
+        visit.lost_valley(&mut run);
+        assert_eq!(run.lives, before, "no life points to take from a run that has none");
+        assert_eq!(run.key_bits(), 0xf, "and the keys stay, so the gate stays open");
     }
 }

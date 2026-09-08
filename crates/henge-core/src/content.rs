@@ -264,6 +264,25 @@ pub struct ActorDef {
     /// the data so a pack can give the moon to any creature it likes.
     #[serde(default)]
     pub moon: BTreeMap<String, MoonStat>,
+    /// Which of the original's controllers this actor runs, by the name
+    /// [`crate::monster::Controller`] knows it as.
+    ///
+    /// **Recovered.** The original dispatches on the actor's kind (`+0x35`)
+    /// through `CONTROLTABLE`, which `InitGameStart` fills with `ControlTrogg`,
+    /// `ControlTroll`, `ControlRatmen`, `ControlMudmen`, `ControlBalok`,
+    /// `ControlBeast`, `ControlDemon`, `ControlDragon`, `ControlClaw` and
+    /// `ControlKnight`. Empty means the plain one, which closes and swings.
+    #[serde(default)]
+    pub controller: String,
+    /// A border this actor brings with it, as `[left, right, top, bottom]`.
+    ///
+    /// **Recovered**, and there is exactly one: `SETDEMONBORD`, the last
+    /// routine of `GFX`, writes a single record into the buffer the arena's
+    /// `.T` file fills and `SBORD` walks, and sets the deepest walkable row
+    /// with it. A fight against the demon is therefore fought in the demon's
+    /// own rectangle rather than the arena's. See `docs/TASKVM.md`.
+    #[serde(default)]
+    pub border: Option<[i32; 4]>,
 }
 
 /// An actor's numbers on one night of the moon.
@@ -326,6 +345,8 @@ impl Default for ActorDef {
             finishes: BTreeMap::new(),
             bleeds: false,
             moon: BTreeMap::new(),
+            controller: String::new(),
+            border: None,
         }
     }
 }
@@ -457,6 +478,23 @@ impl ActorDef {
             }
         }
         Ok(())
+    }
+
+    /// Which controller this actor runs. An actor that names none, or names
+    /// one the engine does not know, gets the plain opponent.
+    pub fn controller(&self) -> crate::monster::Controller {
+        crate::monster::Controller::from_name(&self.controller)
+            .unwrap_or(crate::monster::Controller::Knight)
+    }
+
+    /// The rectangle this actor narrows a fight to, if it has one.
+    pub fn bounds(&self) -> Option<crate::arena::Bounds> {
+        self.border.map(|[left, right, top, bottom]| crate::arena::Bounds {
+            left,
+            right,
+            top,
+            bottom,
+        })
     }
 
     /// Whether this actor is animated by the task VM rather than by frame lists.

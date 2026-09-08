@@ -422,7 +422,7 @@ impl Run {
         self.cursed = false;
         self.health = health_left.max(0);
         if self.health <= 0 {
-            self.over = true;
+            self.spend_life();
         }
         if won {
             self.victories += 1;
@@ -432,6 +432,40 @@ impl Run {
             }
         }
         !self.over
+    }
+
+    /// Put down, and back up again if there is a life left in you.
+    ///
+    /// **`MOON:WhoLived`, recovered.** A knight on nothing is not finished; he
+    /// is a life point poorer and back on his feet with a full sheet:
+    ///
+    /// ```text
+    /// cmp word ptr [si+0x38], 0        ; health
+    /// jg  ..                           ; still up
+    /// or  byte ptr [KnightDeath], 1
+    /// mov ax, word ptr [si+0x3c]       ; the maximum
+    /// mov word ptr [si+0x38], ax       ; whole again
+    /// sub byte ptr [si+0x31], 1        ; and one life the poorer
+    /// ```
+    ///
+    /// The run itself ends when the last one goes, which is what
+    /// `_MAP:CheckEncounterDone` tests when it decides that a knight on the map
+    /// is a grave rather than a rider (`cmp byte ptr [si+0x31], 0; jg`), and
+    /// what the routine at image 0x617 answers with `GameOverMes` and
+    /// `jmp StartAgain`.
+    ///
+    /// Returns whether the run is over. A run whose knight was never given
+    /// life points has none to spend, so for one of those this is still
+    /// death first time, which is what every test written before the quest
+    /// assumes.
+    pub fn spend_life(&mut self) -> bool {
+        self.health = self.max_health;
+        self.lives -= 1;
+        if self.lives <= 0 {
+            self.lives = 0;
+            self.over = true;
+        }
+        self.over
     }
 
     /// Experience from somewhere that is not a bout on the road: `LairWon`'s
@@ -829,6 +863,71 @@ impl Run {
         self.lives = lives;
         self.max_lives = lives;
     }
+
+    /// A fingerprint of the whole run, the way [`crate::bout::Bout::state_hash`]
+    /// is one of a fight.
+    ///
+    /// Every field goes in, the private ones included: the generator's seed
+    /// and the steps banked toward the next point of healing are as much of
+    /// the state as the purse is, and a save that dropped them would reload
+    /// into a run that mended and was robbed on different steps. This is what
+    /// a save is checked against, and what proves a reloaded run is the same
+    /// run rather than one that merely looks like it.
+    pub fn state_hash(&self) -> u64 {
+        fn mix(h: &mut u64, v: i64) {
+            *h ^= v as u64;
+            *h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        fn text(h: &mut u64, s: &str) {
+            for b in s.as_bytes() {
+                mix(h, *b as i64);
+            }
+            mix(h, -1);
+        }
+        let h = &mut 0xcbf2_9ce4_8422_2325u64;
+        for v in [
+            self.health as i64, self.max_health as i64, self.day as i64,
+            self.victories as i64, self.fights as i64, self.over as i64,
+            self.gold as i64, self.lives as i64, self.max_lives as i64,
+            self.experience as i64, self.xp_per_level as i64, self.hasted as i64,
+            self.warded as i64, self.ward_backfires as i64, self.cursed as i64,
+            self.toad as i64, self.moon.day as i64, self.moon.count as i64,
+            self.grudge as i64, self.bitten as i64, self.won as i64,
+            self.magic_last as i64, self.sword_out as i64, self.progress as i64,
+            self.steps_per_point as i64, self.theft_odds as i64, self.seed as i64,
+        ] {
+            mix(h, v);
+        }
+        text(h, &self.knight.name);
+        for v in [
+            self.knight.seat as i64, self.knight.strength as i64,
+            self.knight.constitution as i64, self.knight.endurance as i64,
+            self.knight.daggers as i64,
+        ] {
+            mix(h, v);
+        }
+        text(h, &self.knight.weapon);
+        text(h, &self.knight.armour);
+        mix(h, self.kit.capacity as i64);
+        for (id, n) in self.kit.iter() {
+            text(h, id);
+            mix(h, n as i64);
+        }
+        for lair in &self.lairs {
+            mix(h, lair.gold as i64);
+            mix(h, lair.cleared as i64);
+            mix(h, lair.key.map_or(0, |k| k.bit()) as i64);
+            for id in &lair.magic {
+                text(h, id);
+            }
+            mix(h, -2);
+        }
+        for (family, turn) in &self.arena_turn {
+            text(h, family);
+            mix(h, *turn as i64);
+        }
+        *h
+    }
 }
 
 #[cfg(test)]
@@ -920,6 +1019,48 @@ mod tests {
         let mut r = Run::new(100);
         r.finished_fight(25, true, 0);
         assert_eq!(r.health, 25, "a victory is not a reward of health");
+    }
+
+    /// `MOON:WhoLived`, which is what makes losing a thing you can survive.
+    /// Five life points, one a death, whole again each time, and the run ends
+    /// on the fifth.
+    #[test]
+    fn a_life_point_is_spent_on_a_death_and_the_run_ends_on_the_last() {
+        let mut items = shop();
+        items.insert(
+            "padded_armour".into(),
+            ItemDef {
+                name: "Padded armour".into(),
+                price: 0,
+                virtue: Virtue::Armour { health: 0, stride: 0 },
+                consumed: false,
+            },
+        );
+        let def = KnightDef {
+            name: "Sir Banner".into(),
+            shades: vec![0],
+            home: [10, 10],
+            strength: 1,
+            constitution: 1,
+            endurance: 1,
+            life: 5,
+            daggers: 10,
+            gold: 10,
+            weapon: "long_sword".into(),
+            armour: "padded_armour".into(),
+        };
+        let mut r = Run::for_knight(&def, 0, &items);
+        assert_eq!(r.lives, 5);
+        for left in (1..5).rev() {
+            assert!(r.finished_fight(0, false, 0), "still up with {left} to come");
+            assert_eq!(r.lives, left);
+            assert_eq!(r.health, r.max_health, "and whole again: WhoLived restores it");
+            assert!(r.alive());
+        }
+        assert!(!r.finished_fight(0, false, 0), "and the last one ends it");
+        assert_eq!(r.lives, 0);
+        assert!(!r.alive());
+        assert_eq!(r.fights, 5);
     }
 
     #[test]
@@ -1267,6 +1408,16 @@ mod magic_tests {
         r
     }
 
+    /// Put a knight down for good. He has the five life points
+    /// `SetKnightEquipment` gives him, and `WhoLived` spends one a death, so
+    /// one lost fight is not the end of him any more.
+    fn kill(r: &mut Run) {
+        for _ in 0..r.max_lives.max(1) {
+            r.finished_fight(0, false, 0);
+        }
+        assert!(!r.alive(), "the knight should be out of lives");
+    }
+
     // Item 41: the potion, as the routine at 0xcad0 has it.
 
     #[test]
@@ -1451,7 +1602,7 @@ mod magic_tests {
         let items = magic();
         let mut r = knight_run(&items);
         r.kit.take("haste", 1);
-        r.finished_fight(0, false, 0);
+        kill(&mut r);
         assert_eq!(r.cast("haste", &items), Cast::Pointless);
     }
 
@@ -1570,7 +1721,7 @@ mod magic_tests {
         let items = magic();
         let mut r = knight_run(&items);
         r.experience = 40;
-        r.finished_fight(0, false, 0);
+        kill(&mut r);
         assert!(!r.spend_experience(Ability::Strength, &items));
         assert_eq!(r.spend_experience_rolled(&items), None);
         assert_eq!(r.bestow_ability(&items), None);

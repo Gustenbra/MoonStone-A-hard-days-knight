@@ -240,6 +240,22 @@ impl PlaceScene {
     }
 }
 
+/// Where the menu's rows are, as boxes a pointer can be over.
+///
+/// The same arithmetic `draw_menu` uses, taken from one place so a row can
+/// never be highlighted in one and hit in the other. This is what the
+/// original's `ADDGADGET` does at the moment it draws each line, and the reason
+/// it can: a gadget's rectangle is the rectangle of the thing drawn in it.
+pub fn menu_rects(def: &PlaceDef) -> Vec<(usize, i32, i32, i32, i32)> {
+    const PAD: i32 = 5;
+    const STEP: i32 = 9;
+    let [x, y, w, _] = def.menu;
+    let top = y + PAD + STEP + 4;
+    (0..def.options.len())
+        .map(|i| (i, x + 2, top + i as i32 * STEP - 2, w - 4, STEP))
+        .collect()
+}
+
 /// Greedy word wrap. Rendering, not rules, so it lives here.
 fn wrap(reg: &Registry, font: &Font, text: &str, width: i32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();

@@ -304,37 +304,154 @@ impl SelectScene {
     }
 }
 
-/// The fourteen things the Gods say between days.
+/// Where the title's four rows and the select's four portraits are, as boxes a
+/// pointer can be over.
 ///
-/// **Recovered, verbatim.** `_LOADER:WaitMES` is fourteen pointers to chains of
-/// text records, and each record is a string, an x, a y, a flag and the next
-/// record. The chains hold one to four lines each, and the ys they carry are
-/// 75, 95, 115 and 135, one slot apart. The pointers are not in the order the
-/// labels are written: `WaitMES` reads `WaitM3A`, `WaitM2A`, `WaitM1A`, then
-/// `WaitM4A` onwards, and that is the order they are in below.
+/// The numbers are the same ones the drawing uses, taken from one place so a
+/// row can never be lit in one and hit in the other.
+pub fn title_rects() -> Vec<(usize, i32, i32, i32, i32)> {
+    (0..Row::ALL.len())
+        .map(|i| (i, ARROW_X, FIRST_ROW_Y + i as i32 * ROW_STEP - 2, 260 - ARROW_X, ROW_STEP))
+        .collect()
+}
+
+pub fn select_rects() -> Vec<(usize, i32, i32, i32, i32)> {
+    (0..SEATS).map(|i| (i, PORTRAIT_X[i], PORTRAIT_Y, PORTRAIT_W, 80)).collect()
+}
+
+/// The pointer, over whatever is drawn.
 ///
-/// **Where they are shown is ours.** The original puts them up while a disk
-/// loads, which is why `_WIZARD:LoadWizard` is the only routine that calls the
-/// screen. Nothing here loads from a disk, and this is quest advice the player
-/// would otherwise never see, so it goes on the between-days screen instead,
-/// one a day, cycled the way `WaitCOUNT` cycles it: step every showing, wrap at
-/// fourteen.
-pub const HINTS: [&[&str]; 14] = [
-    &["Prepare yourself, for the ", "season of the Moonstones is", "upon you!"],
-    &["The Gods pause for a moment", "to contemplate your fate..."],
-    &["The Gods pause for a moment", " "],
-    &["Beware of the Ratmen", "during a full moon", "for they grow stronger", "as the moon gets fuller"],
-    &["Seek the knowledge", "of", "Mythral the Mystic"],
-    &["Beware of the", "fierce Baloks", "of the", "Northern Wastelands"],
-    &["Offer a magic item", "within Stonehenge", "and Danu will grant", "you a longer life"],
-    &["Seek the wisdom of", "Math the wizard", "to aid you in your quest"],
-    &["Visit your home village", "to restore lost lives."],
-    &["The Gods turn their", "attentions away for", "a moment..."],
-    &["The Gods pause for a moment", " "],
-    &["The Gods await their", "new champion..."],
-    &["Beware of the dreaded", "Black Knights", " "],
-    &["Beware of the Dragon", "whose dark shadow", "sweeps the land"],
-];
+/// `PO.CEL` is one 16 by 18 frame, and the packs have carried it decoded and
+/// unused since the first day; `SHOWPOINTER` blits it at the pointer's own
+/// coordinates with nothing subtracted, so its hot spot is its top left corner
+/// and so is the point [`henge_core::pointer::Gadget::covers`] tests.
+///
+/// Drawn as a silhouette with a halo under it, for the reason every other
+/// sprite over a foreign palette is: the pointer has to read over a sunlit town
+/// and over a stone circle at midnight, and its own indices mean nothing in
+/// either.
+pub fn draw_pointer(reg: &mut Registry, fb: &mut Framebuffer, p: &henge_core::pointer::Pointer) {
+    if !p.woken {
+        return;
+    }
+    let (dark, light) = status::extremes(fb);
+    // Outlined in the darkest colour the screen has rather than a middle one:
+    // the arrow is sixteen pixels wide and has to read over a knight in white
+    // armour as well as over a night sky.
+    for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
+        sprite::draw_mask(reg, fb, POINTER, 0, p.x + ox, p.y + oy, dark);
+    }
+    sprite::draw_mask(reg, fb, POINTER, 0, p.x, p.y, light);
+}
+
+/// `PO.CEL`, the original's pointer.
+const POINTER: &str = "bank.po";
+
+/// `MESSAGE.PIV`: the stone circle in silhouette against a night sky, black
+/// under it, which is what all three kinds of message are drawn over.
+const MESSAGE_PLATE: &str = "scene.message";
+
+/// One message, over the original's own message picture.
+///
+/// **Recovered:** the picture, the coordinates, the centring, and the bold face
+/// every one of them is set in (`les si, ptr [0x8915]` before the chain walk,
+/// which is the bold font pointer).
+///
+/// **Ours:** the colour an instruction message comes up in. `INSTRUCTMESSAGE`
+/// installs its own six-word palette ramp (0x800, 0x600, 0x400, 0, 0x200,
+/// 0x100) before it fades, and the fade machinery those words drive is not
+/// built, so the difference between the kinds is made here instead: an
+/// instruction is written in the picture's own brightest colour and the other
+/// two in white, which is the same distinction the ramp draws.
+pub fn draw_message(
+    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, msg: &henge_core::message::Message,
+) {
+    use henge_core::message::{Align, Kind};
+    show(reg, fb, MESSAGE_PLATE);
+    let (_, light) = status::extremes(fb);
+    // An instruction message is the one that arrives in another colour.
+    let ink = match msg.kind {
+        Kind::Instruction => warmest(fb),
+        _ => light,
+    };
+    // Every message is set in the bold face, because every one of the three
+    // routines does `les si, ptr [0x8915]` into the current font pointer before
+    // it walks the chain, and `[0x8915]` is `BOLD.F`. The record's own bit 3 is
+    // `CheckBOLD`'s kerning, not a choice of face.
+    let Some(font) = fonts.bold.or(fonts.small) else { return };
+    for line in msg.shown() {
+        match line.align {
+            Align::Centre => font.draw_centred(reg, fb, &line.text, line.y, ink),
+            Align::Right => {
+                let w = font.width(reg, &line.text);
+                font.draw(reg, fb, &line.text, TEXT_RIGHT - w, line.y, ink);
+            }
+            Align::Left => {
+                font.draw(reg, fb, &line.text, line.x, line.y, ink);
+            }
+        }
+    }
+}
+
+/// `TextRightBorder`, which the alignment is measured against.
+const TEXT_RIGHT: i32 = SCREEN_W as i32;
+
+/// The most saturated colour the palette has, for an instruction message.
+fn warmest(fb: &Framebuffer) -> u8 {
+    (1..32)
+        .max_by_key(|i| {
+            let c = fb.palette[*i];
+            let (r, g, b) = ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+            let hi = r.max(g).max(b);
+            let lo = r.min(g).min(b);
+            (hi - lo) * 4 + hi
+        })
+        .unwrap_or(1) as u8
+}
+
+/// The intro, one card at a time.
+///
+/// The plates and the words are the original's, out of `INTR.EXE`; which word
+/// goes over which plate is ours, and `henge_core::intro` says so. The words go
+/// on a plate of their own for the same reason the wordmark does: they have to
+/// read over eleven different pictures.
+pub fn draw_intro(
+    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, intro: &henge_core::intro::Intro,
+) {
+    let Some(card) = intro.showing() else { return };
+    show(reg, fb, card.plate);
+    if card.lines.is_empty() {
+        return;
+    }
+    let (dark, light) = status::extremes(fb);
+    let Some(font) = fonts.bold.or(fonts.small) else { return };
+    let n = card.lines.len() as i32;
+    let step = font.line_height.max(14);
+    let h = n * step + 12;
+    // Put the words over the emptiest half of the picture rather than always at
+    // the foot of it. Five lines at the bottom of the last plate cover the
+    // knight the plate is of, and the plates differ too much for one fixed
+    // position to be right on all eleven, so the picture is asked: whichever
+    // band is darker is the one with least in it.
+    let top = if band_ink(fb, 12) <= band_ink(fb, 200 - 16 - n * step) { 12 } else { 200 - 16 - n * step };
+    fb.rect(0, top - 6, SCREEN_W as i32, h, dark);
+    for (i, line) in card.lines.iter().enumerate() {
+        font.draw_centred(reg, fb, line, top + i as i32 * step, light);
+    }
+}
+
+/// How bright a horizontal band of the frame is. Sampled rather than summed
+/// whole: this decides where a caption goes, not what it says.
+fn band_ink(fb: &Framebuffer, y: i32) -> u32 {
+    let mut total = 0u32;
+    for row in (y.max(0)..(y + 40).min(SCREEN_H as i32)).step_by(4) {
+        for col in (0..SCREEN_W).step_by(4) {
+            let c = fb.palette[(fb.pixels[row as usize * SCREEN_W + col] & 0x1f) as usize];
+            total += ((c >> 16) & 0xff) + ((c >> 8) & 0xff) + (c & 0xff);
+        }
+    }
+    total
+}
 
 /// `KI.CEL`, whose cels 0x2d to 0x31 are the five moons.
 const MOON_BANK: &str = "bank.ki";
@@ -350,13 +467,15 @@ const MOON_AT: (i32, i32) = (119, 12);
 /// sky the select screen also uses. `[0x8989]` is `Moons[MoonCount]`, which is
 /// tonight's phase.
 ///
-/// **Ours:** the day number under the heading, and the hint below it. The
-/// original's own hint screen has its four lines at y 75, 95, 115 and 135; here
+/// **Ours:** the day number under the heading, and the hint below it. The hint
+/// is one of `WAITMESSAGE`'s fourteen, taken through `henge_core::message`, and
+/// the original's own hint screen has its lines at y 75, 95, 115 and 135; here
 /// the heading keeps its recovered 95 and the hint takes the same four slots
-/// starting one below it, because both cannot have y 95.
+/// starting one below it, because both cannot have y 95. The `Loading...` line
+/// every one of the fourteen ends on is left out, because nothing here loads.
 pub fn draw_interlude(
     reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, day: u32, phase: henge_core::moon::Phase,
-    hint: usize, note: Option<&str>,
+    hint: &henge_core::message::Message, note: Option<&str>,
 ) {
     show(reg, fb, "scene.ch");
     sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
@@ -374,8 +493,8 @@ pub fn draw_interlude(
         small.draw_centred(reg, fb, note, y, light);
         return;
     }
-    for line in HINTS[hint % HINTS.len()] {
-        small.draw_centred(reg, fb, line, y, light);
+    for line in hint.shown() {
+        small.draw_centred(reg, fb, &line.text, y, light);
         y += 14;
     }
 }

@@ -316,9 +316,28 @@ Two things to know when compositing something else. The palette defaults to
 `palette.forest`, so a creature drawn in it has the wrong colours and the right
 shape; pass `--palette` for its own. And a script's name prefix is the
 encounter, not the bank table: `Knight_HangSd` is played on the ratman's banks
-and `Dragon_Flight*` on a table with `DRAGON5.CEL` in slot 0. The cel bounds
-check catches both and says so rather than drawing the wrong sprite, and
-`--actor ratmen` puts `Knight_HangSd` right.
+and `Dragon_Flight*` on `DrBuffer`, which is `MI.C` in every slot. The cel
+bounds check catches both and says so rather than drawing the wrong sprite, and
+`--actor ratmen` and `--actor dragon_flight` put them right.
+
+### `DrBuffer`: the fifth bank table, and the loader nobody had found
+
+`Dragon_Flight1`..`8` do not run on any of the four `TASKCELBUF` chooses
+between. `_MAP:ContinueDragon` (image `0xa5b3`) builds a table of its own at
+DS:`0xccbc` by writing the far pointer at DS:`0x8975` into **all five** of its
+slots, points the dragon's task at it, and drives it from `DrAnim` at
+DS:`0xcc22`, sixteen words holding each of the eight flight scripts twice, which
+`DragonDONE` indexes with `[si+0x0a] & 0xf`.
+
+The pointer at DS:`0x8975` is `MI.C`, the map icon bank, and the record had it
+as `DRAGON5.CEL`. The loader at `0x88b5` is what settles it: it stores the
+address the **next** file will be loaded at, not the one it has just loaded,
+because `LOADFILE` advances `di` past what it copied and `AdjustAddr` rounds it
+up into `es` with `di` zeroed. So the store that follows `ki.cel` names where
+`mi.c` will go. Cels 34 to 41 of `MI.C` composite to a dragon seen from above
+with its wings beating; the same eight cels of `KI.CEL` are a mixture of a
+moon, a scroll and some five-pixel bars. `DRAGON5.CEL` is slot 4 of the
+creature table and it is the fire, which is what `Dragon_Fire` draws from.
 
 ## The Rust side
 
@@ -462,8 +481,8 @@ plane when the z difference is within `+0x56`; `CheckXAxis` against `+0x54`
 goes to `TrackBack`, which sets the walk bit away from the knight; against
 `+0x52` it returns "in range" with no walk bit set; further out,
 `TrackOpponent` sets the walk bit towards him. What each creature does once
-in range is its own routine (`TroggAttacks` picks the spear's lunge inside
-`+0x52`, the chop beyond a hundred, the swing inside it) and is not built.
+in range is its own routine, and all of them are now built; the next section
+is the account of them.
 
 | creature | `+0x38` | `+0x3c` | `+0x52` | `+0x54` | `+0x56` | `+0x35` | damage |
 |---|---|---|---|---|---|---|---|
@@ -583,3 +602,106 @@ is set or its x passes `0x14a` facing right or falls below -10 facing left.
 the strike point the collision code left in the victim's `+0x58` and `+0x5a`,
 facing as the knight does, on bank table 4. `Blood1` is four frames of forty
 parts on `BLO.CEL`, every one of them flagged 0x80.
+
+## The creatures' own controllers
+
+Read for build order items 33, 36 and 37, and transcribed into
+`henge-core/src/monster.rs`. `CONTROLTABLE` at DS:`0x6964` is filled by
+`InitGameStart` and indexed by the actor's kind (`+0x35`); the task loop calls
+the entry for an actor when it has hit something (`+0xc`), been struck
+(`+0xe`), or its animation has ended (`task+1` clear). A controller answers by
+writing the attack kind into `+0x28` and the next script into DS:`0x783a`,
+where `0xffff` means carry on and zero means remove the task.
+
+Two things follow from that shape and are reproduced. A creature **names its
+own script**, so in henge it hands the fighter an `Order` and the joystick path
+is never reached; and a controller runs **once per animation frame**, not once
+per tick, so a cooldown of ten is ten frames. The state each keeps is the actor
+record's own: `+0x0a` the walk frame, `+0x0b` a timer, `+0x48` and `+0x49`
+flags, `+0x4a` a cooldown. That is a `Brain` on the fighter here, and it is
+folded into `Bout::state_hash` with everything else.
+
+**`MonsterTrack`** (`0x56d9`) decides only where a creature wants to be.
+`FaceKnight` first; `CheckZAxis` puts them on the same plane when the depth
+difference is within `+0x56`, and off it the walk bit for depth goes on and the
+tracker answers "still walking". Then `CheckXAxis` against `+0x54` sends it to
+`TrackBack`, which walks *away*; against `+0x52` it answers "in range" with no
+bit set; and beyond that `TrackOpponent` walks towards. `CheckXAxis` leaves
+`bx` holding the absolute distance, which every caller then uses.
+
+Every controller opens with `mov ax, [KnightTable]; mov [Opponent], ax`. **A
+creature's opponent is the knight and nothing else**, which is why a dragon
+does not take its own claws for an enemy.
+
+| creature | what its own routine does |
+|---|---|
+| trogg, axe or hammer | `TroggAttacks`: the overhead from 100 to 120, the swing inside 100, ten frames between blows. A `GETPERCENT` roll of 30 or under chops instead when the knight is holding a block, which is the guard the chop gets through. `TroggAttack` gives ground inside `+0x54`, and comes in for a fallen knight's head inside 100 with the gore on |
+| trogg, spear | the same routine's kind 0x10 branch: one lunge, only inside `+0x52`, and twenty frames |
+| troll | `TrollAttack`: `Troll_Bunt` inside 100, `Troll_Chop` from 100 to 150, and never two chops running, because it compares `+0x28` before it picks |
+| ratman | `ControlRatCollide` does not use the tracker at all. Slash inside 40, bite from 40 to 50, leap beyond, and `RatmanHit` sets fifteen frames of `HitDelay` when a blow of its own lands |
+| mudman | `ControlMudmen`: reach between 75 and 100, and inside that `MudmenIBury` takes it under the ground; `MudmenAppear` brings it up 75 pixels to the knight's far side. `MudmenHit2` **takes hold of him**: the knight's own task is removed and he is drawn inside `Mudmen_EntangleKnight` for the forty frames `+0x0b` counts, and only fire and down together (`test bx, 0x10`, `test bx, 4`) tear him loose. `MudmenChoke` is `KillKnight` |
+| balok | `ControlBalok`: hops to close, uppercut from 70 to 80, grab out to 120, then stands off until 180 or until the knight has a dagger on his belt (`[bx+0x34]`) |
+| beast | `ControlBeast` never tracks. `BeastCharge` runs it to the arena edge and turns it round; `SetBEASTZ` alternates a line dead on the knight with one up to 28 rows off, on `BeastFLAGS` bit 0; `SetBeastTimer` waits `RND & 0xf | 5` frames off the edge |
+| demon | `DemonAttack`: slap inside 100 (kind 0x10, nine frames, and two turns of `demonbodge` between slaps), zap out to 130 (kind 4, six), whip out to 140 (kind 2, five). The whip then walks four `DemonFLAGS` bits through `Demon_OWhipMiss`, `OWhipHit`, `UWhipMiss` and `UWhipHit`, swapping in `OWhipKnight` or `UWhipKnight` when the crack lands between 120 and 140 or 130 and 150, and handing the caught knight `Knight_SwSlapped` outright. `Demon_Zap` calls `KnightOFF` and `KnightON` from its own frames: ten off him, off the board, and back 0x89 pixels to the demon's side |
+| dragon | `ControlDragon`, item 36 and section 3.3 of `COMPLETE.md` |
+| claw | `ControlClaw`: slaps whatever comes inside x 100 on its plane, **never calls `CalcDamage`**, and plays `Dragon_ClawDead` when the dragon's hit points are gone |
+
+`TroggAttacks` is the only routine in the set that rolls. `_WIZARD:RND`
+(`0xbd89`) is eight rounds of a shift register over one word at DS:`0xe22f`:
+each round takes `ror(seed, 3) ^ seed`, keeps bit 1 of it as the bit shifted
+into the top, and shifts the seed right one. `GETPERCENT` (`0xbda9`) masks the
+result to seven bits and subtracts 27 from anything at 100 or over, giving
+0 to 99. Both are transcribed; the register belongs to the bout rather than to
+the process, so a fight replays and two machines roll the same way.
+
+## `SETDEMONBORD`, and what a border actually is
+
+The last routine in `GFX` sits at image `0x7ff9`, after the word `CLIPHIEGHT`
+at `0x7ff7` and before `INSTALLKBD` at `0x8025`. It is nine stores:
+
+```
+es <- [0x88ff]           the segment the arena's own .T file was loaded into
+es:[0] <- 1              one border record, big-endian
+es:[2] <- 0              left
+es:[4] <- 309            right
+es:[6] <- 99             bottom
+es:[8] <- 10             top
+[0x80b5] <- 99           the deepest walkable row
+```
+
+That segment is the arena. The loader at `0x8d93` reads a count out of its
+first word and skips that many eight-byte records before the tile placements,
+and walks them again taking the deepest `rec+4` into DS:`0x80b5`, which
+`FindHalfBORD`, `FindQuarterBORD` and `Find3QuarterBORD` divide up. `SBORD`
+(`0x4552`) walks the same list every frame and clears the walk bits in `+0x26`
+that would carry an actor across one. So **a `.T` file's header is a count and
+a list of border rectangles, not one walkable box**; every arena the game ships
+holds exactly one, which is why reading it as `u16 _; u16 left, right, bottom,
+top` worked.
+
+`SETDEMONBORD` therefore does not draw anything. It replaces the arena's border
+list with a single rectangle, 0 to 309 across and 10 to 99 deep, so the demon
+narrows the ground you may fight it on. **Nothing in the shipped image calls
+it**: no `call` or `jmp` anywhere in the code resolves to `0x7ff9`, and the
+address appears as an immediate nowhere either. In the DOS release it is dead
+code. Here it is the demon's own `ActorDef::border`, applied by
+`Bout::apply_actor_borders` when a demon is in the arena and by nothing else.
+
+The identification rests on two things and neither is a name in the file:
+the routine is the last in `GFX` and `SETDEMONBORD` is the last of the twenty
+one `GFX` publics, in the blob's own order; and it writes a border record and
+nothing else. Treat it as very likely rather than certain, the same way the
+command names are treated above.
+
+## One more thing about the link-time correction
+
+`docs/REVERSING.md` records that stored code addresses need the seven-step
+correction. So do **`call` and `jmp` displacements**, which is easy to miss
+because a branch inside one module needs no correction at all and most of the
+interesting reading is inside `MOON`. A displacement is assembled in link space,
+so the target is `fix((next_ip - shift_of_caller) + rel)`. Uncorrected, the
+call at `0x243e` in `InitKnightvsDragon` lands three bytes inside an
+instruction in the middle of the swamp generator; corrected, it lands exactly on
+`LOADDRAGON` at `0x8b7a`, which loads `Dragon1.cel`, `Dragon2.cel` and
+`DRAGON5.CEL`. The same correction on `mov bx, 0x8ea4` in `GENERATELANDSCAPE`
+turns a stretch of code into the four-entry dispatch table it is.

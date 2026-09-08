@@ -3,6 +3,7 @@
 //! Release builds contain no original-game data. `--features research` adds a
 //! viewer for studying the 1991 files, which is a development tool only.
 
+mod ending;
 mod framebuffer;
 mod map;
 mod place;
@@ -22,8 +23,12 @@ use text::Font;
 use henge_core::combat::{Intent, State};
 use henge_core::item::{Items, Loss};
 use henge_core::knight::{Ability, Knight, Knights, MAX_ABILITY};
+use henge_core::intro::Intro;
+use henge_core::message::{Message, Messages};
 use henge_core::place::{Answer, Approach, Places};
+use henge_core::pointer::{Gadgets, Pointer};
 use henge_core::run::{Cast, Challenge, Run};
+use henge_core::save::Save;
 use henge_core::shell::Start;
 use henge_core::{SCREEN_H, SCREEN_W};
 use world::{Sheet, World};
@@ -61,6 +66,9 @@ fn carrying(run: &Run) -> String {
 ///                     to do without first having to win and lose a fight
 ///   --gold <n>        start the run with coin, so a stall can be reached
 ///                     without first winning the fights that pay for it
+///   --keys <0..4>     start holding that many of the four lair keys
+///   --stone <name>    start carrying one of the four moonstones
+///   --lives <n>       how many life points to ride out with
 ///   --start <screen>  title, select, map or arena. Defaults to the map, so
 ///                     every recipe written before the shell existed still does
 ///                     what it did
@@ -85,6 +93,31 @@ fn gold_arg(a: &[String]) -> Option<u32> {
     a.iter().position(|s| s == "--gold").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
 }
 
+/// `--keys <0..4>`: start holding that many of the four lair keys, so the
+/// Valley of the Gods can be reached without first clearing four lairs.
+fn keys_arg(a: &[String]) -> Option<usize> {
+    a.iter().position(|s| s == "--keys").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+/// `--lives <n>`: how many life points to ride out with, so the game-over
+/// screen is one lost fight away instead of five.
+fn lives_arg(a: &[String]) -> Option<i32> {
+    a.iter().position(|s| s == "--lives").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+}
+
+/// `--stone <new|full|half|gibbous>`: start carrying that moonstone, so the
+/// stone circle's winning branch can be reached without beating the Guardian.
+fn stone_arg(a: &[String]) -> Option<henge_core::moon::Moonstone> {
+    let name = a.iter().position(|s| s == "--stone").and_then(|i| a.get(i + 1))?;
+    let found = henge_core::moon::Moonstone::ALL
+        .into_iter()
+        .find(|m| m.item().trim_start_matches("moonstone.") == name);
+    if found.is_none() {
+        eprintln!("no moonstone called {name}: try new, full, half or gibbous");
+    }
+    found
+}
+
 fn knight_arg(a: &[String]) -> Option<usize> {
     a.iter().position(|s| s == "--knight").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
 }
@@ -101,15 +134,34 @@ fn foe_arg(a: &[String]) -> Option<String> {
 fn start_arg(a: &[String]) -> Option<Mode> {
     let name = a.iter().position(|s| s == "--start").and_then(|i| a.get(i + 1))?;
     match name.as_str() {
+        "intro" => Some(Mode::Intro),
         "title" => Some(Mode::Title),
         "select" => Some(Mode::Select),
         "map" => Some(Mode::Map),
         "arena" | "combat" => Some(Mode::Combat),
         other => {
-            eprintln!("no screen called {other}: try title, select, map or arena");
+            eprintln!("no screen called {other}: try intro, title, select, map or arena");
             None
         }
     }
+}
+
+/// `--point x,y`: put the pointer there, for checking the gadgets headlessly.
+fn point_arg(a: &[String]) -> Option<(i32, i32)> {
+    let v = a.iter().position(|s| s == "--point").and_then(|i| a.get(i + 1))?;
+    let (x, y) = v.split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+/// `--save <path>`: where a saved game goes. One slot, because the original
+/// has none at all and a slot list is a thing to design once somebody wants
+/// more than one.
+fn save_path_arg(a: &[String]) -> String {
+    a.iter()
+        .position(|s| s == "--save")
+        .and_then(|i| a.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "henge-save.json".to_string())
 }
 
 #[derive(Default)]
@@ -201,11 +253,39 @@ fn prepare(app: &mut App, a: &[String]) {
     if let Some(g) = gold_arg(a) {
         app.run.gold = g;
     }
+    // The quest, posed. Four lairs and a Guardian is not something a headless
+    // run can play through, so the tokens they hand over can be handed over
+    // here instead. Nothing else about the run changes: the keys and the stone
+    // are ordinary pack entries and every rule reads them the same way.
+    if let Some(n) = keys_arg(a) {
+        for key in henge_core::moon::Key::ALL.into_iter().take(n) {
+            app.run.kit.take(key.item(), 1);
+        }
+    }
+    if let Some(stone) = stone_arg(a) {
+        app.run.kit.take(stone.item(), 1);
+    }
+    if let Some(n) = lives_arg(a) {
+        app.run.lives = n;
+        app.run.max_lives = n.max(app.run.max_lives);
+    }
     // Last, so it survives whatever taking a knight did to the seats.
     if let (Some(foe), Some(w)) = (foe_arg(a), app.world.as_mut()) {
         if !w.set_foe(&foe) {
             std::process::exit(2);
         }
+    }
+    // `--load` replaces everything above it: a save is the state, and posing a
+    // run and then loading over it would be posing nothing.
+    if a.iter().any(|s| s == "--load") {
+        if !app.load_game() {
+            std::process::exit(3);
+        }
+    }
+    // `--point x,y` puts the pointer somewhere, which is the only way to reach
+    // it with no mouse and no display.
+    if let Some((x, y)) = point_arg(a) {
+        app.point_at(x, y);
     }
     app.sheet = a.iter().any(|s| s == "--sheet");
     if a.iter().any(|s| s == "--bloodless") {
@@ -254,10 +334,17 @@ fn main() -> anyhow::Result<()> {
                 app.pressed[6] = t % 23 == 0;
             }
             app.update();
-            let line = match app.mode {
+            // A message box is modal, so the mode underneath it is not what is
+            // on screen. Say which kind and what it says, or a trace would
+            // report a town menu nobody can see.
+            let line = if let Some(m) = app.showing.as_ref() {
+                let said: Vec<&str> = m.shown().map(|l| l.text.trim()).collect();
+                format!("{t:>5}  MESSAGE {:?}  {}", m.kind, said.join(" / "))
+            } else { match app.mode {
                 // The shell has no state worth a line of trace: what it does is
                 // decided by looking at it, and it is checked by test in
                 // `henge_core::shell` instead.
+                Mode::Intro => format!("{t:>5}  INTRO   card {}", app.intro.card),
                 Mode::Title => format!("{t:>5}  TITLE"),
                 Mode::Select => format!("{t:>5}  SELECT"),
                 Mode::Map if app.map.is_none() => break,
@@ -333,7 +420,7 @@ fn main() -> anyhow::Result<()> {
                     // the eight a family rotates to is now a thing worth seeing.
                     format!("{:>5}  COMBAT  {:<5} {:<8} {}", t, w.name(), w.family(), who.join(" | "))
                 }
-            };
+            } };
             let key = line[7..].to_string();
             if key != last { println!("{line}"); last = key; }
         }
@@ -379,7 +466,11 @@ fn main() -> anyhow::Result<()> {
 
     // A game opens on its title screen. `--start` overrides it, which is how the
     // window can still be pointed straight at a map or an arena.
-    app.mode = start_arg(&args_of()).unwrap_or(Mode::Title);
+    // The original runs `INTR.EXE` and then `MAIN.EXE`, so a window opens on
+    // the intro and the title follows it. Fire, space or Tab skips it, and
+    // `--start title` goes straight there. Every headless recipe is unchanged:
+    // those go through `prepare`, which still defaults to the map.
+    app.mode = start_arg(&args_of()).unwrap_or(Mode::Intro);
     if app.mode == Mode::Select {
         app.begin_select();
     }
@@ -414,6 +505,27 @@ fn main() -> anyhow::Result<()> {
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+            // A real mouse moves the pointer straight to where it is. The
+            // stick still works; this is the same pointer either way.
+            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+                let size = window.inner_size();
+                if let Some((x, y)) = Framebuffer::to_screen(
+                    size.width as usize, size.height as usize, position.x, position.y,
+                ) {
+                    app.point_at(x, y);
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
+                if button == winit::event::MouseButton::Left {
+                    let down = state == ElementState::Pressed;
+                    // Straight onto seat two's fire, which is the button the
+                    // gadgets already read.
+                    if down && !app.keys[11] {
+                        app.pressed[11] = true;
+                    }
+                    app.keys[11] = down;
+                }
+            }
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event, .. }, ..
             } => {
@@ -520,7 +632,11 @@ struct App {
     /// the lair's own page rather than to the map, because the floor is only
     /// yours once the guardian is down and the spoils are read there.
     raiding: Option<usize>,
-    /// The place to reopen when a raid is over.
+    /// This bout is the Valley of the Gods' Guardian. Winning spends the four
+    /// keys and pays a moonstone; losing costs two life points and leaves the
+    /// keys where they are, so the gate stays open.
+    questing: bool,
+    /// The place to reopen when a raid or the Valley is over.
     raid_place: String,
     /// The between-days screen, and how many ticks it has left.
     ///
@@ -534,13 +650,36 @@ struct App {
     /// A practice bout is not part of a run: nothing carries, nobody is slain,
     /// and it goes back to the title when it is over.
     practice: bool,
+    /// The pointer, and the boxes on this screen it can be over.
+    ///
+    /// `MovePointer` and the gadget table, in `henge_core::pointer`. The
+    /// original drives the pointer with the stick and so does this: seat two's
+    /// keys steer it on any screen that has gadgets, and a real mouse moves it
+    /// straight to where the mouse is, because a window with a mouse in it
+    /// should behave like one.
+    pointer: Pointer,
+    gadgets: Gadgets,
+    /// Every message the executable gives up, and the counter the wait
+    /// messages come off. `WaitCOUNT` is `hint`, above.
+    messages: Messages,
+    /// A message box up over everything, and how many ticks it has left. Modal,
+    /// which is what all three of `WAITMESSAGE`, `OCCURMESSAGE` and
+    /// `INSTRUCTMESSAGE` are: they draw, they fade, and nothing else runs.
+    showing: Option<Message>,
+    showing_for: u32,
+    /// The intro sequence.
+    intro: Intro,
+    /// Where a save is written and read. Relative to wherever the game is run
+    /// from unless `--save` says otherwise, and never written into the save
+    /// itself.
+    save_path: String,
     status: String,
     #[cfg(feature = "research")]
     research: Option<research::Viewer>,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Mode { Title, Select, Map, Combat, Place }
+enum Mode { Intro, Title, Select, Map, Combat, Place }
 
 /// A flight over the map, `EffectFLAG+2` and `+4` in `_MAP`: the gem's comes
 /// back to where it began, the hawk's lands where it is when fire is pressed.
@@ -708,10 +847,18 @@ impl App {
             flight: None,
             sheet_cursor: 0,
             raiding: None,
+            questing: false,
             raid_place: String::new(),
             interlude: 0,
             hint: 0,
             practice: false,
+            pointer: Pointer::centred(),
+            gadgets: Gadgets::default(),
+            messages: Messages::recovered(),
+            showing: None,
+            showing_for: 0,
+            intro: Intro::new(),
+            save_path: save_path_arg(&args_of()),
             status,
             #[cfg(feature = "research")]
             research: research::Viewer::from_args()?,
@@ -726,6 +873,20 @@ impl App {
     }
 
     fn key(&mut self, code: KeyCode, down: bool) {
+        // Saving and loading are ours, and so are the keys: the original has
+        // neither. They work on any screen, because refusing is how a screen
+        // that cannot be saved from says so.
+        if down {
+            match code {
+                KeyCode::F5 => {
+                    self.save_game();
+                }
+                KeyCode::F9 => {
+                    self.load_game();
+                }
+                _ => {}
+            }
+        }
         let i = key_index(code);
         if i < 256 {
             if down && !self.keys[i] {
@@ -758,6 +919,9 @@ impl App {
                             // knights in it cannot strand you on a select screen
                             // with nothing to select.
                             Mode::Select => { self.select = None; Mode::Title }
+                            // Tab out of the intro too, so the sequence can
+                            // never hold a player who wants to play.
+                            Mode::Intro => { self.intro.skip(); Mode::Title }
                             Mode::Title => Mode::Map,
                         };
                     }
@@ -792,6 +956,17 @@ impl App {
         let dx = self.keys[3] as i32 - self.keys[2] as i32;
         let dy = self.keys[1] as i32 - self.keys[0] as i32;
 
+        // A message box is modal, the way all three of the original's are:
+        // `MESSAGE.PIV` goes up, the chain is drawn over it, and nothing else
+        // runs until it fades. Fire clears it, as `WaitFIRE` does.
+        if self.showing.is_some() {
+            self.showing_for = self.showing_for.saturating_sub(1);
+            if self.showing_for == 0 || self.pressed.iter().any(|p| *p) {
+                self.showing = None;
+            }
+            return;
+        }
+
         // The between-days screen is modal, the way `NextWHICH` puts it up
         // before anything else runs. It clears on a press, or on its own after
         // a few seconds, so a run left alone still goes on.
@@ -803,25 +978,39 @@ impl App {
             return;
         }
 
+        // The pointer, and the boxes on this screen. Laid out before the
+        // screen ticks, so what the pointer is over is the highlight that
+        // screen then acts on.
+        self.gadgets_tick(
+            self.keys[10] as i32 - self.keys[9] as i32,
+            self.keys[8] as i32 - self.keys[7] as i32,
+        );
+
         match self.mode {
+            Mode::Intro => self.intro_tick(),
             Mode::Title => self.title_tick(),
             Mode::Select => self.select_tick(),
             Mode::Map => {
-                if !self.run.alive() {
-                    // The run is over. Hold a moment so the tally can be read,
-                    // then begin again.
+                // A run that is over, won or lost. The tally holds until it is
+                // taken, and then the game goes back to where the original's
+                // own two endings go: `jmp StartAgain` for a loss, and for a
+                // win an exit to DOS, which here is the same screen because
+                // there is nowhere else to exit to.
+                if self.run.ending().is_some() {
                     self.run_over_for += 1;
-                    if self.run_over_for > 180 {
-                        self.run.restart();
+                    let taken = self.run_over_for > 30 && self.takes();
+                    if self.run_over_for > 600 || taken {
                         self.run_over_for = 0;
-                        // A new run is a new board: the same knight rides out
-                        // again, and the lairs he already emptied are full and
-                        // back on the map, keys and all.
+                        self.run.restart();
+                        // A new run is a new board: the lairs a dead knight
+                        // emptied are full and back on the map, keys and all.
                         self.stock_lairs();
                         if let Some(w) = self.world.as_mut() {
                             w.set_player_health(self.run.health_for_fight());
                             w.set_moon(self.run.moon.phase().key());
                         }
+                        self.title.touched();
+                        self.mode = Mode::Title;
                     }
                     return;
                 }
@@ -947,11 +1136,21 @@ impl App {
                 }
             }
             Mode::Place => {
+                // A run that ended while you were indoors, which is what a
+                // lair's guardian or the Valley's does: back out onto the map,
+                // where the tally is. Nothing in a place is any use to a
+                // knight who has no life points left.
+                if self.run.ending().is_some() {
+                    self.visiting = None;
+                    self.mode = Mode::Map;
+                    return;
+                }
                 let (up, down, take) = (self.pressed[0], self.pressed[1], self.takes());
                 let mut leave = false;
                 let mut days = 0;
                 let mut door: Option<String> = None;
                 let mut raid: Option<(usize, String, String, String, u32)> = None;
+                let mut quest: Option<(String, String, String, u32)> = None;
                 if let Some(s) = self.visiting.as_mut() {
                     if let Some(def) = self.places.get(&s.visit.place) {
                         if up {
@@ -968,6 +1167,9 @@ impl App {
                                 Answer::Fight { lair, arena, family, guardian, count } => {
                                     raid = Some((lair, arena, family, guardian, count));
                                 }
+                                Answer::Guardian { arena, family, guardian, count } => {
+                                    quest = Some((arena, family, guardian, count));
+                                }
                             }
                         }
                     } else {
@@ -983,6 +1185,12 @@ impl App {
                 // is set up here rather than in `place.rs`, which knows nothing
                 // about arenas, and the lair is remembered so that winning
                 // comes back to its own page instead of to the map.
+                // The Valley gate stood open. Same bout, same road back, and
+                // the lair number is what tells them apart.
+                if let Some((arena, family, guardian, count)) = quest {
+                    self.questing = true;
+                    raid = Some((usize::MAX, arena, family, guardian, count));
+                }
                 if let Some((lair, arena, family, guardian, count)) = raid {
                     let here = self.visiting.as_ref().map(|s| s.visit.place.clone());
                     if let Some(w) = self.world.as_mut() {
@@ -996,7 +1204,7 @@ impl App {
                             w.set_family(&family, pick);
                         }
                         w.set_seats(self.title.state.players.max(1), count.max(1) as usize);
-                        self.raiding = Some(lair);
+                        self.raiding = (lair != usize::MAX).then_some(lair);
                         self.raid_place = here.unwrap_or_default();
                         self.visiting = None;
                         self.voices.reset();
@@ -1083,6 +1291,40 @@ impl App {
                             }
                             let won = w.bout.winner() == Some(0);
                             w.reset();
+                            // The Valley's Guardian, which is neither a lair
+                            // nor the road: winning spends the four keys and
+                            // pays a moonstone, losing costs two more life
+                            // points on top of the one the death already took.
+                            if self.questing {
+                                self.questing = false;
+                                self.raiding = None;
+                                let place = self.raid_place.clone();
+                                let beat = won && self.run.alive();
+                                if self.enter(&place) {
+                                    let mut visit =
+                                        self.visiting.as_ref().map(|s| s.visit.clone());
+                                    if let Some(v) = visit.as_mut() {
+                                        if beat {
+                                            v.won_valley(&self.items, &mut self.run);
+                                        } else {
+                                            v.lost_valley(&mut self.run);
+                                        }
+                                    }
+                                    if let (Some(sc), Some(v)) = (self.visiting.as_mut(), visit) {
+                                        sc.visit = v;
+                                    }
+                                } else {
+                                    if beat {
+                                        self.run.valley_won(&self.items);
+                                    } else {
+                                        self.run.valley_lost();
+                                    }
+                                    if self.map.is_some() {
+                                        self.mode = Mode::Map;
+                                    }
+                                }
+                                return;
+                            }
                             // A raid won opens the floor. A raid lost leaves the
                             // lair as it was, with the guardian still in it.
                             match self.raiding.take() {
@@ -1120,6 +1362,19 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// The intro, one card at a time. Fire skips it, and when it runs out the
+    /// game opens on its title the way it would have anyway.
+    fn intro_tick(&mut self) {
+        if self.takes() || self.pressed[11] {
+            self.intro.skip();
+        }
+        self.intro.tick();
+        if self.intro.done {
+            self.mode = Mode::Title;
+            self.title.touched();
         }
     }
 
@@ -1307,6 +1562,215 @@ impl App {
         }
     }
 
+    /// Write a save.
+    ///
+    /// **Ours entirely**: the original has no save. It is taken on the map and
+    /// nowhere else, because a save is a serialization of the simulation
+    /// between one step and the next; saving inside a bout would mean carrying
+    /// every fighter's script pointer and the knives in the air for something
+    /// nobody wants to resume mid-swing. `henge_core::save` says the rest.
+    fn save_game(&mut self) -> bool {
+        if self.mode != Mode::Map || !self.run.knight.named() {
+            self.notice("only on the road");
+            return false;
+        }
+        let Some(m) = self.map.as_ref() else {
+            self.notice("no map to save");
+            return false;
+        };
+        let save = Save::of(
+            &self.run, &m.state, self.title.state.players, self.title.state.gore, self.hint,
+        );
+        let text = match serde_json::to_string_pretty(&save) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notice(format!("save failed: {e}"));
+                return false;
+            }
+        };
+        match std::fs::write(&self.save_path, text) {
+            Ok(()) => {
+                println!("saved to {}: {}", self.save_path, save.summary());
+                self.notice("saved");
+                true
+            }
+            Err(e) => {
+                self.notice(format!("save failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Read a save back, or say clearly why not.
+    ///
+    /// Three distinguishable refusals, none of which loads half a game: not a
+    /// save, a save this build cannot read, and a save that does not match its
+    /// own fingerprint.
+    fn load_game(&mut self) -> bool {
+        let text = match std::fs::read_to_string(&self.save_path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notice(format!("no save: {e}"));
+                return false;
+            }
+        };
+        let save: Save = match serde_json::from_str(&text) {
+            Ok(s) => s,
+            Err(_) => {
+                self.notice(henge_core::save::SaveError::NotASave.message());
+                eprintln!("{}: not a saved game", self.save_path);
+                return false;
+            }
+        };
+        if let Err(e) = save.check() {
+            self.notice(e.message());
+            eprintln!("{}: {e}", self.save_path);
+            return false;
+        }
+        println!("loaded {}: {}", self.save_path, save.summary());
+        self.apply(save);
+        true
+    }
+
+    /// Put a checked save into the running game.
+    fn apply(&mut self, save: Save) {
+        self.run = save.run;
+        self.title.state.players = save.players.clamp(1, henge_core::shell::SEATS);
+        self.title.state.gore = save.gore;
+        self.hint = save.wait_count % self.messages.wait_len();
+        if let Some(m) = self.map.as_mut() {
+            m.state = save.travel;
+            m.last_terrain = m.terrain_here();
+        }
+        // Whatever screen the game was on is left behind: a loaded game stands
+        // on the road, which is the only place a save is ever taken from.
+        self.visiting = None;
+        self.flight = None;
+        self.raiding = None;
+        self.sheet = false;
+        self.interlude = 0;
+        self.showing = None;
+        self.run_over_for = 0;
+        self.mode = Mode::Map;
+        self.refresh_lairs();
+        self.sync_sheet();
+        if let Some(w) = self.world.as_mut() {
+            w.set_player_health(self.run.health_for_fight());
+            w.set_player_daggers(self.run.knight.daggers);
+            w.set_moon(self.run.moon.phase().key());
+            w.set_gore(self.title.state.gore);
+        }
+    }
+
+    /// Put the pointer somewhere outright, rather than steering it.
+    ///
+    /// A window with a mouse in it should behave like one, and the pointer's
+    /// hot spot is its top left corner, which is the point `CHECKGADGET` tests.
+    fn point_at(&mut self, x: i32, y: i32) {
+        self.pointer.x = x.clamp(0, henge_core::pointer::MAX_X);
+        self.pointer.y = y.clamp(0, henge_core::pointer::MAX_Y);
+        self.pointer.woken = true;
+    }
+
+    /// Put a message box up. Modal, as all three of the original's are.
+    fn show_message(&mut self, msg: Message) {
+        if msg.is_empty() {
+            return;
+        }
+        self.showing = Some(msg);
+        self.showing_for = Self::MESSAGE_TICKS;
+    }
+
+    /// Ticks a message box holds before it goes on its own. The original waits
+    /// for fire; this does too, and gives up after a while so an unattended
+    /// game is never stuck behind one.
+    const MESSAGE_TICKS: u32 = 260;
+
+    /// What arriving somewhere says, and which of the three routines says it.
+    ///
+    /// `WAITMESSAGE` at the wizard's tower, `OCCURMESSAGE` at either city and
+    /// `INSTRUCTMESSAGE` at the stone circle, which is where the original puts
+    /// each of them.
+    fn announce(&mut self, place: &str) {
+        if self.messages.waits_on_entering(place) {
+            let msg = self.messages.wait(self.hint).clone();
+            self.hint = (self.hint + 1) % self.messages.wait_len();
+            self.show_message(msg);
+            return;
+        }
+        if let Some(msg) = self.messages.on_entering(place).cloned() {
+            self.show_message(msg);
+        }
+    }
+
+    /// Lay out the boxes the pointer can be over on whatever screen is up, and
+    /// let it drive them.
+    ///
+    /// `CLEARGADGETS` then a run of `ADDGADGET`s, exactly as the original's
+    /// screens do it, and then `CHECKGADGET`: the row under the pointer becomes
+    /// the highlighted row, and fire over it is the same press space would be.
+    /// So the pointer never invents a way to do something; it only reaches the
+    /// menus that were already there.
+    fn gadgets_tick(&mut self, dx: i32, dy: i32) {
+        self.gadgets.clear();
+        let rows: Vec<(usize, i32, i32, i32, i32)> = if self.sheet && self.mode == Mode::Map {
+            let n = self.sheet_rows().len();
+            status::sheet_menu_rects(n, Some(self.sheet_cursor))
+        } else {
+            match self.mode {
+                Mode::Title if !self.title.attracting() => shell::title_rects(),
+                Mode::Select => shell::select_rects(),
+                Mode::Place => self
+                    .visiting
+                    .as_ref()
+                    .and_then(|s| self.places.get(&s.visit.place))
+                    .map_or_else(Vec::new, place::menu_rects),
+                _ => Vec::new(),
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        for (id, x, y, w, h) in rows {
+            self.gadgets.add_box(id, x, y, w, h, "");
+        }
+        // The stick moves it two pixels a tick, which is `MovePointer`. Seat
+        // two's keys, so seat one's still move the highlight and nothing that
+        // worked before stops working.
+        self.pointer.steer(dx, dy, self.keys[11]);
+        // A pointer nobody has touched drives nothing. Without this the arrow
+        // starts in the middle of the screen and silently moves the highlight
+        // of every menu it happens to open over, which is a menu that chose
+        // itself.
+        if !self.pointer.woken {
+            return;
+        }
+        let Some(over) = self.gadgets.hit_id(&self.pointer) else { return };
+        // Being over a row is being on it, the way `GadgetHit` says the line
+        // for whatever the pointer has reached.
+        match self.mode {
+            _ if self.sheet => self.sheet_cursor = over,
+            Mode::Title => self.title.state.row = over,
+            Mode::Select => {
+                if let Some(sel) = self.select.as_mut() {
+                    if sel.state.free(over) {
+                        sel.state.cursor = over;
+                    }
+                }
+            }
+            Mode::Place => {
+                if let Some(s) = self.visiting.as_mut() {
+                    s.visit.cursor = over;
+                }
+            }
+            _ => {}
+        }
+        // And fire over it takes it, through the same edge every menu reads.
+        if self.pressed[11] {
+            self.pressed[6] = true;
+        }
+    }
+
     /// A line on the map's corner plate, where the cutpurse's notice goes.
     fn notice(&mut self, line: impl Into<String>) {
         self.robbed = line.into();
@@ -1328,9 +1792,19 @@ impl App {
             rows.push((format!("{} ({cost} xp)", a.increase_line()), lit, SheetAction::Raise(a)));
         }
         for (id, n) in self.run.kit.iter() {
-            let line = self.items.get(id).map_or_else(|| format!("Use {id}"), |d| d.action_line());
+            // A key and a moonstone are carried, not cast: `MagicCast` has no
+            // branch for either, and the panel's own line for one is `Take Key
+            // to the Valley`, which is a trade and not a use. They are listed
+            // so the pack is honest about what is in it, and unlit so nothing
+            // offers to spend the quest.
+            let token = henge_core::moon::is_token(id);
+            let line = match self.items.get(id) {
+                Some(d) if token => d.name.clone(),
+                Some(d) => d.action_line(),
+                None => format!("Use {id}"),
+            };
             let line = if n > 1 { format!("{line} x{n}") } else { line };
-            rows.push((line, true, SheetAction::Use(id.to_string())));
+            rows.push((line, !token, SheetAction::Use(id.to_string())));
         }
         rows
     }
@@ -1360,6 +1834,9 @@ impl App {
                 }
             }
             SheetAction::Use(id) => {
+                if !lit {
+                    return;
+                }
                 let cast = self.run.cast(&id, &self.items);
                 self.acted(cast);
             }
@@ -1465,7 +1942,7 @@ impl App {
     /// renderer would step again on every frame.
     fn begin_interlude(&mut self) {
         self.interlude = Self::INTERLUDE_TICKS;
-        self.hint = (self.hint + 1) % shell::HINTS.len();
+        self.hint = (self.hint + 1) % self.messages.wait_len();
         // What waits in an arena depends on the night the fight starts, so the
         // phase is pushed the moment it can change.
         if let Some(w) = self.world.as_mut() {
@@ -1529,6 +2006,8 @@ impl App {
             Ok(scene) => {
                 self.visiting = Some(scene);
                 self.mode = Mode::Place;
+                // What arriving here says, if the original says anything.
+                self.announce(id);
                 true
             }
             Err(e) => {
@@ -1560,6 +2039,12 @@ impl App {
             // 'e' is Enter, so the headless driver can prove Enter takes a menu
             // option and not only that space does.
             Some('e') => self.pressed[12] = true,
+            // Seat two's fire, which is the pointer's button: `p` for point.
+            Some('p') => { self.keys[11] = true; self.pressed[11] = true; }
+            // Save and load, so both can be driven with no keyboard: the same
+            // two calls F5 and F9 make.
+            Some('S') => { self.save_game(); }
+            Some('L') => { self.load_game(); }
             // Held and pressed both: walking reads the key, a menu reads the
             // edge, and the same letter has to drive either.
             Some('h') => { self.keys[2] = true; self.pressed[2] = true; }
@@ -1580,35 +2065,16 @@ impl App {
         self.keys[1] = y < gy;
     }
 
-    /// The tally at the end of a run. Without words this was a blank screen and
-    /// a pause, which told the player nothing about what they had just done.
+    /// The end of a run, won or lost: the original's own heading and the tally
+    /// under it. `ending::draw` is where the pixels go.
     fn draw_run_over(&mut self) {
-        // The heading is set in the title face and the tally underneath it in
-        // the small one. Both lines in the bold face overran the box and came
-        // out as blobs, because that face is twenty pixels tall and "Day 1
-        // Won 0 of 1" is far wider than the box it was centred in.
-        let Some(head) = self.fonts.remove("bold") else { return };
+        let Some(tally) = self.run.tally() else { return };
+        let bold = self.fonts.remove("bold");
         let small = self.fonts.remove("small");
-        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        let (mut dark, mut light) = (0usize, 0usize);
-        for i in 1..32 {
-            if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) { dark = i; }
-            if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) { light = i; }
+        ending::draw(&mut self.reg, &mut self.fb, bold.as_ref(), small.as_ref(), &tally);
+        if let Some(f) = bold {
+            self.fonts.insert("bold".into(), f);
         }
-        let tally = format!("Day {}   Won {} of {}", self.run.day, self.run.victories, self.run.fights);
-        let body = small.as_ref().unwrap_or(&head);
-
-        // Size the box to the words rather than hoping they fit inside a fixed
-        // one, which is what clipped the tally before.
-        let hw = head.width(&mut self.reg, "You are slain");
-        let tw = body.width(&mut self.reg, &tally);
-        let w = (hw.max(tw) + 32).min(312);
-        let x = (320 - w) / 2;
-        self.fb.rect(x, 78, w, 46, dark as u8);
-        head.draw_centred(&mut self.reg, &mut self.fb, "You are slain", 86, light as u8);
-        body.draw_centred(&mut self.reg, &mut self.fb, &tally, 110, light as u8);
-
-        self.fonts.insert("bold".into(), head);
         if let Some(f) = small {
             self.fonts.insert("small".into(), f);
         }
@@ -1708,6 +2174,12 @@ impl App {
                 &mut self.reg, &mut self.fb, font, &self.run, &self.items, colour, &rows, cursor,
             );
         }
+        // The pointer goes on last, over whatever it is pointing at, and only
+        // on a screen that has boxes for it to be over.
+        if !self.gadgets.is_empty() {
+            let p = self.pointer;
+            shell::draw_pointer(&mut self.reg, &mut self.fb, &p);
+        }
     }
 
     fn draw_scene(&mut self) {
@@ -1726,8 +2198,28 @@ impl App {
             let note = self.run.is_toad().then_some("You are a toad, and a toad has no turn");
             shell::draw_interlude(
                 &mut self.reg, &mut self.fb, &fonts, self.run.day, self.run.moon.phase(),
-                self.hint, note,
+                self.messages.wait(self.hint), note,
             );
+            return;
+        }
+        // A message box sits over everything else for the same reason: it is
+        // what `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` do.
+        if let Some(msg) = self.showing.as_ref() {
+            let fonts = shell::Fonts {
+                bold: self.fonts.get("bold"),
+                small: self.fonts.get("small"),
+            };
+            let msg = msg.clone();
+            shell::draw_message(&mut self.reg, &mut self.fb, &fonts, &msg);
+            return;
+        }
+        if self.mode == Mode::Intro {
+            let fonts = shell::Fonts {
+                bold: self.fonts.get("bold"),
+                small: self.fonts.get("small"),
+            };
+            let intro = self.intro;
+            shell::draw_intro(&mut self.reg, &mut self.fb, &fonts, &intro);
             return;
         }
         if self.mode == Mode::Title {
@@ -1787,9 +2279,7 @@ impl App {
                 self.map = Some(m);
                 if ok {
                     self.draw_flight();
-                    if !self.run.alive() {
-                        self.draw_run_over();
-                    }
+                    self.draw_run_over();
                     return;
                 }
             }

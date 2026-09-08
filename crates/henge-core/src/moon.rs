@@ -305,6 +305,13 @@ impl Moonstone {
         Moonstone::ALL.into_iter().find(|m| m.item() == id)
     }
 
+    /// The stone a single bit of `+0x16` names. `MOON:Valley` hands one out as
+    /// `al = 1; al <<= rnd & 3`, so a granted stone arrives as a bit and has
+    /// to be read back as one.
+    pub fn from_bit(bit: u8) -> Option<Moonstone> {
+        Moonstone::ALL.into_iter().find(|m| m.bit() == bit)
+    }
+
     /// The panel's own words where it has them, `st10`..`st12`.
     pub fn name(self) -> &'static str {
         match self {

@@ -8,7 +8,7 @@ use crate::framebuffer::Framebuffer;
 use henge_assets::{player_colours, player_luts, recolour, Lut, Registry};
 use henge_core::arena::Bounds;
 use henge_core::bout::{Bout, HitEvent};
-use henge_core::combat::{simple_ai, Fighter, Intent};
+use henge_core::combat::{Fighter, Intent};
 use henge_core::content::{ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH};
 use henge_core::taskvm::{field, Task};
 
@@ -21,7 +21,9 @@ const CELL_H: usize = 25;
 pub enum Control {
     /// Reads a set of keys on this machine. Moonstone was a couch game.
     Local(usize),
-    Ai { cooldown: i32, clock: i32 },
+    /// The creature's own controller, which lives in the simulation because
+    /// the state it keeps is the actor record's. See `henge_core::monster`.
+    Ai,
 }
 
 /// What the run's knight brings into the arena.
@@ -127,6 +129,33 @@ impl World {
         Ok(w)
     }
 
+    /// Who this seat is fighting: a creature's opponent is the nearest
+    /// knight, a knight's is the nearest creature. `ControlTrogg` and every
+    /// other controller begin with `mov ax, [KnightTable]; mov [Opponent], ax`,
+    /// so a creature never takes another creature for an enemy.
+    fn opposed(&self, seat: usize) -> Option<usize> {
+        let me = self.bout.fighters.get(seat)?;
+        let want_knight = me.actor != "knight";
+        let (x, y) = (me.x, me.y);
+        let nearest = |alive_only: bool| {
+            self.bout
+                .fighters
+                .iter()
+                .enumerate()
+                .filter(|(i, f)| *i != seat && (f.actor == "knight") == want_knight)
+                // Not filtered on `hidden`: the original's `Opponent` is the
+                // knight's record whatever is being done to him, and a mudman
+                // that has hold of one must not lose sight of him for it.
+                .filter(|(_, f)| !alive_only || f.alive())
+                .min_by_key(|(_, f)| (f.x - x).abs() + (f.y - y).abs() * 2)
+                .map(|(i, _)| i)
+        };
+        // A body is still an opponent: the finisher goes to whoever is down,
+        // and a creature that has just killed the knight must not go looking
+        // for another creature to fight.
+        nearest(true).or_else(|| nearest(false))
+    }
+
     /// The definition behind a seat. Every fighter in a bout was built from
     /// an actor the pack holds, so a miss here is a bug rather than a state.
     fn def_of(&self, actor: &str) -> &ActorDef {
@@ -209,7 +238,7 @@ impl World {
         let humans = humans.clamp(1, 4);
         let total = (humans + foes).clamp(2, 4);
         self.control = (0..total)
-            .map(|i| if i < humans { Control::Local(i) } else { Control::Ai { cooldown: 20 + i as i32 * 17, clock: i as i32 * 37 } })
+            .map(|i| if i < humans { Control::Local(i) } else { Control::Ai })
             .collect();
         self.reset();
     }
@@ -322,15 +351,55 @@ impl World {
                 // People are knights. The seats the machine fills are whatever
                 // the road, or the browser, asked for.
                 match self.control.get(i as usize) {
-                    Some(Control::Ai { .. }) if self.foe != "knight" => {
+                    Some(Control::Ai) if self.foe != "knight" => {
                         Fighter::new(self.foe.as_str(), &foe, x, y, facing)
                     }
                     _ => Fighter::new("knight", &knight, x, y, facing),
                 }
             })
             .collect();
+        let mut fighters: Vec<Fighter> = fighters;
+        // **The dragon's set piece.** `InitKnightvsDragon` does not put a
+        // dragon in an ordinary bout: it places the head at x 80 and z 100,
+        // then builds two more actors of its own, `Claw1TABLE` and
+        // `Claw2TABLE`, at x 5 and ten rows either side of the head. The
+        // knight comes at it from the right, and the claws guard the ground
+        // in front of it. Nothing else in the game is set up this way.
+        if self.foe == "dragon" && self.actors.contains_key("dragon_claw") {
+            let claw = self.actors["dragon_claw"].clone();
+            let mid = (b.top + b.bottom) / 2;
+            fighters.retain(|f| f.actor == "knight" || f.actor == "dragon");
+            fighters.truncate(2);
+            if let Some(d) = fighters.iter_mut().find(|f| f.actor == "dragon") {
+                d.x = 80;
+                d.y = mid;
+                d.facing = 1;
+            }
+            if let Some(k) = fighters.iter_mut().find(|f| f.actor == "knight") {
+                k.x = b.right - 60;
+                k.y = mid;
+                k.facing = -1;
+            }
+            // `DragonMoveClaw1`: claw one ten rows in front of the head,
+            // claw two twenty behind it, and both follow it.
+            for dz in [10, -20] {
+                let (x, y) = b.clamp(5, mid + dz);
+                let mut f = Fighter::new("dragon_claw", &claw, x, y, 1);
+                f.brain.timer = dz;
+                fighters.push(f);
+            }
+            self.control = (0..fighters.len())
+                .map(|i| if i == 0 { Control::Local(0) } else { Control::Ai })
+                .collect();
+        }
         self.bout = Bout::new(b, fighters);
         self.bout.bloodless = !self.gore;
+        // `SETDEMONBORD`: an actor may narrow the ground the fight is fought
+        // on, and one does.
+        {
+            let actors = &self.actors;
+            self.bout.apply_actor_borders(|name| &actors[name]);
+        }
         // The scale every fight is at. With a sheet it is the original's:
         // the knight's swing is its `*Dam` entry and the creatures, whose
         // hit points and blows are at the scale of a twenty point knight,
@@ -387,11 +456,6 @@ impl World {
         }
         if let (Some(d), Some(f)) = (self.player_daggers, self.bout.fighters.first_mut()) {
             f.record.set(field::DAGGERS, d as i32);
-        }
-        for c in self.control.iter_mut() {
-            if let Control::Ai { cooldown, .. } = c {
-                *cooldown = 20;
-            }
         }
         self.events.clear();
     }
@@ -494,24 +558,31 @@ impl World {
                 Some(Control::Local(slot)) => {
                     intents[i] = local.get(slot).copied().unwrap_or_default();
                 }
-                Some(Control::Ai { .. }) => {
+                Some(Control::Ai) => {
                     // Somebody standing, or failing that a body still worth
                     // one more blow, which is the finisher with the gore on.
+                    // The creature's own controller does the rest, inside the
+                    // simulation, where the state it keeps belongs.
                     let actors = &self.actors;
+                    // Every one of the original's controllers opens by
+                    // writing `KnightTable` into `Opponent`: a creature
+                    // fights the knight and nothing else, which is also what
+                    // keeps the dragon from taking its own claws for a foe.
                     let target = self
-                        .bout
-                        .nearest_foe(i)
+                        .opposed(i)
+                        .or_else(|| self.bout.nearest_foe(i))
                         .or_else(|| self.bout.nearest_body(i, |name| &actors[name]));
                     if let Some(target) = target {
-                        let (me, foe) = (self.bout.fighters[i].clone(), self.bout.fighters[target].clone());
-                        // The opponent judges spacing by its own reach, so a
-                        // troll swings from where a troll's club lands.
-                        let def = self.def_of(&me.actor).clone();
                         let gore = self.gore;
-                        if let Some(Control::Ai { cooldown, clock }) = self.control.get_mut(i) {
-                            *clock += 1;
-                            intents[i] = simple_ai(&me, &foe, &def, cooldown, *clock, gore);
-                        }
+                        // The bout needs a definition per actor and a mutable
+                        // hold on itself at the same time, and both live on
+                        // this struct. Lending the definitions out and taking
+                        // them back is the cheap way to say that; the map is
+                        // moved, not cloned.
+                        let actors = std::mem::take(&mut self.actors);
+                        intents[i] =
+                            self.bout.monster_intent(i, target, |name| &actors[name], gore);
+                        self.actors = actors;
                     }
                 }
                 None => {}

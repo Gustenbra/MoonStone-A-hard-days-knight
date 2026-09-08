@@ -45,18 +45,25 @@ const ACTORS: &[(&str, &[&str])] = &[
 /// sheet comes from `TileTable`, four words indexed by the landscape code,
 /// which reads `FO1` for both plain and forest, `SW1` for swamp and `WA1` for
 /// waste. The names below are those tables, in their order.
-const ARENAS: &[(&str, &str, &str, [&str; 8])] = &[
-    ("waste", "WA1.CMP", "WAB1.CMP",
+const ARENAS: &[(&str, &str, &str, &str, [&str; 8])] = &[
+    ("waste", "wa", "WA1.CMP", "WAB1.CMP",
      ["wa1", "wa2", "wa3", "wa4", "wa5", "wa6", "wa7", "wa8"]),
-    ("forest", "FO1.CMP", "FOB1.CMP",
+    ("forest", "fo", "FO1.CMP", "FOB1.CMP",
      ["fo1", "fo2", "fo3", "fo4", "fo5", "fo6", "fo7", "fo8"]),
-    ("swamp", "SW1.CMP", "SWB1.CMP",
+    ("swamp", "sw", "SW1.CMP", "SWB1.CMP",
      ["sw1", "sw2", "sw3", "sw4", "sw5", "sw6", "sw7", "sw8"]),
-    // The original calls this family "plain" and gives it the GL sheets over
-    // the GLB1 backdrop. Its scenery comes from FO1 like the forest's, not
-    // from FO2: FO2 is the sheet every family reaches for when a placement's
-    // selector byte is 4.
-    ("glade", "FO1.CMP", "GLB1.CMP",
+    // **The moors.** The original's own name for this family is in the
+    // `_LOADER` public list, where the five generators run
+    // `GENERATELANDSCAPE`, `GENERATEMOORES`, `GENERATEFOREST`,
+    // `GENERATESWAMP`, `GENERATEWASTE`: four families and a dispatcher, in
+    // landscape-code order, and the first of the four is the moors. The
+    // routine the dispatch table sends code 0 to loads `GLB1.CMP` and then
+    // reads `PlainTable[PLAINCOUNT]`, which is `GL1.t`..`GL8.t`. So the moors
+    // is not a fifth family and there is no missing `MO*` file: it is the
+    // ground this project files under its own `GL` prefix. Its scenery comes
+    // from FO1 like the forest's, not from FO2, which is the sheet every
+    // family reaches for when a placement's selector byte is 4.
+    ("glade", "gl", "FO1.CMP", "GLB1.CMP",
      ["gl1", "gl2", "gl3", "gl4", "gl5", "gl6", "gl7", "gl8"]),
 ];
 
@@ -94,6 +101,9 @@ const SHARED_TILES: &str = "FO2.CMP";
 const KNIGHT_BANKS: &[&str] = &["KN1.OB", "KN2.OB", "KN3.OB", "KN4.OB", "KN5.OB"];
 const TABLE3_BANKS: &[&str] = &["MI.C", "KI.CEL", "KI.CEL", "KI.CEL", "KI.CEL", "PO.CEL"];
 const TABLE4_BANKS: &[&str] = &["BLO.CEL", "BLO.CEL", "BLO.CEL", "BLO.CEL", "BLO.CEL"];
+/// `DrBuffer`, the table the dragon's flight over the map runs on: five slots
+/// all pointing at the same bank. See `bank_tables`.
+const DRAGON_FLIGHT_BANKS: &[&str] = &["MI.C", "MI.C", "MI.C", "MI.C", "MI.C"];
 
 /// Table 2, one creature at a time, read out of the creature loaders. An empty
 /// name is a slot that loader leaves alone.
@@ -216,9 +226,21 @@ struct Creature {
     /// writes into `+0x28` before it plays the script, named the way the
     /// knight's kinds are. That is what indexes the knight's `KnightHitSw`.
     kind: &'static str,
-    /// The creature's other attacks, by kind, where its routine has more
-    /// than one to pick from. Which it picks when is item 37.
-    alternates: &'static [(&'static str, &'static str)],
+    /// The creature's other attacks, by kind and by what the `*Dam` table
+    /// gives that kind. Which it picks when is its controller's business.
+    alternates: &'static [(&'static str, &'static str, i32)],
+    /// Which of the original's controllers it runs, as
+    /// `henge_core::monster::Controller` names them.
+    controller: &'static str,
+    /// Script rows beyond the five states: the ratman's leap, the dragon's
+    /// head lifting and lowering. Named for what the controller asks for.
+    rows: &'static [(&'static str, &'static [&'static str])],
+    /// A border this creature brings into the arena, `[left, right, top,
+    /// bottom]`. Only the demon has one, and it is `SETDEMONBORD`.
+    border: Option<[i32; 4]>,
+    /// Scripts the game's own code starts beside it rather than jumps to:
+    /// the demon's whirl, the dragon's fire.
+    spawns: &'static [&'static str],
     /// `*Hit`: the blow-taken script by the knight's attack kind, each with
     /// its own `TASKDEAD` and so its own death. A kind missing here takes
     /// `hurt`.
@@ -295,7 +317,10 @@ const CREATURES: &[Creature] = &[
         // `TrollBunt` writes 4 and `TrollChop` 0x10. `TrollHit` is one script
         // for every kind, and `TrollStruck` calls `AddBlood`.
         kind: "swing",
-        alternates: &[("chop", "Troll_Chop")],
+        alternates: &[("chop", "Troll_Chop", 6)],
+        // `ControlTroll`: the club inside a hundred, the overhead from a
+        // hundred to a hundred and fifty, and never two overheads running.
+        controller: "troll", rows: &[], border: None, spawns: &[],
         hurt_by: &[],
         blockable: false,
         bleeds: true,
@@ -313,7 +338,8 @@ const CREATURES: &[Creature] = &[
         // `TroggSwing` writes 4 and `TroggChop` 0x10; `TroggHitAxe` is the
         // row below, and `TroggStruck1` runs the knight's `CheckBlock`.
         kind: "swing",
-        alternates: &[("chop", "TroggAxe_Chop")],
+        alternates: &[("chop", "TroggAxe_Chop", 6)],
+        controller: "trogg", rows: &[], border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "TroggAxe_Stabbed"), ("swing", "TroggAxe_WaistHit"),
             ("knife", "TroggAxe_ShoulderHit"), ("rthrust", "TroggAxe_Stabbed"),
@@ -333,7 +359,8 @@ const CREATURES: &[Creature] = &[
         hurt: &["TroggHammer_WaistHit"],
         death: &["TroggHammer_Split"],
         kind: "swing",
-        alternates: &[("chop", "TroggHammer_Chop")],
+        alternates: &[("chop", "TroggHammer_Chop", 4)],
+        controller: "trogg", rows: &[], border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "TroggHammer_Stabbed"), ("swing", "TroggHammer_WaistHit"),
             ("knife", "TroggHammer_ShoulderHit"), ("rthrust", "TroggHammer_Stabbed"),
@@ -355,6 +382,9 @@ const CREATURES: &[Creature] = &[
         // `CheckBlock` and answers a block with `Knight_SwEvade`.
         kind: "lunge",
         alternates: &[],
+        // `TroggAttacks` takes its kind 0x10 branch for the spear: one lunge,
+        // only inside the approach range, and twenty frames before the next.
+        controller: "trogg_spear", rows: &[], border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "TroggSpear_Stabbed"), ("swing", "TroggSpear_WaistHit"),
             ("knife", "TroggSpear_ShoulderHit"), ("rthrust", "TroggSpear_Stabbed"),
@@ -377,7 +407,13 @@ const CREATURES: &[Creature] = &[
         // `ControlRatCollide` writes 4 for the slash and 2 for the bite,
         // which is a grab and waits on 37. `RatmenHit` is the row below.
         kind: "swing",
-        alternates: &[],
+        // `ControlRatCollide` writes 4 for the slash and 2 for the bite, and
+        // `RatmenDam` gives one for the slash and three for the bite.
+        alternates: &[("lunge", "Ratman_Bite", 3)],
+        controller: "ratman",
+        // `RatmenWal`'s up row is the leap, which is what it crosses ground on.
+        rows: &[("leap", &["Ratman_Leap"])],
+        border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "Ratman_Stabbed"), ("swing", "Ratman_Knocked"),
             ("knife", "Ratman_Stabbed"), ("rthrust", "Ratman_Stabbed"),
@@ -411,6 +447,12 @@ const CREATURES: &[Creature] = &[
         // stands in so the blow is felt.
         kind: "swing",
         alternates: &[],
+        // `ControlMudmen`: it reaches for you between seventy five and a
+        // hundred and goes under the ground inside that.
+        controller: "mudman",
+        rows: &[("bury", &["Mudmen_IBury"]), ("appear", &["Mudmen_Appear"])],
+        border: None,
+        spawns: &["Mudmen_EntangleKnight", "Mudmen_ChokeKnight", "Mudmen_KnightSd"],
         hurt_by: &[],
         blockable: false,
         bleeds: false,
@@ -421,22 +463,40 @@ const CREATURES: &[Creature] = &[
     },
     Creature {
         id: "demon", name: "Demon", banks: "demon", sheet: "actor.demon",
-        idle: &["Demon_Stance1"],
-        walk: &["Demon_Stance1"],
+        // `[di+0x10]` is `Demon_Evolve`, so the demon's own stance slot is
+        // its materialisation; the four stances that follow it are what
+        // `Demon_Stance1`'s `TASKSAVE` into `+0x10` cycles through.
+        idle: &["Demon_Stance1", "Demon_Stance2", "Demon_Stance3", "Demon_Stance4"],
+        walk: &["Demon_Stance1", "Demon_Stance2", "Demon_Stance3", "Demon_Stance4"],
         attack: &["Demon_Slap"],
         hurt: &["Demon_Hurt"],
         death: &["Demon_Death"],
         // `DemonAttack` writes 0x10 for the slap, 4 for the zap, 2 for the whip.
         kind: "chop",
-        alternates: &[],
+        alternates: &[("swing", "Demon_Zap", 4), ("lunge", "Demon_Whip", 4)],
+        controller: "demon",
+        rows: &[("evolve", &["Demon_Evolve"])],
+        // **Recovered: `SETDEMONBORD`.** The last routine in `GFX` writes one
+        // record into the border list the arena's `.T` file otherwise fills,
+        // and sets the deepest walkable row to match: 0 to 309 across, 10 to
+        // 99 deep. Nothing in the shipped image calls it, so the border is
+        // dead code there; it is real here, and it is what the demon does to
+        // the screen.
+        border: Some([0, 309, 10, 99]),
+        // `AddDemonWhirl` starts the whirl on the demon's own banks; the whip
+        // chain is four more scripts the controller hands over in turn.
+        spawns: &[
+            "Demon_Whirl", "Demon_OWhipMiss", "Demon_OWhipHit", "Demon_UWhipMiss",
+            "Demon_UWhipHit", "Demon_OWhipKnight", "Demon_UWhipKnight",
+        ],
         hurt_by: &[],
         blockable: false,
         bleeds: false,
         // `InitKnightvsDemon` writes 250 hit points and no maximum. Its blow
         // is not in a `*Dam` table; four is a stand-in between a troll's and
-        // a dragon's bite. Its screen border is `SETDEMONBORD`, not done.
+        // a dragon's bite. It moves five pixels a frame, which is one a tick.
         health: 250, damage: 4, approach: 95, back_off: 90, depth: 2,
-        reach: 65, speed: [2, 1], bounty: 100, girth: 0, moon: &[],
+        reach: 65, speed: [1, 1], bounty: 100, girth: 0, moon: &[],
     },
     Creature {
         id: "beast", name: "Beast", banks: "beast", sheet: "bank.be1",
@@ -453,6 +513,10 @@ const CREATURES: &[Creature] = &[
         // from above finds the head and its own death.
         kind: "chop",
         alternates: &[],
+        // `ControlBeast`: it never tracks. It runs from one side of the arena
+        // to the other, turns off the edge, waits five to twenty frames, picks
+        // a depth and comes back.
+        controller: "beast", rows: &[], border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "Beast_LowerHit"), ("swing", "Beast_LowerHit"),
             ("knife", "Beast_LowerHit"), ("rthrust", "Beast_LowerHit"),
@@ -478,7 +542,8 @@ const CREATURES: &[Creature] = &[
         // `ControlBalok` writes 4 for the uppercut and 0x10 for the grab.
         // `BalokStruck` calls `AddBlood`.
         kind: "swing",
-        alternates: &[],
+        alternates: &[("chop", "Balok_Grab", 4)],
+        controller: "balok", rows: &[], border: None, spawns: &[],
         hurt_by: &[],
         blockable: false,
         bleeds: true,
@@ -490,28 +555,72 @@ const CREATURES: &[Creature] = &[
     Creature {
         id: "dragon", name: "Dragon", banks: "dragon", sheet: "actor.dragon",
         idle: &["Dragon_Stance"],
-        // The dragon does not walk. Its `DragonWal` rows are the head lifting
-        // and lowering, which the set-piece drives. Here it creeps, a pixel a
-        // tick, on its standing frame, because a plain opponent that cannot
-        // close never fights; the set piece will pin it to its lair floor.
+        // The dragon does not walk anywhere. `TrackKnight` shifts its head
+        // five pixels at a time inside a corridor thirty to a hundred wide and
+        // follows the knight in depth, on the standing frame it is holding.
         walk: &["Dragon_Stance"],
         attack: &["Dragon_HighBite"],
         hurt: &["Dragon_Hit"],
         death: &["Dragon_Dead"],
-        // `DragonAttack` writes 2 for the bite. `DragonStruck` calls `AddBlood`.
+        // `DragonAttack` writes 2 for the bite, 4 for the low breath and 0x10
+        // for the high one. `DragonStruck` calls `AddBlood`.
         kind: "lunge",
-        alternates: &[],
+        alternates: &[("swing", "Dragon_LowBreath", 30), ("chop", "Dragon_HighBreath", 30)],
+        controller: "dragon",
+        // `DragonWal` holds no walk row at all: the rows at +0x10 and +0x20
+        // are the head lifting and lowering, five scripts each with the fifth
+        // repeated to fill the eight `NextWalk` steps through.
+        rows: &[
+            ("lift", &[
+                "Dragon_LiftHead1", "Dragon_LiftHead2", "Dragon_LiftHead3",
+                "Dragon_LiftHead4", "Dragon_LiftHead5", "Dragon_LiftHead5",
+                "Dragon_LiftHead5", "Dragon_LiftHead5",
+            ]),
+            ("lower", &[
+                "Dragon_LowerHead1", "Dragon_LowerHead2", "Dragon_LowerHead3",
+                "Dragon_LowerHead4", "Dragon_LowerHead5", "Dragon_LowerHead5",
+                "Dragon_LowerHead5", "Dragon_LowerHead5",
+            ]),
+        ],
+        border: None,
+        // `AddDragonFIRE` starts the breath as a task of its own;
+        // `Dragon_BitKnight` is where a bite that lands goes.
+        spawns: &["Dragon_Fire", "Dragon_BitKnight", "Dragon_HighStance"],
         hurt_by: &[],
         blockable: false,
         bleeds: true,
         // `SetUpDragonTables` writes 200 hit points and a maximum of 120.
-        // `DragonDam` is 10 for a lunge or a right thrust and 30 for a swing
-        // or a chop; the bite is given the smaller.
+        // `DragonDam`, as `InitKnightvsDragon` overwrites it for this fight,
+        // is 10 for a lunge or a right thrust and 30 for a swing or a chop.
         health: 200, damage: 10, approach: 60, back_off: 20, depth: 5,
         // The girth is a fraction of the figure, which is 212 wide: the bite
         // is at its origin, and a knight kept the figure's width away could
         // never be bitten.
         reach: 60, speed: [1, 1], bounty: 250, girth: 50, moon: &[],
+    },
+    Creature {
+        // `InitKnightvsDragon` sets two more actors up beside the dragon,
+        // `Claw1TABLE` and `Claw2TABLE`, at x 5 and ten rows either side of
+        // the head's depth. `ControlClaw` never subtracts a hit point: they
+        // guard the ground in front of the dragon and die when it does.
+        id: "dragon_claw", name: "Claw", banks: "dragon", sheet: "actor.dragon",
+        idle: &["Dragon_Claw"],
+        walk: &["Dragon_Claw"],
+        attack: &["Dragon_ClawSlap"],
+        hurt: &["Dragon_Claw"],
+        death: &["Dragon_ClawDead"],
+        // `ControlClaw` writes 0xa, the rear thrust's kind, and
+        // `InitKnightvsDragon` writes 10 into that row of `DragonDam`.
+        kind: "rthrust",
+        alternates: &[],
+        controller: "claw", rows: &[], border: None, spawns: &[],
+        hurt_by: &[],
+        blockable: false,
+        bleeds: false,
+        // `SetUpDragonTables` runs after the fifty is written and puts the
+        // dragon's own 200 and 120 back over it, so fifty never takes effect.
+        health: 200, damage: 10, approach: 0, back_off: 0, depth: 10,
+        reach: 60, speed: [0, 0], bounty: 0, girth: 30, moon: &[],
     },
 ];
 
@@ -541,7 +650,7 @@ fn main() -> anyhow::Result<()> {
     let mut m = Manifest::new("reference", Provenance::DerivedFromOriginal);
 
     // Palettes, named after the arena family that owns them.
-    for (name, sheet, _, _) in ARENAS {
+    for (name, _, sheet, _, _) in ARENAS {
         if let Ok(p) = lib.piv(sheet) {
             m.palettes.insert(format!("palette.{name}"), p.palette);
         }
@@ -635,19 +744,27 @@ fn main() -> anyhow::Result<()> {
     let mut arenas = BTreeMap::new();
     for name in lib.with_extension(&["t"]) {
         let Ok(t) = lib.terrain(&name) else { continue };
-        // The F09/SW9 stubs carry garbage bounds and no usable placements.
+        // The F09/SW9 stubs carry garbage bounds. An arena with no scenery at
+        // all is still an arena, and `SWL2.T` is one: it has the same bounds
+        // as its neighbours and a placement list that is empty on purpose.
+        // Dropping it left the fourteenth lair with no layout to fight in.
         let sane = t.left < t.right
             && t.top < t.bottom
             && t.right < 640
             && t.bottom < 400;
-        if t.placements.is_empty() || !sane {
+        if !sane {
             continue;
         }
         let stem = name.split('.').next().unwrap_or(&name).to_lowercase();
+        // Each family says what its own files are called. Matching on the
+        // first two letters of the family's *name* worked only because this
+        // project happened to name the moors after its `GL` files; a family
+        // renamed to what the original calls it would have sent every one of
+        // its arenas to the fallback and drawn them over the forest's sky.
         let family = ARENAS
             .iter()
-            .find(|(f, _, _, _)| stem.starts_with(&f[..2]))
-            .map(|(f, _, _, _)| *f)
+            .find(|(_, prefix, _, _, _)| stem.starts_with(prefix))
+            .map(|(f, _, _, _, _)| *f)
             .unwrap_or("forest");
         arenas.insert(stem, serde_json::json!({ "family": family, "terrain": t }));
     }
@@ -665,7 +782,7 @@ fn main() -> anyhow::Result<()> {
     let key = |f: &str| format!("scene.{}", f.split('.').next().unwrap_or(f).to_lowercase());
     let families: BTreeMap<&str, serde_json::Value> = ARENAS
         .iter()
-        .map(|(name, sheet, backdrop, rotation)| {
+        .map(|(name, _, sheet, backdrop, rotation)| {
             let creatures: &[&str] =
                 AMBUSHES.iter().find(|(f, _)| f == name).map_or(&[], |(_, c)| *c);
             (*name, serde_json::json!({
@@ -854,6 +971,21 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
             let banks: Vec<Bank> = files.iter().map(|f| bank_of(lib, f, &mut cache)).collect();
             if banks.iter().any(|b| !b.cels.is_empty()) {
                 tables.insert(n, banks);
+            }
+        }
+        // Table 5 is not one of the four `TASKCELBUF` chooses between. It is
+        // `DrBuffer` at DS:0xccbc, which `_MAP:ContinueDragon` builds by
+        // writing the pointer at DS:0x8975 into all five of its slots, and
+        // `Dragon_Flight1`..`8` run on it. That pointer is `MI.C`, the map
+        // icon bank: the loader at 0x88b5 loads `ki.cel` first, then stores
+        // where the *next* file will land before loading `mi.c` there, so the
+        // address it keeps a second copy of is the map icons and not the moon.
+        // Cels 34 to 41 of `MI.C` are the eight frames of a beating wing.
+        if *creature == "dragon" {
+            let banks: Vec<Bank> =
+                DRAGON_FLIGHT_BANKS.iter().map(|f| bank_of(lib, f, &mut cache)).collect();
+            if banks.iter().any(|b| !b.cels.is_empty()) {
+                tables.insert(5, banks);
             }
         }
         out.insert(creature.to_string(), tables);
@@ -1105,6 +1237,10 @@ fn actor_definitions(
     def.blocks = KNIGHT_BLOCKS.iter().map(|(k, g)| (k.to_string(), g.to_string())).collect();
     def.finishes = KNIGHT_FINISHES.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
     def.blockable = true;
+    // `CONTROLTABLE[6]` is `ControlKnight`, which reads a joystick. A knight
+    // in a seat the machine plays gets the plain opponent, which closes and
+    // swings and struggles out of a hold.
+    def.controller = "knight".into();
     def.animation = animation;
     if !def.animation.is_empty() {
         def.validate().map_err(|e| anyhow::anyhow!("knight: {e}"))?;
@@ -1150,7 +1286,9 @@ fn creature_definition(
     let roots: Vec<&str> = [c.idle, c.walk, c.attack, c.hurt, c.death]
         .iter()
         .flat_map(|v| v.iter().copied())
-        .chain(c.alternates.iter().map(|(_, s)| *s))
+        .chain(c.alternates.iter().map(|(_, s, _)| *s))
+        .chain(c.rows.iter().flat_map(|(_, v)| v.iter().copied()))
+        .chain(c.spawns.iter().copied())
         .chain(c.hurt_by.iter().map(|(_, s)| *s))
         .chain(c.bleeds.then_some(BLOOD))
         .chain(std::iter::once(recover))
@@ -1232,9 +1370,15 @@ fn creature_definition(
         c.kind.to_string(),
         AttackDef { script: c.attack[0].to_string(), damage: c.damage },
     );
-    for (kind, script) in c.alternates {
-        def.attacks.insert(kind.to_string(), AttackDef { script: script.to_string(), damage: c.damage });
+    for (kind, script, damage) in c.alternates {
+        def.attacks
+            .insert(kind.to_string(), AttackDef { script: script.to_string(), damage: *damage });
     }
+    for (row, names) in c.rows {
+        def.scripts.insert(row.to_string(), names.iter().map(|n| n.to_string()).collect());
+    }
+    def.controller = c.controller.to_string();
+    def.border = c.border;
     def.attack = c.kind.to_string();
     def.hurt_by = c.hurt_by.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
     def.blockable = c.blockable;
@@ -1249,9 +1393,34 @@ fn creature_definition(
 /// recovered, so this was read off the artwork: the banks turned out to run
 /// A-Z, then a-z, then 0-9, then punctuation.
 ///
+/// **The map was read off the artwork, and it has now been checked against the
+/// executable's own table and is right.** `GFX:TextASCII` at image 107,446 is
+/// 95 bytes, indexed by `character - 32`, and `TextP` reads it with
+/// `sub al, 0x20; mov di, TextASCII; add di, ax; mov al, [di]`. It says:
+///
+/// ```text
+/// A-Z -> 0..25    a-z -> 26..51   0-9 -> 52..61
+/// !   -> 62       .   -> 64       ,   -> 65
+/// #   -> 66       $   -> 67       %   -> 68
+/// anything with no glyph -> 69    '   -> 70       / and \ -> 71
+/// ```
+///
+/// which is this map exactly, with one difference and one gap. The difference
+/// is the bold font's glyph 71, guessed here as a bar and actually the slash,
+/// the same as the small font's. The gap is glyph 63: **no character maps to
+/// it**, so the `?` below is the one entry the table cannot confirm and it is
+/// kept as the reading of the artwork it always was.
+///
 /// A few glyphs near the end are ornaments whose meaning is not obvious. They
 /// are left unmapped rather than guessed at, which costs nothing: an unmapped
 /// glyph is simply never drawn.
+///
+/// **The metrics are recovered too.** `TextP` advances by the glyph's own cel
+/// width and nothing else, except that `CheckBOLD` sets bit 3 of the record's
+/// flag word whenever the current font is `BOLD.F`, and `TextP` then does
+/// `sub word ptr [textwidth], 3` before it draws. So the bold face tracks three
+/// pixels tight and the small face not at all, and the space is glyph 69 like
+/// any other character: fifteen wide in the bold bank, five in the small.
 fn font_definitions() -> String {
     const LETTERS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!?.,";
     // Six more, read off the artwork the same way the letters were. Glyph 69 is
@@ -1260,23 +1429,25 @@ fn font_definitions() -> String {
     // and the bold font's a horizontal bar. A status panel prints health as
     // `have/most`, which is why the small font's slash is worth having.
     const SMALL_TAIL: &str = "#$% '/";
-    const BOLD_TAIL: &str = "#$% '-";
+    const BOLD_TAIL: &str = "#$% '/";
     serde_json::json!({
         "bold": {
             "sheet": "bank.bold",
             // glyphs[i] is the character glyph i draws.
             "glyphs": format!("{LETTERS}{BOLD_TAIL}"),
             "space": 69,
-            "space_width": 7,
-            "tracking": 1,
+            // Glyph 69 is fifteen wide and the bold face tracks three tight.
+            "space_width": 12,
+            "tracking": -3,
             "line_height": 20
         },
         "small": {
             "sheet": "bank.small",
             "glyphs": format!("{LETTERS}{SMALL_TAIL}"),
             "space": 69,
-            "space_width": 4,
-            "tracking": 1,
+            // Glyph 69 is five wide, and only the bold face is tracked.
+            "space_width": 5,
+            "tracking": 0,
             "line_height": 8
         }
     })
@@ -1413,6 +1584,26 @@ fn lair_arena(family: &str, n: usize) -> String {
         _ => "gl",
     };
     format!("{prefix}l{}", n + 1)
+}
+
+/// Where the Valley of the Gods stands.
+///
+/// **Ours, and the ground is not.** `MOON:MapIconsTABLE` is in the unreadable
+/// 2,906 bytes with every other place but the two towns, so the coordinates
+/// cannot be read. What can be read is what the fight behind the gate looks
+/// like: `InitKnightvsDemon` ends with `mov ax, 4; call ColourBackDrop`, and 4
+/// is the swamp in `_MAP:MapType`'s own coding. So the Valley is sited on
+/// marsh, by the same neighbourhood test the lairs use, and of the cells that
+/// pass it takes the one furthest from either town, because a place you need
+/// four keys to open should not be next door to a merchant.
+fn valley_site(ground: &[u8], taken: &[(i32, i32, i32, i32)]) -> Option<(i32, i32)> {
+    const TOWNS: [(i32, i32); 2] = [(94, 47), (297, 157)];
+    let far = |c: &&(i32, i32)| {
+        TOWNS.iter().map(|t| (c.0 - t.0).pow(2) + (c.1 - t.1).pow(2)).min().unwrap_or(0)
+    };
+    // A wide sample of the marsh, then the remotest of it. `lair_sites` returns
+    // six spread across the region, which is exactly the set to choose from.
+    lair_sites(ground, 4, taken).iter().max_by_key(|c| (far(c), -c.1, -c.0)).copied()
 }
 
 /// Where the twenty four lairs stand.
@@ -1855,11 +2046,54 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>, ground: &[u8]) -> String 
         }),
     );
 
+    // The Valley of the Gods, which is what four keys are for.
+    //
+    // **The label is recovered**: `_MAP:knvalley` is `Enter Valley of the
+    // Gods`, and what the gate says when it is shut is `NoKeysMessage`, whose
+    // three lines are `henge_core::quest::NO_KEYS`. **The Guardian is
+    // recovered too**: `MOON:FightDemon` calls `InitKnightvsDemon`, which sets
+    // 250 health, one monster and `ColourBackDrop` 4. The arena is left empty
+    // so the swamp's own rotation picks one, the way the road does.
+    //
+    // **Ours**: where it stands (see `valley_site`) and the picture behind the
+    // gate, which is the intro plate of a portal standing open on an altar.
+    // MOON names no picture for the Valley; the only one it names at all is
+    // `bg8.piv`, and that is the ending's.
+    let mut taken: Vec<(i32, i32, i32, i32)> =
+        vec![highwood, waterdeep, healer, stones, wizard];
+    if let Some(site) = valley_site(ground, &taken) {
+        let (w, h) = icon(0x1c, (13, 10));
+        let (x, y, w, h) = at(site, (w, h));
+        taken.push((x, y, w, h));
+        places.insert(
+            "valley".into(),
+            serde_json::json!({
+                "name": "Valley of the Gods",
+                "scene": "scene.bg4",
+                "x": x, "y": y, "w": w, "h": h,
+                "icon": 0x1c,
+                "menu": [8, 12, 168, 40],
+                "text": [6, 146, 308, 42],
+                "options": [
+                    {
+                        "label": "Enter Valley of the Gods",
+                        "effect": {
+                            "do": "valley",
+                            "arena": "",
+                            "family": "swamp",
+                            "guardian": "demon",
+                            "count": 1
+                        }
+                    },
+                    { "label": "Leave", "effect": leave }
+                ]
+            }),
+        );
+    }
+
     // And the lairs. Everything already placed is kept clear of, in the order
     // the families are laid out, so no two lairs and no lair and a town ever
     // share ground.
-    let mut taken: Vec<(i32, i32, i32, i32)> =
-        vec![highwood, waterdeep, healer, stones, wizard];
     for (family_index, (family, scene, guardians)) in LAIRS.iter().enumerate() {
         let code = match *family {
             "glade" => 0u8,
@@ -1989,22 +2223,61 @@ fn item_definitions() -> String {
         },
         // The four lair keys, one hidden in each family's six. `MOON:Valley`
         // wants all four bits of `+0x14` set; a pack that carries items by id
-        // needs four ids, and these are `moon::Key::item`'s. They are worth
-        // nothing at any counter, because `moon::is_token` refuses them.
+        // needs four ids, and these are `moon::Key::item`'s.
+        //
+        // **The price is recovered and no counter in henge will take it.**
+        // `_STATUS` has `Buy Key for 12 GP` and `Sell Key for 6 GP`, and the
+        // half is `GoldSell`'s own `shr ax, 1`, which is a check on both. But
+        // that page is a trade between two knights (`BuyMoonstone` ORs the bit
+        // into the buyer's `+0x14` and XORs it out of the seller's), not a
+        // shop, and henge has one knight to a run, so `moon::is_token` still
+        // refuses to sell one. The number is here because it is the
+        // original's, and because a second player at the same map will want
+        // it.
         "key.forest": {
-            "name": "Key of the forest", "price": 0, "consumed": false,
+            "name": "Key of the forest", "price": 12, "consumed": false,
             "virtue": { "does": "inert" }
         },
         "key.waste": {
-            "name": "Key of the wastes", "price": 0, "consumed": false,
+            "name": "Key of the wastes", "price": 12, "consumed": false,
             "virtue": { "does": "inert" }
         },
         "key.swamp": {
-            "name": "Key of the marsh", "price": 0, "consumed": false,
+            "name": "Key of the marsh", "price": 12, "consumed": false,
             "virtue": { "does": "inert" }
         },
         "key.glade": {
-            "name": "Key of the glades", "price": 0, "consumed": false,
+            "name": "Key of the glades", "price": 12, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+
+        // The four moonstones, which is what the Valley of the Gods pays for
+        // four keys: `MOON:Valley` sets one bit of `+0x16` as `1 << (rnd & 3)`
+        // and `MOON:Henge` ends the game for whoever stands in the circle with
+        // the one whose night it is.
+        //
+        // **Three of the four names are recovered**, from the status panel's
+        // own list beside `Key to the Valley`: `New moon Moonstone`,
+        // `Full Moonstone` and `Half Moonstone`. There are four bits and three
+        // names, so `Gibbous Moonstone` is ours; see `moon::Moonstone`, where
+        // the two routines that pair a bit with a phase also disagree with
+        // each other. The price is `Buy Moonstone for 20 GP` and
+        // `Sell Moonstone for 10 GP`, and is refused here for the same reason
+        // the keys' is.
+        "moonstone.new": {
+            "name": "New moon Moonstone", "price": 20, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "moonstone.full": {
+            "name": "Full Moonstone", "price": 20, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "moonstone.half": {
+            "name": "Half Moonstone", "price": 20, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "moonstone.gibbous": {
+            "name": "Gibbous Moonstone", "price": 20, "consumed": false,
             "virtue": { "does": "inert" }
         },
 
@@ -2168,6 +2441,57 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), ids.len(), "an id is listed twice");
+    }
+
+    /// Every creature runs one of the original's controllers, and every
+    /// controller in the engine is one some creature runs. Item 37 is only
+    /// done if nobody is left on the plain opponent by accident.
+    #[test]
+    fn every_creature_names_a_controller_the_engine_knows() {
+        use henge_core::monster::Controller;
+        let mut used: BTreeSet<&str> = BTreeSet::new();
+        for c in CREATURES {
+            let known = Controller::from_name(c.controller);
+            assert!(known.is_some(), "{}: no controller called {}", c.id, c.controller);
+            assert_ne!(
+                known,
+                Some(Controller::Knight),
+                "{} is still fighting like a knight in a costume",
+                c.id
+            );
+            used.insert(c.controller);
+        }
+        for want in [
+            "trogg", "trogg_spear", "troll", "ratman", "mudman", "balok", "beast", "demon",
+            "dragon", "claw",
+        ] {
+            assert!(used.contains(want), "nothing in the bestiary runs {want}");
+        }
+    }
+
+    /// **Item 59.** The moors is landscape code 0, whose generator loads
+    /// `GLB1.CMP` and rotates `GL1.t`..`GL8.t`; the four families and their
+    /// file prefixes are what the four `GENERATE*` routines read. A family
+    /// whose prefix does not match its own rotation would send every one of
+    /// its arenas to the fallback, which is how a whole family goes missing.
+    #[test]
+    fn every_family_owns_the_layouts_its_own_prefix_claims() {
+        let mut prefixes: BTreeSet<&str> = BTreeSet::new();
+        for (name, prefix, _, _, rotation) in ARENAS {
+            assert!(prefixes.insert(prefix), "{name}: two families claim {prefix}");
+            for arena in rotation {
+                assert!(
+                    arena.starts_with(prefix),
+                    "{name} rotates through {arena}, which is not a {prefix} layout"
+                );
+            }
+        }
+        assert_eq!(prefixes.len(), 4, "four generators, four families");
+        // And the moors keeps its own backdrop, which is the one thing that
+        // tells it apart from the forest it shares a scenery sheet with.
+        let moors = ARENAS.iter().find(|(n, ..)| *n == "glade").expect("no moors family");
+        assert_eq!(moors.1, "gl");
+        assert_eq!(moors.3, "GLB1.CMP");
     }
 
     /// The check is real: misspell one script and the creature is refused,

@@ -231,6 +231,40 @@ pub struct Fighter {
     /// held and `xor ax, 3` when left or right is. Fire is left alone.
     #[serde(default)]
     pub cursed: bool,
+    /// The controller state of a creature that has one of its own: the
+    /// cooldown, timer and flags the original keeps in the actor record at
+    /// `+0x0a`, `+0x0b`, `+0x48`, `+0x49` and `+0x4a`. See [`crate::monster`].
+    #[serde(default)]
+    pub brain: crate::monster::Brain,
+    /// The script this fighter's own controller handed it, which is the
+    /// original's `DS:0x783a` and `+0x28`. A creature does not press a button:
+    /// its routine names the script and the kind outright, so an order is what
+    /// a creature has where a person has an [`Intent`].
+    #[serde(default)]
+    pub ordered: Option<Order>,
+    /// The standing order the controller last gave, kept because a controller
+    /// only runs on the frame its animation ended (the original's `task+1`),
+    /// while the simulation ticks six times for each of those frames. The
+    /// original keeps the same thing in `+0x26`.
+    #[serde(default)]
+    pub drive: Intent,
+    /// Something has hold of this fighter: the mudman's arms
+    /// (`MudmenEntangle`). Held, its own input is ignored until it breaks free.
+    #[serde(default)]
+    pub holder: Option<usize>,
+    /// Off the board, and not drawn: `KnightOFF`, which the demon's zap calls
+    /// before `KnightON` puts him back beside it.
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+/// What a creature's own controller told it to do, as against what a joystick
+/// would have said. `state` and `script` are `[0x783a]`; `attack` is `+0x28`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Order {
+    pub state: State,
+    pub script: String,
+    pub attack: Option<Attack>,
 }
 
 impl Fighter {
@@ -267,7 +301,17 @@ impl Fighter {
             restart: false,
             bonus: 0,
             cursed: false,
+            brain: crate::monster::Brain::default(),
+            ordered: None,
+            drive: Intent::default(),
+            holder: None,
+            hidden: false,
         };
+        // The demon's own stance slot (`[di+0x10]`) is `Demon_Evolve`, so the
+        // first thing it does is arrive. Nothing else has an entrance.
+        if def.controller() == crate::monster::Controller::Demon {
+            f.brain.flags |= crate::monster::flag::UNBORN;
+        }
         // Run the first frame of the standing script now, so a fighter is
         // visible before anything has ticked. Without it a screenshot taken at
         // tick zero shows an empty arena, and a task that has never stepped has
@@ -366,6 +410,16 @@ impl Fighter {
         }
     }
 
+    /// Is this fighter's own controller due to run?
+    ///
+    /// The original's task loop calls a controller when the actor has hit
+    /// something, been struck, or its animation has ended (`task+1` clear).
+    /// A one-frame stance clears that every frame, so a standing creature is
+    /// asked every frame and a swinging one only when the swing is over.
+    pub fn ready(&self, def: &ActorDef) -> bool {
+        !self.state.is_committed() || self.animation_done(def)
+    }
+
     pub fn sequence<'a>(&self, def: &'a ActorDef) -> Option<&'a Sequence> {
         def.sequence(self.state.sequence_name())
     }
@@ -422,15 +476,73 @@ impl Fighter {
             return Vec::new();
         }
 
+        // Held: `MudmenEntangle` takes the knight's control away entirely and
+        // reads only fire and down, which is the struggle. Everything else he
+        // presses does nothing until he is free or dead.
+        if self.holder.is_some() {
+            self.ordered = None;
+            // `MudmenEntangle`: `test bx, 0x10` and `test bx, 4`, fire and
+            // down, and only both together tear him loose.
+            if intent.attack && intent.dy > 0 {
+                self.holder = None;
+                self.hidden = false;
+            } else {
+                if def.scripted() {
+                    return self.run_task(def, bounds, bloodless);
+                }
+                return Vec::new();
+            }
+        }
+
         // A committed action runs to completion before input is looked at
         // again. It is looked at on the tick the action ends, the way the
         // original's controller runs on the frame `task+1` clears, which is
         // what lets a held block stay up with no gap in it.
-        if self.state.is_committed() && self.animation_done(def) {
+        // A finished action falls back to standing, unless this fighter's own
+        // controller has already named what comes next, which is what the
+        // original's task loop does on the frame `task+1` clears.
+        // A fighter its own controller is driving keeps showing the last frame
+        // of whatever it was given until that controller speaks again, which
+        // is what `DS:0x783a` holding 0xffff means. Only a fighter nobody is
+        // driving falls back to standing the moment its animation ends.
+        if self.state.is_committed()
+            && self.animation_done(def)
+            && self.ordered.is_none()
+            && self.brain.flags & crate::monster::flag::DRIVEN == 0
+        {
             self.enter(State::Idle);
         }
-        if self.state.is_committed() {
+        let busy = self.state.is_committed() && !self.animation_done(def);
+        if busy {
             // still busy
+        } else if let Some(order) = self.ordered.take() {
+            // A creature's own controller names the script and the kind
+            // outright, the way the original writes `DS:0x783a` and `+0x28`,
+            // rather than pressing a button and letting `KnightAttack`
+            // choose. Everything else about the state is the same.
+            if order.state == State::Walk {
+                if intent.dx != 0 {
+                    self.facing = intent.dx.signum();
+                }
+                self.evaded = false;
+            }
+            if order.script.is_empty() {
+                self.enter(order.state);
+            } else {
+                // `REPLACEANIM`: the same script handed over again means play
+                // it again. Without that a hold whose animation is shorter
+                // than the hold drops to a stance between frames.
+                if self.state == order.state && self.script == order.script {
+                    self.state = State::Idle;
+                    self.script.clear();
+                }
+                self.enter_on(order.state, order.script);
+            }
+            self.attack = order.attack;
+        } else if self.brain.flags & crate::monster::flag::DRIVEN != 0 {
+            // A creature with a controller of its own has no joystick to read.
+            // Between one order and the next it carries on with what it was
+            // given, which is `DS:0x783a` left at 0xffff.
         } else if intent.attack {
             // `KnightAttack`: the direction held with fire, relative to the
             // facing, picks the attack. Fire alone is the stance in the
@@ -465,7 +577,7 @@ impl Fighter {
 
         // Free movement only while not committed. Committed frames may still
         // carry the actor via their own dx/dy.
-        if !self.state.is_committed() && self.state == State::Walk {
+        if self.state == State::Walk {
             let (x, y) = bounds.clamp(
                 self.x + intent.dx * def.speed_x,
                 self.y + intent.dy * def.speed_y,
@@ -648,7 +760,11 @@ impl Fighter {
             return;
         }
         let hurt = if def.scripted() { def.hurt_for(by) } else { None };
-        self.health -= damage;
+        // `ControlClaw` never subtracts: the dragon's forelimbs take a blow
+        // and are unmoved by it.
+        if def.controller().takes_damage() {
+            self.health -= damage;
+        }
         match hurt {
             Some(script) => {
                 if self.health < 0 {
@@ -804,85 +920,6 @@ fn segments_cross(p1: (i32, i32), p2: (i32, i32), p3: (i32, i32), p4: (i32, i32)
     };
     let (d1, d2, d3, d4) = (d(p3, p4, p1), d(p3, p4, p2), d(p1, p2, p3), d(p1, p2, p4));
     ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
-}
-
-/// A deliberately plain opponent, but one a person can fight.
-///
-/// The first version closed at full speed and swung on every cooldown, which
-/// against a human on twenty health meant being pinned in place and cut down
-/// without a chance to answer: equal speed meant no getting away, and every
-/// hit froze the player for the next. This one has a rhythm that can be read
-/// and exploited, which is what makes a fight a game rather than a countdown.
-///
-/// * It closes at two thirds of walking speed, so the player can always make
-///   space by backing off.
-/// * After a swing it steps back for a moment before coming in again.
-/// * Every so often it hesitates, which is the opening to attack it.
-///
-/// `clock` is any counter that advances once a tick. Real behaviour, per
-/// creature, comes with the bestiary; this exists so combat can be felt.
-///
-/// One thing here is the original's rather than ours: with the gore on, a
-/// creature that has put a knight down comes in for one more blow while he
-/// is still kneeling (`TroggAttack`, on `DeCapFLAG`, inside a hundred
-/// pixels), which is the swing that takes the head. `gore` is that switch,
-/// and `foe` may be a body for as long as it can still be struck.
-pub fn simple_ai(
-    me: &Fighter,
-    foe: &Fighter,
-    def: &ActorDef,
-    cooldown: &mut i32,
-    clock: i32,
-    gore: bool,
-) -> Intent {
-    if !me.alive() {
-        return Intent::default();
-    }
-    *cooldown = (*cooldown - 1).max(0);
-    let dx = foe.x - me.x;
-    let dy = foe.y - me.y;
-    let reach = def.reach;
-    let toward = dx.signum();
-    let level = dy.abs() <= def.depth_tolerance;
-
-    if !foe.alive() {
-        // The finisher, or nothing.
-        let body = foe.state == State::Dead
-            && foe.task.as_ref().map_or(false, |t| {
-                t.active && t.shown.iter().any(|p| p.is(taskvm::part_flags::BODY))
-            });
-        if !gore || !body || *cooldown > 0 {
-            return Intent::default();
-        }
-        if dx.abs() <= reach && level {
-            *cooldown = def.attack_cooldown;
-            return Intent { dx: 0, dy: 0, attack: true };
-        }
-        return Intent { dx: if dx.abs() > reach - 4 { toward } else { 0 }, dy: if !level { dy.signum() } else { 0 }, attack: false };
-    }
-
-    // Recovering from a swing: back off, then wait it out.
-    if *cooldown > 0 {
-        let backing = *cooldown > def.attack_cooldown - 14;
-        return Intent { dx: if backing { -toward } else { 0 }, dy: 0, attack: false };
-    }
-
-    if dx.abs() <= reach && level {
-        *cooldown = def.attack_cooldown;
-        return Intent { dx: 0, dy: 0, attack: true };
-    }
-
-    // A pause in the approach, every couple of seconds, that a watching
-    // player can learn to use.
-    if clock.rem_euclid(150) < 30 {
-        return Intent::default();
-    }
-
-    Intent {
-        dx: if dx.abs() > reach - 4 && clock % 3 != 0 { toward } else { 0 },
-        dy: if !level { dy.signum() } else { 0 },
-        attack: false,
-    }
 }
 
 #[cfg(test)]
@@ -1438,22 +1475,42 @@ pub(crate) mod tests {
         assert_eq!(f.attack, None);
     }
 
+    /// What stood here was `simple_ai`, a hand written opponent with a rhythm
+    /// chosen for playability: two thirds speed, a step back after every
+    /// swing, and a hesitation every couple of seconds. None of that was the
+    /// original's, and item 37 replaced it with `ControlKnight`'s own shape
+    /// through the recovered tracker. The claim the old test made is the one
+    /// kept here: an opponent closes, and then it swings.
     #[test]
-    fn the_opponent_closes_distance_then_swings() {
-        let d = def();
+    fn the_plain_opponent_closes_distance_then_swings() {
+        use crate::monster::{decide, Act, Brain, Sight};
+        let d = ActorDef { controller: "knight".into(), approach: 100, back_off: 80, ..def() };
         let me = Fighter::new("a", &d, 0, 100, 1);
+        let look = |foe: &Fighter, brain: &mut Brain| {
+            let s = Sight {
+                me: &me,
+                foe,
+                def: &d,
+                bounds: bounds(),
+                gore: true,
+                body: false,
+                decapped: false,
+            };
+            let mut seed = 1u16;
+            decide(&s, brain, &mut seed)
+        };
+        let mut brain = Brain::default();
         let far = Fighter::new("b", &d, 200, 100, -1);
-        let mut cd = 0;
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 31, true).dx, 1, "walks toward a distant foe");
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 33, true).dx, 0, "but not every tick: slower than a person");
-        assert_eq!(simple_ai(&me, &far, &d, &mut cd, 10, true).dx, 0, "and it hesitates now and then");
-
-        let near = Fighter::new("b", &d, 20, 100, -1);
-        let mut cd = 0;
-        assert!(simple_ai(&me, &near, &d, &mut cd, 31, true).attack, "swings when in reach");
-        assert_eq!(cd, d.attack_cooldown);
-        let after = simple_ai(&me, &near, &d, &mut cd, 32, true);
-        assert!(!after.attack, "one swing, then it recovers");
-        assert_eq!(after.dx, -1, "and gives ground while it does");
+        assert!(
+            matches!(look(&far, &mut brain), Act::Walk { dx: 1, .. }),
+            "walks toward a distant foe"
+        );
+        let near = Fighter::new("b", &d, 90, 100, -1);
+        assert!(
+            matches!(look(&near, &mut brain), Act::Attack { .. }),
+            "swings once it is in range"
+        );
+        assert_eq!(brain.cooldown, 20, "and waits before the next one");
+        assert_eq!(look(&near, &mut brain), Act::Idle, "one swing at a time");
     }
 }

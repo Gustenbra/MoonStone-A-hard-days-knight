@@ -7,12 +7,12 @@ need your own copy of the original, which the engine reads and converts locally.
 
 > **Status: early, and private while the licence is undecided.**
 > Combat and overworld travel work, and the road is walked by the original's own
-> creatures, animated from its own scripts. Their behaviour is still a plain
-> opponent's; `docs/BUILD_ORDER.md` says what is and is not there.
+> creatures, animated from its own scripts and fighting on their own recovered
+> controllers; `docs/BUILD_ORDER.md` says what is and is not there.
 
 ## What works
 
-- 57 combat arenas across four families, with real terrain, scenery and depth sorting
+- 56 combat arenas across four families, with real terrain, scenery and depth sorting
 - An overworld you travel across, with a day cycle and ambushes, laid out by the
   original's own two map tables: which of the four kinds of ground each 8x8 block
   is, and how hard that block is to cross. Nothing on the map is impassable; the
@@ -39,6 +39,13 @@ need your own copy of the original, which the engine reads and converts locally.
   layout and each holding gold, magic, or both. One of the four keys is hidden in
   one lair of each family, and a lair you have beaten but could not carry out of
   stays on the map to come back to
+- **The quest, and the end of it.** One of the four keys is in one lair of each kind of
+  ground, and four of them open the Valley of the Gods, where the Guardian waits on marsh
+  ground because the original's own set-up routine colours the backdrop that way. Beating
+  it spends all four keys and pays one of the four moonstones, and standing in the stone
+  circle with the stone whose night it is ends the game. Short of that, five life points:
+  a knight put down is whole again and one point poorer, and only the last of them is
+  `GAME OVER`. What every step of it says is the original's own words
 - **The moon the game is named after.** Four days to a phase, eight steps to the
   cycle, and a between-days screen with tonight's moon over the night sky and one
   of the fourteen things the Gods have to say. The ratmen are stronger on some
@@ -75,16 +82,48 @@ need your own copy of the original, which the engine reads and converts locally.
   troll, and a knight left kneeling can lose his head to the next swing. Turn
   the gore off and the same blow is a collapse, because the scripts themselves
   branch on the switch
-- **The bestiary.** Troll, trogg with axe, hammer or spear, ratmen, mudmen, beast,
-  Balok, demon and dragon, each running the original's own animation scripts on
-  its own sprite banks, with the hit points, blows and ranges the original's own
-  set-up routines give them. Ambushes on the road field them by the ground you
-  are standing on. The demon's screen border and the dragon's set piece are not
-  built and are not faked
+- **The bestiary, and each of them fights like itself.** Troll, trogg with axe,
+  hammer or spear, ratmen, mudmen, beast, Balok, demon and dragon, each running
+  the original's own animation scripts on its own sprite banks, with the hit
+  points, blows and ranges the original's own set-up routines give them.
+  **What each does with those ranges is its own routine, and they all read**:
+  the trogg picks the overhead or the swing by distance and chops through a
+  held block a third of the time, the troll never swings overhead twice
+  running, the ratman slashes inside forty and bites to fifty and leaps at
+  anything further, the mudman comes at you on a diagonal and goes under the
+  ground to come up beside you and takes hold of you with its arms, Balok hops
+  in and stands off until you reach for a dagger, and the beast never tracks
+  you at all: it charges from one side of the arena to the other, turns off the
+  edge and comes back on a different line. Ambushes on the road field them by
+  the ground you are standing on
+- **The two set pieces.** The demon arrives rather than walking on, breathes
+  through its four stances with its whirl at its feet, and slaps, zaps and
+  whips you by range; its zap takes you off the board and puts you back beside
+  it. The ground it is fought on is narrowed to the rectangle `SETDEMONBORD`
+  writes, which turns out to be a movement border and not a decoration. The
+  dragon is a head on a neck at the far end of the arena with two claws in
+  front of it that take no harm at all: it lifts its head when you close and
+  lowers it when you back off, bites when you are near and breathes fire the
+  length of the arena when you are not
+- **The message system, all three kinds.** A message in the original is a chain of
+  ten-byte records and there are three routines that show one: the fourteen things the
+  Gods say while a disk loads, an occurrence, and an instruction, which comes up in a
+  colour of its own. All three go over `MESSAGE.PIV`, the stone circle against a night
+  sky, and each fires where the original fires it: the two cities greet you, the stone
+  circle tells you the druids are preparing, and the wizard's tower is the one door that
+  takes one off the Gods' pile
+- **An intro.** `INTR.EXE` had never been examined; it unpacks the same way `MAIN.EXE`
+  does and gives up 319 symbols, its whole asset list and its words. The eleven plates
+  play in the original's own order with the original's own captions, and the people who
+  made the game are named at the end. The tile maps its `.STI` files hold and the animated
+  cast are not built and are not faked
+- **Save and load**, which the original has none of, so that part is designed rather than
+  ported: a versioned serialization of the simulation with a fingerprint over it, three
+  distinguishable refusals, and no path of any kind inside the file
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 270 tests, all of it verifiable headlessly with no display or sound card
+- 326 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -115,9 +154,18 @@ cargo run --release -p henge-formats --bin henge-bake -- "path/to/Moonstone" pac
 cargo run --release
 ```
 
-It opens on the title screen. Up and down move the highlight, left and right change
-the setting on the row you are on, and space takes it. The moon quest goes to the
-select screen, where left and right pick a knight and space takes him.
+It opens on the intro: the original's own eleven plates with the original's own words
+over them, out of `INTR.EXE`. Space skips it, and the title follows. Up and down move
+the highlight, left and right change the setting on the row you are on, and space takes
+it. The moon quest goes to the select screen, where left and right pick a knight and
+space takes him.
+
+**There is a pointer.** `PO.CEL` is the original's arrow and `MovePointer` is how it
+moves: two pixels a frame in whichever direction is held on the second player's keys,
+or wherever your mouse is. Whatever it is over is the highlighted line, and the button
+takes it, on the title, the select screen, a town's menu and the character sheet.
+
+**F5 saves and F9 loads.** The original has no save at all, so that part is ours.
 
 Walking onto a town, a lair, the healer, the stone circle or the wizard's tower
 opens it. In a place, up and
@@ -169,6 +217,16 @@ henge --trace 12 0 --start title --input "ldddss"        # two players, quest, c
 henge --screenshot out.png 120 0 --start arena --knight 2 --fight --sheet
 ```
 
+`--keys <0..4>` starts a run already holding that many of the four lair keys, `--stone
+<new|full|half|gibbous>` already carrying a moonstone and `--lives <n>` with that many
+life points, which is how the Valley, the win and the game over are reached without
+clearing four lairs and dying five times first.
+
+`--point x,y` puts the pointer somewhere, which is how a clickable widget is reached with
+no mouse and no display, and `p` in an `--input` script is the pointer's button. `S` and
+`L` in a script save and load, the same two calls F5 and F9 make; `--save <path>` says
+which file, and `--load` reads it at start.
+
 `--goto x,y` steers across the map a step a tick, and swings back at whatever
 ambushes it on the way. `--at <place>` starts inside a place, `--hurt <hp>` starts
 the run already wounded so a healer has something to do, `--gold <n>` starts it
@@ -181,7 +239,7 @@ Presses arrive through the same edge-detected path the keyboard uses, so a
 script exercises the game rather than a stub. `--bloodless` is the title's gore
 switch, off; `--trace ... --scripts` names the script each fighter is on.
 
-`--start <title|select|map|arena>` says which screen to open on. It defaults to the
+`--start <intro|title|select|map|arena>` says which screen to open on. It defaults to the
 map, so every recipe written before the shell existed still does what it did; the
 window opens on the title. `--knight <0..3>` begins a run as one of the four
 without going through the select screen, and `--sheet` holds the character sheet
@@ -251,11 +309,16 @@ cargo run --release -p henge-assets --bin henge-pack-status packs
 
 ## Text
 
-The game can say things now. The fonts decoded from the start, but which glyph draws
-which character is a table inside the original executable that is not recovered, so the
-order was read off the artwork: A-Z, then a-z, then 0-9, then punctuation. A few ornaments
-at the end are unidentified and left unmapped rather than guessed at; an unmapped glyph is
-simply never drawn.
+The game can say things now. The fonts decoded from the start, and which glyph draws which
+character was read off the artwork: A-Z, then a-z, then 0-9, then punctuation. **That table
+has since been found in the executable, and the reading was right.** `GFX:TextASCII` is 95
+bytes indexed by `character - 32`, and it agrees entry for entry; the only correction is the
+bold font's last glyph, read as a bar and actually a slash, and glyph 63 is the one entry
+no character maps to, so the `?` there is still a reading of the artwork. The spacing came
+with it: the bold face tracks three pixels tight, because `TextP` takes three off every
+glyph's advance when the current font is the bold one, and the small face does not. A few
+ornaments at the end are unidentified and left unmapped rather than guessed at; an unmapped
+glyph is simply never drawn.
 
 The mapping lives in the pack as content, so a replacement font needs no code change.
 Glyphs draw as a silhouette in a chosen colour, since a glyph's own shades are legible
