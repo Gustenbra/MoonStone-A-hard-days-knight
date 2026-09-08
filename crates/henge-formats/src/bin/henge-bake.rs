@@ -12,7 +12,7 @@
 //!   henge-bake <game-data-dir> <packs-dir>/reference
 
 use anyhow::Context;
-use henge_assets::{FrameRect, Manifest, Provenance, Sheet};
+use henge_assets::{FrameRect, Manifest, Provenance, Sheet, RECIPE};
 use henge_core::content::{ActorDef, AttackDef};
 use henge_core::taskvm::{Bank, BankTables, Instr, ScriptSet};
 use henge_formats::taskvm::{all_scripts, Symbols};
@@ -664,6 +664,24 @@ fn main() -> anyhow::Result<()> {
     let src = args.next().unwrap_or_else(|| ".".into());
     let out = args.next().unwrap_or_else(|| "packs/reference".into());
     let out = Path::new(&out);
+
+    // A pack already baked by this same recipe is left alone, so the launcher
+    // can call the baker every time without costing fifteen seconds a run.
+    // Requiring a person to remember a --rebake flag does not work: the pack
+    // silently stays as it was, and the game quietly runs without the music,
+    // the animation scripts and the overworld grid it needs.
+    let force = argv.iter().any(|a| a == "--force" || a == "--rebake");
+    if !force && out.join("manifest.json").exists() {
+        if let Ok(text) = fs::read_to_string(out.join("manifest.json")) {
+            if let Ok(old) = serde_json::from_str::<serde_json::Value>(&text) {
+                if old.get("recipe").and_then(|r| r.as_u64()) == Some(RECIPE as u64) {
+                    println!("pack is already baked to recipe {RECIPE}; nothing to do");
+                    return Ok(());
+                }
+            }
+        }
+        println!("the pack was baked by an older recipe than {RECIPE}; rebaking");
+    }
 
     let lib = Library::open(&src).context("opening the original game data")?;
     fs::create_dir_all(out.join("sheets"))?;

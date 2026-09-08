@@ -38,11 +38,16 @@ fi
 
 [ -f packs/reference/manifest.json ] || rebake=1
 
-if [ -n "$rebake" ]; then
+# The baker is asked every time. It compares the pack's recipe stamp against
+# its own and does nothing when they match, which costs a moment; when they do
+# not, it rebakes without anyone having to remember a flag. Getting this wrong
+# is silent: the game starts, and quietly has no music, no animation scripts
+# and no overworld grid.
+if true; then
   # The music has to be lifted out of the tune drivers before the bake can put
   # it in the pack. It needs python and unicorn, and the game plays without it,
   # so a failure here is a note rather than a stop.
-  if [ ! -f research/tunes.json ]; then
+  if [ ! -s research/tunes.json ]; then
     if command -v python3 >/dev/null 2>&1; then
       echo "Reading the music..."
       python3 tools/tunes.py "$data" research/tunes.json || \
@@ -51,8 +56,7 @@ if [ -n "$rebake" ]; then
       echo "  no python3, so no music. The rest of the game is unaffected."
     fi
   fi
-  echo "Reading the original game files..."
-  cargo run --release --bin henge-bake -- "$data"
+  cargo run --release --quiet --bin henge-bake -- "$data" ${rebake:+--force}
 fi
 
 echo "Building..."

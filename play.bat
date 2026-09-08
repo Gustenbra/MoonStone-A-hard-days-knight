@@ -40,26 +40,30 @@ if not exist "%DATA%\KN1.OB" (
   exit /b 1
 )
 
-if not exist "packs\reference\manifest.json" set "REBAKE=1"
 
-if defined REBAKE (
-  rem The music has to be lifted out of the tune drivers before the bake can
-  rem put it in the pack. It needs python and unicorn, and the game plays
-  rem without it, so a failure here is a note rather than a stop.
-  if not exist "research\tunes.json" (
-    where python >nul 2>&1
-    if errorlevel 1 (
-      echo   no python, so no music. The rest of the game is unaffected.
-    ) else (
-      echo Reading the music...
-      python tools\tunes.py "%DATA%" research\tunes.json
-      if errorlevel 1 echo   no music this time. It needs unicorn:  pip install unicorn
-    )
+rem The music has to be lifted out of the tune drivers before the bake can
+rem put it in the pack. It needs python and unicorn, and the game plays
+rem without it, so a failure here is a note rather than a stop.
+if not exist "research\tunes.json" (
+  where python >nul 2>&1
+  if errorlevel 1 (
+    echo   no python, so no music. The rest of the game is unaffected.
+  ) else (
+    echo Reading the music...
+    python tools\tunes.py "%DATA%" research\tunes.json
+    if errorlevel 1 echo   no music this time. It needs unicorn:  pip install unicorn
   )
-  echo Reading the original game files...
-  cargo run --release --bin henge-bake -- "%DATA%"
-  if errorlevel 1 exit /b 1
 )
+
+rem The baker is asked every time. It compares the pack's recipe stamp against
+rem its own and does nothing when they match; when they do not, it rebakes
+rem without anyone having to remember a flag. Getting this wrong is silent:
+rem the game starts, and quietly has no music, no animation scripts and no
+rem overworld grid.
+set "FORCE="
+if defined REBAKE set "FORCE=--force"
+cargo run --release --quiet --bin henge-bake -- "%DATA%" %FORCE%
+if errorlevel 1 exit /b 1
 
 echo Building...
 cargo build --release

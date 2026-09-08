@@ -35,10 +35,22 @@ pub struct Sheet {
     pub frames: Vec<FrameRect>,
 }
 
+/// Bumped whenever the baker starts writing something a pack could not have
+/// had before. The launcher rebakes when what is on disk does not match.
+pub const RECIPE: u32 = 3;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {
     pub pack: String,
     pub provenance: Provenance,
+    /// Which version of the baker's recipe wrote this pack.
+    ///
+    /// A pack is not just the original's files copied out: it is what the baker
+    /// makes of them, and that changes as the baker learns more. A pack baked
+    /// before the animation scripts were recovered is missing them, and the
+    /// game cannot tell by looking at a sheet count. This is how it can tell.
+    #[serde(default)]
+    pub recipe: u32,
     #[serde(default)]
     pub sheets: BTreeMap<String, Sheet>,
     #[serde(default)]
@@ -58,6 +70,7 @@ impl Manifest {
         Manifest {
             pack: pack.into(),
             provenance,
+            recipe: RECIPE,
             sheets: BTreeMap::new(),
             sounds: BTreeMap::new(),
             music: BTreeMap::new(),
