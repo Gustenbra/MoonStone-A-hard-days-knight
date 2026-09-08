@@ -79,6 +79,13 @@ pub struct World {
     /// What the player's knight carries into the next bout, off the run's
     /// sheet. The other knights get the ten `SetKnightEquipment` hands out.
     player_daggers: Option<u32>,
+    /// Tonight's moon, as `moon::Phase::key` writes it.
+    ///
+    /// `SetRatmenTables` reads the phase every time it sets a ratman up, so
+    /// what waits in an arena depends on the night the fight starts. The one
+    /// creature that answers to it says so on its own definition, which is why
+    /// this is a key and not a special case for ratmen.
+    moon: String,
 }
 
 impl World {
@@ -111,6 +118,7 @@ impl World {
             bestiary,
             gore: true,
             player_daggers: None,
+            moon: String::new(),
         };
         // One person by default. Two would leave the second knight controlled by
         // a keyboard nobody is pressing: it never attacks, never closes, and a
@@ -214,6 +222,16 @@ impl World {
     /// fresh; the player is whatever the run has left them.
     pub fn set_player_health(&mut self, health: i32) {
         self.player_health = Some(health);
+    }
+
+    /// Tonight's moon, for the creatures whose numbers move with it. Nothing
+    /// redraws: the phase is read when the next bout is set up, as
+    /// `SetRatmenTables` reads it when the fight is built.
+    pub fn set_moon(&mut self, phase: &str) {
+        if self.moon != phase {
+            self.moon = phase.to_string();
+            self.reset();
+        }
     }
 
     /// The daggers the player's knight throws from, off the run's sheet.
@@ -323,6 +341,14 @@ impl World {
             Some(_) => ORIGINAL_KNIGHT_HEALTH,
             None => knight.health.max(1),
         };
+        // What each creature in the bout is worth on tonight's moon, read off
+        // the definitions before the fighters are taken mutably.
+        let moon: std::collections::BTreeMap<String, (i32, i32)> = self
+            .bout
+            .fighters
+            .iter()
+            .map(|f| (f.actor.clone(), self.def_of(&f.actor).under_moon(&self.moon)))
+            .collect();
         if self.sheet.is_some() {
             self.bout.damage = knight.attacks.get(&knight.attack).map_or(4, |a| a.damage).max(1);
         }
@@ -343,9 +369,13 @@ impl World {
                 f.record.set(field::DAGGERS, 10);
             } else {
                 let scale = |v: i32| (v * scale_to / ORIGINAL_KNIGHT_HEALTH).max(1);
-                f.max_health = scale(f.max_health);
+                // What the moon makes of it, before anything is scaled: a
+                // ratman is five points and a slash of one most nights, seven
+                // and three on the full moon and twelve and five on the new.
+                let (health, damage) = moon.get(&f.actor).copied().unwrap_or((f.max_health, f.damage));
+                f.max_health = scale(health);
                 f.health = f.max_health;
-                f.damage = scale(f.damage);
+                f.damage = scale(damage);
                 f.record.set_health(f.health);
             }
         }

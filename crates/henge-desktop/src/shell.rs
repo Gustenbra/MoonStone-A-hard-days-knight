@@ -303,3 +303,79 @@ impl SelectScene {
         small.draw_centred(reg, fb, &line, 178, light);
     }
 }
+
+/// The fourteen things the Gods say between days.
+///
+/// **Recovered, verbatim.** `_LOADER:WaitMES` is fourteen pointers to chains of
+/// text records, and each record is a string, an x, a y, a flag and the next
+/// record. The chains hold one to four lines each, and the ys they carry are
+/// 75, 95, 115 and 135, one slot apart. The pointers are not in the order the
+/// labels are written: `WaitMES` reads `WaitM3A`, `WaitM2A`, `WaitM1A`, then
+/// `WaitM4A` onwards, and that is the order they are in below.
+///
+/// **Where they are shown is ours.** The original puts them up while a disk
+/// loads, which is why `_WIZARD:LoadWizard` is the only routine that calls the
+/// screen. Nothing here loads from a disk, and this is quest advice the player
+/// would otherwise never see, so it goes on the between-days screen instead,
+/// one a day, cycled the way `WaitCOUNT` cycles it: step every showing, wrap at
+/// fourteen.
+pub const HINTS: [&[&str]; 14] = [
+    &["Prepare yourself, for the ", "season of the Moonstones is", "upon you!"],
+    &["The Gods pause for a moment", "to contemplate your fate..."],
+    &["The Gods pause for a moment", " "],
+    &["Beware of the Ratmen", "during a full moon", "for they grow stronger", "as the moon gets fuller"],
+    &["Seek the knowledge", "of", "Mythral the Mystic"],
+    &["Beware of the", "fierce Baloks", "of the", "Northern Wastelands"],
+    &["Offer a magic item", "within Stonehenge", "and Danu will grant", "you a longer life"],
+    &["Seek the wisdom of", "Math the wizard", "to aid you in your quest"],
+    &["Visit your home village", "to restore lost lives."],
+    &["The Gods turn their", "attentions away for", "a moment..."],
+    &["The Gods pause for a moment", " "],
+    &["The Gods await their", "new champion..."],
+    &["Beware of the dreaded", "Black Knights", " "],
+    &["Beware of the Dragon", "whose dark shadow", "sweeps the land"],
+];
+
+/// `KI.CEL`, whose cels 0x2d to 0x31 are the five moons.
+const MOON_BANK: &str = "bank.ki";
+/// Where the `Next Day` routine at image 0x8e5b blits tonight's moon:
+/// `mov bx, 0x77; mov cx, 0xc`.
+const MOON_AT: (i32, i32) = (119, 12);
+
+/// The screen between one day and the next.
+///
+/// **Recovered:** the backdrop, the moon and its corner, and the heading. The
+/// routine at 0x8e5b draws `NextDayMes`, whose string is `NDM` (`Next Day`) at
+/// y 95, and then blits cel `[0x8989]` of `KI.CEL` at (119, 12) over the night
+/// sky the select screen also uses. `[0x8989]` is `Moons[MoonCount]`, which is
+/// tonight's phase.
+///
+/// **Ours:** the day number under the heading, and the hint below it. The
+/// original's own hint screen has its four lines at y 75, 95, 115 and 135; here
+/// the heading keeps its recovered 95 and the hint takes the same four slots
+/// starting one below it, because both cannot have y 95.
+pub fn draw_interlude(
+    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, day: u32, phase: henge_core::moon::Phase,
+    hint: usize, note: Option<&str>,
+) {
+    show(reg, fb, "scene.ch");
+    sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
+    let (_, light) = status::extremes(fb);
+    if let Some(bold) = fonts.bold {
+        bold.draw_centred(reg, fb, "Next Day", 88, light);
+    }
+    let Some(small) = fonts.small else { return };
+    small.draw_centred(reg, fb, &format!("Day {day}   {}", phase.name()), 112, light);
+    let mut y = 132;
+    // A day the run had no say in says so, in the hint's place: being turned
+    // into a toad and losing three turns is the sort of thing a player has to
+    // be told about, and this is the screen those three days go past on.
+    if let Some(note) = note {
+        small.draw_centred(reg, fb, note, y, light);
+        return;
+    }
+    for line in HINTS[hint % HINTS.len()] {
+        small.draw_centred(reg, fb, line, y, light);
+        y += 14;
+    }
+}

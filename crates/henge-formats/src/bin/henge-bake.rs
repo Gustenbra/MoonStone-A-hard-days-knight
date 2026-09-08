@@ -245,6 +245,9 @@ struct Creature {
     /// Ours: how much ground it stands on, or zero to take three quarters of
     /// the standing frame's width the way the knight's was set.
     girth: i32,
+    /// What the moon does to it: the phase key, the hit points and the blow it
+    /// is fielded with on that night. Only the ratman has one.
+    moon: &'static [(&'static str, i32, i32)],
 }
 
 /// The bestiary, as the original sets each creature up.
@@ -298,7 +301,7 @@ const CREATURES: &[Creature] = &[
         bleeds: true,
         health: 40, damage: 3, approach: 150, back_off: 90, depth: 5,
         // `TrollWALKR` steps 16, 26, 13, 26: twenty pixels a frame.
-        reach: 80, speed: [3, 1], bounty: 40, girth: 0,
+        reach: 80, speed: [3, 1], bounty: 40, girth: 0, moon: &[],
     },
     Creature {
         id: "trogg_axe", name: "Trogg", banks: "trogg_axe", sheet: "actor.trogg_axe",
@@ -320,7 +323,7 @@ const CREATURES: &[Creature] = &[
         bleeds: false,
         health: 20, damage: 3, approach: 100, back_off: 90, depth: 5,
         // `TroggWALKR` steps 0, 7, 23: ten pixels a frame.
-        reach: 70, speed: [2, 1], bounty: 15, girth: 0,
+        reach: 70, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
     },
     Creature {
         id: "trogg_hammer", name: "Trogg", banks: "trogg_axe", sheet: "actor.trogg_axe",
@@ -339,7 +342,7 @@ const CREATURES: &[Creature] = &[
         blockable: true,
         bleeds: false,
         health: 20, damage: 2, approach: 70, back_off: 65, depth: 5,
-        reach: 60, speed: [2, 1], bounty: 15, girth: 0,
+        reach: 60, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
     },
     Creature {
         id: "trogg_spear", name: "Trogg", banks: "trogg_spear", sheet: "actor.trogg_spear",
@@ -362,7 +365,7 @@ const CREATURES: &[Creature] = &[
         // No `TroggDamSp` exists; the spear's blow is set where the lunge
         // lands, in code not yet read. Three is the axe's, as a stand-in.
         health: 15, damage: 3, approach: 130, back_off: 120, depth: 5,
-        reach: 100, speed: [2, 1], bounty: 15, girth: 0,
+        reach: 100, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
     },
     Creature {
         id: "ratmen", name: "Ratman", banks: "ratmen", sheet: "actor.ratmen",
@@ -382,11 +385,18 @@ const CREATURES: &[Creature] = &[
         ],
         blockable: false,
         bleeds: false,
-        // Five hit points and a blow of three at new moon; `SetRatmenTables`
-        // raises both with the moon, to seven and six, then twelve and eight.
-        // The moon is not in the game yet, so the ratman is the dark one.
-        health: 5, damage: 3, approach: 40, back_off: 30, depth: 5,
+        // **The one creature the moon moves**, and the record's earlier reading
+        // of it was off by a row. `SetRatmenTables` writes five hit points and
+        // then fills `RatmenDam` twice: `[bx+2]` with three and `[bx+4]` with
+        // one. Those tables are nine words indexed by attack kind, two to an
+        // entry, so `[bx+4]` is kind 4, which is what `ControlRatCollide`
+        // writes for the slash; `[bx+2]` is kind 2, the bite, which is item
+        // 37's. The slash is therefore one, not three. On the full moon the
+        // routine rewrites them as seven and three, and on the new moon as
+        // twelve and five, and that is the table below.
+        health: 5, damage: 1, approach: 40, back_off: 30, depth: 5,
         reach: 24, speed: [3, 1], bounty: 5, girth: 0,
+        moon: &[("full", 7, 3), ("new", 12, 5)],
     },
     Creature {
         id: "mudmen", name: "Mudman", banks: "mudmen", sheet: "actor.mudmen",
@@ -407,7 +417,7 @@ const CREATURES: &[Creature] = &[
         health: 30, damage: 2, approach: 80, back_off: 75, depth: 5,
         // `MudmenWALK` steps (12, 12), (10, 14): it comes at you on a
         // diagonal, eleven across and thirteen deep a frame.
-        reach: 90, speed: [2, 2], bounty: 25, girth: 0,
+        reach: 90, speed: [2, 2], bounty: 25, girth: 0, moon: &[],
     },
     Creature {
         id: "demon", name: "Demon", banks: "demon", sheet: "actor.demon",
@@ -426,7 +436,7 @@ const CREATURES: &[Creature] = &[
         // is not in a `*Dam` table; four is a stand-in between a troll's and
         // a dragon's bite. Its screen border is `SETDEMONBORD`, not done.
         health: 250, damage: 4, approach: 95, back_off: 90, depth: 2,
-        reach: 65, speed: [2, 1], bounty: 100, girth: 0,
+        reach: 65, speed: [2, 1], bounty: 100, girth: 0, moon: &[],
     },
     Creature {
         id: "beast", name: "Beast", banks: "beast", sheet: "bank.be1",
@@ -456,7 +466,7 @@ const CREATURES: &[Creature] = &[
         // `BeastChargeOffsets` 33, 27, 17, 33: nearly thirty pixels a frame.
         // Its weapon parts are its own body, so it has to be allowed close:
         // three quarters of its width would keep it out of its own bite.
-        reach: 40, speed: [4, 1], bounty: 30, girth: 20,
+        reach: 40, speed: [4, 1], bounty: 30, girth: 20, moon: &[],
     },
     Creature {
         id: "balok", name: "Balok", banks: "balok", sheet: "actor.balok",
@@ -475,7 +485,7 @@ const CREATURES: &[Creature] = &[
         health: 30, damage: 4, approach: 80, back_off: 60, depth: 10,
         // Its uppercut lands from 41 to 74 pixels out, and its own width
         // keeps a knight sixty away, so it swings from just outside that.
-        reach: 70, speed: [2, 1], bounty: 80, girth: 0,
+        reach: 70, speed: [2, 1], bounty: 80, girth: 0, moon: &[],
     },
     Creature {
         id: "dragon", name: "Dragon", banks: "dragon", sheet: "actor.dragon",
@@ -501,7 +511,7 @@ const CREATURES: &[Creature] = &[
         // The girth is a fraction of the figure, which is 212 wide: the bite
         // is at its origin, and a knight kept the figure's width away could
         // never be bitten.
-        reach: 60, speed: [1, 1], bounty: 250, girth: 50,
+        reach: 60, speed: [1, 1], bounty: 250, girth: 50, moon: &[],
     },
 ];
 
@@ -709,11 +719,16 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/fonts.json"), font_definitions())?;
     m.data.insert("data.fonts".into(), "data/fonts.json".into());
 
-    // The overworld's two grids, lifted out of the unpacked executable.
+    // The overworld's two grids, lifted out of the unpacked executable. The
+    // terrain half is kept, because it is also what sites the lairs: each one
+    // stands on ground of its own family, and only this table says which that is.
+    let mut ground: Vec<u8> = Vec::new();
     match overworld_tables(&src) {
-        Ok(Some(land)) => {
+        Ok(Some((terrain, going))) => {
+            let land = serde_json::json!({ "terrain": terrain, "going": going });
             fs::write(out.join("data/overworld.json"), serde_json::to_string(&land)?)?;
             m.data.insert("data.overworld".into(), "data/overworld.json".into());
+            ground = terrain;
         }
         Ok(None) => eprintln!(
             "no unpacked MAIN.EXE image found: baking without the terrain grids.\n  \
@@ -734,7 +749,7 @@ fn main() -> anyhow::Result<()> {
                 .collect()
         })
         .unwrap_or_default();
-    fs::write(out.join("data/places.json"), place_definitions(&icons))?;
+    fs::write(out.join("data/places.json"), place_definitions(&icons, &ground))?;
     m.data.insert("data.places".into(), "data/places.json".into());
 
     fs::write(out.join("data/items.json"), item_definitions())?;
@@ -1191,6 +1206,16 @@ fn creature_definition(
         banks: tables,
         bank_table: table,
         animation,
+        moon: c
+            .moon
+            .iter()
+            .map(|(phase, health, damage)| {
+                ((*phase).to_string(), henge_core::content::MoonStat {
+                    health: *health,
+                    damage: *damage,
+                })
+            })
+            .collect(),
         ..ActorDef::default()
     };
     for (state, names) in [
@@ -1258,34 +1283,6 @@ fn font_definitions() -> String {
     .to_string()
 }
 
-/// The places on the map, and what each of them offers.
-///
-/// The original's overworld is a node graph inside `MAIN.EXE` that is not
-/// recovered, so these coordinates were not lifted from it: they were read off
-/// the map image by eye, and each one sits on the landmark the artist already
-/// drew there. Highwood is the white castle in the northern snow, Waterdeep is
-/// the walled port on the eastern shore, the healer keeps the ruin in the
-/// southern forest, and the stones are the circle the game is named after.
-///
-/// The backdrops are the original's own town screens, which is why this lives
-/// in the reference pack along with everything else derived from it.
-///
-/// `menu` is where the words go on that particular backdrop. Highwood and
-/// Waterdeep painted their menu onto a panel at the edge of the picture, so the
-/// box is put exactly over that panel and the live menu replaces the painted
-/// one. The others have no panel, so the box goes where the art is quietest.
-///
-/// **A stall is a room, not a menu line.** The merchant is its own place, marked
-/// `hidden` so walking can never find it, reached through the town's own menu
-/// and leaving back into it. That keeps a town's front door short and lets the
-/// shop have a box of its own, wide enough for goods and their prices, which a
-/// 62-pixel painted panel is not.
-///
-/// **Two prices.** The hermit in the woods takes only days. The healers inside
-/// the walls want coin as well, which is the difference between the two worth
-/// having now that there is coin: the free one costs you a week of the calendar
-/// the moon and the ambushes are hung on.
-
 /// `_MAP:MapType` and `_MAP:MapSLOW`, read straight out of the fully unpacked
 /// `MAIN.EXE` load image.
 ///
@@ -1299,7 +1296,7 @@ fn font_definitions() -> String {
 /// `MOON:ColourBackdrop` branches on; and all four codes have to appear, since
 /// a table with only one value in it would be a table read from the wrong
 /// place. A wrong image fails these rather than baking a plausible lie.
-fn overworld_tables(src: &str) -> anyhow::Result<Option<serde_json::Value>> {
+fn overworld_tables(src: &str) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
     let candidates = [
         std::env::args().nth(3).unwrap_or_default(),
         "research/main.final.bin".into(),
@@ -1339,7 +1336,7 @@ fn overworld_tables(src: &str) -> anyhow::Result<Option<serde_json::Value>> {
         going[..40 * 25].iter().all(|c| *c < 4),
         "MapSLOW holds a mask wider than the two bits CheckSLOW uses"
     );
-    Ok(Some(serde_json::json!({ "terrain": terrain, "going": going })))
+    Ok(Some((terrain, going)))
 }
 
 /// Where each place sits, and how big it is.
@@ -1364,7 +1361,188 @@ fn overworld_tables(src: &str) -> anyhow::Result<Option<serde_json::Value>> {
 ///
 /// The healer and the stones have no recovered coordinates at all. They are
 /// placed on the landmarks the map already draws.
-fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
+/// The six lairs of each family, in `LairFile` order, and what stands in each.
+///
+/// **Recovered: the arena layouts and their order.** `MOON:LairFile` at
+/// DS:0x0b7a is 24 pointers to `fol1.t`..`fol6.t`, `wal1.t`..`wal6.t`,
+/// `swl1.t`..`swl6.t`, `gll1.t`..`gll6.t`. It sits four bytes past the end of
+/// the stale duplicate that hides the rest of the lair tables, so it is the one
+/// of the four the load image does carry. That order is also what plants the
+/// keys: the initialiser steps six records between one key and the next, so
+/// lair 0 to 5 are the forest's, 6 to 11 the wastes', 12 to 17 the marsh's and
+/// 18 to 23 the glades', matching `moon::Key::ALL`.
+///
+/// **Ours: which guardian, and how many.** `ForestLairs`, the table pairing a
+/// lair with an entry of `CombatTable` and a head count, is inside the
+/// unreadable 2,906 bytes. What a guardian *can* be is recovered, because
+/// `InitGameStart` fills `CombatTable` with the thirteen `InitKnightvs*`
+/// routines; which one each lair gets is chosen here. Each family fields its
+/// own road creatures for the first three, then the two the road never
+/// produces: the beast and Balok are lair encounters in the original and stand
+/// nowhere else. The demon and the dragon are set pieces and are left out, both
+/// because their own set pieces are not built and because two hundred and fifty
+/// hit points against a twenty point knight is not a fight.
+///
+/// A bout seats four, so a count is at most three beside one player.
+const LAIRS: &[(&str, &str, [(&str, u32); 6])] = &[
+    ("forest", "scene.fob1", [
+        ("ratmen", 2), ("trogg_axe", 2), ("trogg_spear", 2),
+        ("beast", 2), ("trogg_axe", 3), ("balok", 1),
+    ]),
+    ("waste", "scene.wab1", [
+        ("trogg_hammer", 2), ("troll", 1), ("trogg_axe", 2),
+        ("beast", 2), ("troll", 2), ("balok", 1),
+    ]),
+    ("swamp", "scene.swb1", [
+        ("mudmen", 1), ("trogg_spear", 2), ("mudmen", 2),
+        ("beast", 2), ("trogg_spear", 3), ("balok", 1),
+    ]),
+    ("glade", "scene.glb1", [
+        ("ratmen", 2), ("trogg_hammer", 2), ("trogg_axe", 2),
+        ("beast", 2), ("ratmen", 3), ("balok", 1),
+    ]),
+];
+
+/// The arena layout each lair is fought in: `fol1`, `wal1` and the rest,
+/// which is `LairFile` with the extension taken off.
+fn lair_arena(family: &str, n: usize) -> String {
+    let prefix = match family {
+        "forest" => "fo",
+        "waste" => "wa",
+        "swamp" => "sw",
+        _ => "gl",
+    };
+    format!("{prefix}l{}", n + 1)
+}
+
+/// Where the twenty four lairs stand.
+///
+/// **Ours, but not arbitrary.** `MOON:LairLocation` is in the part of DGROUP
+/// the load image does not carry, so the coordinates cannot be read. What can
+/// be read is the ground: `_MAP:MapType` says which of the four families each
+/// 8x8 block of the map is, and a lair fought on `fol3.t` belongs on forest.
+/// So each family's six are sited on cells of its own code, and the placement
+/// is a search rather than a list of numbers typed out by eye:
+///
+/// * the cell and all eight around it must carry the same code, so a lair is
+///   never on a one block island where its icon straddles two kinds of ground;
+/// * it must clear the towns, the healer, the stones and the wizard's tower by
+///   twenty four pixels, and the four knights' starting corners by twenty
+///   eight, so nothing opens the moment a run begins;
+/// * it must be inside `HawkBorders` with room for the status bar;
+/// * and of what is left, the six are chosen by taking the first in scan order
+///   and then repeatedly the candidate furthest from everything already
+///   chosen, which spreads them across the region the family occupies.
+///
+/// The result is fixed by the map's own table, so it is the same on every
+/// machine and moves only if the terrain grid does.
+fn lair_sites(ground: &[u8], code: u8, taken: &[(i32, i32, i32, i32)]) -> Vec<(i32, i32)> {
+    const COLS: i32 = 40;
+    const ROWS: i32 = 26;
+    // `_MAP:CalcKnGrid` indexes with `((x + 4) >> 3, (y + 10) >> 3)`, so the
+    // token positions a cell answers for are `[gx * 8 - 4, gx * 8 + 3]` by
+    // `[gy * 8 - 10, gy * 8 - 3]`. These are the middles of those.
+    let at = |gx: i32, gy: i32| (gx * 8, gy * 8 - 6);
+    // The four knights' corners, from `InitKnights`. A lair on one of them
+    // would open before the first step of a run.
+    const HOMES: [(i32, i32); 4] = [(10, 10), (300, 5), (26, 180), (300, 185)];
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    for gy in 0..ROWS {
+        for gx in 0..COLS {
+            let same = |x: i32, y: i32| {
+                (0..COLS).contains(&x)
+                    && (0..ROWS).contains(&y)
+                    && ground.get((y * COLS + x) as usize) == Some(&code)
+            };
+            if !(-1..=1).all(|dy| (-1..=1).all(|dx| same(gx + dx, gy + dy))) {
+                continue;
+            }
+            let (x, y) = at(gx, gy);
+            if !(8..=300).contains(&x) || !(10..=170).contains(&y) {
+                continue;
+            }
+            let clear = taken.iter().all(|(ox, oy, ow, oh)| {
+                !(x < ox + ow + 24 && *ox < x + LAIR_W + 24
+                    && y < oy + oh + 24 && *oy < y + LAIR_H + 24)
+            });
+            let away = HOMES.iter().all(|(hx, hy)| (x - hx).abs() >= 28 || (y - hy).abs() >= 28);
+            if clear && away {
+                candidates.push((x, y));
+            }
+        }
+    }
+    let mut picked: Vec<(i32, i32)> = Vec::new();
+    if let Some(first) = candidates.first().copied() {
+        picked.push(first);
+    }
+    while picked.len() < 6 && picked.len() < candidates.len() {
+        let far = |c: &(i32, i32)| {
+            picked
+                .iter()
+                .map(|p| (c.0 - p.0).pow(2) + (c.1 - p.1).pow(2))
+                .min()
+                .unwrap_or(0)
+        };
+        let Some(next) = candidates
+            .iter()
+            .filter(|c| !picked.contains(c))
+            .max_by_key(|c| (far(c), -c.1, -c.0))
+            .copied()
+        else {
+            break;
+        };
+        picked.push(next);
+    }
+    picked
+}
+
+/// `MI.C` frame 0x14, the icon `_MAP:DisplayLairs` blits at every lair whose
+/// coordinates are not negative. Nine by five.
+const LAIR_W: i32 = 9;
+const LAIR_H: i32 = 5;
+
+/// Where each place sits, and how big it is.
+///
+/// **Two of the five coordinates are recovered and the rest are not, and the
+/// difference is worth stating.** `_MAP:KnightGoesToTown` carries the two towns
+/// as literals: a knight heading for Highwood walks to map (94, 47) and for
+/// Waterdeep to (297, 157), and the same routine works out which is nearer from
+/// the grid cells (12, 7) and (37, 20). Those cells are exactly what the
+/// recovered grid formula turns those pixels into, which is what makes both
+/// pairs trustworthy rather than merely present.
+///
+/// What those numbers are is the spot a knight is sent to, not the corner of
+/// the picture. The corner lives in `MOON:MapIconsTABLE`, which is
+/// uninitialised data and so is not in the load image at all: the first 2,906
+/// bytes of DGROUP in the unpacked file are a stale duplicate of another region
+/// and cannot be read. So the box is **built** here rather than recovered: the
+/// icon's size comes from the `MI.C` bank, which is real, and it is hung so
+/// that the recovered destination sits in the middle of it. Both towns land on
+/// their own artwork when it is drawn, which is the check that it is not
+/// nonsense, but it remains a construction.
+///
+/// The healer, the stones and the wizard's tower have no recovered coordinates
+/// at all. They are placed on the landmarks the map already draws: the ruin in
+/// the southern woods, the ring in the middle of it all, and the lone dark
+/// tower standing in the northern waste, which is the only building the map
+/// paints that nothing else claims. The lairs are sited by the recovered
+/// terrain grid; see [`lair_sites`].
+///
+/// **The menu lines a map gadget carries are recovered**, from `_MAP`:
+/// `knhigh` `Enter the city of Highwood`, `knwater` `Enter the city of
+/// Waterdeep`, `knhenge` `Enter Stonehenge`, `knmath` `Visit Math the Wizard`
+/// and `knlair` `Enter Lair`. Those are the words the original puts on its own
+/// list when you are standing on one, so they are the words used here.
+///
+/// **A stall is a room, not a menu line.** The merchant, the tavern, the town
+/// healer, the temple and the mystic are all their own places, marked `hidden`
+/// so walking can never find one, reached through the town's own menu and
+/// leaving back into it. That keeps a town's front door short and gives each
+/// room a box wide enough for what it has to say.
+///
+/// **Two prices.** The hermit in the woods takes only days. The town healer
+/// takes coin and gives it all to whatever it will buy, which is `HealDon`.
+fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>, ground: &[u8]) -> String {
     // MI.C frame numbers, which are also the kinds the original's menu table is
     // indexed by: 0x19 Highwood, 0x1a Waterdeep, 0x1b Stonehenge.
     let icon = |frame: u8, fallback: (i32, i32)| *icons.get(&frame).unwrap_or(&fallback);
@@ -1376,13 +1554,19 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
     };
     let highwood = at((94, 47), icon(0x19, (25, 32)));
     let waterdeep = at((297, 157), icon(0x1a, (32, 28)));
-    // Ours, not theirs: the ruin in the southern woods, and the stone ring the
-    // map draws in the middle of it all. Sized like the original's own
-    // Stonehenge icon where there is one to borrow.
+    // Ours, not theirs: the ruin in the southern woods, the stone ring the map
+    // draws in the middle of it all, and the tower in the northern waste.
+    // Sized like the original's own icons where there is one to borrow.
     let healer = (89, 159, 10, 10);
     let stones = {
         let (w, h) = icon(0x1b, (18, 12));
         (158 - w / 2, 102 - h / 2, w, h)
+    };
+    // Frame 0x1e is seven by twenty, which is the shape and very nearly the
+    // size of the tower the map paints at (218, 12).
+    let wizard = {
+        let (w, h) = icon(0x1e, (7, 20));
+        (217, 12, w, h)
     };
 
     let heal = |days: u32, gold: u32| {
@@ -1393,7 +1577,6 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
             "too_poor": "I keep no man for nothing."
         })
     };
-    let closed = |said: &str| serde_json::json!({ "do": "closed", "said": said });
     let leave = serde_json::json!({ "do": "leave" });
     let go = |place: &str| serde_json::json!({ "do": "go", "place": place });
     let buy = |item: &str| {
@@ -1411,6 +1594,15 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
             "refused": "You have none, or no need of one."
         })
     };
+    let sell = |item: &str| serde_json::json!({ "do": "sell", "item": item });
+    let donate = |gold: u32| serde_json::json!({ "do": "donate", "gold": gold });
+    let consult = |gold: u32| serde_json::json!({ "do": "consult", "gold": gold });
+    let wager = |stake: u32, room: &str| {
+        serde_json::json!({ "do": "wager", "stake": stake, "room": room })
+    };
+
+    let mut places = serde_json::Map::new();
+
     // A stall sells the same goods wherever it stands; only the box moves,
     // because it has to sit where that particular painting has room.
     let stall = |name: &str, scene: &str, menu: serde_json::Value, back: &str| {
@@ -1421,95 +1613,295 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
             "x": 0, "y": 0, "w": 0, "h": 0,
             "menu": menu,
             // The goods are the original's merchant's own list, `pu1`..`pu17`,
-            // less what the quest is not ready for (the key and the moonstone
-            // are item 70's and 71's), and the henge flask and draught beside
-            // them. Casting is done on the character sheet, as the original
-            // does it on the status screen, so a stall only sells.
+            // and the henge flask and draught beside them. Casting is done on
+            // the character sheet, as the original does it on the status
+            // screen, so a stall only sells.
             "options": [
-                { "label": "Flask of healing",      "effect": buy("potion") },
+                { "label": "Flask of healing",      "effect": buy("flask") },
                 { "label": "Draught of life",       "effect": buy("elixir") },
-                { "label": "Potion of healing",     "effect": buy("healing_potion") },
+                { "label": "Potion of healing",     "effect": buy("potion") },
                 { "label": "Broad sword",           "effect": buy("broad_sword") },
                 { "label": "Claymore sword",        "effect": buy("claymore") },
                 { "label": "Sword of Sharpness",    "effect": buy("sword_of_sharpness") },
                 { "label": "Chain mail",            "effect": buy("chain_mail") },
                 { "label": "Plate armour",          "effect": buy("plate_armour") },
                 { "label": "Battle armour",         "effect": buy("battle_armour") },
-                { "label": "Gem of seeing",         "effect": buy("gem") },
-                { "label": "Ring of protection",    "effect": buy("ring") },
-                { "label": "Scroll of Haste",       "effect": buy("haste") },
-                { "label": "Scroll of the Hawk",    "effect": buy("hawk") },
-                { "label": "Scroll of Protection",  "effect": buy("protection") },
-                { "label": "Iron key",              "effect": buy("key") },
-                { "label": "Drink a flask",         "effect": drink("potion") },
+                { "label": "Gem of seeing",         "effect": buy("gem_of_seeing") },
+                { "label": "Ring of protection",    "effect": buy("ring_of_protection") },
+                { "label": "Scroll of Haste",       "effect": buy("scroll_of_haste") },
+                { "label": "Scroll of the Hawk",    "effect": buy("scroll_of_the_hawk") },
+                { "label": "Scroll of Protection",  "effect": buy("scroll_of_protection") },
+                { "label": "Drink a flask",         "effect": drink("flask") },
                 { "label": "Drink a draught",       "effect": drink("elixir") },
                 { "label": "Back",                  "effect": go(back) }
             ]
         })
     };
 
-    serde_json::json!({
-        "highwood": {
+    // The tavern, over `TAV.PIV`, whose own painted panel is the five stakes
+    // and an exit: `_TAVERN` gives its gadgets `[si+0x10]` of one to five and
+    // the picture writes `1 gold` to `5 gold` beside them. The box is put
+    // exactly over that panel so the live list replaces the painted one.
+    let tavern = |town: &str| {
+        let room = format!("{town}.dice");
+        serde_json::json!({
+            "name": "Tavern",
+            "scene": "scene.tav",
+            "hidden": true,
+            "x": 0, "y": 0, "w": 0, "h": 0,
+            "menu": [258, 0, 62, 200],
+            "options": [
+                { "label": "1 gold", "effect": wager(1, &room) },
+                { "label": "2 gold", "effect": wager(2, &room) },
+                { "label": "3 gold", "effect": wager(3, &room) },
+                { "label": "4 gold", "effect": wager(4, &room) },
+                { "label": "5 gold", "effect": wager(5, &room) },
+                { "label": "Exit",   "effect": go(town) }
+            ]
+        })
+    };
+
+    // The dice table, `DICE.PIV`. The three faces go on top of the picture
+    // where `RollDice` blits them, and the words on the plank beside them,
+    // which is where `BETLOSER`, `PLAYERPOT` and `CONT` are written: x 174,
+    // y 126, 140 and 152. `Press fire to continue` is `_TAVERN:CONT`.
+    let dice = |town: &str| {
+        serde_json::json!({
+            "name": "Dice",
+            "scene": "scene.dice",
+            "hidden": true,
+            "dice": true,
+            "x": 0, "y": 0, "w": 0, "h": 0,
+            "text": [164, 112, 144, 34],
+            "menu": [164, 148, 144, 30],
+            "options": [
+                { "label": "Press fire to continue",
+                  "effect": go(&format!("{town}.tavern")) }
+            ]
+        })
+    };
+
+    // The town healer, `HEA.PIV`. `HealDon` takes the whole donation and
+    // spends it down: ten mends every wound, fifteen buys a life point, and
+    // what is left over stays in his pot. The three amounts offered are ours,
+    // because the original's gadget adds and subtracts a coin at a time; the
+    // greeting is `HT1a`..`HT1c` verbatim.
+    let town_healer = |town: &str| {
+        serde_json::json!({
+            "name": "Healer",
+            "scene": "scene.hea",
+            "hidden": true,
+            "x": 0, "y": 0, "w": 0, "h": 0,
+            "menu": [6, 88, 136, 58],
+            "text": [4, 148, 312, 40],
+            "intro": "Good Day Sir Knight, would you care for a healing.  I have the best roots, herbs and leeches on this side of the land. I am at your service for a small donation",
+            "options": [
+                { "label": "Donate",  "effect": donate(10) },
+                { "label": "Donate",  "effect": donate(25) },
+                { "label": "Donate",  "effect": donate(50) },
+                { "label": "Back",    "effect": go(town) }
+            ]
+        })
+    };
+
+    for (town, scene, stall_menu) in [
+        ("highwood", "scene.highwood", serde_json::json!([140, 0, 178, 200])),
+        ("waterdeep", "scene.waterdee", serde_json::json!([2, 0, 178, 200])),
+    ] {
+        places.insert(
+            format!("{town}.merchant"),
+            stall("Merchant", scene, stall_menu.clone(), town),
+        );
+        places.insert(format!("{town}.tavern"), tavern(town));
+        places.insert(format!("{town}.dice"), dice(town));
+        places.insert(format!("{town}.healer"), town_healer(town));
+    }
+
+    // The temple. `_STATUS:TTemple` and `SellToTemple` are a gadget list of
+    // `se7`..`se18`, one per magic slot, and `GoldSell` pays half the price the
+    // merchant asks. The original draws it over whatever screen is up, and
+    // there is no temple picture in the game files, so it is a room on the
+    // town's own art like the stall next door. That much is ours.
+    places.insert(
+        "highwood.temple".into(),
+        serde_json::json!({
+            "name": "Temple",
+            "scene": "scene.highwood",
+            "hidden": true,
+            "x": 0, "y": 0, "w": 0, "h": 0,
+            "menu": [140, 0, 178, 200],
+            "options": [
+                { "label": "Sell Potion of healing",     "effect": sell("potion") },
+                { "label": "Sell Gem of seeing",         "effect": sell("gem_of_seeing") },
+                { "label": "Sell Sword of Sharpness",    "effect": sell("sword_of_sharpness") },
+                { "label": "Sell Ring of protection",    "effect": sell("ring_of_protection") },
+                { "label": "Sell Talisman",              "effect": sell("talisman_of_the_wyrm") },
+                { "label": "Sell scroll of Haste",       "effect": sell("scroll_of_haste") },
+                { "label": "Sell scroll of the Hawk",    "effect": sell("scroll_of_the_hawk") },
+                { "label": "Sell scroll of Aquisition",  "effect": sell("scroll_of_acquisition") },
+                { "label": "Sell scroll of the Wyrm",    "effect": sell("scroll_of_the_wyrm") },
+                { "label": "Sell scroll of Protection",  "effect": sell("scroll_of_protection") },
+                { "label": "Sell Flask of healing",      "effect": sell("flask") },
+                { "label": "Back",                       "effect": go("highwood") }
+            ]
+        }),
+    );
+
+    // The mystic, `MYS.PIV`. `MysticUpDown` rolls against `DonationTAB`, six
+    // records of a threshold and a signed delta, so a bigger donation buys
+    // better odds; the three amounts are picked one to a band. The greeting is
+    // `MY1a`..`MY1c` verbatim.
+    places.insert(
+        "waterdeep.mystic".into(),
+        serde_json::json!({
+            "name": "Mystic",
+            "scene": "scene.mys",
+            "hidden": true,
+            "x": 0, "y": 0, "w": 0, "h": 0,
+            "menu": [6, 88, 136, 58],
+            "text": [4, 148, 312, 40],
+            "intro": "Welcome my child.  I am here to help you in your quest I have the powers to reach into the cosmos and give your body new skills and agility.",
+            "options": [
+                { "label": "Donate", "effect": consult(5) },
+                { "label": "Donate", "effect": consult(25) },
+                { "label": "Donate", "effect": consult(50) },
+                { "label": "Back",   "effect": go("waterdeep") }
+            ]
+        }),
+    );
+
+    places.insert(
+        "highwood".into(),
+        serde_json::json!({
             "name": "Highwood",
             "scene": "scene.highwood",
             "x": highwood.0, "y": highwood.1, "w": highwood.2, "h": highwood.3,
             "menu": [256, 0, 62, 200],
             "options": [
                 { "label": "Merchant", "effect": go("highwood.merchant") },
-                { "label": "Tavern",   "effect": closed("No one is pouring tonight.") },
-                { "label": "Healer",   "effect": heal(3, 10) },
-                { "label": "Temple",   "effect": closed("The doors are barred.") },
+                { "label": "Tavern",   "effect": go("highwood.tavern") },
+                { "label": "Healer",   "effect": go("highwood.healer") },
+                { "label": "Temple",   "effect": go("highwood.temple") },
                 { "label": "Leave",    "effect": leave }
             ]
-        },
-        // A stall's box swallows the town's own painted menu as well as the
-        // art beside it. Leaving that painted list of doors showing next to a
-        // live one would offer the player two menus and honour only the live
-        // one, and it is wide enough here for goods and their prices, which the
-        // painted panel alone is not.
-        "highwood.merchant": stall(
-            "Merchant", "scene.highwood", serde_json::json!([140, 0, 178, 200]), "highwood"),
-        "waterdeep": {
+        }),
+    );
+    places.insert(
+        "waterdeep".into(),
+        serde_json::json!({
             "name": "Waterdeep",
             "scene": "scene.waterdee",
             "x": waterdeep.0, "y": waterdeep.1, "w": waterdeep.2, "h": waterdeep.3,
             "menu": [2, 0, 62, 200],
             "options": [
                 { "label": "Merchant", "effect": go("waterdeep.merchant") },
-                { "label": "Tavern",   "effect": closed("No one is pouring tonight.") },
-                { "label": "Healer",   "effect": heal(3, 10) },
-                { "label": "Mystic",   "effect": closed("Mythral will not see you.") },
+                { "label": "Tavern",   "effect": go("waterdeep.tavern") },
+                { "label": "Healer",   "effect": go("waterdeep.healer") },
+                { "label": "Mystic",   "effect": go("waterdeep.mystic") },
                 { "label": "Leave",    "effect": leave }
             ]
-        },
-        // Waterdeep's painted panel is on the left, so its stall grows to the
-        // right off it rather than to the left.
-        "waterdeep.merchant": stall(
-            "Merchant", "scene.waterdee", serde_json::json!([2, 0, 178, 200]), "waterdeep"),
-        "healer": {
+        }),
+    );
+    places.insert(
+        "healer".into(),
+        serde_json::json!({
             "name": "The Healer",
             "scene": "scene.hea",
             "x": healer.0, "y": healer.1, "w": healer.2, "h": healer.3,
-            "menu": [6, 112, 154, 66],
+            "menu": [6, 88, 154, 58],
+            "text": [4, 148, 312, 40],
             "options": [
                 { "label": "Tend my wounds", "effect": heal(3, 0) },
-                { "label": "Drink a flask",  "effect": drink("potion") },
+                { "label": "Drink a flask",  "effect": drink("flask") },
                 { "label": "Leave",          "effect": leave }
             ]
-        },
-        "stones": {
+        }),
+    );
+    // The stones. `MOON:Henge` tests the moonstone bits against tonight's moon
+    // before it offers anything else; short of that the druids take an offering,
+    // which is what the between-days screen tells you to bring them: `Offer a
+    // magic item within Stonehenge and Danu will grant you a longer life`.
+    places.insert(
+        "stones".into(),
+        serde_json::json!({
             "name": "The Stones",
             "scene": "scene.hen1",
             "x": stones.0, "y": stones.1, "w": stones.2, "h": stones.3,
-            "menu": [8, 18, 132, 74],
+            "menu": [8, 16, 148, 40],
+            "text": [6, 146, 308, 42],
             "options": [
-                { "label": "Listen", "effect": closed("The stones keep their counsel.") },
-                { "label": "Wait",   "effect": closed("The moon is not yet full.") },
-                { "label": "Leave",  "effect": leave }
+                { "label": "Offer a magic item", "effect": { "do": "offer" } },
+                { "label": "Leave",              "effect": leave }
             ]
+        }),
+    );
+    // Math's tower. `WizardIntro` is what he says on the way in; ringing the
+    // bell is one roll against thirty, seventy and ninety, and leaving sets the
+    // grudge to seventy whatever it gave, so a second visit the same day is
+    // dangerous and a third is close to certain.
+    places.insert(
+        "wizard".into(),
+        serde_json::json!({
+            "name": "Math the Wizard",
+            "scene": "scene.wi1",
+            "x": wizard.0, "y": wizard.1, "w": wizard.2, "h": wizard.3,
+            "menu": [6, 6, 128, 40],
+            "text": [4, 112, 312, 76],
+            "intro": "As you ring the bell at the bottom of the foreboding wizard's tower, a sense of unease rises in the air. A tall, dark figure slowly rises onto the balcony some fifty feet above your head and with a low, powerful breath, the mighty wizard Math speaks:",
+            "options": [
+                { "label": "Visit Math the Wizard", "effect": { "do": "wizard" } },
+                { "label": "Leave",                 "effect": leave }
+            ]
+        }),
+    );
+
+    // And the lairs. Everything already placed is kept clear of, in the order
+    // the families are laid out, so no two lairs and no lair and a town ever
+    // share ground.
+    let mut taken: Vec<(i32, i32, i32, i32)> =
+        vec![highwood, waterdeep, healer, stones, wizard];
+    for (family_index, (family, scene, guardians)) in LAIRS.iter().enumerate() {
+        let code = match *family {
+            "glade" => 0u8,
+            "forest" => 2,
+            "swamp" => 4,
+            _ => 6,
+        };
+        let sites = lair_sites(ground, code, &taken);
+        for (n, (guardian, count)) in guardians.iter().enumerate() {
+            let index = family_index * 6 + n;
+            let Some((gx, gy)) = sites.get(n).copied() else { continue };
+            let (x, y, w, h) = at((gx, gy), (LAIR_W, LAIR_H));
+            taken.push((x, y, w, h));
+            places.insert(
+                format!("lair.{family}.{}", n + 1),
+                serde_json::json!({
+                    "name": "Lair",
+                    "scene": scene,
+                    "x": x, "y": y, "w": w, "h": h,
+                    "icon": 0x14,
+                    "menu": [8, 100, 160, 40],
+                    "text": [6, 146, 308, 42],
+                    "options": [
+                        {
+                            "label": "Enter Lair",
+                            "effect": {
+                                "do": "raid",
+                                "lair": index,
+                                "arena": lair_arena(family, n),
+                                "family": family,
+                                "guardian": guardian,
+                                "count": count
+                            }
+                        },
+                        { "label": "Leave", "effect": leave }
+                    ]
+                }),
+            );
         }
-    })
-    .to_string()
+    }
+
+    serde_json::Value::Object(places).to_string()
 }
 
 /// What there is to carry, and what a stall asks for it.
@@ -1529,11 +1921,23 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>) -> String {
 /// Scroll of the Wyrm sets `WyrmFLAG` so `KnightWyrm` can send the dragon
 /// after a rival. The prices `se*` sells them back for are half.
 ///
+/// **The ids of the ten are the ones `henge_core::service::magic_item` names**,
+/// because every bestowal in the game goes through that table: the wizard's
+/// gift, what is on a lair's floor, and what the temple will buy back. A pack
+/// that files one of them under another id simply never has it handed out, so
+/// the two have to agree and the engine's side is the one that cannot move.
+/// That is also why the flask, which is ours, is `flask` and not `potion`: the
+/// original's own Potion of Healing is slot 0 and has the better claim to it.
+///
+/// The four keys are here so that one carried out of a lair has a name to be
+/// listed under. They are `moon::Key::item` ids, they carry no price, and
+/// `moon::is_token` keeps them off every counter in the game.
+///
 /// It lands in the reference pack for now because it is authored alongside the
 /// places that sell it, and those carry the original's own town art.
 fn item_definitions() -> String {
     serde_json::json!({
-        "potion": {
+        "flask": {
             "name": "Flask of healing",
             "price": 25,
             "consumed": true,
@@ -1547,49 +1951,60 @@ fn item_definitions() -> String {
         },
 
         // The original's own magic, slot by slot.
-        "healing_potion": {
+        "potion": {
             "name": "Potion of healing", "price": 20, "consumed": true,
             "virtue": { "does": "restore" }
         },
-        "gem": {
+        "gem_of_seeing": {
             "name": "Gem of seeing", "price": 32, "consumed": true,
             "virtue": { "does": "sight", "astray": 0, "returns": true }
         },
-        "ring": {
+        "ring_of_protection": {
             "name": "Ring of protection", "price": 50, "consumed": false,
             "virtue": { "does": "ward", "health": 20 }
         },
-        "talisman": {
+        "talisman_of_the_wyrm": {
             "name": "Talisman of the Wyrm", "price": 52, "consumed": false,
             "virtue": { "does": "inert" }
         },
-        "haste": {
+        "scroll_of_haste": {
             "name": "Scroll of Haste", "price": 36, "consumed": true,
             "virtue": { "does": "haste" }
         },
-        "aquisition": {
+        "scroll_of_acquisition": {
             "name": "Scroll of Aquisition", "price": 52, "consumed": true,
             "virtue": { "does": "seize" }
         },
-        "hawk": {
+        "scroll_of_the_hawk": {
             "name": "Scroll of the Hawk", "price": 52, "consumed": true,
             "virtue": { "does": "sight", "astray": 16, "returns": false }
         },
-        "wyrm": {
+        "scroll_of_the_wyrm": {
             "name": "Scroll of the Wyrm", "price": 40, "consumed": true,
             "virtue": { "does": "inert" }
         },
-        "protection": {
+        "scroll_of_protection": {
             "name": "Scroll of Protection", "price": 24, "consumed": true,
             "virtue": { "does": "protection", "backfire": 11 }
         },
-        // Carried, worth coin, and honest about doing nothing yet: the lairs it
-        // is for do not exist. An inert item is still a real item, and a thief
-        // can still take it off you.
-        "key": {
-            "name": "Iron key",
-            "price": 120,
-            "consumed": false,
+        // The four lair keys, one hidden in each family's six. `MOON:Valley`
+        // wants all four bits of `+0x14` set; a pack that carries items by id
+        // needs four ids, and these are `moon::Key::item`'s. They are worth
+        // nothing at any counter, because `moon::is_token` refuses them.
+        "key.forest": {
+            "name": "Key of the forest", "price": 0, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "key.waste": {
+            "name": "Key of the wastes", "price": 0, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "key.swamp": {
+            "name": "Key of the marsh", "price": 0, "consumed": false,
+            "virtue": { "does": "inert" }
+        },
+        "key.glade": {
+            "name": "Key of the glades", "price": 0, "consumed": false,
             "virtue": { "does": "inert" }
         },
 
@@ -1773,6 +2188,142 @@ mod tests {
             assert!(!list.is_empty(), "{family} lists nothing");
             for id in *list {
                 assert!(CREATURES.iter().any(|c| c.id == *id), "{family} names {id}, which is not in the bestiary");
+            }
+        }
+    }
+
+    /// A grid of the four terrains, a quarter of the map each, for the place
+    /// table to site lairs on without a baked pack to read the real one from.
+    fn quartered_ground() -> Vec<u8> {
+        let mut g = vec![0u8; GRID_LEN];
+        for y in 0..26 {
+            for x in 0..40 {
+                g[y * 40 + x] = match (x < 20, y < 13) {
+                    (true, true) => 0,
+                    (false, true) => 2,
+                    (true, false) => 4,
+                    (false, false) => 6,
+                };
+            }
+        }
+        g
+    }
+
+    fn places() -> serde_json::Value {
+        serde_json::from_str(&place_definitions(&BTreeMap::new(), &quartered_ground())).unwrap()
+    }
+
+    /// The twenty four lairs, in `LairFile` order, each on its own layout.
+    ///
+    /// This is the check that the keys land where the quest expects them:
+    /// `Run::stock_lairs` plants one key per family six records apart, so a
+    /// lair whose number and family disagree hides the forest's key in a marsh.
+    #[test]
+    fn the_lairs_are_the_twenty_four_lairfile_names_in_order() {
+        let places = places();
+        let mut seen: BTreeMap<usize, (String, String, String, u64)> = BTreeMap::new();
+        for def in places.as_object().unwrap().values() {
+            for choice in def["options"].as_array().unwrap() {
+                let e = &choice["effect"];
+                if e["do"] != "raid" {
+                    continue;
+                }
+                let was = seen.insert(
+                    e["lair"].as_u64().unwrap() as usize,
+                    (
+                        e["arena"].as_str().unwrap().into(),
+                        e["family"].as_str().unwrap().into(),
+                        e["guardian"].as_str().unwrap().into(),
+                        e["count"].as_u64().unwrap(),
+                    ),
+                );
+                assert!(was.is_none(), "two places claim lair {}", e["lair"]);
+            }
+        }
+        let want: Vec<String> = ["fo", "wa", "sw", "gl"]
+            .iter()
+            .flat_map(|p| (1..=6).map(move |n| format!("{p}l{n}")))
+            .collect();
+        assert_eq!(want.len(), 24);
+        for (n, arena) in want.iter().enumerate() {
+            let (got, family, guardian, count) =
+                seen.get(&n).unwrap_or_else(|| panic!("no lair numbered {n}"));
+            assert_eq!(got, arena, "lair {n} is fought on the wrong layout");
+            // `LairFile` order is forest, waste, swamp, glade, which is also
+            // `moon::Key::ALL`, which is what puts each key in its own ground.
+            let want_family = henge_core::moon::Key::ALL[n / 6].family();
+            assert_eq!(family, want_family, "lair {n} is on the wrong ground");
+            assert!(
+                CREATURES.iter().any(|c| c.id == guardian),
+                "lair {n} is guarded by {guardian}, which is not in the bestiary"
+            );
+            assert!((1..=3).contains(count), "lair {n} fields {count}, and a bout seats four");
+        }
+    }
+
+    /// Every door leads somewhere and every counter sells something the pack
+    /// has. A stall naming an item that is not declared is a dead line that
+    /// only shows up by walking into it.
+    #[test]
+    fn every_door_and_every_counter_in_the_pack_resolves() {
+        let places = places();
+        let places = places.as_object().unwrap();
+        let items: serde_json::Value = serde_json::from_str(&item_definitions()).unwrap();
+        let items = items.as_object().unwrap();
+        for (id, def) in places {
+            for choice in def["options"].as_array().unwrap() {
+                let e = &choice["effect"];
+                if let Some(to) = e.get("place").and_then(|p| p.as_str()) {
+                    assert!(places.contains_key(to), "{id} has a door to {to}, which does not exist");
+                }
+                if let Some(item) = e.get("item").and_then(|p| p.as_str()) {
+                    assert!(items.contains_key(item), "{id} deals in {item}, which the pack has not got");
+                }
+            }
+        }
+    }
+
+    /// The ten magic slots the engine hands out have to be items the pack
+    /// declares, or the wizard's gift and every lair floor quietly falls back
+    /// to whichever of the ten does exist.
+    #[test]
+    fn the_pack_declares_every_magic_slot_the_engine_can_bestow() {
+        let items: serde_json::Value = serde_json::from_str(&item_definitions()).unwrap();
+        let items = items.as_object().unwrap();
+        for (_, slot) in henge_core::service::MAGIC_TABLE {
+            let id = henge_core::service::magic_item(slot)
+                .unwrap_or_else(|| panic!("slot {slot:#x} names nothing"));
+            assert!(items.contains_key(id), "the pack has no {id}, which is magic slot {slot:#x}");
+        }
+        // And the four keys, so one carried out of a lair has a name.
+        for key in henge_core::moon::Key::ALL {
+            assert!(items.contains_key(key.item()), "the pack has no {}", key.item());
+        }
+    }
+
+    /// No two places on the map share ground. Two boxes overlapping would make
+    /// one of them unreachable, since walking opens the nearer of the pair.
+    #[test]
+    fn nothing_on_the_map_stands_on_anything_else() {
+        let places = places();
+        let boxes: Vec<(String, i64, i64, i64, i64)> = places
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, d)| !d["hidden"].as_bool().unwrap_or(false))
+            .map(|(id, d)| {
+                let n = |k: &str| d[k].as_i64().unwrap();
+                (id.clone(), n("x"), n("y"), n("w"), n("h"))
+            })
+            .collect();
+        assert!(boxes.len() >= 24 + 5, "only {} places on the map", boxes.len());
+        for (i, a) in boxes.iter().enumerate() {
+            assert!(a.1 >= 0 && a.1 + a.3 <= 320, "{} is off the map", a.0);
+            assert!(a.2 >= 0 && a.2 + a.4 <= 200, "{} is off the map", a.0);
+            for b in &boxes[i + 1..] {
+                let apart = a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1
+                    || a.2 + a.4 <= b.2 || b.2 + b.4 <= a.2;
+                assert!(apart, "{} and {} stand on the same ground", a.0, b.0);
             }
         }
     }

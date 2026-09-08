@@ -126,7 +126,9 @@ impl Effect {
         match self {
             Effect::Buy { item, .. } => items.get(item).map(|d| d.price),
             Effect::Heal { gold, .. } if *gold > 0 => Some(*gold),
-            Effect::Wager { stake, .. } => Some(*stake),
+            // Not the wager. The tavern's five gadgets are painted `1 gold` to
+            // `5 gold`, so the stake is already the label and a price column
+            // beside it would print the same number twice.
             Effect::Donate { gold } | Effect::Consult { gold } => Some(*gold),
             // `GoldSell`: `shr ax, 1` on the price.
             Effect::Sell { item } => items.get(item).map(|d| d.price / 2),
@@ -167,6 +169,22 @@ pub struct PlaceDef {
     /// code, because it depends entirely on where that particular backdrop has
     /// room for words.
     pub menu: [i32; 4],
+    /// Where what the place says goes, if not inside the menu box.
+    ///
+    /// Several of the original's own screens paint a panel for words and
+    /// nothing else: the healer's slate, the mystic's parchment, the plank on
+    /// the dice table. A menu drawn over the picture and a paragraph dropped
+    /// into that panel is what those screens were built for, so a place may
+    /// name a second box and keep the picture between the two.
+    #[serde(default)]
+    pub text: Option<[i32; 4]>,
+    /// The dice table: three faces drawn where `_TAVERN:RollDice` blits them.
+    ///
+    /// The screen behind them is `DICE.PIV`, which is a picture of three dice
+    /// already on the wood; the faces go on top of it. Nothing else in the game
+    /// draws a prop over a place, so this is a flag rather than a prop list.
+    #[serde(default)]
+    pub dice: bool,
     pub options: Vec<Choice>,
     /// Not on the map. A hidden place is a room inside another one, reached
     /// only through an [`Effect::Go`], so its coordinates mean nothing and
@@ -221,6 +239,30 @@ pub fn nearest(places: &Places, x: i32, y: i32, range: i32) -> Option<(&str, &Pl
         .filter(|(_, d)| !d.hidden && d.distance2(x, y) <= range * range)
         .min_by_key(|(id, d)| (d.distance2(x, y), id.as_str()))
         .map(|(id, d)| (id.as_str(), d))
+}
+
+/// The terrain family of every lair the pack declares, by the lair number its
+/// [`Effect::Raid`] names, which is what [`Run::stock_lairs`] wants.
+///
+/// A pack decides how many lairs there are and where they sit, so the run's
+/// table has to be built from the pack rather than from a constant here. A
+/// number no place claims is a hole, and comes back as an empty family, so a
+/// pack that skips one cannot shift every lair after it onto the wrong ground.
+///
+/// [`Run::stock_lairs`]: crate::run::Run::stock_lairs
+pub fn lair_families(places: &Places) -> Vec<String> {
+    let mut families: Vec<String> = Vec::new();
+    for def in places.values() {
+        for choice in &def.options {
+            if let Effect::Raid { lair, family, .. } = &choice.effect {
+                if families.len() <= *lair {
+                    families.resize(*lair + 1, String::new());
+                }
+                families[*lair] = family.clone();
+            }
+        }
+    }
+    families
 }
 
 /// Whether the traveller is standing in a place, and whether they just walked in.
@@ -484,6 +526,8 @@ mod tests {
             intro: String::new(),
             icon: None,
             menu: [8, 8, 100, 100],
+            text: None,
+            dice: false,
             options: vec![
                 Choice {
                     label: "Merchant".into(),
@@ -518,6 +562,8 @@ mod tests {
             intro: String::new(),
             icon: None,
             menu: [8, 8, 100, 100],
+            text: None,
+            dice: false,
             options: vec![
                 Choice {
                     label: "Flask of healing".into(),
@@ -590,7 +636,8 @@ mod tests {
     fn the_towns_hold_the_spots_the_original_sends_a_knight_to() {
         let town = |x, y, w, h| PlaceDef {
             name: "t".into(), scene: "s".into(), x, y, w, h,
-            hidden: false, intro: String::new(), icon: None, menu: [0, 0, 0, 0], options: vec![],
+            hidden: false, intro: String::new(), icon: None, menu: [0, 0, 0, 0],
+            text: None, dice: false, options: vec![],
         };
         // Highwood: icon 0x19 is 25x32, hung so that (94, 47) is in the middle.
         let highwood = town(86, 36, 25, 32);
@@ -823,5 +870,38 @@ mod tests {
         let mut a = Approach::default();
         assert_eq!(a.step(&places, 0, 0), None, "standing on its coordinates finds nothing");
         assert_eq!(nearest(&places, 0, 0, 40).map(|(id, _)| id), None);
+    }
+
+    /// The run's lair table is built from the pack, and each lair keeps the
+    /// number its own option names whatever the ids sort like. That is what
+    /// puts the forest's key in a forest lair rather than six places along.
+    #[test]
+    fn the_lair_table_is_read_off_the_pack_by_number() {
+        let lair = |n: usize, family: &str| {
+            let mut d = healer();
+            d.name = "Lair".into();
+            d.options = vec![Choice {
+                label: "Enter Lair".into(),
+                effect: Effect::Raid {
+                    lair: n,
+                    arena: format!("a{n}"),
+                    family: family.into(),
+                    guardian: "troll".into(),
+                    count: 1,
+                },
+            }];
+            d
+        };
+        let mut places = Places::new();
+        // Inserted so that the ids sort the other way round from the numbers.
+        places.insert("a".into(), lair(2, "swamp"));
+        places.insert("b".into(), lair(0, "forest"));
+        places.insert("z".into(), lair(1, "waste"));
+        assert_eq!(lair_families(&places), vec!["forest", "waste", "swamp"]);
+        // A pack with no lairs asks the run to stock none.
+        assert!(lair_families(&world()).is_empty());
+        // And a hole is a hole, not a shift.
+        places.remove("z");
+        assert_eq!(lair_families(&places), vec!["forest", "", "swamp"]);
     }
 }

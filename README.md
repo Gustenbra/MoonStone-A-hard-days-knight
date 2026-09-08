@@ -21,9 +21,28 @@ need your own copy of the original, which the engine reads and converts locally.
 - Where a fight happens is decided by the terrain you are standing on, and which
   of that family's eight arenas you get is the family's own turn counter, the way
   the original rotates through them
-- **Places to go**: Highwood, Waterdeep, a healer in the woods and the stone
-  circle, each on the landmark the map already draws. Walk onto one and it opens
-  with its own screen and menu
+- **Places to go**: Highwood and Waterdeep at the coordinates the executable
+  sends a knight to, a healer in the woods, the stone circle and Math's tower on
+  the landmarks the map already draws. Walk onto one and it opens with its own
+  screen and menu. Inside the walls are a merchant, a tavern, a healer, a temple
+  and a mystic, each on the original's own art and speaking its own lines: three
+  dice for a stake of one to five gold on the odds table in `_TAVERN`, a donation
+  the healer spends down on your wounds and your life points, a reading from the
+  cosmos that can take a point of an ability as easily as give one, and a counter
+  that buys magic back at half price
+- **Math the wizard**, in his tower in the northern waste. Ring the bell and one
+  roll decides between a magic gift, a point of an ability, a purse of gold and
+  being turned into a toad, which costs you the three turns the original's own map
+  loop refuses a toad. He remembers you: the grudge is seventy after every visit
+  and comes down by ten a day, so a second call the same day is dangerous
+- **Twenty four lairs**, six on each kind of ground, each fought in its own arena
+  layout and each holding gold, magic, or both. One of the four keys is hidden in
+  one lair of each family, and a lair you have beaten but could not carry out of
+  stays on the map to come back to
+- **The moon the game is named after.** Four days to a phase, eight steps to the
+  cycle, and a between-days screen with tonight's moon over the night sky and one
+  of the fourteen things the Gods have to say. The ratmen are stronger on some
+  nights than others, because the original's own set-up routine reads the phase
 - **Gold and goods**: coin comes off whoever you put down, and the merchants in
   both towns are open. Flasks and draughts are bought, carried and drunk; a
   healer in the woods still charges only days, and one inside the walls wants
@@ -65,7 +84,7 @@ need your own copy of the original, which the engine reads and converts locally.
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
-- 190 tests, all of it verifiable headlessly with no display or sound card
+- 270 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -100,7 +119,8 @@ It opens on the title screen. Up and down move the highlight, left and right cha
 the setting on the row you are on, and space takes it. The moon quest goes to the
 select screen, where left and right pick a knight and space takes him.
 
-Walking onto a town, the healer or the stone circle opens it. In a place, up and
+Walking onto a town, a lair, the healer, the stone circle or the wizard's tower
+opens it. In a place, up and
 down move the highlight, space takes the option, and Tab is always a way back out.
 
 Player one uses the arrows and space, and the direction held with space is the
@@ -191,8 +211,8 @@ actor, because what waits in a swamp is a mudman and that is worth seeing too.
 
 ```
     0  PLACE   day 1  hp  40  gold  100  -         Merchant  > Flask of healing [25]
-    1  PLACE   day 1  hp  40  gold   75  potion    Merchant  > Flask of healing [25]  A fair trade.
-    6  PLACE   day 1  hp  80  gold   50  potion    Merchant  > Drink a flask          You drain it.
+    1  PLACE   day 1  hp  40  gold   75  flask     Merchant  > Flask of healing [25]  A fair trade.
+    6  PLACE   day 1  hp  80  gold   50  flask     Merchant  > Drink a flask          You drain it.
 ```
 
 ## How it is put together
@@ -300,8 +320,8 @@ menu line takes its price from the goods rather than repeating it in the label,
 so the two can never drift apart:
 
 ```json
-"potion": { "name": "Flask of healing", "price": 25, "consumed": true,
-            "virtue": { "does": "heal", "health": 40 } }
+"flask": { "name": "Flask of healing", "price": 25, "consumed": true,
+           "virtue": { "does": "heal", "health": 40 } }
 ```
 
 **Things leave the pack as well as entering it.** The original names a routine

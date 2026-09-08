@@ -14,6 +14,16 @@ const TOKEN_SHEET: &str = "bank.mi";
 const TOKEN_FRAME: usize = 3;
 const MAP_SCENE: &str = "scene.map";
 
+/// What the map has to be told about the world before it can draw it: the place
+/// under the traveller's feet, whatever a cutpurse just took, and the icons the
+/// picture does not already contain.
+#[derive(Default)]
+pub struct Marks<'a> {
+    pub here: Option<&'a str>,
+    pub notice: Option<&'a str>,
+    pub icons: &'a [(i32, i32, usize)],
+}
+
 pub struct MapScene {
     pub state: Overworld,
     /// Cached map palette, so terrain can be read without borrowing the registry
@@ -94,10 +104,11 @@ impl MapScene {
     /// is under your feet its name is the more useful of the two.
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer,
                   fonts: &std::collections::BTreeMap<String, crate::text::Font>,
-                  run: &henge_core::run::Run,
-                  here: Option<&str>, notice: Option<&str>) -> anyhow::Result<()> {
+                  run: &henge_core::run::Run, world: &Marks) -> anyhow::Result<()> {
+        let (here, notice) = (world.here, world.notice);
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
+        self.draw_icons(reg, fb, world.icons);
 
         // The status bar goes down first and the traveller on top of it. The
         // map is the whole screen in the original, and the recovered bound lets
@@ -108,6 +119,20 @@ impl MapScene {
         self.draw_purse(reg, fb, fonts.get("small"), run, notice);
         self.draw_token(reg, fb);
         Ok(())
+    }
+
+    /// The places the map has to draw for itself.
+    ///
+    /// The towns, the healer's ruin, the stone ring and the wizard's tower are
+    /// painted into `MAP.CMP` and need nothing. A lair is not: `_MAP:DisplayLairs`
+    /// walks the lair table and blits `MI.C` frame 0x14 at every one whose x is
+    /// not negative, which is how a lair leaves the map when it has been beaten
+    /// and stripped. These icons are authored against the map's own palette, so
+    /// they draw in their own colours with nothing translated.
+    fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer, icons: &[(i32, i32, usize)]) {
+        for (x, y, frame) in icons {
+            crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
+        }
     }
 
     /// The purse, on a plate in the corner of the map.

@@ -24,8 +24,8 @@ visible without unpacking the executable twice. **There are 2,223 symbols with a
 | **blocked** | cannot start until something else is decoded |
 | **design** | never recovered; has to be invented rather than ported |
 
-Honest headline: **over half done**, and what remains includes the quest, the creatures'
-own behaviour and most of the economy.
+Honest headline: **most of it done**, and what remains is the quest, the creatures' own
+behaviour, the two set pieces, and the shell's message system and mouse.
 
 ---
 
@@ -231,7 +231,7 @@ hardware. Nothing to port. Listed so the symbol list is complete.
 
 # 3. Combat
 
-## 3.1 Core `done, but for experience and the sheathed sword`
+## 3.1 Core `done, but for the sheathed sword`
 
 | Original | What it is | Status |
 |---|---|---|
@@ -363,11 +363,24 @@ is `MOON:MapIconsTABLE` itself: it is uninitialised data, the first 2,906 bytes 
 in the load image are a stale duplicate, and the seven places that are not towns therefore
 have no recovered coordinates. See `REVERSING.md`.
 
+**So the places that are not towns were put where the artwork puts them**, and that
+decision is now taken: the healer keeps the ruin in the southern woods, the stones are the
+ring the map draws in the middle of it all, and Math's tower is the lone dark tower
+standing in the northern waste, which is the only building on the picture nothing else
+claims. The twenty four lairs are sited by the recovered terrain grid rather than by eye;
+see 4.3. Every one of the recovered menu lines is used as its own gadget's label.
+
 - [x] The real terrain table
 - [x] `CHECKY`/`CHECKY2`: what makes ground impassable
 - [x] Scrolling: settled, and negative
-- [ ] The rest of the location graph, which needs `MapIconsTABLE` reconstructed some
-      other way, or accepting the places where the artwork puts them
+- [x] The rest of the location graph, as far as it can be: the two recovered towns, the
+      four other fixed places on their own landmarks, and the lairs on their own ground
+- [ ] The four home villages, one per knight, which `StackMessages` names four times over
+      (`Enter Village`, and the entry is skipped unless the knight's index matches). Four
+      villages is a mechanic henge does not have at all, and the between-days screen tells
+      you to `Visit your home village to restore lost lives`
+- [ ] The Valley of the Gods (`knvalley`), which is what four keys are for, and pillaging
+      a dead rival's grave (`kngrave`). Both are phase 7's
 
 ## 4.2 Arena generation `done, except the moors`
 
@@ -405,28 +418,124 @@ in the game carries 3, 4 or 0xfe there.
       fifth family or a second name for the plain one is not established either way, and
       that is what item 59 has to settle
 
-## 4.3 Lairs `todo`
+## 4.3 Lairs `done`
 
-`LAIRSTART`, `FINDLAIR`, `FINDCLOSELAIR`, `LAIRTABLE`, `LAIRPOINTER`, `FMEM_LAIR`.
+`LAIRSTART`, `FINDLAIR`, `FINDCLOSELAIR`, `LAIRTABLE`, `LAIRPOINTER`, `FMEM_LAIR`, and
+with addresses: `MOON:InitLair`, `LairFill`, `GoldLair`, `MagicLair`, `GoldMagicLair`,
+`LairWon`, `LairGEM`, `CheckLairClear`, `CheckLairEncounter`, `MOON:LairRND`,
+`MOON:LairFile`, `fmem_LairMagic`, `_MAP:DisplayLairs`, `TrackLair`, `CloseLair`,
+`LairFLAG`, `NoLairsFLAG`, `_STATUS:DisplayLair`.
 
-Lairs are fixed dangerous places holding the keys. **None of this exists in henge.**
+**Twenty four lairs, six to a family, and the quest begins in them.** The table is 24
+records of 18 bytes at DS:0002, built by the initialiser at image 0x1e00:
 
-- [ ] Lair placement, entry, contents, the guardian fight
+```
++0x00  the lair's own item record, 24 bytes of counts at fmem_LairMagic
++0x02  which entry of CombatTable sets up the guardian fight
++0x04  how many of them
++0x06  gold
++0x08  set to 1 the first time the guardian is beaten
++0x0a  x on the map, 0xffff once the lair is stripped bare
++0x0c  y
++0x0e  the landscape code
++0x10  the arena layout
+```
 
-## 4.4 Time and the moon `partial`
+**The keys.** The initialiser calls `NUM16` four times, which is `rnd & 7` rolled again
+while it exceeds five, and writes 8, 4, 2 and 1 into byte `+0x14` of the chosen lair's
+item record, stepping 0x6c (six records) on between each. One key per family, in a lair
+chosen uniformly at the start of the quest, and `MOON:Valley` wants all four bits.
 
-`NEXTMOON`, `MOON`, `MOON_PIV`, `WEEK`, `LOADNEXTDAY`, `NEXTDAYPIC`, `FADEOUTDAY`, `JIFFY`.
+**The contents.** `LairFill` rolls 0..=100 against `MOON:LairRND`, four records of a
+threshold and a kind: 50 gold, 70 magic, 90 both, 100 both again, because the
+dispatcher's last comparison is dead code and falls through to the same call. Gold is
+the wizard's own gift routine called with `dx` set, ten to thirty one; magic is his
+bestowal called twice, so a lair with magic holds two items and nothing is ever empty.
 
-We have a day counter. **The moon phase, which the game is named for, does not exist.**
+**`MOON:LairFile` is recovered**, which the plan did not expect: it sits four bytes past
+the end of the stale duplicate, and is 24 pointers to `fol1.t`..`fol6.t`, `wal1.t`..`wal6.t`,
+`swl1.t`..`swl6.t`, `gll1.t`..`gll6.t`. That is the arena layout of each lair *and* the
+order the keys are planted in, which is `moon::Key::ALL`.
 
-- [ ] Moon phases on a weekly cycle, and the between-days screen
-- [ ] What the moon gates. `design` unless recovered
+**Arriving and leaving.** `CheckLairEncounter` overlaps the traveller's 8x10 token with
+`MI.C` frame 0x1f, exactly the way a town is decided, and puts `Enter Lair` on the map's
+list; `DisplayLairs` blits frame 0x14 at every lair whose x is not negative, so lairs are
+on the map from the start; `CheckLairClear` writes 0xffff over the coordinates when the
+gold is zero *and* all 24 item counts are, so a lair you have beaten but could not empty
+is still there to go back to; and `LairWon` marks it and adds one to the knight's
+experience the first time only.
+
+**What is not recovered**: `ForestLairs` (guardian and count), `LairLocation` and
+`LairType` are all inside the 2,906 bytes of DGROUP that the load image carries as a stale
+duplicate. What a guardian *can* be is recovered, because `InitGameStart` fills
+`CombatTable` with the thirteen `InitKnightvs*` routines. Where each lair stands is a
+search over the real `MapType` grid for a cell whose whole neighbourhood is that family's
+ground, clear of every other place and of the four starting corners, spread by
+farthest-point sampling; which guardian each holds is the family's own road creatures for
+the first three and then the beast and Balok, the two the road never produces. Both are
+marked as ours in the baker.
+
+- [x] Lair placement, entry, contents, the guardian fight
+- [ ] `LairGEM`, which is the one thing a gem flight is for in the original: looking into
+      a lair from the air, and being put back where you started on the way out. Here a
+      gem flight ends on fire instead
+- [ ] `_STATUS:DisplayLair`, the panel page that draws the floor as icons. Ours says it
+      in words instead
+
+## 4.4 Time and the moon `done`
+
+`NEXTMOON`, `MOON`, `MOON_PIV`, `WEEK`, `LOADNEXTDAY`, `NEXTDAYPIC`, `FADEOUTDAY`, `JIFFY`,
+and with addresses: `MOON:EncounterFini`, `AdjustTIME`, `Moons`, `MoonCount`,
+`_MAP:NextWHICH`, `_LOADER:NextDayMes`, `NDM`, `WaitMES`, `WaitCOUNT`, `MoonPic`.
+
+**The calendar is recovered whole.** `EncounterFini` is called by `_MAP:NextWHICH` once
+every fourth turn, that is once each time all four knights have moved:
+
+```
+[0x898b] += 1                     ; days since the moon last moved
+if [0x898b] <= 3: AdjustTIME      ; four days to a phase
+[0x5b1] += 1
+[0x898b] = 0
+MoonCount = (MoonCount + 1) & 7   ; eight steps to the cycle
+GiveBK()
+[0x8989] = Moons[MoonCount]       ; tonight's moon, as a cel number
+AdjustTIME()
+```
+
+So **four days move the moon one step and eight steps close the cycle**: thirty two days.
+`InitGameStart` writes 0x2d before anything else runs, so a quest opens on the full moon.
+`AdjustTIME` is the rest of a turned day: the wizard's grudge down by ten unless it is the
+0xff of a knight he has never met, a day off a toad, and a quarter of whatever health is
+missing back, never less than a point.
+
+**The screen** is the routine at 0x8e5b: `NextDayMes` (`NDM`, `Next Day`) at y 95 over
+`CH.PIV`, and cel `[0x8989]` of `KI.CEL` blitted at (119, 12). Cels 0x2d to 0x31 are five
+57x44 moons, full to sliver, shadow on the right of each.
+
+**What the moon gates**, all recovered: `SetRatmenTables` reads the phase before every
+ratman fight and writes five hit points and a slash of one, or seven and three under 0x2d,
+or twelve and five under 0x31; `CalcDamage` doubles a knight's blow while he carries the
+moonstone whose night it is; `MOON:Henge` ends the game for a knight standing in the
+circle with it. The first is live. The other two are built and cannot fire until something
+hands out a moonstone, which is 7's.
+
+**What is ours**: the eight bytes of `MOON:Moons`, which are in the stale part of DGROUP,
+so the cycle is five pictures over eight steps waning and waxing back; and showing one of
+the fourteen `_LOADER:WaitMES` hints on the between-days screen, which the original shows
+while a disk loads and henge has no disk to load.
+
+- [x] Moon phases on a weekly cycle, and the between-days screen
+- [x] What the moon gates
+- [ ] `FADEOUTDAY`, the fade between the map and the screen, which is item 75's
 
 ---
 
-# 5. Locations
+# 5. Locations `done`
 
-Each is a named routine. All are **todo** beyond the menus already drawn.
+Each is a named routine, and **all of them now run**. Two of the eleven modules,
+`_TAVERN` and `_WIZARD`, turned out to be nothing but these: the dice table, the stone
+circle, the wizard's bell, the town healer and the mystic. The temple is one routine in
+`_STATUS`. What was in the plan as five `todo` lines was mostly translation.
 
 **What the map offers, recovered.** `MOON:CheckGROOC` walks `MapIconsTABLE`, overlaps each
 entry's `MI.C` icon rectangle with the traveller's 8x10 token, and pushes what it hits onto
@@ -457,70 +566,110 @@ the Valley of the Gods, the wizard, or pillaging a dead rival's grave.
 
 | Original | What it is | Status |
 |---|---|---|
-| `TAVERN` | recruit, rumours, drink | menu only, but gold now exists to charge |
-| `DICE` | a dice game | **todo**, `DICE.CEL` and `DICE.PIV` unused |
-| `HEALER` | restore health | done; the hermit costs days, a town healer days and gold |
-| `TEMPLE` | temple services | **todo** |
-| `MYSTIC` | mystic services | **todo** |
-| `STONEHENGE` | the stone circle | menu only |
-| `CONTROLWIZARD`, `WIZBESTOW`, `GETABILITY`, `BESTOWGOLD`, `BESTOWMAGIC` | the wizard grants gold, magic, abilities | **todo** |
+| `TAVERN`, `TavernOpenScene`, `TavernLoop`, `LeaveTavern`, `SetBET` | the tavern | done: the five painted stakes, and an empty purse turned out at the door |
+| `DICE`, `RollDice`, `DiceSort`, `DiceWinner`, `DiceODDS`, `DDICE`, `BET` | a dice game | done, and **recovered, not designed** |
+| `HEALER`, `HealDon`, `ExitHealer`, `InitDonation` | restore health | done; the hermit costs days, the town healer takes a donation and spends it down |
+| `TEMPLE`, `TTemple`, `SellToTemple`, `GoldSell` | temple services | done for selling; buying a moonstone waits on 7 |
+| `MYSTIC`, `MysticUpDown`, `MysticAbility`, `MysticJudge`, `DonationTAB` | mystic services | done |
+| `STONEHENGE`, `MOON:Henge`, `HengeControl`, `HengeWait` | the stone circle | done: an offering, and the winning branch waiting on a moonstone |
+| `CONTROLWIZARD`, `WIZBESTOW`, `GETABILITY`, `BESTOWGOLD`, `BESTOWMAGIC`, `WIZBestowGold`, `WIZBestowMagic`, `WIZBestowAbility`, `MagicRND` | the wizard grants gold, magic, abilities | done, all four outcomes and the grudge |
 | `LOADHIGHWOOD`, `LOADHW`, `LOADWATERDEEP`, `LOADWD`, `LOADCITY`, `LOADREGION` | town loading | done as scenes |
 
-- [ ] Tavern: what it actually offers
-- [ ] The dice game, rules unknown `design`
-- [ ] Temple and mystic services
-- [ ] The wizard: abilities, gold and magic bestowal. `GETABILITY` implies a character
-      ability system that does not exist in henge at all
-- [ ] What the stone circle does, and its relationship to the moon
+**The dice game, in full.** `RollDice` rolls three bytes with `and ax, 7; cmp ax, 5; jg`
+and re-rolls, blits `DICE.CEL` cel `DDICE[n]` at (115, 15), (49, 38) and (75, 88) over
+`DICE.PIV`, and then `DiceSort` bubble sorts the three and the sorted throw is compared
+two words at a time against `DiceODDS` at DS:d125, eleven records of three faces and a
+multiplier. The table is **not** monotone in the face: three of face 0 pays thirty, of
+face 1 twenty, of face 5 eighteen, of face 3 sixteen, of face 4 fourteen and of face 2
+twelve, and no pair pays at all unless it is a pair of face 0. The purse saturates at a
+hundred and fifty (`cmp word ptr [si+0x32], 0x96`), so a big win can pay less than the
+arithmetic says, here as there.
+
+**The wizard, in full.** One roll plus the grudge byte at `+0x3b`, against thirty (magic),
+seventy (an ability), ninety (ten to thirty one gold) and everything above that (a toad
+for three days). A knight he has never met carries 0xff, which rolls one lower and cannot
+reach the toad; leaving sets the grudge to seventy whatever he gave, and `AdjustTIME`
+takes ten off it a day. `MagicRND` is ten records of a threshold and a slot, with two
+refusals: never the Sword of Sharpness twice, because only one exists, and never the same
+slot twice running. The fourteen `WizardText` lines are cycled by `WIZGOLD_CNT` and
+`WIZMAG_CNT` and are used verbatim.
+
+- [x] Tavern: what it actually offers
+- [x] The dice game, and it was in `_TAVERN` all along
+- [x] Temple and mystic services
+- [x] The wizard: abilities, gold and magic bestowal
+- [x] What the stone circle does, and its relationship to the moon
+- [ ] The shake before the throw, `DD_ShakeDice` and `DD_ThrowDice`, two animation
+      scripts of a hand over the table. The result is drawn; the roll is not animated
+- [ ] `HengeControl` and `HengeLOOP`, the circle's own set piece: `ColourEn4Knight`,
+      the thunder, and `Knight_LiftMagic`
+- [ ] The mouse gadgets all six of these screens are really made of, which is item 53
 
 ---
 
-# 6. Items, magic and economy `partly done`
+# 6. Items, magic and economy `done`
 
-Gold, prices, a carried pack and potions exist. Magic, curses, the hawk and the gem
-do not.
+Gold, prices, a carried pack, the ten magic items, casting, both curses, the hawk and the
+gem. What is left here is the quest's own tokens, which are section 7's.
 
 | Original | What it is | Status |
 |---|---|---|
-| `GEM`, `INITGEM`, `RESTOREGEM` | a gem item with state | **todo** |
-| `HAWK`, `INITHAWK`, `RESTOREHAWK`, `INITCURSEHAWK` | a hawk, and a cursed variant | **todo** |
-| `HASTE` | a haste effect | **todo** |
-| `PCURSED` | player cursed state | **todo** |
-| `CAST_MAGIC` | casting | **todo** |
+| `GEM`, `INITGEM`, `RESTOREGEM` | a gem item with state | done: a flight that returns you to where it began |
+| `HAWK`, `INITHAWK`, `RESTOREHAWK`, `INITCURSEHAWK` | a hawk, and a cursed variant | done but for the cursed one: the hawk's flight lands where you put it |
+| `HASTE` | a haste effect | done: `DistanceDONE` doubles the day's step budget, `NextWHICH` clears it |
+| `PCURSED`, `ControlKnight`'s inverted joystick | player cursed state | done: a backfired scroll of protection, one bout, cleared at the end of `Combat` |
+| `CAST_MAGIC`, `MagicCast`, `MagicName`, `MagicPrices` | casting | done, from the character sheet as the original does it from the status screen |
 | `DRINKPOTIONHEAL` | potions | done, as an item virtue in the data |
-| `BESTOWGOLD`, `BESTOWMAGIC`, `GETABILITY` | acquisition | gold done, as a bounty off the fallen; the wizard's bestowal **todo** |
-| `TAKEFROMKNIGHT` | losing items | done: a flask is spent when drunk, and a cutpurse on the road takes coin or goods |
+| `BESTOWGOLD`, `BESTOWMAGIC`, `GETABILITY` | acquisition | done: off the fallen, out of a lair, and over the wizard's balcony |
+| `TAKEFROMKNIGHT` | losing items | done: spent when used, taken by a cutpurse, and given to the druids |
+| `AdjustLevel`, `XPlevels` | levelling | done: three `Increase` gadgets on the sheet, lit as `0xd3a7` lights them |
+
+**The ten magic slots are the seam between the engine and the pack**, and they have to
+agree: `_WIZARD:MagicRND` returns a slot, `magic_item` names the id, and the wizard's
+gift, a lair's floor and the temple's counter all go through it. A pack that files one of
+them under another id simply never has it handed out, so the baker's ids are the engine's
+and a test in the baker asserts it.
 
 - [x] Gold, and prices, so the merchant can open
 - [x] Inventory, carrying and losing items
-- [x] Potions, in as much as healing flasks exist. A potion that does anything
-      other than mend waits on magic
-- [x] Abilities and character stats, in as much as a knight has strength, constitution and
-      endurance, they are on the sheet, and the original's own arithmetic turns them into
-      health, reach and damage. **What makes them grow does not exist**: `AdjustLevel`
-      spends experience on a random one of the three at a threshold `XPlevels` sets per
-      player count, and that is build order item 45
+- [x] Potions, and the nine other magic slots, each with a virtue in the data
+- [x] Abilities and character stats, and what makes them grow: experience against
+      `XPlevels`, the mystic's donation, and the wizard's bestowal, all three capped at
+      five by `CheckMaxAbility`
 - [x] Swords and armour, as items with a price and a number: four blades worth 0, 2, 3 and
       5 damage and four suits worth 0, 10, 20 and 30 health, from `CalcDamage` and the
-      derivation routine at 0x28d, at the prices the merchant's own lines carry. Nothing
-      sells them yet
-- [ ] Magic: spells, casting, costs
-- [ ] Curses
-- [ ] The hawk and the gem, whatever they turn out to do
+      derivation routine at 0x28d, at the prices the merchant's own lines carry, and both
+      merchants sell them
+- [x] Magic: spells, casting, costs
+- [x] Curses: the backfired scroll, and the wizard's toad, which costs the three turns
+      `NextWHICH` refuses it
+- [x] The hawk and the gem
+- [ ] Two of the ten are still inert, and honestly so: `TalismanWrym` shifts the dragon's
+      fire right once per talisman and floors it at five, and the Scroll of the Wyrm sets
+      `WyrmFLAG` so `KnightWyrm` can send the dragon after a rival. Both act on the
+      dragon, and the dragon's set piece is 3.3
+- [ ] `INITCURSEHAWK`, the hawk that drops you somewhere you did not choose
+- [ ] The moonstones, which every counter in the game already knows the price of
+      (`pu18`, `se18`) and nothing hands out. Section 7
 
 ---
 
 # 7. The quest `design`
 
-**This is the point of the game and none of it exists.**
+**This is the point of the game, and section 4.3 has just laid its first half.**
 
 `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`, `PINDEX`, `FMEM_POINTS`, `FMEM_COLAREA`.
 
-The symbols name the scoring and completion machinery but not the quest logic, so this is
-mostly recoverable only by playing the original or by design.
+The symbols name the scoring and completion machinery but not the quest logic, so what is
+left is mostly recoverable only by playing the original or by design.
 
-- [ ] The four keys, one per lair
-- [ ] The moonstone itself: where, what retrieving it requires
+- [ ] The four keys, one per lair. **Half done**: the lair initialiser plants one in each
+      family's six, a raid hands it over, and `MOON:Valley` reads them back as the four
+      bits of `+0x14`. What is missing is the Valley of the Gods itself
+- [ ] The moonstone itself: where, what retrieving it requires. Everything that reads one
+      is built: `MOON:Henge` ends the game for a knight in the circle with the stone of the
+      night, `CalcDamage` doubles his blow while he carries it, and `Valley` hands one out
+      for the four keys as `1 << (rnd & 3)`. Nothing calls `Valley`
 - [ ] Win condition and ending
 - [ ] Scoring and the final tally
 - [ ] Losing: currently a run just ends
@@ -662,11 +811,15 @@ Dependency order, not preference.
 5. ~~Title, character select and the status panel (8.1 to 8.3)~~ **done**, which
    leaves the shell needing only the pointer, the gadgets and the message boxes
 
+5b. ~~Lairs (4.3), the moon (4.4) and every door in section 5~~ **done**, which put the
+   quest's four keys on the board and left the moonstones as the only missing token
+
 **Then**
-6. Lairs (4.3) and the moon (4.4)
-7. Attack variety, blocking, gore (3.1)
-8. The quest (7)
-9. The dragon (3.3) and Balok as set pieces
+6. The quest (7), which is now one step: the Valley of the Gods, and what it gives
+7. ~~Attack variety, blocking, gore (3.1)~~ **done**
+8. Per-creature behaviour (3.2), which is the last thing standing between the bestiary
+   and fighting like itself
+9. The dragon (3.3) and the demon as set pieces
 
 **Whenever**
 - Music (2.5), gamepads (2.4), colour cycling and fades (2.2), scrolling

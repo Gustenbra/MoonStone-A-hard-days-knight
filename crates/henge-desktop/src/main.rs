@@ -245,6 +245,13 @@ fn main() -> anyhow::Result<()> {
                 app.keys[3] = (t / 140) % 2 == 0;
                 app.keys[2] = (t / 140) % 2 == 1;
                 app.keys[6] = t % 23 < 4;
+                // A menu reads presses, not held keys, so a wanderer with only
+                // keys down parks on the first door it walks into and the rest
+                // of the run proves nothing. Stepping the highlight and taking
+                // it means a wandering run goes into a town or a lair, does
+                // something there, and comes back out.
+                app.pressed[1] = t % 11 == 0;
+                app.pressed[6] = t % 23 == 0;
             }
             app.update();
             let line = match app.mode {
@@ -268,10 +275,14 @@ fn main() -> anyhow::Result<()> {
                         Some(Flight { returns: false, .. }) => " hawk",
                         None => "",
                     };
-                    format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} s{}c{}e{} xp{}{}{}",
+                    format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} {} s{}c{}e{} xp{}{}{}",
                         t, m.state.day, m.state.x, m.state.y, r.health, r.gold, carrying(r),
                         r.victories, r.fights,
                         if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name(),
+                        // The moon, because four days move it and what waits in
+                        // an arena moves with it: a calendar is only checkable
+                        // if it is on the line.
+                        r.moon.phase().key(),
                         k.strength, k.constitution, k.endurance, r.experience, aloft,
                         if app.sheet { format!(" SHEET > {}", app.sheet_rows().get(app.sheet_cursor).map_or("", |r| r.0.as_str())) } else { String::new() })
                 }
@@ -511,6 +522,15 @@ struct App {
     raiding: Option<usize>,
     /// The place to reopen when a raid is over.
     raid_place: String,
+    /// The between-days screen, and how many ticks it has left.
+    ///
+    /// `_MAP:NextWHICH` puts it up the moment the last knight has had his
+    /// turn, so it sits between one day and the next and nothing else runs
+    /// while it is there.
+    interlude: u32,
+    /// Which of the fourteen hints is next. `_LOADER:WaitCOUNT`, which the
+    /// original steps every time it shows one and wraps at fourteen.
+    hint: usize,
     /// A practice bout is not part of a run: nothing carries, nobody is slain,
     /// and it goes back to the title when it is over.
     practice: bool,
@@ -689,6 +709,8 @@ impl App {
             sheet_cursor: 0,
             raiding: None,
             raid_place: String::new(),
+            interlude: 0,
+            hint: 0,
             practice: false,
             status,
             #[cfg(feature = "research")]
@@ -770,6 +792,17 @@ impl App {
         let dx = self.keys[3] as i32 - self.keys[2] as i32;
         let dy = self.keys[1] as i32 - self.keys[0] as i32;
 
+        // The between-days screen is modal, the way `NextWHICH` puts it up
+        // before anything else runs. It clears on a press, or on its own after
+        // a few seconds, so a run left alone still goes on.
+        if self.interlude > 0 {
+            self.interlude -= 1;
+            if self.pressed.iter().any(|p| *p) {
+                self.interlude = 0;
+            }
+            return;
+        }
+
         match self.mode {
             Mode::Title => self.title_tick(),
             Mode::Select => self.select_tick(),
@@ -781,8 +814,13 @@ impl App {
                     if self.run_over_for > 180 {
                         self.run.restart();
                         self.run_over_for = 0;
+                        // A new run is a new board: the same knight rides out
+                        // again, and the lairs he already emptied are full and
+                        // back on the map, keys and all.
+                        self.stock_lairs();
                         if let Some(w) = self.world.as_mut() {
                             w.set_player_health(self.run.health_for_fight());
+                            w.set_moon(self.run.moon.phase().key());
                         }
                     }
                     return;
@@ -791,6 +829,19 @@ impl App {
                 // where the casting and the levelling are done.
                 if self.sheet {
                     self.sheet_tick();
+                    return;
+                }
+                // A toad has no turn. `_MAP:NextWHICH` tests `[si+0x3a]` and
+                // goes straight round to the next knight when it is set, so
+                // the wizard's curse costs its three days rather than being a
+                // counter nothing reads: the day turns over and no step is
+                // taken.
+                if self.run.is_toad() {
+                    if let Some(m) = self.map.as_mut() {
+                        m.state.pass_days(1);
+                    }
+                    self.run.new_day();
+                    self.begin_interlude();
                     return;
                 }
                 // Aloft, the map is crossed without steps, ambushes or slow
@@ -846,6 +897,7 @@ impl App {
                 if let Some(m) = self.map.as_ref() {
                     if m.state.day != day_before {
                         self.run.new_day();
+                        self.begin_interlude();
                     }
                 }
                 // A town is somewhere you arrive at, not somewhere you get
@@ -922,6 +974,11 @@ impl App {
                         leave = true;
                     }
                 }
+                // Taking something off a lair's floor can be the thing that
+                // empties it, and an empty beaten lair is off the map.
+                if take {
+                    self.refresh_lairs();
+                }
                 // A guardian is waiting on the other side of the door. The bout
                 // is set up here rather than in `place.rs`, which knows nothing
                 // about arenas, and the lair is remembered so that winning
@@ -951,8 +1008,19 @@ impl App {
                 // you back on the map: the merchant's stall is a room in the
                 // town, not a walk away from it.
                 if let Some(id) = door {
+                    // What the room you came from was saying goes with you,
+                    // which is how the tavern's throw reaches the dice table.
+                    // Where it was saying nothing, the new room's own greeting
+                    // stands instead.
+                    let carried = self
+                        .visiting
+                        .as_ref()
+                        .map(|s| s.visit.through(&id))
+                        .filter(|v| !v.said.is_empty() || v.dice.is_some());
                     if !self.enter(&id) {
                         leave = true;
+                    } else if let (Some(s), Some(v)) = (self.visiting.as_mut(), carried) {
+                        s.visit = v;
                     }
                 }
                 // Time spent indoors has to move the map's calendar too, or the
@@ -1019,15 +1087,28 @@ impl App {
                             // lair as it was, with the guardian still in it.
                             match self.raiding.take() {
                                 Some(lair) if won && self.run.alive() => {
-                                    let spoils = self.run.lair_won(lair, &self.items);
+                                    // Back to the lair's own page, and the
+                                    // floor read there: `MOON:LairWon` marks
+                                    // the lair, pays the one point of
+                                    // experience the first win is worth, and
+                                    // opens the page for the taking.
                                     let place = self.raid_place.clone();
                                     if self.enter(&place) {
-                                        if let Some(s) = self.visiting.as_mut() {
-                                            s.visit.said = spoils.describe(&self.items);
+                                        let mut visit =
+                                            self.visiting.as_ref().map(|s| s.visit.clone());
+                                        if let Some(v) = visit.as_mut() {
+                                            v.won_lair(lair, &self.items, &mut self.run);
                                         }
-                                    } else if self.map.is_some() {
-                                        self.mode = Mode::Map;
+                                        if let (Some(s), Some(v)) = (self.visiting.as_mut(), visit) {
+                                            s.visit = v;
+                                        }
+                                    } else {
+                                        self.run.lair_won(lair, &self.items);
+                                        if self.map.is_some() {
+                                            self.mode = Mode::Map;
+                                        }
                                     }
+                                    self.refresh_lairs();
                                 }
                                 _ => {
                                     if self.map.is_some() {
@@ -1174,13 +1255,19 @@ impl App {
             m.state.x = def.home[0].clamp(0, MAX_X);
             m.state.y = def.home[1].clamp(0, MAX_Y);
         }
+        self.stock_lairs();
         let humans = self.title.state.players.max(1);
         let gore = self.title.state.gore;
         let daggers = self.run.knight.daggers;
         let sheet = self.sheet_of();
         self.flight = None;
         self.sheet_cursor = 0;
+        let phase = self.run.moon.phase().key();
         if let Some(w) = self.world.as_mut() {
+            // A quest opens on the full moon, which `InitGameStart` writes
+            // before anything else runs, and the ratmen are already fielded
+            // by it: the phase goes in with everything else the run decides.
+            w.set_moon(phase);
             // One opponent on the road. Ambushes are creatures in the original,
             // and until the bestiary lands they are knights standing in; three
             // knights of equal strength on twenty health is not an ambush, it
@@ -1360,6 +1447,75 @@ impl App {
         // Over the token, which the map has already drawn, and lifted a
         // little so it reads as above the ground rather than on it.
         self.fb.blit(&px, w, h, x, y - 4, false);
+    }
+
+    /// How long the between-days screen stays up on its own.
+    ///
+    /// The original waits on a key. Ours does too, but it also gives up after
+    /// a few seconds: this game is walked with a direction held down, and a
+    /// screen that needs a separate press to clear would stop the walk dead
+    /// every day.
+    const INTERLUDE_TICKS: u32 = 150;
+
+    /// A day has turned over. Put the moon up, and take a hint off the pile.
+    ///
+    /// The moon's own numbers move here rather than in the drawing, because
+    /// `_LOADER:WaitCOUNT` is a counter the original steps each time it shows
+    /// one of the fourteen and wraps at fourteen, and a counter stepped by a
+    /// renderer would step again on every frame.
+    fn begin_interlude(&mut self) {
+        self.interlude = Self::INTERLUDE_TICKS;
+        self.hint = (self.hint + 1) % shell::HINTS.len();
+        // What waits in an arena depends on the night the fight starts, so the
+        // phase is pushed the moment it can change.
+        if let Some(w) = self.world.as_mut() {
+            w.set_moon(self.run.moon.phase().key());
+        }
+    }
+
+    /// Lay the board, exactly where the original's lair initialiser runs: four
+    /// keys planted one to a family, and then twenty four floors filled.
+    ///
+    /// Which lairs there are and what ground each stands on comes off the pack,
+    /// so a pack with none simply stocks none and the map is what it was. This
+    /// runs both when a knight is taken and when a dead run begins again,
+    /// because `Run::restart` empties the table and a board left unstocked
+    /// would be twenty four lairs with nothing but bones in them.
+    fn stock_lairs(&mut self) {
+        let families = henge_core::place::lair_families(&self.places);
+        if !families.is_empty() {
+            self.run.stock_lairs(&families, &self.items);
+        }
+        self.refresh_lairs();
+    }
+
+    /// Take off the map every lair that has been beaten and stripped.
+    ///
+    /// `MOON:CheckLairClear` writes 0xffff over a lair's coordinates when its
+    /// gold is zero *and* all twenty four of its item counts are, and
+    /// `DisplayLairs` then skips it; a lair you have beaten but could not carry
+    /// out of is still there to go back to. Here that is the place's own
+    /// `hidden` flag, which is already what keeps walking out of a room, so one
+    /// idea covers both.
+    fn refresh_lairs(&mut self) {
+        for def in self.places.values_mut() {
+            let lair = def.options.iter().find_map(|c| match &c.effect {
+                henge_core::place::Effect::Raid { lair, .. } => Some(*lair),
+                _ => None,
+            });
+            if let Some(n) = lair {
+                def.hidden = !self.run.lair_on_the_map(n);
+            }
+        }
+    }
+
+    /// Every lair still on the map, as the icon and corner the map draws it at.
+    fn map_icons(&self) -> Vec<(i32, i32, usize)> {
+        self.places
+            .values()
+            .filter(|d| !d.hidden)
+            .filter_map(|d| d.icon.map(|frame| (d.x, d.y, frame)))
+            .collect()
     }
 
     /// Walk into a place and open its menu.
@@ -1560,6 +1716,20 @@ impl App {
             v.render(&mut self.fb);
             return;
         }
+        // The between-days screen sits over everything, because that is what
+        // it is: the moment between one turn of the map and the next.
+        if self.interlude > 0 {
+            let fonts = shell::Fonts {
+                bold: self.fonts.get("bold"),
+                small: self.fonts.get("small"),
+            };
+            let note = self.run.is_toad().then_some("You are a toad, and a toad has no turn");
+            shell::draw_interlude(
+                &mut self.reg, &mut self.fb, &fonts, self.run.day, self.run.moon.phase(),
+                self.hint, note,
+            );
+            return;
+        }
         if self.mode == Mode::Title {
             let fonts = shell::Fonts {
                 bold: self.fonts.get("bold"),
@@ -1605,9 +1775,14 @@ impl App {
                 let near = henge_core::place::nearest(&self.places, m.state.x, m.state.y, 16)
                     .map(|(_, d)| d.name.clone());
                 let notice = (self.robbed_for > 0).then_some(self.robbed.as_str());
+                let icons = self.map_icons();
+                let marks = map::Marks {
+                    here: near.as_deref(),
+                    notice,
+                    icons: &icons,
+                };
                 let ok = m
-                    .render(&mut self.reg, &mut self.fb, &self.fonts, &self.run,
-                            near.as_deref(), notice)
+                    .render(&mut self.reg, &mut self.fb, &self.fonts, &self.run, &marks)
                     .is_ok();
                 self.map = Some(m);
                 if ok {

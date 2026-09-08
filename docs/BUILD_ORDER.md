@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 47 done, 2 partial, 28 remaining.**
+**77 items. 61 done, 2 partial, 14 remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -159,8 +159,13 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       `Split`. Fifteen hit points, ranges 130/120/5. It has no `*Dam` table; its blow
       is set where the lunge lands, in code not yet read, so three stands in
 - [x] 31. **Ratmen.** `Ratman_Stance`, `Roll1`..`4` (`RatmenWal`; the leaps are its up
-      row), `Slash`, `Knocked`, `KnockDead`. Five hit points and a blow of three at new
-      moon; `SetRatmenTables` raises both with the moon, which is not in the game yet
+      row), `Slash`, `Knocked`, `KnockDead`. Five hit points and a slash of one, and
+      **the record's earlier reading of the blow was a row out**: `SetRatmenTables`
+      fills `RatmenDam` at `[bx+2]` with three and `[bx+4]` with one, those tables are
+      nine words indexed by attack kind two to an entry, and the ratman's own kind is 4
+      (`ControlRatCollide`), so one is the slash and three is the bite that waits on 37.
+      The moon moves both: seven and three under 0x2d, twelve and five under 0x31, and
+      that is now in the game (item 64)
 - [x] 32. **Mudmen.** `Mudmen_Stance`, `Move1`, `Move3`, `Move1`, `Move2` (`MudmenWal`,
       exactly), `ArmAttack`, `Hit`, `Dies`. Thirty hit points, a blow of two, ranges
       80/75/5. `MudmenWALK` moves it eleven across and thirteen deep a frame, so it
@@ -201,19 +206,46 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
 Independent of phase 1. **Can start immediately, in parallel with the research.**
 
 - [x] 38. Gold and prices. Coin off the fallen, a `bounty` per actor in the data,
-      prices on the items, and both towns' merchants open. The healers inside the
-      walls charge coin as well as days; the hermit in the woods still charges only days
+      prices on the items, and both towns' merchants open. The hermit in the woods
+      charges only days; the healer inside the walls takes a donation and spends it
+      down, which is `_WIZARD:HealDon`
 - [x] 39. Inventory: carrying, using, losing. A bounded pack on the run, items as
       data with a price and a virtue, flasks bought and drunk, and losing made real
       both ways: a flask is spent when drunk, and a cutpurse on the road takes coin
       or, failing that, something out of the pack
-- [ ] 40. Character stats and abilities
-- [ ] 41. Potions beyond healing. Healing flasks landed with 39, as an item virtue
-      in the data; anything a potion does other than mend waits on 42
-- [ ] 42. Magic: spells, casting, costs
-- [ ] 43. Curses
-- [ ] 44. The hawk and the gem
-- [ ] 45. Experience and levelling
+- [x] 40. **Character stats and abilities.** Strength, constitution and endurance at
+      `+0x2e`..`+0x30`, each capped at five by `_WIZARD:CheckMaxAbility`, and the
+      original's own arithmetic turning them into a fight: `10 * constitution +
+      armour + 10` for the health at 0x28d, `strength + blade` added to a blow by
+      `CalcDamage`, and `endurance * 2 + armour + 4` shifted left four for the day's
+      step budget in `DistanceDONE`. All three are on the sheet, all three are
+      raised and lowered by the mystic, the wizard and levelling
+- [x] 41. **Potions beyond healing.** The ten magic slots `_WIZARD:MagicRND` hands
+      out are items with a virtue apiece: the potion restores, the gem and the hawk
+      fly, the ring wards, the scroll of haste doubles the day, acquisition seizes,
+      protection turns an ambush away or backfires. Two are still inert and honestly
+      so, because the talisman and the scroll of the Wyrm both act on the dragon and
+      the dragon's set piece is item 36
+- [x] 42. **Magic: spells, casting, costs.** `MagicCast` is a chain of `cmp bx,
+      slot`, reproduced as `Run::cast`; the slots and their prices are
+      `MagicPrices` as `SetUpStatus` fills it, and the casting is done from the
+      character sheet, which is where the original does it
+- [x] 43. **Curses.** Two, and both recovered. A scroll of protection that backfires
+      (`KnightProtection`, one roll in eleven) sets the flag `ControlKnight` reads
+      and reverses the joystick for that bout, cleared at the end of `Combat`. The
+      wizard's toad is `[si+0x3a] = 3`, and it costs the three days it says it does:
+      `_MAP:NextWHICH` tests that byte and passes straight to the next knight, so a
+      toad's turn goes by without a step
+- [x] 44. **The hawk and the gem.** Both are `EffectFLAG`: the token crosses the map
+      with no step count, no slow ground and no ambush while either is up, and it is
+      drawn as the token's own frame plus five for the gem and plus ten for the hawk,
+      which in `MI.C` are the crystal row and the hawk row, one per knight's colour.
+      The gem's flight comes back to where it began, the hawk's lands where you put it
+- [x] 45. **Experience and levelling.** `XPlevels` is the cost of a point, indexed by
+      the player count, and `AdjustLevel` spends it on one of the three abilities.
+      The sheet carries the three `Increase` gadgets in the original's own order
+      (`ab1`..`ab3`), lit only while the experience covers the cost and the ability
+      is under five, as the status screen at 0xd3a7 lights them
 
 ## Phase 4: combat depth
 
@@ -355,8 +387,24 @@ Independent of everything. Makes it feel like a game rather than a demo.
 
 ## Phase 6: the world
 
-38 is done, so the merchant is open and the tavern has something to charge for.
-57, 58, 60 and 61 are done: the map's own tables are in the game.
+**Done.** The map's own tables were already in the game (57, 58, 60, 61); now every
+door on it opens, the lairs are on it, and the moon runs.
+
+Most of this turned out to be translation rather than design, because `_TAVERN` and
+`_WIZARD` are two whole source modules with addresses and the temple is one routine in
+`_STATUS`. Three corrections to the record came out of reading them, and they are noted
+against 31, 64 and 69. **Every screen was checked by looking**: the tavern over its own
+painted panel of five stakes, the dice table with the throw drawn where `RollDice` blits
+it, the town healer and the mystic behind their own greetings, Math on his balcony, the
+druids in the circle, the between-days screen on a full and on a gibbous moon, a lair on
+the map, a lair entered, and the spoils page after its guardian fell.
+
+One thing that is worth knowing before anyone reads the numbers below: **the coordinates
+of everything but the two towns are still ours.** `MOON:MapIconsTABLE`, `LairLocation`
+and `LairType` are all inside the 2,906 bytes of DGROUP the load image carries as a stale
+duplicate. What is recovered is the *shape* of the answer, and for the lairs the ground:
+each one is sited on a cell of its own family in the real `MapType` grid, which is why a
+`fol3.t` lair stands under trees.
 
 - [x] 57. **Recovered: `_MAP:MapType`, 40x26 bytes, one family code per 8x8 block of the
       map picture.** Codes 0, 2, 4, 6 are plain, forest, swamp and waste, which is the
@@ -388,22 +436,105 @@ Independent of everything. Makes it feel like a game rather than a demo.
       one screen. `_MAP:ScrollINPUT`, despite the name, reads the keyboard. The `SCROLL`
       and `PAN` symbols carry no addresses and belong elsewhere; `SCROLLX` in `_STATUS` is
       the status panel's own icon cursor
-- [ ] 62. Lairs: placement, entry, contents, the guardian fight
-- [ ] 63. Moon phases on a weekly cycle, and the between-days screen
-- [ ] 64. What the moon gates
-- [ ] 65. Tavern: what it offers
-- [ ] 66. Temple and mystic services
-- [ ] 67. The wizard: abilities, gold and magic bestowal
-- [ ] 68. What the stone circle does
-- [ ] 69. The dice game. Rules unknown, so design
+- [x] 62. **Lairs: twenty four of them, and the quest starts here.** The table is 24
+      records of 18 bytes built by the initialiser at 0x1e00, and what it does is
+      recovered whole: `NUM16` four times to plant one key per family, six records
+      apart, then `LairFill` rolling `MOON:LairRND` for each floor (half gold, a fifth
+      magic, the rest both, and nothing empty because the fourth threshold falls through
+      to the third's call). Gold is the wizard's own gift routine called with `dx` set,
+      ten to thirty one; magic is his bestowal called twice. `LairWon` pays a point of
+      experience the first time only, and `CheckLairClear` writes 0xffff over a lair
+      that is beaten *and* stripped, so one you could not carry out of is still on the
+      map to come back to. **`MOON:LairFile` is recovered**, which is more than the
+      record had: it sits four bytes past the end of the stale duplicate and gives the
+      24 arena layouts in order, `fol1`..`fol6`, `wal1`..`wal6`, `swl1`..`swl6`,
+      `gll1`..`gll6`. That order is also the key order, so lairs 0 to 5 are the
+      forest's and hide the forest key. **Ours**: where each stands, which is a search
+      over the real terrain grid for cells whose whole neighbourhood is that family's
+      ground, clear of every other place, spread by farthest-point sampling; and which
+      guardian each holds, which is the family's own road creatures for the first three
+      and then the beast and Balok, the two the road never produces. The demon and the
+      dragon are left out, because their set pieces are items 33 and 36 and because two
+      hundred and fifty hit points against a twenty point knight is not a fight
+- [x] 63. **Moon phases, and the between-days screen.** `MOON:EncounterFini` counts the
+      day, moves the moon every fourth and closes the cycle every eighth, so thirty two
+      days come round; `InitGameStart` writes 0x2d, so a quest opens on the full moon.
+      The screen is the routine at 0x8e5b: `Next Day` at y 95 over `CH.PIV`, the night
+      sky the select screen uses, with cel `Moons[MoonCount]` of `KI.CEL` blitted at
+      (119, 12). **Ours**: the eight byte `Moons` table itself, which is in the
+      unreadable part of DGROUP, so the cycle is five pictures over eight steps waning
+      and waxing back, which is the one arrangement that uses every picture and returns
+      to where it began; and putting the hint under it. The fourteen hints are
+      `_LOADER:WaitMES` verbatim, in its own order, cycled the way `WaitCOUNT` cycles
+      them, and the original shows them while a disk loads, which is a thing henge does
+      not do
+- [x] 64. **What the moon gates, and it is more than the record thought.**
+      `SetRatmenTables` reads the phase every time a ratman fight is built: five hit
+      points and a slash of one most nights, seven and three under 0x2d, twelve and five
+      under 0x31. That is on the ratman's own definition in the pack rather than in the
+      engine, so a pack can give the moon to any creature. `MOON:CalcDamage` doubles a
+      knight's blow while he carries the moonstone whose night it is, and `MOON:Henge`
+      ends the game for a knight standing in the circle with it; both are built and
+      neither can fire yet, because nothing hands out a moonstone until item 71. The
+      code and the game's own hint disagree about the ratmen and the code is what is
+      reproduced: `RatNewMoon` is the strongest of the three
+- [x] 65. **Tavern.** The whole of `_TAVERN` is the dice table and the henge, so the
+      tavern *is* the dice game: `TavernOpenScene` turns an empty purse out of the door
+      before anything is drawn, and the six gadgets `TAV.PIV` paints are five stakes of
+      one to five gold and an exit. The live menu goes exactly over that painted panel
+- [x] 66. **Temple and mystic.** The temple is `_STATUS:SellToTemple` and `GoldSell`:
+      one off the record, the price shifted right once into a purse that saturates at a
+      hundred and fifty, and a sword sold out of the hand leaves a long sword in it. Its
+      gadget list is `se7`..`se17`. The mystic is `MYS.PIV` and the routine at 0xb935:
+      a donation, an ability picked before the roll, and `MysticUpDown` walking
+      `DonationTAB` for the delta the donation buys, good at fifty or under. Its lines
+      are `MY1a`..`MY7b` verbatim. **Not built**: the temple's other counter, which buys
+      and sells a moonstone (`pu18`, `se18`, `BuyMoonstone`), because item 71 owns the
+      moonstones; and the original's coin-at-a-time donation gadget, in place of which
+      three fixed amounts are offered
+- [x] 67. **The wizard.** `WizardIntro` on the way in, one roll plus the grudge against
+      thirty, seventy and ninety for magic, an ability, gold and the toad, and the
+      fourteen `WizardText` lines cycled by `WIZGOLD_CNT` and `WIZMAG_CNT`, all
+      verbatim. The grudge is real: 0xff for a knight he has never met, which rolls one
+      lower and cannot reach the toad, and seventy after every visit, coming down by ten
+      a day, so the second visit of a day is dangerous and the third close to certain.
+      The toad costs what it says: `_MAP:NextWHICH` tests `[si+0x3a]` and passes to the
+      next knight, so three turns go by without a step. His tower is the one the map
+      paints in the northern waste, which is ours
+- [x] 68. **The stone circle.** `MOON:Henge` tests the moonstone bits against tonight's
+      moon before it offers anything else, and short of that the druids take an
+      offering: a life point, a full mending and a ratman's bite lifted, for anything
+      magic that is not a weapon, armour or one of the quest's tokens. The winning
+      branch is built and cannot fire until item 71 hands out a moonstone. `The druids
+      prepare for the ritual` is `_TAVERN:HengeWait`; `HengeInstruct` is in the
+      unreadable part of DGROUP, so the rest of what they say is ours
+- [x] 69. **The dice game, and it was not design after all.** `_TAVERN:RollDice` rolls
+      three bytes with `and ax, 7; cmp ax, 5; jg` and re-rolls, `DiceSort` bubble sorts
+      them, and the sorted throw is compared two words at a time against `DiceODDS`,
+      eleven records of three faces and a multiplier at DS:d125. Nothing pays for a pair
+      unless the pair is the first face; three of the first face pays thirty and three
+      of the third pays twelve, so the table is not monotone and a rule of thumb would
+      have got it wrong. The purse saturates at a hundred and fifty. The three faces are
+      blitted at (115, 15), (49, 38) and (75, 88) over `DICE.PIV`, which is a picture of
+      three dice already on the wood, and the words go on the plank beside them where
+      `BETLOSER`, `PLAYERPOT` and `CONT` are written. **Not built**: the shake, which is
+      `DD_ShakeDice` and `DD_ThrowDice`, two animation scripts of a hand over the table
 
 ## Phase 7: the quest
 
-**The point of the game.** Needs lairs (62) and inventory (39). Almost none of this is
-recoverable from the symbols, so most of it is design and playtesting rather than porting.
+**The point of the game.** Needs lairs (62) and inventory (39), and both are now done:
+the four keys are planted one to a family and come out of a lair into the pack. Almost
+none of the rest is recoverable from the symbols, so most of it is design and playtesting
+rather than porting.
 
-- [ ] 70. The four keys, one per lair
-- [ ] 71. The moonstone: where it is, what retrieving it takes
+- [ ] 70. The four keys, one per lair. **Half done by 62**: the lair initialiser plants
+      one in each family's six, `LairWon` hands it over, and `Run::keys_held` reads them
+      back the way `MOON:Valley` tests the four bits of `+0x14`. What is missing is the
+      Valley of the Gods itself, which is what four keys are for
+- [ ] 71. The moonstone: where it is, what retrieving it takes. Everything that reads
+      one is built and waiting: `MOON:Henge` ends the game for a knight in the circle
+      with the stone of the night, `CalcDamage` doubles his blow while he carries it, and
+      the temple's own `pu18` and `se18` lines buy and sell it. Nothing hands one out
 - [ ] 72. Win condition and ending
 - [ ] 73. Scoring and the final tally
 - [ ] 74. Losing properly, rather than a run simply stopping
@@ -422,10 +553,11 @@ Any time. None of it blocks anything.
 ## If you only did three things
 
 **37** is what makes the nine creatures fight like themselves rather than like a
-knight in a costume, and the ranges it needs are already on every actor. **65** is
-cheap now that 38 gave the tavern something to charge for. **45** is
-next to free: experience is already counted and displayed, and `AdjustLevel` says exactly
-what spending it does.
+knight in a costume, and the ranges it needs are already on every actor. **70** and
+**71** are next to free now: the four keys are already hidden, planted and carried, and
+the stone circle and `CalcDamage` are both already waiting for a moonstone that nothing
+hands out. **54** would give every one of the doors that opened in phase 6 somewhere
+better to put its words than a box the renderer picks a colour for.
 
 ## What is not portable
 
@@ -435,7 +567,14 @@ the symbol coverage is checkable, and deliberately absent here.
 
 ## What is design rather than translation
 
-Items 37, 56, 64, 69, and all of phase 7, and which creature waits on which ground.
-These were never recovered from the executable, so finishing them means designing and
-playtesting, not translating. Worth knowing before
-anyone estimates the end of this list.
+Items 37 and 56, and all of phase 7, and which creature waits on which ground, and
+where everything but the two towns stands on the map, and which guardian each lair
+holds. These were never recovered from the executable, so finishing them means designing
+and playtesting, not translating. Worth knowing before anyone estimates the end of this
+list.
+
+**64 and 69 were on this list and are not any more.** What the moon gates is spelled out
+in `SetRatmenTables`, `CalcDamage` and `Henge`; the dice game's odds are eleven records
+in `_TAVERN`. Both were taken for design because the plan was written against the 334
+`PUBLIC` names, before the other 1,889 symbols were recovered. Anything still marked
+design here is worth a grep before it is invented.

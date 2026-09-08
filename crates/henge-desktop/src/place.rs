@@ -20,6 +20,9 @@ use henge_core::place::{Effect, PlaceDef, Places, Visit};
 use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
 
+/// `DICE.CEL`, whose first six cels are the six faces.
+const DICE_SHEET: &str = "bank.dice";
+
 /// Loads whatever places the packs declare. A pack without them is not an
 /// error: the map simply has nowhere to go, exactly as it did before.
 pub fn load(reg: &Registry) -> Places {
@@ -61,7 +64,7 @@ impl PlaceScene {
             img.width == SCREEN_W && img.height == SCREEN_H,
             "{} is {}x{}, expected a full screen", def.scene, img.width, img.height
         );
-        Ok(PlaceScene { visit: Visit::open(place), palette, pixels: img.pixels.clone() })
+        Ok(PlaceScene { visit: Visit::open_at(place, def), palette, pixels: img.pixels.clone() })
     }
 
     /// The colour the backdrop uses most inside a box, and what to write on it.
@@ -100,10 +103,59 @@ impl PlaceScene {
     ) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
+        if def.dice {
+            self.draw_dice(reg, fb);
+        }
         let Some(font) = font else { return Ok(()) };
         self.draw_menu(reg, fb, def, font, run, items);
+        if let Some(box_) = def.text {
+            self.draw_text(reg, fb, box_, font);
+        }
         self.draw_status(reg, fb, font, run);
         Ok(())
+    }
+
+    /// The three faces of the last throw, over `DICE.PIV`'s own picture of
+    /// three dice on the wood.
+    ///
+    /// **Recovered.** `_TAVERN:RollDice` rolls the three bytes of `DDICE` and
+    /// then blits `DICE.CEL` cel `DDICE[n]` three times, with the same
+    /// `bx`, `cx` pair the moon is drawn with: (115, 15), (49, 38) and
+    /// (75, 88). The faces are the cel numbers themselves, which is why a die
+    /// is zero based everywhere in the simulation.
+    fn draw_dice(&self, reg: &mut Registry, fb: &mut Framebuffer) {
+        const AT: [(i32, i32); 3] = [(115, 15), (49, 38), (75, 88)];
+        let Some(dice) = self.visit.dice else { return };
+        for (n, (x, y)) in AT.iter().enumerate() {
+            let Some(face) = dice.get(n).copied() else { continue };
+            crate::sprite::draw(reg, fb, DICE_SHEET, face as usize, *x, *y, false);
+        }
+    }
+
+    /// What the place said, in its own panel rather than under the menu.
+    ///
+    /// Several of the original's screens paint a slate or a plank for words
+    /// and nothing else. Where a place names one, the paragraph goes there and
+    /// the menu keeps to its own corner of the picture.
+    fn draw_text(&self, reg: &mut Registry, fb: &mut Framebuffer, box_: [i32; 4], font: &Font) {
+        if self.visit.said.is_empty() {
+            return;
+        }
+        let [x, y, w, h] = box_;
+        let ink = self.ink_for(fb, x, y, w, h);
+        // Flooded with the colour the art already uses most inside the box, so
+        // over a painted slate or plank nothing changes and over dithered
+        // ground the words get a plate to sit on rather than a thicket.
+        fb.rect(x, y, w, h, ink.ground);
+        const PAD: i32 = 5;
+        let mut cy = y + PAD;
+        for line in wrap(reg, font, &self.visit.said, w - PAD * 2) {
+            if cy + 7 > y + h {
+                break;
+            }
+            font.draw(reg, fb, &line, x + PAD, cy, ink.text);
+            cy += 8;
+        }
     }
 
     fn draw_menu(&self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef,
@@ -152,7 +204,8 @@ impl PlaceScene {
         }
 
         // What the place last said, wrapped into whatever width the box has.
-        if !self.visit.said.is_empty() {
+        // Unless the place keeps a panel for words, in which case it goes there.
+        if def.text.is_none() && !self.visit.said.is_empty() {
             cy += 5;
             for line in wrap(reg, font, &self.visit.said, w - PAD * 2) {
                 if cy + 7 > y + h {
@@ -172,18 +225,18 @@ impl PlaceScene {
             if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
             if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
         }
-        fb.rect(0, 178, 320, 22, dark as u8);
+        fb.rect(0, 188, 320, 12, dark as u8);
         let left = format!("Day {}", run.day);
-        font.draw(reg, fb, &left, 6, 186, light as u8);
+        font.draw(reg, fb, &left, 6, 191, light as u8);
         let right = format!("{} of {}", run.health.max(0), run.max_health);
         let w = font.width(reg, &right);
-        font.draw(reg, fb, &right, 314 - w, 186, light as u8);
+        font.draw(reg, fb, &right, 314 - w, 191, light as u8);
         // The purse goes in the middle, where a place has nothing else to put:
         // it is the number that changes when you buy something, so it has to be
         // on the screen you buy things on.
         let purse = format!("{} gold", run.gold);
         let pw = font.width(reg, &purse);
-        font.draw(reg, fb, &purse, (SCREEN_W as i32 - pw) / 2, 186, light as u8);
+        font.draw(reg, fb, &purse, (SCREEN_W as i32 - pw) / 2, 191, light as u8);
     }
 }
 
