@@ -785,13 +785,19 @@ mov ax, 0x4b ; mov bx, 0x6e; mov cx, 0xbe   `All rights reserved` at (110, 190)
 and walks `TitleMes` over it, which is `created by` centred at y 90, `Rob Anderson` at
 105 and `Loading...` at 150. `MOON:DoOptions` then calls `0x890c`, which loads `Sel.cel`
 and puts the same stored picture back through `0x8e3f`, and `DisplaySelect` blits cel
-0x49 again at (5, 10) with the arrow and the option list under it. So the option screen
-is the loading title with the wordmark ten pixels higher, the plate is the select
-screen's own night sky, and the wordmark is not centred.
+0x49 again at (5, 10) with the arrow and the option list under it.
 
-The four option rows take their `y` from a table at `DS:0x706`, which is inside the
-stale span of `DGROUP`, so their spacing is still ours. `ARX` is not: `DoOptions` writes
-`0x32` into it.
+The stored picture is bare. The `rep movsw` at `0x8839` that fills `DS:0x88fb` runs
+before the three blits at `0x8850`, `0x8860` and `0x8870`, so what `0x890c` puts back has
+no wordmark and no credit lines on it, and `DisplaySelect` adds the wordmark and nothing
+else. So the option screen is the night sky, the wordmark ten pixels higher than on the
+loading title, and the rows; the copyright line and `All rights reserved` are on the
+loading title only. henge drew them on the option screen as well for a while, and once
+the rows had their own coordinates `Select Knight` at y 170 ran straight into the
+copyright line at 181. The wordmark is not centred on either screen.
+
+The four option rows take their `y` from `MOON:ARR` at `DS:0x706`, readable now, and `ARX`
+is what `DoOptions` writes into it: `0x32`.
 
 ## The status screen is a pair of stone arches, and it has its own palette
 

@@ -17,11 +17,16 @@
 //! copy of the picture in the segment at `DS:0x88fb`, and blits cel 0x49 at
 //! (5, 20), cel 0x4a at (22, 181) and cel 0x4b at (110, 190). Those are the
 //! wordmark and the two credit lines, at the coordinates the registers are
-//! loaded with. `DoOptions` then calls `0x890c`, which loads `Sel.cel` and
-//! restores that same picture through `0x8e3f`, and `DisplaySelect` blits the
-//! wordmark again at (5, 10) with the option list under it. So the option
-//! screen is the title screen with the wordmark ten pixels higher, and the
-//! plate behind it was never an intro plate at all.
+//! loaded with. **The copy is taken first**: the `rep movsw` at `0x8839` runs
+//! before the three blits at `0x8850`, so what is kept is the bare picture.
+//! `DoOptions` then calls `0x890c`, which loads `Sel.cel` and restores that
+//! bare picture through `0x8e3f`, and `DisplaySelect` blits the wordmark
+//! again at (5, 10) with the option list under it and nothing else. So the
+//! option screen is the night sky, the wordmark and the four rows: the two
+//! credit lines belong to the loading title only, which is the screen with
+//! `created by`, `Rob Anderson` and `Loading...` on it. They were drawn here
+//! too for a while, and `Select Knight` at its own y of 170 ran straight into
+//! them, which is how the mistake showed itself.
 //!
 //! The option list is recovered too, and now down to its words. `DoOptions` has
 //! four rows, a player count of one to four, a gore switch and two ways to
@@ -41,9 +46,9 @@
 //!
 //! **Nothing on it is flattened to one colour.** `CH.PIV` reserves the bold
 //! face's five entries the way `MESSAGE.PIV` does: black at 5 and `dee`,
-//! `dc9`, `c95`, `832` at 9 to 12. So the wordmark, the two credit lines and
-//! the four option rows are all blitted with their own indices, and the black
-//! bands that used to sit behind them are gone.
+//! `dc9`, `c95`, `832` at 9 to 12. So the wordmark and the four option rows
+//! are blitted with their own indices, and the black bands that used to sit
+//! behind them are gone.
 //!
 //! **Attract mode** cycles the other ten plates. Those eleven screens have been
 //! sitting in the pack unused since the baker first decoded them; showing them
@@ -98,29 +103,35 @@ const FIRST_PORTRAIT: usize = 2;
 /// stops.
 const TITLE_BANK: &str = "bank.bold";
 const LOGO: usize = 73;
+/// Frames 74 and 75, the copyright line and `All rights reserved`. The loader
+/// puts them at (22, 181) and (110, 190) on the loading title, which henge
+/// does not show: it has nothing to load. They are named so the numbers are
+/// on record, and drawn nowhere.
+#[allow(dead_code)]
 const COPYRIGHT: usize = 74;
+#[allow(dead_code)]
 const RESERVED: usize = 75;
 
-/// The plate the title is drawn over, and the ones attract mode cycles.
+/// The plate the title is drawn over.
 ///
 /// `_LOADER:MoonPic` is the string `CH.PIV`, and the routine at `0x87c3` loads
 /// it, keeps a copy and draws the wordmark and the two credit lines on it.
 const TITLE_PLATE: &str = "scene.ch";
 
-/// Ticks of nobody touching anything before the title gives up and starts
-/// showing off.
-///
-/// **There is no such thing.** `DoOptions` at `0x1241` sets its three counters
-/// up and then polls the input and dispatches, with no idle count, no timer and
-/// nowhere to go: the original's title screen simply sits there until somebody
-/// presses something. An attract mode was invented here and cycled ten of the
-/// intro's files as though each were a picture. Three of them are not pictures
-/// at all: `bg1a`, `bg1b` and `bg1c` are the tile sheets `INTRO.STI` arranges
-/// into the opening panorama, so showing one raw put half a moon above a row of
-/// trunks with a hard cut between them, which is what it looked like.
-///
-/// Removed rather than repaired. Restoring it means a list of the seven plates
-/// that really are pictures and a counter, but it would still be ours.
+// Ticks of nobody touching anything before the title gives up and starts
+// showing off used to be a constant here.
+//
+// **There is no such thing.** `DoOptions` at `0x1241` sets its three counters
+// up and then polls the input and dispatches, with no idle count, no timer and
+// nowhere to go: the original's title screen simply sits there until somebody
+// presses something. An attract mode was invented here and cycled ten of the
+// intro's files as though each were a picture. Three of them are not pictures
+// at all: `bg1a`, `bg1b` and `bg1c` are the tile sheets `INTRO.STI` arranges
+// into the opening panorama, so showing one raw put half a moon above a row of
+// trunks with a hard cut between them, which is what it looked like.
+//
+// Removed rather than repaired. Restoring it means a list of the seven plates
+// that really are pictures and a counter, but it would still be ours.
 
 /// `ARX` in the original. The arrow's left edge on the option list.
 const ARROW_X: i32 = 50;
@@ -175,10 +186,6 @@ const GORE_OFF: &str = "Off";
 /// `DisplaySelect`: `mov ax, 0x49; mov bx, 5; mov cx, 0xa`. The wordmark is
 /// not centred; its left edge is five pixels in.
 const LOGO_AT: (i32, i32) = (5, 10);
-/// `0x8850` onwards, on the screen the same picture is first put up on:
-/// `mov ax, 0x4a; mov bx, 0x16; mov cx, 0xb5` and then `0x4b` at (110, 190).
-const COPYRIGHT_AT: (i32, i32) = (22, 181);
-const RESERVED_AT: (i32, i32) = (110, 190);
 
 #[derive(Default)]
 pub struct TitleScene {
@@ -237,12 +244,10 @@ impl TitleScene {
         bold.draw_own(reg, fb, &self.state.players.to_string(), VALUE_X, ROW_Y[0]);
         bold.draw_own(reg, fb, if self.state.gore { GORE_ON } else { GORE_OFF }, VALUE_X, ROW_Y[1]);
 
-        // The original's own two credit lines, frames 74 and 75 of the same
-        // bank, at the corners `0x8860` and `0x8870` load: (22, 181) and
-        // (110, 190). In their own pixels like everything else on the screen.
+        // No credit lines. `0x890c` restores the picture the loader copied
+        // before it blitted them, and `DisplaySelect` adds only the wordmark,
+        // the arrow and the six records.
         let _ = light;
-        sprite::draw(reg, fb, TITLE_BANK, COPYRIGHT, COPYRIGHT_AT.0, COPYRIGHT_AT.1, false);
-        sprite::draw(reg, fb, TITLE_BANK, RESERVED, RESERVED_AT.0, RESERVED_AT.1, false);
     }
 
 }

@@ -943,12 +943,15 @@ arrow is `SEL.CEL` frame 0 at `ARX` = 50.
 0x49 at (5, 20), cel 0x4a at (22, 181) and cel 0x4b at (110, 190), and walks `TitleMes`
 over it (`created by` at y 90, `Rob Anderson` at 105, `Loading...` at 150). `DoOptions`
 calls `0x890c`, which loads `Sel.cel` and restores that picture through `0x8e3f`, and
-`DisplaySelect` blits cel 0x49 again at (5, 10). So the option screen is the same picture
-with the wordmark ten pixels higher, and it is the select screen's night sky. The earlier
-note that the picture must be in `INTR.EXE` was wrong.
+`DisplaySelect` blits cel 0x49 again at (5, 10). The copy at `DS:0x88fb` is taken at
+`0x8839`, before the three blits, so what comes back is the bare picture: the option
+screen is the night sky, the wordmark ten pixels higher, and the rows. The two credit
+lines are on the loading title only, and henge no longer draws them on the option screen,
+where `Select Knight` at its own y of 170 had been running into the copyright line at 181.
+The earlier note that the picture must be in `INTR.EXE` was wrong.
 
-`CH.PIV` also reserves the bold face's five entries, so the wordmark, the credit lines and
-the option rows are all blitted in their own indices.
+`CH.PIV` also reserves the bold face's five entries, so the wordmark and the option rows
+are blitted in their own indices.
 
 **The rows are recovered now, words and coordinates both.** `DisplaySelect` takes the
 arrow's `y` off `MOON:ARR` at `DS:0x706`, which holds 85, 110, 148 and 168, and hands
