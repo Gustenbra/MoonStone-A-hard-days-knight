@@ -132,7 +132,7 @@ impl MapScene {
 
     /// The places the map has to draw for itself.
     ///
-    /// The towns, the healer's ruin, the stone ring and the wizard's tower are
+    /// The towns, Stonehenge, the Valley of the Gods and the wizard's tower are
     /// painted into `MAP.CMP` and need nothing. A lair is not: `_MAP:DisplayLairs`
     /// walks the lair table and blits `MI.C` frame 0x14 at every one whose x is
     /// not negative, which is how a lair leaves the map when it has been beaten
@@ -146,15 +146,16 @@ impl MapScene {
     /// magenta. Nothing in the original blits them: `SHOW`, `DisplayLairs` and
     /// `DisplayOtherKnights` are the whole of what goes on the map picture, and
     /// those are the shapes `MOON:CheckGROOC` measures a place's box from
-    /// through `MOON:GetWIDTH`. The towns, the ruin, the ring and the tower are
-    /// painted into `MAP.CMP` itself and need no icon.
+    /// through `MOON:GetWIDTH`. Every place those frames name is painted into
+    /// `MAP.CMP` itself and needs no icon.
     ///
-    /// **Ours, and only one of them:** the Valley of the Gods. Where it stands
-    /// is this project's, because `MapIconsTABLE` is in the unreadable span of
-    /// `DGROUP`, so nothing on the map picture marks it and a player with four
-    /// keys would have nowhere to aim. It is drawn as a silhouette in the map's
-    /// own brightest colour, which is a marker rather than a reading of the
-    /// artwork.
+    /// This used to draw one of them anyway, the Valley of the Gods, because
+    /// where it stood was this project's guess and nothing on the picture
+    /// marked it. `MOON:MapIconsTABLE` is readable now and puts it on the green
+    /// ring in the mountains the artwork already draws, so the marker is gone
+    /// and the map is again only what the original blits on it. The masked
+    /// path below still stands, because a pack may put an icon on a place of
+    /// its own.
     fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer, icons: &[(i32, i32, usize)]) {
         let ink = crate::status::extremes(fb).1;
         for (x, y, frame) in icons {

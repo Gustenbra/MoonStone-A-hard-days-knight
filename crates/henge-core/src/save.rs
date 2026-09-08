@@ -194,7 +194,7 @@ mod tests {
         run.fights = 6;
         run.experience = 11;
         run.kit.take("flask", 2);
-        run.knight.name = "Sir Balain".into();
+        run.knight.name = "SIR JEFFREY".into();
         run.knight.seat = 2;
         run.knight.strength = 3;
         run.next_arena("forest", 8);
@@ -312,7 +312,7 @@ mod tests {
         let (run, travel) = posed();
         let save = Save::of(&run, &travel, 1, true, 0);
         let s = save.summary();
-        assert!(s.contains("Sir Balain"), "{s}");
+        assert!(s.contains("SIR JEFFREY"), "{s}");
         assert!(s.contains("day 9"), "{s}");
     }
 }

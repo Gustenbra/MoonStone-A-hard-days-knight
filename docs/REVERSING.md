@@ -352,16 +352,110 @@ and the better lesson is the older one two sections up: **a negative result abou
 structure is only as good as your confidence that you are looking at the whole file.**
 Twice now the answer has been that an unpacking stopped early.
 
-What came back, and what has not yet been read out of it: `SelectPAL` and `CCOL` are used
-by the select screen; `CRText` is its heading, `Select a Knight`, centred at y 5; `ARR`
-holds the title's four option rows at y 85, 110, 148 and 168; `Moons` is
-`45 47 46 48 49 48 46 47`; `XPlevels` is `3 2 1 1`; `LairType` is six 2s, six 6s, six 4s
-and six 0s, which is the forest, waste, marsh and glade order `LairFile` already gave,
-arriving a second time from a second table; `LairLocation` and `MapIconsTABLE` hold the
-map coordinates every place on the overworld is currently *placed* rather than recovered;
-and `BNAME`, `GNAME`, `ENAME` and `RNAME` are `SIR_GODBER`, `SIR_RICHARD`, `SIR_JEFFREY`
-and `SIR_EDWARD`, which is not what this project currently calls the four knights. Each of
-those belongs to the subsystem that owns it.
+What came back, and what has been read out of it: `SelectPAL` and `CCOL` are used by the
+select screen; `CRText` is its heading, `Select a Knight`, centred at y 5; `ARR` holds the
+title's four option rows at y 85, 110, 148 and 168; `Moons` is `45 47 46 48 49 48 46 47`;
+`XPlevels` is `3 2 1 1`; `ForestLairs`, `LairLocation`, `LairType` and `MapIconsTABLE`
+are the whole overworld, read out and baked (see below); and `BNAME`, `GNAME`, `ENAME`
+and `RNAME` are `SIR_GODBER`, `SIR_RICHARD`, `SIR_JEFFREY` and `SIR_EDWARD`. Each of those
+belongs to the subsystem that owns it.
+
+### The overworld came back with it
+
+Four tables in that span say where everything on the map stands, and the reading of each
+is the code's rather than the bytes'. The lair initialiser's copy loop at image 0x1ea0
+runs twenty four times over eighteen-byte records with `di` on `ForestLairs`, `bx` on
+`LairLocation`, `bp` on `LairType` and `si` on `LairFile`, and each source is stepped by
+the loop itself:
+
+```
+mov ax, [di] ; add di, 2 ; mov [si+0x02], ax   which CombatTable entry the guardian is
+mov ax, [di] ; add di, 2 ; mov [si+0x04], ax   TotalMonsters
+mov ax, [bx] ; add bx, 2 ; mov [si+0x0a], ax   x
+mov ax, [bx] ; add bx, 2 ; mov [si+0x0c], ax   y
+mov ax, [bp] ; add bp, 2 ; mov [si+0x0e], ax   the landscape ColourBackdrop is given
+mov ax, [si] ; add si, 2 ; mov [si+0x10], ax   the arena layout
+```
+
+So `ForestLairs` is 24 pairs of words, `LairLocation` 24 pairs and `LairType` 24 single
+words: 96, 96 and 48 bytes, which is what the symbol table gives for their sizes, and
+nothing about the layout had to be guessed from the shape of the data.
+
+`MapIconsTABLE` is read the same way, by `MOON:CheckGROOC` at image 0x70b: three words a
+pass, stop on a negative first word, hand the three to the overlap test as icon frame, x
+and y. Sixty bytes is nine records and the terminator, and the nine are the four villages,
+Highwood, Waterdeep, Stonehenge, the Valley of the Gods and Math's tower.
+
+**Three things say the result is the map and not a coincidence.** `LairType` comes out six
+2s, six 6s, six 4s and six 0s, the forest, waste, marsh and glade order `LairFile` already
+gave, arriving a second time from a second table. Twenty three of the twenty four
+`LairLocation` pairs land on a `MapType` cell whose code is that lair's own `LairType`,
+which is a third table agreeing; the odd one, lair 15, is a cell into the treeline and is
+still fought in the marsh, since `InitLair` hands `ColourBackdrop` the record's landscape
+and never asks the map. And drawn on the map picture, Highwood's box covers the castle,
+Waterdeep's the walled town in the marsh, Stonehenge's the stone circle in the southern
+woods and the wizard's the lone dark tower in the northern waste, to the pixel.
+
+The last of those is what corrected two mistakes this project had made and could not have
+caught any other way. It had put its healer on the ruin in the southern woods and its
+Stonehenge on the ring in the middle of it all. The ruin *is* Stonehenge; the ring is the
+Valley of the Gods. Both were sited on real artwork under the wrong name, which is a
+failure mode worth naming: **artwork will confirm that a place exists and will not tell
+you what it is called.**
+
+### The text records in that span, and what they settle
+
+`MOON:OPT1a` and `MOON:CRText` are message records, the ten-byte kind the walker at image
+`0x7a86` follows: `{text, x, y, flags, next}`. The layout is not a guess about the shape.
+The walker reads `mov dx, [bx]` for the string, `[bx+2]` into `TextX` and `[bx+4]` into
+`TextY`, tests `[bx+6]` for bit 0 (centre between `TextLeftBorder` and `TextRightBorder`,
+which are 0 and 320) and bit 2 (right-align), and takes `[bx+8]` as the next record or
+stops on zero. Every chain in the span walks to a terminator and every string pointer in
+every one of them lands on a NUL-terminated line that reads as English, which is the check
+that the layout is right.
+
+The single-line entry point at `0x7a70` settles it outright. It builds one record at
+`DS:0x7ff2` out of its arguments and falls straight into the walker:
+
+```
+0x7a70  mov di, 0x7ff2
+0x7a73  mov [di], si          ; text
+0x7a75  mov [di+2], ax        ; x
+0x7a78  mov [di+4], bx        ; y
+0x7a7b  mov [di+6], cx        ; flags
+0x7a7e  mov word [di+8], 0    ; next
+0x7a83  mov si, 0x7ff2
+```
+
+So the field order is not inferred from the data at all; it is written out one register at
+a time. `ChooseRefresh` is one of its callers: `mov si, [NAMEy]; mov ax, 0x32;
+mov bx, 0x32; xor cx, cx`, the chosen knight's name at (50, 50) with no flags, drawn only
+while `TypeFLAG` is set, which is while `TypeName` has the caret in it.
+
+Two things this settles that were previously paired by content:
+
+* the title's option list is `Players`/`Gore` at x 86 with their values at x 214, and
+  `Practice`/`Select Knight` centred, at y 83, 108, 150 and 170. All six strings are here
+  too: `Sel1`, `Sel2`, `Sel5`, `Sel6`, `NPLAYER` and `TEXTON`/`TEXTOFF`
+* `GameOverMes` is **two** records, `GOmes1` `GAME OVER` centred at y 95 and then
+  `Press fire to continue` at y 180. The string `Player      ` sits nine bytes before
+  `GOmes1` and `henge` had paired the two, on the reasonable guess that the original
+  printed a player number into it. It does not: nothing anywhere in the image refers to
+  that string's address, and `GameOverMes` starts at `GOmes1`. `NoKeysMessage` and
+  `ValleyEnter` both end on the same `Press fire to continue` record, which `VICTORY`
+  does not
+
+### The glyph map, and why the knights have underscores in their names
+
+`TextASCII` at `DS:0x8006` is 96 bytes indexed by `char - 0x20`, and both `TextP` and
+`TextLen` go through it. It has 72 glyphs: A-Z at 0, a-z at 26, 0-9 at 52, then `!`, an
+unused 63, `.`, `,`, `#`, `$`, `%`, the blank at 69, `'` and `/`. Everything it has no
+glyph for, `'_'` included, maps to 69, the blank. So `SIR_RICHARD` draws as `SIR RICHARD`.
+
+The underscore is there on purpose. `TypeName` starts the caret by scanning the name
+buffer for the first *space*, so a name written with spaces would only be editable from
+`SIR` onwards; written with underscores the whole eleven characters are, and the screen
+still shows a space.
 
 ### The arena tables
 

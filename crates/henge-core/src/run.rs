@@ -1039,7 +1039,7 @@ mod tests {
             },
         );
         let def = KnightDef {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             shades: vec![0],
             home: [10, 10],
             strength: 1,
@@ -1095,7 +1095,7 @@ mod tests {
             },
         );
         let def = KnightDef {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             shades: vec![0x0000cc],
             home: [10, 10],
             strength: 1,
@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(r.health, 20);
         assert_eq!(r.gold, 10, "and the ten they set out with");
         assert_eq!(r.lives, 5);
-        assert_eq!(r.knight.name, "Sir Banner");
+        assert_eq!(r.knight.name, "SIR GODBER");
         assert_eq!(r.knight.seat, 0);
     }
 
@@ -1121,7 +1121,7 @@ mod tests {
     #[test]
     fn a_restart_keeps_the_knight_and_clears_everything_else() {
         let mut r = Run::new(40);
-        r.knight.name = "Sir Dwain".into();
+        r.knight.name = "SIR RICHARD".into();
         r.knight.seat = 1;
         r.max_lives = 5;
         r.lives = 2;
@@ -1129,7 +1129,7 @@ mod tests {
         r.experience = 7;
         r.finished_fight(0, false, 0);
         r.restart();
-        assert_eq!(r.knight.name, "Sir Dwain");
+        assert_eq!(r.knight.name, "SIR RICHARD");
         assert_eq!(r.knight.seat, 1);
         assert_eq!(r.lives, 5, "back to full");
         assert_eq!(r.gold, 0);
@@ -1393,7 +1393,7 @@ mod magic_tests {
 
     fn knight_run(items: &Items) -> Run {
         let def = KnightDef {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             shades: vec![0x0000cc],
             home: [10, 10],
             strength: 1,

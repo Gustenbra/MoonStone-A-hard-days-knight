@@ -336,7 +336,7 @@ mod tests {
 
     fn opening() -> Knight {
         Knight {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             seat: 0,
             strength: 1,
             constitution: 1,

@@ -39,40 +39,38 @@
 //! anyway, because it is recovered and because it is the one thing the original
 //! records about a win.
 //!
-//! **The words are the original's.** Every message in the chain lives in MOON's
-//! text pool at image 0xd6e0, which is a separate blob from the message records
-//! themselves: the records are in the 2,906 bytes of DGROUP the load image used
-//! to carry as a stale duplicate, so `NoKeysMessage`, `ValleyEnter`, `VICTORY`
-//! and `GameOverMes` could not be read at their own addresses. That span is
-//! readable now (`docs/REVERSING.md`) and this has not been re-read out of it.
-//! The lines can be read either way, and
-//! there is exactly one candidate for each:
+//! **The words are the original's, and the records have now been read.** Every
+//! message in the chain lives in MOON's text pool at image 0xd6e0, which is a
+//! separate blob from the message records themselves: the records are in the
+//! 2,906 bytes of DGROUP the load image used to carry as a stale duplicate, so
+//! `NoKeysMessage`, `ValleyEnter`, `VICTORY` and `GameOverMes` could once only
+//! be paired with their lines by content. That span is readable now
+//! (`docs/REVERSING.md`), each record is `{text, x, y, flags, next}`, and the
+//! chains walk out as:
 //!
 //! ```text
-//! 0xd724  To be granted a / longer life you must / offer an item of /
-//!         magical nature to Danu            HengeInstruct
-//! 0xd772  You have completed / the quest    VICTORY
-//! 0xd78f  bg8.piv
-//! 0xd83b  You have proven your skill / and agility against the /
-//!         Guardian.  You have been / granted a Moonstone.   ValleyEnter
-//! 0xd89c  You may only enter your / own home village.
-//! 0xd8c6  You must have all four keys / to enter the /
-//!         Valley of the Gods                NoKeysMessage
-//! 0xd908  Player       / GAME OVER          GameOverMes
+//! HengeInstruct  To be granted a / longer life you must / offer an item of /
+//!                magical nature to Danu / Press fire to continue
+//! VICTORY        You have completed / the quest
+//! ValleyEnter    You have proven your skill / and agility against the /
+//!                Guardian.  You have been / granted a Moonstone. /
+//!                Press fire to continue
+//! NoKeysMessage  You must have all four keys / to enter the /
+//!                Valley of the Gods / Press fire to continue
+//! GameOverMes    GAME OVER / Press fire to continue
 //! ```
 //!
-//! The pairing is by content, not by address: nothing in the load image
-//! connects a record to its lines, because the records are the stale part. The
-//! line counts corroborate it, though. The records are ten bytes to a line, and
-//! `VICTORY` to `ValleyEnter` is 0xc7 bytes with other messages in between,
-//! but `HengeInstruct` to `VICTORY` is 0x28, exactly four lines, and
-//! `GameOverMes` to `NoKeysMessage` is 0x14, exactly two, which are the counts
-//! of the two blocks above them.
+//! The old pairing was right about every line but one. **`GameOverMes` is not
+//! two lines with a blank for the player number.** It is `GOmes1`, `GAME OVER`,
+//! centred at y 95, and then `Press fire to continue` at y 180. The string
+//! `Player      ` sits nine bytes before `GOmes1` in the data and was taken for
+//! the first of them; nothing in the image refers to its address at all, and
+//! `GameOverMes`'s first record points at `GOmes1`. It is dead data.
 //!
-//! `bg8.piv` sitting between the victory lines and the next message is why the
-//! ending is drawn over that plate. That is an inference from where the string
-//! sits and not a reference anybody has traced, and it is the only full-screen
-//! picture MOON names.
+//! `bg8.piv` still sits in the text pool between the victory lines and the next
+//! message, which is why the ending is drawn over that plate. That is an
+//! inference from where the string sits and not a reference anybody has traced,
+//! and it is the only full-screen picture MOON names.
 //!
 //! **The Guardian's own fight is recovered too.** `InitKnightvsDemon` writes
 //! 250 into the demon's health, one monster, and `ColourBackDrop` with 4, which
@@ -103,10 +101,9 @@ pub const VALLEY_ENTER: [&str; 4] = [
 /// `VICTORY`, verbatim.
 pub const VICTORY: [&str; 2] = ["You have completed", "the quest"];
 
-/// `GameOverMes`, verbatim. The original prints the player's number into the
-/// blank of the first line; a run here belongs to one knight, so his name goes
-/// there instead.
-pub const GAME_OVER: [&str; 2] = ["Player      ", "GAME OVER"];
+/// `GOmes1`, the whole of what `GameOverMes` puts up before
+/// `Press fire to continue`. One line, centred at y 95.
+pub const GAME_OVER: &str = "GAME OVER";
 
 /// The plate the ending is drawn over: the only picture MOON names by file,
 /// and it sits in the text pool immediately after the victory lines.
@@ -214,12 +211,11 @@ impl Tally {
     }
 
     /// The heading as the original sets it: `VICTORY` is two lines and
-    /// `GameOverMes` two, of which the first is a blank for the player number
-    /// and is replaced here by the knight's name.
+    /// `GameOverMes` is the one line `GOmes1`.
     pub fn heading_lines(&self) -> Vec<String> {
         match self.ending {
             Ending::Won { .. } => VICTORY.iter().map(|l| l.to_string()).collect(),
-            Ending::Slain => vec![GAME_OVER[1].to_string()],
+            Ending::Slain => vec![GAME_OVER.to_string()],
         }
     }
 
@@ -379,7 +375,7 @@ mod tests {
 
     fn knight() -> KnightDef {
         KnightDef {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             shades: vec![0],
             home: [16, 16],
             strength: 1,
@@ -505,7 +501,7 @@ mod tests {
         assert_eq!(r.rite_at_the_stones(None, &items), crate::service::Rite::Won(stone));
         let tally = r.tally().expect("the quest is done");
         assert_eq!(tally.ending, Ending::Won { stone, phase: stone.phase() });
-        assert_eq!(tally.knight, "Sir Banner");
+        assert_eq!(tally.knight, "SIR GODBER");
         assert_eq!(tally.stones, vec![stone]);
         assert!(tally.keys.is_empty());
         assert_eq!(tally.heading(), "You have completed the quest");

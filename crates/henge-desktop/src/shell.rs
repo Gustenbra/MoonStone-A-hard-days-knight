@@ -23,14 +23,21 @@
 //! screen is the title screen with the wordmark ten pixels higher, and the
 //! plate behind it was never an intro plate at all.
 //!
-//! The option list is recovered too: `DoOptions` has four rows, a player count
-//! of one to four, a gore switch and two ways to start, and the arrow is
-//! `SEL.CEL` frame 0 at x 50, which is the `ARX` `DoOptions` writes with
-//! `mov word ptr [ARX], 0x32`. The four row `y` values come out of `MOON:ARR`,
-//! the table at `DS:0x706` that `DisplaySelect` indexes with `optmode`. That
-//! table was in the span of DGROUP the unpacker used to leave stale; it is
-//! readable now and holds 85, 110, 148 and 168, and the spacing below is still
-//! this project's own until somebody wires those four in and looks at it.
+//! The option list is recovered too, and now down to its words. `DoOptions` has
+//! four rows, a player count of one to four, a gore switch and two ways to
+//! start, and the arrow is `SEL.CEL` frame 0 at x 50, which is the `ARX`
+//! `DoOptions` writes with `mov word ptr [ARX], 0x32`. Its four `y` values come
+//! out of `MOON:ARR` at `DS:0x706`, which `DisplaySelect` indexes with
+//! `optmode`: 85, 110, 148 and 168.
+//!
+//! The rows themselves are `MOON:OPT1a`, a chain of six ten-byte text records
+//! that `DisplaySelect` hands to the message walker: `Players` and `Gore` in a
+//! left column at x 86, the player count and `On`/`Off` in a right column at
+//! x 214, and `Practice` and `Select Knight` centred below them. Both the
+//! records and the strings were in the span of DGROUP the unpacker used to
+//! leave stale. What stood here before was `Players N`, `Gore on`,
+//! `Practice combat` and `Moon quest` on an even 18-pixel step, all four of
+//! which were this project's own wording and this project's own spacing.
 //!
 //! **Nothing on it is flattened to one colour.** `CH.PIV` reserves the bold
 //! face's five entries the way `MESSAGE.PIV` does: black at 5 and `dee`,
@@ -117,11 +124,53 @@ const TITLE_PLATE: &str = "scene.ch";
 
 /// `ARX` in the original. The arrow's left edge on the option list.
 const ARROW_X: i32 = 50;
-/// Ours. `DisplaySelect` takes the arrow's `y` off `MOON:ARR` at `DS:0x706`,
-/// which reads 85, 110, 148, 168 now that the bottom of DGROUP is recovered.
-/// An even step is what is drawn until the title screen is looked at again.
-const FIRST_ROW_Y: i32 = 100;
-const ROW_STEP: i32 = 18;
+/// `MOON:ARR` at `DS:0x706`. `DisplaySelect` does
+/// `mov si, 0x706; mov ax, [optmode]; shl ax, 1; add si, ax; mov ax, [si]` and
+/// blits `SEL.CEL` cel 0 at `ARX` with that as `cx`, so these four words are
+/// the arrow's y on the four rows. They were in the span of DGROUP the unpacker
+/// used to leave stale and are readable now.
+const ARROW_Y: [i32; 4] = [85, 110, 148, 168];
+
+/// The option list itself: `MOON:OPT1a`, six ten-byte text records chained
+/// through their last word, which `DisplaySelect` hands to the message walker
+/// at image `0x7a86`.
+///
+/// **Recovered, all of it**, out of the same span. A record is
+/// `{text, x, y, flags, next}`, which is what that walker reads:
+/// `mov dx, [bx]` is the string, `[bx+2]` and `[bx+4]` go into `TextX` and
+/// `TextY`, `[bx+6]` is tested for bit 0 (centre between `TextLeftBorder` 0 and
+/// `TextRightBorder` 320) and bit 2 (right-align), and `[bx+8]` is the next
+/// record or zero.
+///
+/// ```text
+/// OPT1a    Sel1     Players         x  86  y  83  flags 2
+/// OPT1b    Sel2     Gore            x  86  y 108  flags 2
+/// OPT1f    Sel5     Practice        x   0  y 150  flags 3
+/// OPT1g    Sel6     Select Knight   x   0  y 170  flags 3
+/// OPT1h    NPLAYER  "1          "   x 214  y  83  flags 2
+/// GOREOPT  TEXTON   On              x 214  y 108  flags 2
+/// ```
+///
+/// `DisplaySelect` prints the player count into `NPLAYER`'s buffer with the
+/// decimal routine at `0x7d7f` and points `GOREOPT`'s first word at `TEXTOFF`
+/// or `TEXTON` before it walks the chain, which is the whole of how the two
+/// values on the right get there. Bit 1, which the left-hand four set, is not
+/// read anywhere in the walker.
+const ROW_LABEL: [&str; 4] = ["Players", "Gore", "Practice", "Select Knight"];
+/// The labels are in `optmode` order, which is the order `Row::ALL` is in.
+const _: () = assert!(ROW_LABEL.len() == Row::ALL.len());
+const ROW_Y: [i32; 4] = [83, 108, 150, 170];
+/// Flag bit 0. The bottom two rows are centred and their `x` is ignored.
+const ROW_CENTRED: [bool; 4] = [false, false, true, true];
+/// `OPT1a`/`OPT1b` `x`, and `OPT1h`/`GOREOPT` `x`: label column and value
+/// column.
+const LABEL_X: i32 = 86;
+const VALUE_X: i32 = 214;
+/// `MOON:TEXTON` and `MOON:TEXTOFF`. `DisplaySelect` writes `TEXTOFF` in and
+/// then puts `TEXTON` back if the gore word is zero, so gore starts on, which
+/// is what the word in the image holds.
+const GORE_ON: &str = "On";
+const GORE_OFF: &str = "Off";
 
 /// `DisplaySelect`: `mov ax, 0x49; mov bx, 5; mov cx, 0xa`. The wordmark is
 /// not centred; its left edge is five pixels in.
@@ -162,27 +211,31 @@ impl TitleScene {
         // to make the silhouette read.
         sprite::draw(reg, fb, TITLE_BANK, LOGO, LOGO_AT.0, LOGO_AT.1, false);
 
-        // The option list. The arrow's left edge is `ARX`, which `DoOptions`
-        // sets to 50; the words follow it.
-        let rows = self.rows();
-        let (aw, _) = sprite::size(reg, SEL, ARROW);
-        let text_x = ARROW_X + aw + 6;
+        // The option list, at the coordinates its own records carry. The
+        // arrow's left edge is `ARX`, which `DoOptions` sets to 50, and its y
+        // is `ARR[optmode]`, which is a table of its own rather than the row's
+        // own y: the top two rows sit two pixels above their arrow and the
+        // bottom two two below it.
         let Some(bold) = fonts.bold else { return };
-        for (i, label) in rows.iter().enumerate() {
-            let y = FIRST_ROW_Y + i as i32 * ROW_STEP;
-            let on = i == self.state.row;
-            if on {
-                // `Sel.cel` frame 0 in its own colours, the way
-                // `DisplaySelect` blits it: one `call` with `ax` the cel and
-                // nothing said about colour.
-                sprite::draw(reg, fb, SEL, ARROW, ARROW_X, y + 3, false);
-            }
+        // `Sel.cel` frame 0 in its own colours, the way `DisplaySelect` blits
+        // it: one `call` with `ax` the cel and nothing said about colour.
+        let row = self.state.row.min(ROW_LABEL.len() - 1);
+        sprite::draw(reg, fb, SEL, ARROW, ARROW_X, ARROW_Y[row], false);
+        for (i, label) in ROW_LABEL.iter().enumerate() {
             // In the glyphs' own five indices. The row the arrow is against is
             // the one that is chosen, which is the whole of how the original
             // says so; a second colour for it would be one more than the
             // original has.
-            bold.draw_own(reg, fb, label, text_x, y);
+            if ROW_CENTRED[i] {
+                bold.draw_own_centred(reg, fb, label, ROW_Y[i]);
+            } else {
+                bold.draw_own(reg, fb, label, LABEL_X, ROW_Y[i]);
+            }
         }
+        // `OPT1h` and `GOREOPT`, the two records whose text `DisplaySelect`
+        // rewrites before it walks the chain.
+        bold.draw_own(reg, fb, &self.state.players.to_string(), VALUE_X, ROW_Y[0]);
+        bold.draw_own(reg, fb, if self.state.gore { GORE_ON } else { GORE_OFF }, VALUE_X, ROW_Y[1]);
 
         // The original's own two credit lines, frames 74 and 75 of the same
         // bank, at the corners `0x8860` and `0x8870` load: (22, 181) and
@@ -192,17 +245,6 @@ impl TitleScene {
         sprite::draw(reg, fb, TITLE_BANK, RESERVED, RESERVED_AT.0, RESERVED_AT.1, false);
     }
 
-    fn rows(&self) -> Vec<String> {
-        Row::ALL
-            .iter()
-            .map(|r| match r {
-                Row::Players => format!("Players  {}", self.state.players),
-                Row::Gore => format!("Gore  {}", if self.state.gore { "on" } else { "off" }),
-                Row::Practice => "Practice combat".to_string(),
-                Row::Quest => "Moon quest".to_string(),
-            })
-            .collect()
-    }
 }
 
 /// Whichever fonts the packs happen to hold. Both are optional everywhere else
@@ -353,8 +395,14 @@ impl SelectScene {
 /// The numbers are the same ones the drawing uses, taken from one place so a
 /// row can never be lit in one and hit in the other.
 pub fn title_rects() -> Vec<(usize, i32, i32, i32, i32)> {
-    (0..Row::ALL.len())
-        .map(|i| (i, ARROW_X, FIRST_ROW_Y + i as i32 * ROW_STEP - 2, 260 - ARROW_X, ROW_STEP))
+    // A row's box starts at the arrow that marks it and runs the width of the
+    // list, tall enough for one line of the bold face. `ARR` and the records
+    // put the four rows 25, 40 and 20 pixels apart, so the boxes do not meet.
+    (0..ROW_LABEL.len())
+        .map(|i| {
+            let top = ROW_Y[i].min(ARROW_Y[i]) - 1;
+            (i, ARROW_X, top, 260 - ARROW_X, 19)
+        })
         .collect()
 }
 

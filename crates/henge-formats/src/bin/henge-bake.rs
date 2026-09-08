@@ -645,6 +645,24 @@ const GRID_LEN: usize = 40 * 26;
 /// `docs/REVERSING.md`.
 const SELECTPAL_AT: usize = 0x123b0 + 0x892;
 
+/// The four tables that say where the map's places and lairs stand, all of
+/// them in the bottom of DGROUP the unpacker used to leave stale.
+///
+/// A data symbol's image offset is `0x123b0 + its DS offset`, the same
+/// arithmetic `SELECTPAL_AT` does. `MOON:MapIconsTABLE` is at DS:0x498,
+/// `MOON:ForestLairs` at DS:0xa6a, `MOON:LairLocation` at DS:0xaca and
+/// `MOON:LairType` at DS:0xb2a.
+const MAPICONS_AT: usize = 0x123b0 + 0x498;
+const FORESTLAIRS_AT: usize = 0x123b0 + 0xa6a;
+const LAIRLOCATION_AT: usize = 0x123b0 + 0xaca;
+const LAIRTYPE_AT: usize = 0x123b0 + 0xb2a;
+/// Twenty four of everything: `mov cx, 0x18` in the lair initialiser at image
+/// 0x1ea0, in `MOON:CheckLairEncounter` and in `_MAP:DisplayLairs`.
+const LAIR_COUNT: usize = 24;
+/// `MOON:MapIconsTABLE` is sixty bytes, which is nine six-byte records and the
+/// negative one that stops the walk.
+const MAPICONS_LEN: usize = 60;
+
 fn main() -> anyhow::Result<()> {
     // `henge-bake --render-music <dir>` writes each recovered tune out as a
     // WAV, which is how a tune is listened to, or measured, without starting
@@ -893,16 +911,15 @@ fn main() -> anyhow::Result<()> {
         Err(e) => eprintln!("intro: {e:#}"),
     }
 
-    // The overworld's two grids, lifted out of the unpacked executable. The
-    // terrain half is kept, because it is also what sites the lairs: each one
-    // stands on ground of its own family, and only this table says which that is.
-    let mut ground: Vec<u8> = Vec::new();
+    // The overworld's two grids, lifted out of the unpacked executable. They
+    // are what the map reads the ground under a traveller off; the lairs no
+    // longer need them, because `LairType` says what ground each lair is
+    // fought on and is the table the original itself asks.
     match overworld_tables(&src) {
         Ok(Some((terrain, going))) => {
             let land = serde_json::json!({ "terrain": terrain, "going": going });
             fs::write(out.join("data/overworld.json"), serde_json::to_string(&land)?)?;
             m.data.insert("data.overworld".into(), "data/overworld.json".into());
-            ground = terrain;
         }
         Ok(None) => eprintln!(
             "no unpacked MAIN.EXE image found: baking without the terrain grids.\n  \
@@ -939,7 +956,40 @@ fn main() -> anyhow::Result<()> {
                 .collect()
         })
         .unwrap_or_default();
-    fs::write(out.join("data/places.json"), place_definitions(&icons, &ground))?;
+    // Where everything on the map stands, out of the same image. Without it
+    // the pack keeps the two towns, whose walk-to points are code literals,
+    // and has no lairs, no stones, no tower and no Valley: those live only in
+    // `MapIconsTABLE` and `LairLocation`, and inventing them again would undo
+    // the recovery.
+    let marks = match map_marks(&src) {
+        Ok(Some(m)) => {
+            println!("map: {} places read out of MapIconsTABLE", m.len());
+            m
+        }
+        Ok(None) => BTreeMap::new(),
+        Err(e) => {
+            eprintln!("MapIconsTABLE: {e:#}");
+            BTreeMap::new()
+        }
+    };
+    let lairs = match lair_table(&src) {
+        Ok(Some(l)) => {
+            println!("lairs: {} read out of ForestLairs, LairLocation and LairType", l.len());
+            l
+        }
+        Ok(None) => {
+            eprintln!(
+                "no unpacked MAIN.EXE image found: baking without the lairs and \
+                 without every place but the two towns."
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            eprintln!("lair tables: {e:#}");
+            Vec::new()
+        }
+    };
+    fs::write(out.join("data/places.json"), place_definitions(&icons, &marks, &lairs))?;
     m.data.insert("data.places".into(), "data/places.json".into());
 
     fs::write(out.join("data/items.json"), item_definitions())?;
@@ -1708,49 +1758,173 @@ fn unpacked_image(src: &str) -> Option<Vec<u8>> {
 ///
 /// The healer and the stones have no recovered coordinates at all. They are
 /// placed on the landmarks the map already draws.
-/// The six lairs of each family, in `LairFile` order, and what stands in each.
+/// What each entry of `MOON:CombatTable` puts in the arena.
 ///
-/// **Recovered: the arena layouts and their order.** `MOON:LairFile` at
-/// DS:0x0b7a is 24 pointers to `fol1.t`..`fol6.t`, `wal1.t`..`wal6.t`,
-/// `swl1.t`..`swl6.t`, `gll1.t`..`gll6.t`. It sits four bytes past the end of
-/// the span the unpacker used to leave stale, so it is the one of the four the
-/// load image carried even then. That order is also what plants the
-/// keys: the initialiser steps six records between one key and the next, so
-/// lair 0 to 5 are the forest's, 6 to 11 the wastes', 12 to 17 the marsh's and
-/// 18 to 23 the glades', matching `moon::Key::ALL`.
+/// **Recovered**, out of `MOON:InitGameStart` at image 0x1d44, which is a run
+/// of `mov word ptr [si + n], imm` with `si` holding `CombatTable`'s DS
+/// offset 0x6988. The table is BSS, so it is zero in the load image and only
+/// these immediates say what is in it. They are link-time code addresses and
+/// take the seven-step correction `tools/symbolmap.py` fits, after which all
+/// thirteen land exactly on an `InitKnightvs*` entry point.
 ///
-/// **Ours: which guardian, and how many.** `ForestLairs`, the table pairing a
-/// lair with an entry of `CombatTable` and a head count, is inside the 2,906
-/// bytes that were unreadable when this was written and are readable now; see
-/// `docs/REVERSING.md`, and read them rather than keeping this if you get the
-/// chance. What a guardian *can* be is recovered, because
-/// `InitGameStart` fills `CombatTable` with the thirteen `InitKnightvs*`
-/// routines; which one each lair gets is chosen here. Each family fields its
-/// own road creatures for the first three, then the two the road never
-/// produces: the beast and Balok are lair encounters in the original and stand
-/// nowhere else. The demon and the dragon are set pieces and are left out, both
-/// because their own set pieces are not built and because two hundred and fifty
-/// hit points against a twenty point knight is not a fight.
+/// The run just above it, at image 0x1ced with `si` at DS:0x6964, fills the
+/// parallel controller table with `ControlBeast`, `ControlMudmen`,
+/// `ControlDemon`, `ControlKnight`, `ControlBlackKnight`, `ControlDragon`,
+/// three `ControlTrogg`s, `ControlRatmen` and so on, slot for slot. Two
+/// tables filled in the same order from two different sets of routines is
+/// what pins the meaning of each slot; slot 4 is the black knight, whose
+/// setup routine is the plain knight's.
 ///
-/// A bout seats four, so a count is at most three beside one player.
-const LAIRS: &[(&str, &str, [(&str, u32); 6])] = &[
-    ("forest", "scene.fob1", [
-        ("ratmen", 2), ("trogg_axe", 2), ("trogg_spear", 2),
-        ("beast", 2), ("trogg_axe", 3), ("balok", 1),
-    ]),
-    ("waste", "scene.wab1", [
-        ("trogg_hammer", 2), ("troll", 1), ("trogg_axe", 2),
-        ("beast", 2), ("troll", 2), ("balok", 1),
-    ]),
-    ("swamp", "scene.swb1", [
-        ("mudmen", 1), ("trogg_spear", 2), ("mudmen", 2),
-        ("beast", 2), ("trogg_spear", 3), ("balok", 1),
-    ]),
-    ("glade", "scene.glb1", [
-        ("ratmen", 2), ("trogg_hammer", 2), ("trogg_axe", 2),
-        ("beast", 2), ("ratmen", 3), ("balok", 1),
-    ]),
+/// Slots 10, 11, 13, 15 and 17 are never written and no lair asks for them.
+/// Three of the thirteen set up a knight, who is not in the bestiary because
+/// he is the player's own actor; see [`guardian_is_known`]. No lair asks for
+/// one of those either.
+const GUARDIANS: &[(u16, &str)] = &[
+    (0, "beast"),
+    (1, "mudmen"),
+    (2, "demon"),
+    (3, "knight"),
+    (4, "knight"),
+    (5, "dragon"),
+    (6, "trogg_axe"),
+    (7, "trogg_hammer"),
+    (8, "trogg_spear"),
+    (9, "ratmen"),
+    (12, "balok"),
+    (14, "knight"),
+    (16, "troll"),
 ];
+
+/// Whether the pack has somebody to put in the arena under this name. The
+/// knight is not in `CREATURES`: he is the player's own actor, and the three
+/// `CombatTable` slots that set up a knight fight name him rather than a
+/// creature.
+fn guardian_is_known(id: &str) -> bool {
+    id == "knight" || CREATURES.iter().any(|c| c.id == id)
+}
+
+/// One lair, as the four tables the initialiser copies from describe it.
+struct LairPlace {
+    /// `ForestLairs[2n]`, a byte offset into `CombatTable`, resolved through
+    /// [`GUARDIANS`] to a creature the bestiary has.
+    guardian: &'static str,
+    /// `ForestLairs[2n+1]`, which the initialiser writes to record `+0x04`:
+    /// `TotalMonsters`, everything that comes at you before the lair is clear,
+    /// not everything that stands in the arena at once.
+    count: u32,
+    /// `LairLocation[2n]` and `[2n+1]`, record `+0x0a` and `+0x0c`. The corner
+    /// `_MAP:DisplayLairs` blits icon frame 0x14 at.
+    x: i32,
+    y: i32,
+    /// `LairType[n]`, record `+0x0e`, in `_MAP:MapType`'s own coding: the
+    /// landscape `InitLair` hands to `ColourBackdrop`, which is what decides
+    /// the arena family. It is the ground the fight happens on, and it is not
+    /// read back off the map: lair 15 stands one cell into the treeline and is
+    /// still fought in the marsh.
+    code: u8,
+}
+
+/// The twenty four lairs: the guardian, the head count, where it stands and
+/// what ground it is fought on.
+///
+/// **Recovered, all four tables.** The initialiser's copy loop at image
+/// 0x1ea0 is what says what each of them is. It runs twenty four times over
+/// eighteen-byte records with `di` on `ForestLairs`, `bx` on `LairLocation`,
+/// `bp` on `LairType` and `si` on `LairFile`:
+///
+/// ```text
+/// mov ax, [di]  ; add di, 2 ; mov [si+0x02], ax    which CombatTable entry
+/// mov ax, [di]  ; add di, 2 ; mov [si+0x04], ax    how many
+/// mov ax, [bx]  ; add bx, 2 ; mov [si+0x0a], ax    x
+/// mov ax, [bx]  ; add bx, 2 ; mov [si+0x0c], ax    y
+/// mov ax, [bp]  ; add bp, 2 ; mov [si+0x0e], ax    landscape
+/// mov ax, [si]  ; add si, 2 ; mov [si+0x10], ax    arena layout
+/// ```
+///
+/// So `ForestLairs` is 24 pairs of words and 96 bytes, `LairLocation` 24 pairs
+/// and 96 bytes, and `LairType` 24 single words and 48 bytes, which is exactly
+/// what the symbol table gives for their sizes. Nothing here is inferred from
+/// the shape of the bytes; the reading is the code's.
+///
+/// **The arena layouts and their order are recovered too**, and were already.
+/// `MOON:LairFile` is 24 pointers to `fol1.t`..`fol6.t`, `wal1.t`..`wal6.t`,
+/// `swl1.t`..`swl6.t`, `gll1.t`..`gll6.t`, and it starts four bytes past the
+/// end of the span the unpacker used to leave stale, so it is the one of the
+/// four the load image carried even then. That order is what plants the keys:
+/// the initialiser steps six records between one key and the next, so lair 0
+/// to 5 are the forest's, 6 to 11 the wastes', 12 to 17 the marsh's and 18 to
+/// 23 the glades', matching `moon::Key::ALL`.
+///
+/// Everything is checked before it is used, the way the terrain grids are.
+/// `LairType` has to agree with `LairFile`'s own family for all twenty four,
+/// which is two independent tables saying the same thing; every guardian has
+/// to be a slot `InitGameStart` fills and a creature the bestiary has; every
+/// coordinate has to be on the map; and no two lairs may stand on one spot.
+/// A stale image fails these rather than baking a plausible lie.
+fn lair_table(src: &str) -> anyhow::Result<Option<Vec<LairPlace>>> {
+    let Some(bytes) = unpacked_image(src) else { return Ok(None) };
+    anyhow::ensure!(
+        bytes.len() == IMAGE_LEN,
+        "the unpacked image is {} bytes, expected {IMAGE_LEN}",
+        bytes.len()
+    );
+    let word = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+    let mut lairs = Vec::with_capacity(LAIR_COUNT);
+    for n in 0..LAIR_COUNT {
+        let slot = word(FORESTLAIRS_AT + n * 4) / 2;
+        let count = word(FORESTLAIRS_AT + n * 4 + 2);
+        let x = word(LAIRLOCATION_AT + n * 4) as i32;
+        let y = word(LAIRLOCATION_AT + n * 4 + 2) as i32;
+        let code = word(LAIRTYPE_AT + n * 2);
+        let guardian = GUARDIANS.iter().find(|(s, _)| *s == slot).map(|(_, id)| *id);
+        let guardian = guardian.with_context(|| {
+            format!("lair {n} wants CombatTable entry {slot}, which InitGameStart never fills")
+        })?;
+        anyhow::ensure!(
+            guardian_is_known(guardian),
+            "lair {n} is guarded by {guardian}, which the pack has nobody for"
+        );
+        anyhow::ensure!(
+            (1..=64).contains(&count),
+            "lair {n} fields {count} monsters, so ForestLairs is not ForestLairs"
+        );
+        anyhow::ensure!(
+            matches!(code, 0 | 2 | 4 | 6),
+            "lair {n} is fought on landscape {code}, which ColourBackdrop never branches on"
+        );
+        let family = family_of(code as u8);
+        let want = henge_core::moon::Key::ALL[n / 6].family();
+        anyhow::ensure!(
+            family == want,
+            "lair {n} is {family} by LairType and {want} by LairFile, so one of the two \
+             tables is being read out of the wrong place"
+        );
+        anyhow::ensure!(
+            (0..=320 - LAIR_W).contains(&x) && (0..=200 - LAIR_H).contains(&y),
+            "lair {n} stands at ({x}, {y}), which is off the map"
+        );
+        lairs.push(LairPlace { guardian, count: count as u32, x, y, code: code as u8 });
+    }
+    for (n, a) in lairs.iter().enumerate() {
+        anyhow::ensure!(
+            !lairs[n + 1..].iter().any(|b| b.x == a.x && b.y == a.y),
+            "two lairs stand at ({}, {})", a.x, a.y
+        );
+    }
+    Ok(Some(lairs))
+}
+
+/// The landscape codes `_MAP:MapType` and `MOON:LairType` share, in the names
+/// this project files the four arena families under. `_MAP:FindLandscape`
+/// stores the byte and `MOON:ColourBackdrop` switches on it.
+fn family_of(code: u8) -> &'static str {
+    match code {
+        2 => "forest",
+        4 => "swamp",
+        6 => "waste",
+        _ => "glade",
+    }
+}
 
 /// The arena layout each lair is fought in: `fol1`, `wal1` and the rest,
 /// which is `LairFile` with the extension taken off.
@@ -1764,106 +1938,68 @@ fn lair_arena(family: &str, n: usize) -> String {
     format!("{prefix}l{}", n + 1)
 }
 
-/// Where the Valley of the Gods stands.
+/// `MOON:MapIconsTABLE`: where every place on the overworld stands.
 ///
-/// **Ours, and the ground is not.** `MOON:MapIconsTABLE` is in the 2,906 bytes
-/// that were unreadable when this was written, with every other place but the
-/// two towns. They are readable now (`docs/REVERSING.md`) and this is not yet
-/// read out of them. What can be read is what the fight behind the gate looks
-/// like: `InitKnightvsDemon` ends with `mov ax, 4; call ColourBackDrop`, and 4
-/// is the swamp in `_MAP:MapType`'s own coding. So the Valley is sited on
-/// marsh, by the same neighbourhood test the lairs use, and of the cells that
-/// pass it takes the one furthest from either town, because a place you need
-/// four keys to open should not be next door to a merchant.
-fn valley_site(ground: &[u8], taken: &[(i32, i32, i32, i32)]) -> Option<(i32, i32)> {
-    const TOWNS: [(i32, i32); 2] = [(94, 47), (297, 157)];
-    let far = |c: &&(i32, i32)| {
-        TOWNS.iter().map(|t| (c.0 - t.0).pow(2) + (c.1 - t.1).pow(2)).min().unwrap_or(0)
-    };
-    // A wide sample of the marsh, then the remotest of it. `lair_sites` returns
-    // six spread across the region, which is exactly the set to choose from.
-    lair_sites(ground, 4, taken).iter().max_by_key(|c| (far(c), -c.1, -c.0)).copied()
-}
-
-/// Where the twenty four lairs stand.
+/// **Recovered.** `MOON:CheckGROOC`'s walk at image 0x70b reads three words a
+/// pass, `mov ax, [si]; add si, 2` three times over, stops on a negative first
+/// word, and hands the three to the overlap test as icon frame, x and y. The
+/// box it measures comes from `MOON:GetWIDTH` on that frame, so the pair is
+/// the icon's top-left corner and not its middle. Sixty bytes is nine records
+/// and the terminator.
 ///
-/// **Ours, but not arbitrary.** `MOON:LairLocation` is in the part of DGROUP
-/// the load image does not carry, so the coordinates cannot be read. What can
-/// be read is the ground: `_MAP:MapType` says which of the four families each
-/// 8x8 block of the map is, and a lair fought on `fol3.t` belongs on forest.
-/// So each family's six are sited on cells of its own code, and the placement
-/// is a search rather than a list of numbers typed out by eye:
+/// What the frames are is recovered from the same routine and from
+/// `_MAP:StackMessages`, the table of lines the map's own gadget list carries:
+/// 0x15 to 0x18 are the four villages, each gated on `[di+0x20]`, the knight's
+/// own index, so a village belongs to one knight and only he may enter it;
+/// 0x19 is Highwood, 0x1a Waterdeep, 0x1b Stonehenge, 0x1c the Valley of the
+/// Gods and 0x1e Math the Wizard.
 ///
-/// * the cell and all eight around it must carry the same code, so a lair is
-///   never on a one block island where its icon straddles two kinds of ground;
-/// * it must clear the towns, the healer, the stones and the wizard's tower by
-///   twenty four pixels, and the four knights' starting corners by twenty
-///   eight, so nothing opens the moment a run begins;
-/// * it must be inside `HawkBorders` with room for the status bar;
-/// * and of what is left, the six are chosen by taking the first in scan order
-///   and then repeatedly the candidate furthest from everything already
-///   chosen, which spreads them across the region the family occupies.
-///
-/// The result is fixed by the map's own table, so it is the same on every
-/// machine and moves only if the terrain grid does.
-fn lair_sites(ground: &[u8], code: u8, taken: &[(i32, i32, i32, i32)]) -> Vec<(i32, i32)> {
-    const COLS: i32 = 40;
-    const ROWS: i32 = 26;
-    // `_MAP:CalcKnGrid` indexes with `((x + 4) >> 3, (y + 10) >> 3)`, so the
-    // token positions a cell answers for are `[gx * 8 - 4, gx * 8 + 3]` by
-    // `[gy * 8 - 10, gy * 8 - 3]`. These are the middles of those.
-    let at = |gx: i32, gy: i32| (gx * 8, gy * 8 - 6);
-    // The four knights' corners, from `InitKnights`. A lair on one of them
-    // would open before the first step of a run.
-    const HOMES: [(i32, i32); 4] = [(10, 10), (300, 5), (26, 180), (300, 185)];
-    let mut candidates: Vec<(i32, i32)> = Vec::new();
-    for gy in 0..ROWS {
-        for gx in 0..COLS {
-            let same = |x: i32, y: i32| {
-                (0..COLS).contains(&x)
-                    && (0..ROWS).contains(&y)
-                    && ground.get((y * COLS + x) as usize) == Some(&code)
-            };
-            if !(-1..=1).all(|dy| (-1..=1).all(|dx| same(gx + dx, gy + dy))) {
-                continue;
-            }
-            let (x, y) = at(gx, gy);
-            if !(8..=300).contains(&x) || !(10..=170).contains(&y) {
-                continue;
-            }
-            let clear = taken.iter().all(|(ox, oy, ow, oh)| {
-                !(x < ox + ow + 24 && *ox < x + LAIR_W + 24
-                    && y < oy + oh + 24 && *oy < y + LAIR_H + 24)
-            });
-            let away = HOMES.iter().all(|(hx, hy)| (x - hx).abs() >= 28 || (y - hy).abs() >= 28);
-            if clear && away {
-                candidates.push((x, y));
-            }
-        }
-    }
-    let mut picked: Vec<(i32, i32)> = Vec::new();
-    if let Some(first) = candidates.first().copied() {
-        picked.push(first);
-    }
-    while picked.len() < 6 && picked.len() < candidates.len() {
-        let far = |c: &(i32, i32)| {
-            picked
-                .iter()
-                .map(|p| (c.0 - p.0).pow(2) + (c.1 - p.1).pow(2))
-                .min()
-                .unwrap_or(0)
-        };
-        let Some(next) = candidates
-            .iter()
-            .filter(|c| !picked.contains(c))
-            .max_by_key(|c| (far(c), -c.1, -c.0))
-            .copied()
-        else {
+/// Checked before use: the walk has to terminate inside the table, every frame
+/// has to be one `StackMessages` has a line for, no frame may appear twice,
+/// every corner has to be on the map, and both towns have to be there, since
+/// `_MAP:KnightGoesToTown` carries their walk-to points as literals and they
+/// are the one cross-check the map has on itself.
+fn map_marks(src: &str) -> anyhow::Result<Option<BTreeMap<u8, (i32, i32)>>> {
+    let Some(bytes) = unpacked_image(src) else { return Ok(None) };
+    anyhow::ensure!(
+        bytes.len() == IMAGE_LEN,
+        "the unpacked image is {} bytes, expected {IMAGE_LEN}",
+        bytes.len()
+    );
+    let word = |at: usize| i16::from_le_bytes([bytes[at], bytes[at + 1]]) as i32;
+    let mut marks: BTreeMap<u8, (i32, i32)> = BTreeMap::new();
+    let mut at = MAPICONS_AT;
+    loop {
+        anyhow::ensure!(
+            at + 6 <= MAPICONS_AT + MAPICONS_LEN,
+            "MapIconsTABLE runs off the end of itself without a negative frame"
+        );
+        let frame = word(at);
+        if frame < 0 {
             break;
-        };
-        picked.push(next);
+        }
+        let (x, y) = (word(at + 2), word(at + 4));
+        anyhow::ensure!(
+            (0x15..=0x22).contains(&frame),
+            "MapIconsTABLE names icon frame {frame}, which StackMessages has no line for"
+        );
+        anyhow::ensure!(
+            (0..320).contains(&x) && (0..200).contains(&y),
+            "the place at icon frame {frame} stands at ({x}, {y}), which is off the map"
+        );
+        anyhow::ensure!(
+            marks.insert(frame as u8, (x, y)).is_none(),
+            "MapIconsTABLE names icon frame {frame} twice"
+        );
+        at += 6;
     }
-    picked
+    for (frame, town) in [(0x19u8, "Highwood"), (0x1a, "Waterdeep")] {
+        anyhow::ensure!(
+            marks.contains_key(&frame),
+            "MapIconsTABLE has no {town}, so it is not MapIconsTABLE"
+        );
+    }
+    Ok(Some(marks))
 }
 
 /// `MI.C` frame 0x14, the icon `_MAP:DisplayLairs` blits at every lair whose
@@ -1873,35 +2009,40 @@ const LAIR_H: i32 = 5;
 
 /// Where each place sits, and how big it is.
 ///
-/// **Two of the five coordinates are recovered and the rest are not, and the
-/// difference is worth stating.** `_MAP:KnightGoesToTown` carries the two towns
-/// as literals: a knight heading for Highwood walks to map (94, 47) and for
-/// Waterdeep to (297, 157), and the same routine works out which is nearer from
-/// the grid cells (12, 7) and (37, 20). Those cells are exactly what the
-/// recovered grid formula turns those pixels into, which is what makes both
-/// pairs trustworthy rather than merely present.
+/// **Every coordinate on the map is recovered now except the hermit's.**
+/// `MOON:MapIconsTABLE` is the original's own list of what stands on the
+/// overworld and where, and it is read out of the image by [`map_marks`]. Each
+/// record's pair is the top-left corner of the icon the overlap test measures,
+/// so it is exactly what a place's box wants; the size still comes from the
+/// `MI.C` bank, because the table carries a frame number and not a rectangle.
+/// The lairs come out of [`lair_table`] the same way.
 ///
-/// What those numbers are is the spot a knight is sent to, not the corner of
-/// the picture. The corner lives in `MOON:MapIconsTABLE`, which used to be
-/// unreadable: it is in the first 2,906 bytes of DGROUP, and the unpacker left
-/// that span stale. So the box is **built** here rather than recovered: the
-/// icon's size comes from the `MI.C` bank, which is real, and it is hung so
-/// that the recovered destination sits in the middle of it. Both towns land on
-/// their own artwork when it is drawn, which is the check that it is not
-/// nonsense, but it remains a construction.
+/// That table used to be unreadable: it is in the bottom of DGROUP, and the
+/// unpacker left that span stale. Everything below used to be **built** here
+/// instead, by centring the two towns on the walk-to points
+/// `_MAP:KnightGoesToTown` carries as literals, (94, 47) and (297, 157), and
+/// by hanging the rest on whatever landmark the map painted nearby. That is
+/// gone. What the construction got wrong is worth recording: the ruin in the
+/// southern woods this project called the hermit's is Stonehenge, and the ring
+/// in the middle of it all this project called Stonehenge is the Valley of the
+/// Gods. Both were sited on the right artwork under the wrong name.
 ///
-/// **That span is readable now.** `tools/symbolmap.py` finishes the EXEPACK
-/// stream instead of stopping where the emulated stub stops, and
-/// `MapIconsTABLE`, `LairLocation` and `LairType` are all in what came back. So
-/// every place on the map could stop being a construction. That is the map's
-/// own change and not this one; until somebody makes it, what is below stands.
+/// The two towns keep the `KnightGoesToTown` construction as a fallback, so a
+/// pack baked without the unpacked image still has somewhere to buy a sword.
+/// Everything else the table names is baked only when the table is there.
 ///
-/// The healer, the stones and the wizard's tower have no recovered coordinates
-/// at all. They are placed on the landmarks the map already draws: the ruin in
-/// the southern woods, the ring in the middle of it all, and the lone dark
-/// tower standing in the northern waste, which is the only building the map
-/// paints that nothing else claims. The lairs are sited by the recovered
-/// terrain grid; see [`lair_sites`].
+/// **The four villages are recovered and not baked.** Frames 0x15 to 0x18 are
+/// in the table at (18, 11), (286, 11), (0, 187) and (303, 192), one in each
+/// corner, and `MOON:CheckGROOC` gates each on `[di+0x20]`, the knight's own
+/// index, so a village belongs to one knight and only he may enter it. Nothing
+/// in this project has a village to enter yet, and putting four unguarded ones
+/// on the map would be worse than leaving them off.
+///
+/// **The hermit is ours, and now has no landmark behind it.** It used to stand
+/// on the ruin in the southern woods, which turns out to be Stonehenge's own
+/// artwork; it has been moved off it into the deep woods to the west, clear of
+/// every recovered box, because a second healer that is not in the original
+/// should not sit on top of a place that is.
 ///
 /// **The menu lines a map gadget carries are recovered**, from `_MAP`:
 /// `knhigh` `Enter the city of Highwood`, `knwater` `Enter the city of
@@ -1917,32 +2058,36 @@ const LAIR_H: i32 = 5;
 ///
 /// **Two prices.** The hermit in the woods takes only days. The town healer
 /// takes coin and gives it all to whatever it will buy, which is `HealDon`.
-fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>, ground: &[u8]) -> String {
+fn place_definitions(
+    icons: &BTreeMap<u8, (i32, i32)>,
+    marks: &BTreeMap<u8, (i32, i32)>,
+    lairs: &[LairPlace],
+) -> String {
     // MI.C frame numbers, which are also the kinds the original's menu table is
     // indexed by: 0x19 Highwood, 0x1a Waterdeep, 0x1b Stonehenge.
     let icon = |frame: u8, fallback: (i32, i32)| *icons.get(&frame).unwrap_or(&fallback);
     // A place's box, hung so that `goal` is the middle of it. `goal` is where
     // the traveller's own 8x10 token stands, so its middle is offset by half of
-    // that before the icon is centred on it.
+    // that before the icon is centred on it. Only the two towns still need it,
+    // and only when `MapIconsTABLE` is not there to be read.
     let at = |goal: (i32, i32), size: (i32, i32)| {
         (goal.0 + 4 - size.0 / 2, goal.1 + 5 - size.1 / 2, size.0, size.1)
     };
-    let highwood = at((94, 47), icon(0x19, (25, 32)));
-    let waterdeep = at((297, 157), icon(0x1a, (32, 28)));
-    // Ours, not theirs: the ruin in the southern woods, the stone ring the map
-    // draws in the middle of it all, and the tower in the northern waste.
-    // Sized like the original's own icons where there is one to borrow.
-    let healer = (89, 159, 10, 10);
-    let stones = {
-        let (w, h) = icon(0x1b, (18, 12));
-        (158 - w / 2, 102 - h / 2, w, h)
+    // A place whose corner `MapIconsTABLE` gives and whose size `MI.C` does.
+    let mark = |frame: u8, size: (i32, i32)| {
+        marks.get(&frame).map(|(x, y)| (*x, *y, size.0, size.1))
     };
-    // Frame 0x1e is seven by twenty, which is the shape and very nearly the
-    // size of the tower the map paints at (218, 12).
-    let wizard = {
-        let (w, h) = icon(0x1e, (7, 20));
-        (217, 12, w, h)
-    };
+    let highwood = mark(0x19, icon(0x19, (25, 32)))
+        .unwrap_or_else(|| at((94, 47), icon(0x19, (25, 32))));
+    let waterdeep = mark(0x1a, icon(0x1a, (32, 28)))
+        .unwrap_or_else(|| at((297, 157), icon(0x1a, (32, 28))));
+    let stones = mark(0x1b, icon(0x1b, (18, 12)));
+    let valley = mark(0x1c, icon(0x1c, (13, 10)));
+    let wizard = mark(0x1e, icon(0x1e, (7, 20)));
+    // **Ours.** The hermit is not in the original at all, so no table places
+    // him. He stands deep in the southern woods, clear of every recovered box
+    // and of Stonehenge in particular, which is where he used to stand.
+    let healer = (58, 170, 10, 10);
 
     let heal = |days: u32, gold: u32| {
         serde_json::json!({
@@ -2192,43 +2337,48 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>, ground: &[u8]) -> String 
             ]
         }),
     );
-    // The stones. `MOON:Henge` tests the moonstone bits against tonight's moon
-    // before it offers anything else; short of that the druids take an offering,
-    // which is what the between-days screen tells you to bring them: `Offer a
-    // magic item within Stonehenge and Danu will grant you a longer life`.
-    places.insert(
-        "stones".into(),
-        serde_json::json!({
-            "name": "The Stones",
-            "scene": "scene.hen1",
-            "x": stones.0, "y": stones.1, "w": stones.2, "h": stones.3,
-            "menu": [8, 16, 148, 40],
-            "text": [6, 146, 308, 42],
-            "options": [
-                { "label": "Offer a magic item", "effect": { "do": "offer" } },
-                { "label": "Leave",              "effect": leave }
-            ]
-        }),
-    );
-    // Math's tower. `WizardIntro` is what he says on the way in; ringing the
-    // bell is one roll against thirty, seventy and ninety, and leaving sets the
-    // grudge to seventy whatever it gave, so a second visit the same day is
-    // dangerous and a third is close to certain.
-    places.insert(
-        "wizard".into(),
-        serde_json::json!({
-            "name": "Math the Wizard",
-            "scene": "scene.wi1",
-            "x": wizard.0, "y": wizard.1, "w": wizard.2, "h": wizard.3,
-            "menu": [6, 6, 128, 40],
-            "text": [4, 112, 312, 76],
-            "intro": "As you ring the bell at the bottom of the foreboding wizard's tower, a sense of unease rises in the air. A tall, dark figure slowly rises onto the balcony some fifty feet above your head and with a low, powerful breath, the mighty wizard Math speaks:",
-            "options": [
-                { "label": "Visit Math the Wizard", "effect": { "do": "wizard" } },
-                { "label": "Leave",                 "effect": leave }
-            ]
-        }),
-    );
+    // The stones, at `MapIconsTABLE`'s frame 0x1b. `MOON:Henge` tests the
+    // moonstone bits against tonight's moon before it offers anything else;
+    // short of that the druids take an offering, which is what the
+    // between-days screen tells you to bring them: `Offer a magic item within
+    // Stonehenge and Danu will grant you a longer life`.
+    if let Some(stones) = stones {
+        places.insert(
+            "stones".into(),
+            serde_json::json!({
+                "name": "The Stones",
+                "scene": "scene.hen1",
+                "x": stones.0, "y": stones.1, "w": stones.2, "h": stones.3,
+                "menu": [8, 16, 148, 40],
+                "text": [6, 146, 308, 42],
+                "options": [
+                    { "label": "Offer a magic item", "effect": { "do": "offer" } },
+                    { "label": "Leave",              "effect": leave }
+                ]
+            }),
+        );
+    }
+    // Math's tower, at frame 0x1e. `WizardIntro` is what he says on the way in;
+    // ringing the bell is one roll against thirty, seventy and ninety, and
+    // leaving sets the grudge to seventy whatever it gave, so a second visit
+    // the same day is dangerous and a third is close to certain.
+    if let Some(wizard) = wizard {
+        places.insert(
+            "wizard".into(),
+            serde_json::json!({
+                "name": "Math the Wizard",
+                "scene": "scene.wi1",
+                "x": wizard.0, "y": wizard.1, "w": wizard.2, "h": wizard.3,
+                "menu": [6, 6, 128, 40],
+                "text": [4, 112, 312, 76],
+                "intro": "As you ring the bell at the bottom of the foreboding wizard's tower, a sense of unease rises in the air. A tall, dark figure slowly rises onto the balcony some fifty feet above your head and with a low, powerful breath, the mighty wizard Math speaks:",
+                "options": [
+                    { "label": "Visit Math the Wizard", "effect": { "do": "wizard" } },
+                    { "label": "Leave",                 "effect": leave }
+                ]
+            }),
+        );
+    }
 
     // The Valley of the Gods, which is what four keys are for.
     //
@@ -2239,23 +2389,22 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>, ground: &[u8]) -> String 
     // 250 health, one monster and `ColourBackDrop` 4. The arena is left empty
     // so the swamp's own rotation picks one, the way the road does.
     //
-    // **Ours**: where it stands (see `valley_site`) and the picture behind the
-    // gate, which is the intro plate of a portal standing open on an altar.
-    // MOON names no picture for the Valley; the only one it names at all is
-    // `bg8.piv`, and that is the ending's.
-    let mut taken: Vec<(i32, i32, i32, i32)> =
-        vec![highwood, waterdeep, healer, stones, wizard];
-    if let Some(site) = valley_site(ground, &taken) {
-        let (w, h) = icon(0x1c, (13, 10));
-        let (x, y, w, h) = at(site, (w, h));
-        taken.push((x, y, w, h));
+    // **Recovered too, now**: where it stands. Frame 0x1c of `MapIconsTABLE`
+    // puts it on the green ring in the mountains that the map picture already
+    // draws, which is the artwork this project used to call Stonehenge. The
+    // original blits no icon over it, since only `DisplayLairs` blits anything
+    // on the map, so neither does this.
+    //
+    // **Ours**: the picture behind the gate, which is the intro plate of a
+    // portal standing open on an altar. MOON names no picture for the Valley;
+    // the only one it names at all is `bg8.piv`, and that is the ending's.
+    if let Some((x, y, w, h)) = valley {
         places.insert(
             "valley".into(),
             serde_json::json!({
                 "name": "Valley of the Gods",
                 "scene": "scene.bg4",
                 "x": x, "y": y, "w": w, "h": h,
-                "icon": 0x1c,
                 "menu": [8, 12, 168, 40],
                 "text": [6, 146, 308, 42],
                 "options": [
@@ -2275,48 +2424,50 @@ fn place_definitions(icons: &BTreeMap<u8, (i32, i32)>, ground: &[u8]) -> String 
         );
     }
 
-    // And the lairs. Everything already placed is kept clear of, in the order
-    // the families are laid out, so no two lairs and no lair and a town ever
-    // share ground.
-    for (family_index, (family, scene, guardians)) in LAIRS.iter().enumerate() {
-        let code = match *family {
-            "glade" => 0u8,
-            "forest" => 2,
-            "swamp" => 4,
-            _ => 6,
+    // And the lairs, straight out of `lair_table`: the guardian, the head
+    // count, the corner and the ground, all four the original's. The scene
+    // behind the menu is this project's, one backdrop to a family.
+    //
+    // `count` is `TotalMonsters`, which the original feeds into the arena in
+    // waves. This project fields what a bout seats and no more, so a lair of
+    // fourteen ratmen puts three of them in front of you; the number is
+    // carried through as it stands rather than rounded down here, because
+    // rounding it down would throw away the recovered value.
+    let (w, h) = (LAIR_W, LAIR_H);
+    for (index, lair) in lairs.iter().enumerate() {
+        let family = family_of(lair.code);
+        let n = index % 6;
+        let scene = match family {
+            "forest" => "scene.fob1",
+            "waste" => "scene.wab1",
+            "swamp" => "scene.swb1",
+            _ => "scene.glb1",
         };
-        let sites = lair_sites(ground, code, &taken);
-        for (n, (guardian, count)) in guardians.iter().enumerate() {
-            let index = family_index * 6 + n;
-            let Some((gx, gy)) = sites.get(n).copied() else { continue };
-            let (x, y, w, h) = at((gx, gy), (LAIR_W, LAIR_H));
-            taken.push((x, y, w, h));
-            places.insert(
-                format!("lair.{family}.{}", n + 1),
-                serde_json::json!({
-                    "name": "Lair",
-                    "scene": scene,
-                    "x": x, "y": y, "w": w, "h": h,
-                    "icon": 0x14,
-                    "menu": [8, 100, 160, 40],
-                    "text": [6, 146, 308, 42],
-                    "options": [
-                        {
-                            "label": "Enter Lair",
-                            "effect": {
-                                "do": "raid",
-                                "lair": index,
-                                "arena": lair_arena(family, n),
-                                "family": family,
-                                "guardian": guardian,
-                                "count": count
-                            }
-                        },
-                        { "label": "Leave", "effect": leave }
-                    ]
-                }),
-            );
-        }
+        places.insert(
+            format!("lair.{family}.{}", n + 1),
+            serde_json::json!({
+                "name": "Lair",
+                "scene": scene,
+                "x": lair.x, "y": lair.y, "w": w, "h": h,
+                "icon": 0x14,
+                "menu": [8, 100, 160, 40],
+                "text": [6, 146, 308, 42],
+                "options": [
+                    {
+                        "label": "Enter Lair",
+                        "effect": {
+                            "do": "raid",
+                            "lair": index,
+                            "arena": lair_arena(family, n),
+                            "family": family,
+                            "guardian": lair.guardian,
+                            "count": lair.count
+                        }
+                    },
+                    { "label": "Leave", "effect": leave }
+                ]
+            }),
+        );
     }
 
     serde_json::Value::Object(places).to_string()
@@ -2523,32 +2674,58 @@ fn item_definitions() -> String {
 
 /// The four knights.
 ///
-/// **Recovered, nearly all of it.** `InitKnights` walks the four player records
-/// and gives each one a name buffer and a starting square on the map:
+/// **Recovered, and now including the names.** `InitKnights` walks the four
+/// player records and gives each one a name buffer and a starting square on the
+/// map, branching on the knight's own colour index at `+0x20`:
 ///
 /// ```text
-/// knight 0  BNAME   (10, 10)     knight 1  GNAME   (300, 5)
-/// knight 2  ENAME   (26, 180)    knight 3  RNAME   (300, 185)
+/// index 0  BNAME   (10, 10)     index 1  GNAME   (300, 5)
+/// index 2  ENAME   (26, 180)    index 3  RNAME   (300, 185)
 /// ```
 ///
-/// One corner each. `KnightGlowColours` gives the colours those initials stand
-/// for, as three 12-bit shades apiece: blue, gold, emerald, red, in knight
-/// order, which is why `BNAME`, `GNAME`, `ENAME` and `RNAME` are not a guess.
-/// The fifth entry in that routine, a dark purple, is the one every computer
-/// knight wears.
+/// One corner each. `KnightGlowColours` branches on the same index and gives
+/// the colours those initials stand for, as three 12-bit shades apiece: blue,
+/// gold, emerald, red. The fifth entry in that routine, a dark purple, is the
+/// one every computer knight wears.
+///
+/// **The names themselves are read out of the bottom of DGROUP**, which the
+/// unpacker used to leave stale and now does not (`docs/REVERSING.md`):
+///
+/// ```text
+/// image 0x128ca  BNAME  SIR_GODBER    DS:0x530
+/// image 0x128e0  GNAME  SIR_RICHARD   DS:0x51a
+/// image 0x128f6  ENAME  SIR_JEFFREY   DS:0x546
+/// image 0x1290c  RNAME  SIR_EDWARD    DS:0x55c
+/// ```
+///
+/// Each is a 21-byte buffer padded with spaces, because `TypeName` lets a
+/// player type over it. Which name belongs to which knight is not a guess:
+/// `InitKnights` above pairs the pointer with the index, and `ChooseFIRE` pairs
+/// the same four pointers with the same four indices a second time, writing
+/// `NAMEy` and `+0x20` together on each branch. The initial is the colour's,
+/// not the name's: B is blue, G gold, E emerald, R red.
+///
+/// **The underscore is drawn as a space.** `TextASCII` at `DS:0x8006` maps a
+/// character to a glyph by `char - 0x20`, and `'_'` and `' '` both map to glyph
+/// 69, which is the blank. The font has no underscore at all. The original
+/// stores one because `TypeName` scans the buffer for the first *space* to find
+/// where typing starts, so an underscore keeps the whole default name editable
+/// while the screen still reads `SIR GODBER`. Baked with the space.
+///
+/// **`SIR BANNER`, `SIR DWAIN`, `SIR BALAIN` and `SIR GUNTHER` are not these
+/// four.** They are `Enemy1Name`..`Enemy4Name` at image 0x18cd2, and
+/// `InitGameStart` hands them to the four knight records before anybody
+/// chooses, with colour index 4, the dark purple, and the corners (15, 100),
+/// (300, 100), (160, 20) and (160, 180). A seat a person takes is overwritten
+/// by `ChooseFIRE` and `InitKnights`; a seat nobody takes keeps the enemy name
+/// and rides the map on its own. Those four were what this project called the
+/// player knights, which was wrong.
 ///
 /// The stat block is `SetKnightEquipment`: one of each ability, five life
 /// points, ten daggers, ten gold, a long sword and padded armour. It writes
 /// ninety-nine into the health field and the routine at 0x28d overwrites it a
 /// moment later, so the twenty a knight really starts with is left to that
 /// arithmetic here as well.
-///
-/// **Not recovered: which name belongs to which knight.** The four names are in
-/// the data as `Enemy1Name`..`Enemy4Name`, `SIR BANNER`, `SIR DWAIN`,
-/// `SIR BALAIN` and `SIR GUNTHER`, and the original hands them to its four
-/// computer knights while a person types their own over the top. They are paired
-/// with the four in the order they sit in memory, which is an assumption and
-/// nothing more.
 ///
 /// **And the four do not differ.** `InitKnights` separates them by name, colour
 /// and corner; every stat block it produces is the same. The shape allows four
@@ -2575,10 +2752,13 @@ fn knight_definitions() -> String {
         })
     };
     serde_json::json!([
-        knight("Sir Banner",  [0x00c, 0x009, 0x006], [10, 10]),
-        knight("Sir Dwain",   [0xfa0, 0xe70, 0xc50], [300, 5]),
-        knight("Sir Balain",  [0xae8, 0x6b5, 0x473], [26, 180]),
-        knight("Sir Gunther", [0xd00, 0x900, 0x500], [300, 185]),
+        // `BNAME`, `GNAME`, `ENAME`, `RNAME`, in the colour index order
+        // `InitKnights` and `ChooseFIRE` both branch on. The underscore each
+        // one carries is the blank glyph, so it is written as a space.
+        knight("SIR GODBER",  [0x00c, 0x009, 0x006], [10, 10]),
+        knight("SIR RICHARD", [0xfa0, 0xe70, 0xc50], [300, 5]),
+        knight("SIR JEFFREY", [0xae8, 0x6b5, 0x473], [26, 180]),
+        knight("SIR EDWARD",  [0xd00, 0x900, 0x500], [300, 185]),
     ])
     .to_string()
 }
@@ -2857,25 +3037,51 @@ mod tests {
         }
     }
 
-    /// A grid of the four terrains, a quarter of the map each, for the place
-    /// table to site lairs on without a baked pack to read the real one from.
-    fn quartered_ground() -> Vec<u8> {
-        let mut g = vec![0u8; GRID_LEN];
-        for y in 0..26 {
-            for x in 0..40 {
-                g[y * 40 + x] = match (x < 20, y < 13) {
-                    (true, true) => 0,
-                    (false, true) => 2,
-                    (true, false) => 4,
-                    (false, false) => 6,
-                };
-            }
-        }
-        g
+    /// A stand-in for `MapIconsTABLE`, so the place table can be exercised
+    /// without the unpacked executable to read the real one out of. The frames
+    /// are the real ones; the corners are not, and are only spread out enough
+    /// that nothing lands on anything.
+    fn marks() -> BTreeMap<u8, (i32, i32)> {
+        [(0x19u8, (10, 10)), (0x1a, (200, 10)), (0x1b, (100, 10)), (0x1c, (150, 40)), (0x1e, (250, 40))]
+            .into_iter()
+            .collect()
+    }
+
+    /// A stand-in for the four lair tables, in the same shape `lair_table`
+    /// hands back: the landscape codes in `LairFile`'s own family order, six to
+    /// a family, guardians `InitGameStart` really fills `CombatTable` with, a
+    /// different count in every record so the baker can be caught crossing two
+    /// of them, and corners that clear every other place.
+    fn lairs() -> Vec<LairPlace> {
+        const SLOTS: [u16; 6] = [0, 1, 6, 7, 9, 16];
+        (0..LAIR_COUNT)
+            .map(|i| LairPlace {
+                guardian: GUARDIANS.iter().find(|(s, _)| *s == SLOTS[i % 6]).unwrap().1,
+                count: i as u32 + 1,
+                x: 4 + (i % 6) as i32 * 50,
+                y: 100 + (i / 6) as i32 * 20,
+                code: [2u8, 6, 4, 0][i / 6],
+            })
+            .collect()
     }
 
     fn places() -> serde_json::Value {
-        serde_json::from_str(&place_definitions(&BTreeMap::new(), &quartered_ground())).unwrap()
+        serde_json::from_str(&place_definitions(&BTreeMap::new(), &marks(), &lairs())).unwrap()
+    }
+
+    /// Every slot `InitGameStart` writes into `CombatTable` names a creature
+    /// the bestiary has, and no slot is named twice. A lair asking for a slot
+    /// this table has not got is what `lair_table` refuses.
+    #[test]
+    fn every_combat_table_slot_names_a_creature() {
+        let mut seen = BTreeSet::new();
+        for (slot, id) in GUARDIANS {
+            assert!(seen.insert(*slot), "CombatTable slot {slot} is listed twice");
+            assert!(
+                guardian_is_known(id),
+                "CombatTable slot {slot} is {id}, which the pack has nobody for"
+            );
+        }
     }
 
     /// The twenty four lairs, in `LairFile` order, each on its own layout.
@@ -2922,7 +3128,16 @@ mod tests {
                 CREATURES.iter().any(|c| c.id == guardian),
                 "lair {n} is guarded by {guardian}, which is not in the bestiary"
             );
-            assert!((1..=3).contains(count), "lair {n} fields {count}, and a bout seats four");
+            // `ForestLairs` pairs a head count with each guardian, and each
+            // record has to reach its own lair and no other. The stand-in
+            // numbers every lair differently so a crossed pair shows up.
+            //
+            // The bound this used to carry, one to three, was written when the
+            // count was this project's own invention and a bout seats four.
+            // The recovered `TotalMonsters` runs from three to fourteen, so
+            // the bound was a statement about the invention and not about the
+            // game; what belongs here is that the table is copied faithfully.
+            assert_eq!(*count, n as u64 + 1, "lair {n} was given another lair's head count");
         }
     }
 

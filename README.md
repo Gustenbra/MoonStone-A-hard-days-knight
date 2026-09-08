@@ -64,13 +64,21 @@ need your own copy of the original, which the engine reads and converts locally.
   picture the original draws it on: `_LOADER:MoonPic` is `CH.PIV`, a night sky,
   and the wordmark sits at the corner `DisplaySelect` loads into its registers
   rather than centred. Under it is
-  an option list that is the original's: one to four players, gore on or off,
-  practice combat or the moon quest. Every word on it is drawn in the letters' own
+  an option list that is the original's down to its words and its coordinates:
+  `Players` and `Gore` at x 86 with their values at x 214, `Practice` and
+  `Select Knight` centred below them, all six out of the `OPT1a` record chain,
+  and the arrow at the four heights `MOON:ARR` gives it. Every word on it is
+  drawn in the letters' own
   five colours, because `CH.PIV` reserves those five entries the way `MESSAGE.PIV`
-  does and the original's text path has no ink in it at all. Leave it alone and it
-  starts showing you the intro plates. The four knights are Sir Banner, Sir Dwain, Sir Balain and Sir
-  Gunther, blue, gold, emerald and red because the executable's own colour table
-  says so, and each begins in his own corner of the map
+  does and the original's text path has no ink in it at all. Leave it alone and
+  it sits there, because that is all `DoOptions` does.
+  The four knights are SIR GODBER, SIR RICHARD, SIR JEFFREY and SIR EDWARD,
+  blue, gold, emerald and red because the executable's own colour table says so,
+  and each begins in his own corner of the map. Those names are `BNAME`,
+  `GNAME`, `ENAME` and `RNAME`, and their initials are the colours' rather than
+  the names'. Sir Banner, Sir Dwain, Sir Balain and Sir Gunther, which stood
+  here before, are `Enemy1Name`..`Enemy4Name`: the computer knights' names, worn
+  by whichever of the four seats nobody sits in
 - **Choosing one of them, on a black screen, which is where the original puts it.**
   `ChooseKnight` clears the screen to palette entry 0 and blits four portraits on
   it; there is no picture behind them. Its palette is `SelectPAL`, thirty two

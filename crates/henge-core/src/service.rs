@@ -820,7 +820,7 @@ mod tests {
 
     fn knight() -> KnightDef {
         KnightDef {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             shades: vec![0x2244cc],
             home: [16, 16],
             strength: 1,

@@ -443,25 +443,42 @@ edge is the rectangle `_MAP:HawkBorders` clamps the token into.
 (37, 20), which is exactly what the recovered index formula makes of those pixels.
 `MOON:CheckGROOC` decides you have arrived by overlapping the place's `MI.C` icon
 rectangle with the traveller's own 8x10 one, so a place is a box and not a radius, and
-`MOON:StackMessages` gives the nine kinds and their menu lines. What is **not** recovered
-is `MOON:MapIconsTABLE` itself: it is in the first 2,906 bytes of DGROUP, which the load
-image held as a stale duplicate, and the seven places that are not towns therefore have no
-recovered coordinates here. **That span reads now** and `MapIconsTABLE` and
-`LairLocation` are both in it, so this is recoverable and has not been recovered. See
-`REVERSING.md`.
+`MOON:StackMessages` gives the nine kinds and their menu lines. **`MOON:MapIconsTABLE` is
+recovered too now**: it was in the first 2,906 bytes of DGROUP, which the load image held
+as a stale duplicate, and that span reads (`REVERSING.md`). It is nine six-byte records
+and a terminator, and `henge-bake` reads it:
 
-**So the places that are not towns were put where the artwork puts them**, and that
-decision is now taken: the healer keeps the ruin in the southern woods, the stones are the
-ring the map draws in the middle of it all, and Math's tower is the lone dark tower
-standing in the northern waste, which is the only building on the picture nothing else
-claims. The twenty four lairs are sited by the recovered terrain grid rather than by eye;
-see 4.3. Every one of the recovered menu lines is used as its own gadget's label.
+```
+0x15 (18, 11)   0x16 (286, 11)   0x17 (0, 187)   0x18 (303, 192)   the four villages
+0x19 (82, 28)   Highwood         0x1a (277, 143) Waterdeep
+0x1b (88, 155)  Stonehenge       0x1c (152, 97)  Valley of the Gods
+0x1e (217, 11)  Math the Wizard
+```
+
+Each pair is the icon's top-left corner, which is what `CheckGROOC` measures the box from,
+so it is exactly what a place wants. The two towns cross-check: `KnightGoesToTown`'s
+(94, 47) and (297, 157) are the spots a knight is *sent* to, and both land inside the
+recovered boxes.
+
+**What the hand-siting got wrong is worth recording.** The tower was one pixel out. The
+two towns were nine. But the ruin in the southern woods this project had called the
+hermit's is Stonehenge, and the ring in the middle of it all this project had called
+Stonehenge is the Valley of the Gods: both were on the right artwork under the wrong name,
+85 and 74 pixels from where they belong. All five are read out of the table now. The
+hermit is the only place left on the map that is ours, and he has been moved off
+Stonehenge into the deep woods to the west. Every one of the recovered menu lines is used
+as its own gadget's label.
+
+The four villages have coordinates now and are still not baked: `CheckGROOC` gates each on
+`[di+0x20]`, the knight's own index, and a village belongs to one knight. Four unguarded
+ones on the map would be worse than none.
 
 - [x] The real terrain table
 - [x] `CHECKY`/`CHECKY2`: what makes ground impassable
 - [x] Scrolling: settled, and negative
-- [x] The rest of the location graph, as far as it can be: the two recovered towns, the
-      four other fixed places on their own landmarks, and the lairs on their own ground
+- [x] The whole location graph, out of `MapIconsTABLE` and `LairLocation`: the two towns,
+      Stonehenge, the Valley of the Gods, Math's tower and the twenty four lairs, every
+      one of them at the original's own coordinates. Only the hermit is still ours
 - [ ] The four home villages, one per knight, which `StackMessages` names four times over
       (`Enter Village`, and the entry is skipped unless the knight's index matches). Four
       villages is a mechanic henge does not have at all, and the between-days screen tells
@@ -564,17 +581,43 @@ gold is zero *and* all 24 item counts are, so a lair you have beaten but could n
 is still there to go back to; and `LairWon` marks it and adds one to the knight's
 experience the first time only.
 
-**What is not recovered here**: `ForestLairs` (guardian and count), `LairLocation` and
-`LairType` are all inside the 2,906 bytes of DGROUP that the load image held as a stale
-duplicate. All three read now (`REVERSING.md`) and none of them has been read out of it;
-`LairType` in particular comes out as six 2s, six 6s, six 4s and six 0s, which is the
-forest, waste, marsh, glade order `LairFile` already gave. What a guardian *can* be is recovered, because `InitGameStart` fills
-`CombatTable` with the thirteen `InitKnightvs*` routines. Where each lair stands is a
-search over the real `MapType` grid for a cell whose whole neighbourhood is that family's
-ground, clear of every other place and of the four starting corners, spread by
-farthest-point sampling; which guardian each holds is the family's own road creatures for
-the first three and then the beast and Balok, the two the road never produces. Both are
-marked as ours in the baker.
+**All four per-lair tables are recovered now.** `ForestLairs`, `LairLocation` and
+`LairType` were inside the 2,906 bytes of DGROUP the load image held as a stale duplicate;
+that span reads (`REVERSING.md`) and `henge-bake` reads it. The initialiser's copy loop at
+image 0x1ea0 is what gives each of them its shape, field by field:
+
+```
+mov ax, [di] ; add di, 2 ; mov [si+0x02], ax   ForestLairs   CombatTable byte offset
+mov ax, [di] ; add di, 2 ; mov [si+0x04], ax   ForestLairs   TotalMonsters
+mov ax, [bx] ; add bx, 2 ; mov [si+0x0a], ax   LairLocation  x
+mov ax, [bx] ; add bx, 2 ; mov [si+0x0c], ax   LairLocation  y
+mov ax, [bp] ; add bp, 2 ; mov [si+0x0e], ax   LairType      landscape
+mov ax, [si] ; add si, 2 ; mov [si+0x10], ax   LairFile      arena layout
+```
+
+So `ForestLairs` is 24 pairs of words, `LairLocation` 24 pairs and `LairType` 24 single
+words, which is the 96, 96 and 48 bytes the symbol table gives. Which guardian each slot
+is comes from `InitGameStart` at image 0x1d44, seventeen `mov word ptr [si + n], imm` with
+`si` on `CombatTable`; the parallel run just above it at 0x1ced fills the controller table
+with `ControlBeast`, `ControlMudmen`, `ControlDemon` and the rest in the same order, which
+is what pins each slot's meaning.
+
+What comes out: the forest holds ten to fourteen ratmen or axe troggs, the waste three to
+five Baloks and ten hammer troggs, the marsh five or six mudmen and six or seven trolls,
+and the glades four to six spear troggs, eight or nine beasts and thirteen axe troggs.
+`LairType` is six 2s, six 6s, six 4s and six 0s, the forest, waste, marsh, glade order
+`LairFile` already gave, arriving a second time from a second table; and twenty three of
+the twenty four `LairLocation` pairs land on a `MapType` cell of that same code. The odd
+one, lair 15, is a cell into the treeline and is still fought in the marsh, because
+`InitLair` hands `ColourBackdrop` the record's landscape and never asks the map.
+
+The head count is `TotalMonsters`, which the original feeds in in waves. Henge fields what
+a bout seats, so a lair of fourteen ratmen puts three in front of you; the number goes into
+the pack unrounded rather than being thrown away at bake time. Waves are still not built.
+
+What this replaced: twenty four hand-sited lairs, a median of 51 pixels and as much as 129
+from where the original puts them, and twenty four invented guardians of which five
+happened to be right.
 
 - [x] Lair placement, entry, contents, the guardian fight
 - [ ] `LairGEM`, which is the one thing a gem flight is for in the original: looking into
@@ -659,8 +702,9 @@ line, through `MOON:StackMessages` for the fixed places:
 
 The kind is the `MI.C` frame number, and the frames back it up: 0x15 to 0x1c and 0x1e are
 the only big place-shaped sprites in the bank, 24x19 down to 7x20, while 0x21 is an 8x10
-token like the knights' own. `MapIconsTABLE` has room for ten records of three words, which
-is the nine fixed places above plus a terminator.
+token like the knights' own. `MapIconsTABLE` is sixty bytes, and reading it confirms the
+shape: nine records of three words, one for each of the fixed places above, and a
+terminator. Its coordinates are in 4.1.
 
 **Four villages, one per knight, is a mechanic henge does not have at all**, and neither is
 the Valley of the Gods, the wizard, or pillaging a dead rival's grave.
@@ -904,9 +948,33 @@ with the wordmark ten pixels higher, and it is the select screen's night sky. Th
 note that the picture must be in `INTR.EXE` was wrong.
 
 `CH.PIV` also reserves the bold face's five entries, so the wordmark, the credit lines and
-the option rows are all blitted in their own indices. The row `y` values are still ours,
-but they need not be: `DisplaySelect` takes them off `MOON:ARR` at `DS:0x706`, which was
-in the stale span of `DGROUP` and is readable now, and holds 85, 110, 148 and 168.
+the option rows are all blitted in their own indices.
+
+**The rows are recovered now, words and coordinates both.** `DisplaySelect` takes the
+arrow's `y` off `MOON:ARR` at `DS:0x706`, which holds 85, 110, 148 and 168, and hands
+`MOON:OPT1a` to the message walker at image `0x7a86`. That is a chain of six ten-byte
+records, `{text, x, y, flags, next}`:
+
+| record | string | x | y | flags |
+|---|---|---|---|---|
+| `OPT1a` | `Sel1` `Players` | 86 | 83 | 2 |
+| `OPT1b` | `Sel2` `Gore` | 86 | 108 | 2 |
+| `OPT1f` | `Sel5` `Practice` | 0 | 150 | 3 |
+| `OPT1g` | `Sel6` `Select Knight` | 0 | 170 | 3 |
+| `OPT1h` | `NPLAYER` `1          ` | 214 | 83 | 2 |
+| `GOREOPT` | `TEXTON` `On` | 214 | 108 | 2 |
+
+Flag bit 0 centres the line between `TextLeftBorder` 0 and `TextRightBorder` 320, which is
+what the bottom two rows use and why their `x` is zero; bit 2 right-aligns and nothing on
+this screen sets it; bit 3 is the bold face's own three-pixel kern, set by `CheckBOLD`
+rather than by the record. Bit 1, which the four left-hand records carry, is read nowhere
+in the walker. Before it walks the chain `DisplaySelect` prints the player count into
+`NPLAYER`'s buffer through the decimal routine at `0x7d7f` and points `GOREOPT`'s first
+word at `TEXTOFF` or, if the gore word at `DS:0x700` is zero, at `TEXTON`; that word is
+zero in the image, so gore starts on.
+
+What stood here before was `Players N`, `Gore on`, `Practice combat` and `Moon quest` on
+an even eighteen-pixel step from y 100. All four wordings and the whole layout were ours.
 
 **Attract mode** cycles the other ten plates, which is ours; those write the five caption
 entries first, the way `INTR.EXE`'s `0x0cfb` does, because no other plate reserves them.
@@ -976,15 +1044,40 @@ Whoever revisits `COLOURENKNIGHT` should start there rather than with hue substi
 
 **The four knights do not differ in stats.** `InitKnights` gives each one a name, a colour,
 one corner of the map at (10, 10), (300, 5), (26, 180) or (300, 185), and the same stat
-block as the other three. `henge` keeps the four as data so they *can* differ; what ships is what the original
-had. The names henge uses are `Enemy1Name`..`Enemy4Name`, `SIR BANNER`, `SIR DWAIN`,
-`SIR BALAIN` and `SIR GUNTHER`, which the original hands to its computer knights while a
-person types their own over the top, and which name goes with which of the four is an
-assumption. **`BNAME`, `GNAME`, `ENAME` and `RNAME` can be read now** and they are
-`SIR_GODBER`, `SIR_RICHARD`, `SIR_JEFFREY` and `SIR_EDWARD`, in blue, gold, emerald and
-red order, which is not an assumption: `ChooseFIRE` picks between them on the chosen
-index. Nothing has been renamed on the strength of that yet, because the four names run
-through the pack, the save file and the tests.
+block as the other three. `henge` keeps the four as data so they *can* differ; what ships
+is what the original had.
+
+**The names are recovered, and they were wrong here.** They are `BNAME`, `GNAME`, `ENAME`
+and `RNAME` at image 0x128ca, 0x128e0, 0x128f6 and 0x1290c, twenty-one byte buffers padded
+with spaces because `TypeName` lets a player type over them:
+
+| index | ramp | symbol | string | corner |
+|---|---|---|---|---|
+| 0 | blue | `BNAME` | `SIR_GODBER` | (10, 10) |
+| 1 | gold | `GNAME` | `SIR_RICHARD` | (300, 5) |
+| 2 | emerald | `ENAME` | `SIR_JEFFREY` | (26, 180) |
+| 3 | red | `RNAME` | `SIR_EDWARD` | (300, 185) |
+
+The pairing is not an assumption. `InitKnights` branches on the knight's colour index at
+`+0x20` and writes the name pointer and the corner together on each of its four arms, and
+`ChooseFIRE` branches on the chosen portrait and writes `NAMEy` and `+0x20` together on
+each of its four arms, and the two agree. The initial is the *colour's*: B blue, G gold,
+E emerald, R red, which is why `SIR_GODBER` is the B.
+
+**The underscore is a space.** `TextASCII` at `DS:0x8006` turns a character into a glyph
+by `char - 0x20`, and `'_'` and `' '` both land on glyph 69, the blank; the font has no
+underscore in it. The original stores one because `TypeName` finds where typing starts by
+scanning the buffer for the first *space*, so the underscore keeps the whole default name
+editable while the screen still reads `SIR GODBER`.
+
+`SIR BANNER`, `SIR DWAIN`, `SIR BALAIN` and `SIR GUNTHER`, which this project called the
+four knights until now, are `Enemy1Name`..`Enemy4Name` at image 0x18cd2. `InitGameStart`
+writes them into the four knight records before anybody chooses, with colour index 4, the
+dark purple, and the corners (15, 100), (300, 100), (160, 20) and (160, 180). A seat a
+person takes is overwritten by `ChooseFIRE` and `InitKnights`; a seat nobody takes keeps
+the enemy name and the purple. **So they are the computer knights' names**, and henge has
+no computer knights to give them to yet: nothing uses them, which is the right amount of
+use for them, and the four in `knights.json` are now the player names.
 
 ## 8.3 The status panel `done`
 

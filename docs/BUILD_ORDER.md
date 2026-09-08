@@ -465,7 +465,15 @@ Independent of everything. Makes it feel like a game rather than a demo.
       `Moonstone / A Hard Days Knight` logo and the two credit lines. The option list is
       `DoOptions`: four rows, a player count of one to four, a gore switch, practice combat
       and moon quest, clamping at both ends rather than wrapping, with the arrow at `ARX`
-      50. What it is drawn over is recovered: `_LOADER:MoonPic` is the string `CH.PIV`
+      50 and at the four heights `MOON:ARR` gives it, 85, 110, 148 and 168.
+      **The rows themselves are recovered too**, out of the same span of DGROUP the
+      unpacker used to leave stale: `MOON:OPT1a` is a chain of six ten-byte
+      `{text, x, y, flags, next}` records that `DisplaySelect` hands to the message walker,
+      and they read `Players` and `Gore` at x 86, the player count and `On`/`Off` at
+      x 214, and `Practice` and `Select Knight` centred, at y 83, 108, 150 and 170.
+      `Players N`, `Gore on`, `Practice combat` and `Moon quest` on an even eighteen-pixel
+      step were this project's own wording and spacing, and are gone.
+      What it is drawn over is recovered: `_LOADER:MoonPic` is the string `CH.PIV`
       and `0x87c3` loads it, keeps a copy, and draws the wordmark and the two credit
       lines on it, while `DisplaySelect` blits the wordmark again ten pixels higher.
       **There is no attract mode**, and the one that was here has been removed:
@@ -505,6 +513,17 @@ Independent of everything. Makes it feel like a game rather than a demo.
       **The four do not differ in stats**: `InitKnights` separates them by name, colour and
       which corner of the map they start in, and hands all four the same block. The data
       allows four different ones; what ships is the original's.
+      **And they are named now.** `BNAME`, `GNAME`, `ENAME` and `RNAME` at image 0x128ca,
+      0x128e0, 0x128f6 and 0x1290c are `SIR_GODBER`, `SIR_RICHARD`, `SIR_JEFFREY` and
+      `SIR_EDWARD`, in blue, gold, emerald and red order: `InitKnights` writes the name
+      pointer and the corner on the arm for each colour index, `ChooseFIRE` writes `NAMEy`
+      and that same index on the arm for each portrait, and the two agree, so the initial
+      is the colour's rather than the name's. The underscore is the blank glyph: `TextASCII`
+      sends both `'_'` and `' '` to glyph 69, and the original keeps one because `TypeName`
+      finds where typing starts by scanning for the first space. `SIR BANNER`, `SIR DWAIN`,
+      `SIR BALAIN` and `SIR GUNTHER`, which this project used until now, are
+      `Enemy1Name`..`Enemy4Name`, which `InitGameStart` gives to the seats nobody takes:
+      they are the computer knights.
       **Ours on this screen**, and marked so: the line saying whose turn it is, the name
       under each portrait, the stat line along the bottom, and the `Player N` that stands
       in an empty slot. The original draws none of them; it draws the chosen knight's name
@@ -609,22 +628,25 @@ druids in the circle, the between-days screen on a full and on a gibbous moon, a
 the map, a lair entered, and the spoils page after its guardian fell.
 
 One thing that is worth knowing before anyone reads the numbers below: **the coordinates
-of everything but the two towns are still ours.** `MOON:MapIconsTABLE`, `LairLocation`
-and `LairType` are all inside the 2,906 bytes of DGROUP the load image used to carry as a
-stale duplicate. That span is readable now (`docs/REVERSING.md`) and all three of those
-tables are in what came back, so they could stop being ours; nobody has done it yet. What is recovered is the *shape* of the answer, and for the lairs the ground:
-each one is sited on a cell of its own family in the real `MapType` grid, which is why a
-`fol3.t` lair stands under trees.
+of everything on the map except the hermit are recovered.** `MOON:MapIconsTABLE`,
+`ForestLairs`, `LairLocation` and `LairType` were all inside the 2,906 bytes of DGROUP the
+load image used to carry as a stale duplicate. That span is readable now
+(`docs/REVERSING.md`), and `henge-bake` reads all four out of it: the two towns,
+Stonehenge, the Valley of the Gods, Math's tower, and the twenty four lairs with their
+guardians and head counts. What that replaced, and how far out it was, is in
+`docs/COMPLETE.md` 4.1 and 4.3. The hermit is not in the original at all and is the one
+place on the map still sited by hand.
 
 - [x] 57. **Recovered: `_MAP:MapType`, 40x26 bytes, one family code per 8x8 block of the
       map picture.** Codes 0, 2, 4, 6 are plain, forest, swamp and waste, which is the
       order `MOON:ColourBackdrop` compares against. `_MAP:CalcKnGrid` builds the index from
       the traveller's token: `((x+4)>>3, (y+10)>>3)`, the middle of his feet. Checked by
       drawing the grid's own boundaries over the map artwork, where they follow the
-      treeline, the marsh edge and the mountain ridge. The location graph is **half
-      recovered**: the two towns' coordinates and the nine kinds of place and their menu
-      lines are out of the executable, but `MOON:MapIconsTABLE` itself is uninitialised
-      data and is not in the load image, so where the other seven sit is not recovered
+      treeline, the marsh edge and the mountain ridge. The location graph is **recovered
+      whole**: the nine kinds of place and their menu lines, the two towns' walk-to
+      points, and `MOON:MapIconsTABLE` itself, which was thought to be uninitialised data
+      and is not; it came back with the rest of the bottom of DGROUP and gives all nine
+      places their corners
 - [x] 58. **Recovered: four tables of eight, and a counter, not a roll.** `PlainTable`,
       `ForestTable`, `SwampTable` and `WasteTable` each hold eight filename pointers, and
       generating an arena reads `Table[counter]`, then `inc counter` and `and counter, 7`.

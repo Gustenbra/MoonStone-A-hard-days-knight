@@ -72,10 +72,3 @@ pub fn draw_mask(
         None => (0, 0),
     }
 }
-
-/// How big a frame is, without drawing it.
-pub fn size(reg: &Registry, sheet: &str, index: usize) -> (i32, i32) {
-    reg.sheet(sheet)
-        .and_then(|r| r.value.frames.get(index).map(|f| (f.w as i32, f.h as i32)))
-        .unwrap_or((0, 0))
-}

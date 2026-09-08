@@ -45,14 +45,27 @@
 //! knight's experience the first time only, then opens the status panel's lair
 //! page for the taking.
 //!
-//! **What is not recovered.** Three of the four per-lair tables the initialiser
-//! copies from, `ForestLairs` (guardian and count), `LairLocation` and
-//! `LairType`, sit inside the 2,906 bytes of DGROUP that the load image used to
-//! carry as a stale duplicate. That span is readable now (`docs/REVERSING.md`)
-//! and this has not been re-read out of it. What the guardian can be is
-//! recovered, because `CombatTable` is filled by `InitGameStart` with the
-//! thirteen `InitKnightvs*` routines; which one each lair gets, how many, and
-//! where the lair is, are **ours** and marked so in the baker.
+//! **Where they are, and what is in them, is recovered.** All four of the
+//! tables the initialiser copies from are readable, and the baker reads them:
+//! `ForestLairs` is 24 pairs of words at DS:0a6a, a `CombatTable` byte offset
+//! and a head count; `LairLocation` is 24 pairs at DS:0aca, the corner the map
+//! draws the lair at; `LairType` is 24 words at DS:0b2a, the landscape the
+//! fight happens on; and `LairFile` is the 24 arena layouts. The copy loop at
+//! image 0x1ea0 is what says which is which, field by field. What the guardian
+//! can be is recovered too, from `InitGameStart` filling `CombatTable` with
+//! the thirteen `InitKnightvs*` routines.
+//!
+//! Twenty three of the twenty four coordinates land on a cell of `MapType`
+//! whose code is that lair's own `LairType`, which is two tables agreeing that
+//! were read out of different places; the odd one, lair 15, stands a cell into
+//! the treeline and is still fought in the marsh, because `InitLair` hands
+//! `ColourBackdrop` the record's landscape and never asks the map.
+//!
+//! `ForestLairs`'s head count is `TotalMonsters`, everything that comes at you
+//! before a lair is clear, and it runs from three to fourteen. The original
+//! feeds it into the arena in waves; this project fields what a bout seats,
+//! so the number is carried through the pack unrounded and the arena takes
+//! what it can hold. Waves are **not built**.
 
 use crate::item::Items;
 use crate::moon::Key;
@@ -331,7 +344,7 @@ mod tests {
     fn run(seed: u32) -> (Run, Items) {
         let items = goods();
         let def = KnightDef {
-            name: "Sir Banner".into(),
+            name: "SIR GODBER".into(),
             shades: vec![0],
             home: [16, 16],
             strength: 1,
