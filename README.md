@@ -61,9 +61,9 @@ need your own copy of the original, which the engine reads and converts locally.
   coin as well. What you carry can leave you too, to a cutpurse on the road
 - **A title screen, and a knight to choose.** The game opens on its own wordmark,
   which turned out to be the last three frames of the bold font's bank, over the
-  picture the original draws it on: `_LOADER:MoonPic` is `CH.PIV`, the same night
-  sky the select screen stands its knights against, and the wordmark sits at the
-  corner `DisplaySelect` loads into its registers rather than centred. Under it is
+  picture the original draws it on: `_LOADER:MoonPic` is `CH.PIV`, a night sky,
+  and the wordmark sits at the corner `DisplaySelect` loads into its registers
+  rather than centred. Under it is
   an option list that is the original's: one to four players, gore on or off,
   practice combat or the moon quest. Every word on it is drawn in the letters' own
   five colours, because `CH.PIV` reserves those five entries the way `MESSAGE.PIV`
@@ -71,6 +71,14 @@ need your own copy of the original, which the engine reads and converts locally.
   starts showing you the intro plates. The four knights are Sir Banner, Sir Dwain, Sir Balain and Sir
   Gunther, blue, gold, emerald and red because the executable's own colour table
   says so, and each begins in his own corner of the map
+- **Choosing one of them, on a black screen, which is where the original puts it.**
+  `ChooseKnight` clears the screen to palette entry 0 and blits four portraits on
+  it; there is no picture behind them. Its palette is `SelectPAL`, thirty two
+  colours out of the executable's own data segment rather than out of any file,
+  and the portraits are painted in it: blue, gold, emerald and red. The knight you
+  are on wears a hollow frame drawn entirely in palette entry 15, and entry 15 is
+  the entry `ChooseKnight` hands to `COLOURGLOW`, so **the chosen knight breathes
+  and nothing else on the screen moves**
 - **The status screen, which is a pair of stone arches.** `DisplayPillars` clears
   the screen and `StatusSetup` walks two tables of `[cel][x][y][mirror]` records
   that run into each other, and what they draw is fifteen cels of `KI.CEL`: three
@@ -158,7 +166,7 @@ need your own copy of the original, which the engine reads and converts locally.
   ours; the notes are not
 - **The palette moves.** Fades in and out on every screen change, sixteen steps at one a
   frame, and the original's own colour cycling and colour glows: the overworld's water,
-  the select screen's sky, and the mudmen
+  the frame round the knight you are choosing, and the mudmen
 - **Gamepads**, read the way the original reads a stick, with its own dead zone, its own
   two-corner calibration and its own debounce; and controls that are a table of data
   rather than a match on key codes
@@ -482,8 +490,9 @@ every so many frames; a **glow** walks one entry one step a channel towards a ta
 colour and swaps back on arrival, so it breathes. The game installs exactly two from a
 screen, and both are built: the overworld's water, which is entries 21 to 23 rotating
 every twelfth frame under a symbol the original itself calls `RiverHANDLE`, and the
-character select screen's night sky breathing towards a teal. A third belongs to the
-mudmen and arrives with them.
+character select screen's entry 15 breathing towards a teal, which on that screen is the
+hollow frame round the chosen knight and nothing else. A third belongs to the mudmen and
+arrives with them.
 
 Fades are the other half: sixteen steps, one a frame, linear, in and out. Every screen
 change fades in, and the two screens that end on their own fade out.

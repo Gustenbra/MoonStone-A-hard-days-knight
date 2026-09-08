@@ -474,14 +474,41 @@ Independent of everything. Makes it feel like a game rather than a demo.
       ten of the intro's files as though each were a picture, and three of them are not:
       `bg1a`, `bg1b` and `bg1c` are the tile sheets `INTRO.STI` arranges into the opening
       panorama, so one shown raw was half a moon above a row of trunks
-- [x] 51. **Character select.** `CH.PIV` and `SEL.CEL`, both of which the pack had decoded
-      and never shown, and the rules from `ChooseKnight`, `ChooseRefresh`, `FindChosen` and
-      `ChooseFIRE`. `KnightGlowColours` gives each knight's three shades, so the four are
-      blue, gold, emerald and red because the original says so, which is also what the
-      initials on `BNAME`, `GNAME`, `ENAME` and `RNAME` stand for. **The four do not differ
-      in stats**: `InitKnights` separates them by name, colour and which corner of the map
-      they start in, and hands all four the same block. The data allows four different
-      ones; what ships is the original's
+- [x] 51. **Character select, and it stands on nothing.** `SEL.CEL` and the rules from
+      `ChooseKnight`, `ChooseRefresh`, `FindChosen` and `ChooseFIRE`. **There is no
+      backdrop.** This screen was drawn over `CH.PIV` here for a long time, and that was an
+      invention: `ChooseRefresh`'s first call writes `0x0f02` to the sequencer's map mask
+      and `rep stosw` of zero over `0x2000` words, which clears every plane to palette
+      entry 0. The only artwork on it is four portraits on black.
+      `ChooseRefresh` runs `bp` from 0 to 3 and blits cel `bp + 2` at `CCOL[bp]` with
+      `cx = 0x50`, through the ordinary cel blit and **with no colour substitution at
+      all**: the portraits are already painted, and ours used to draw them through a
+      recolour built from the knight shades, which is colouring coloured artwork and is why
+      they came out as smears. `CCOL` is 12, 88, 164 and 240.
+      **`SelectPAL` is recovered**, which is what makes the rest of it work. It is the one
+      palette in the game that lives in the executable rather than in a picture, it sits in
+      the bottom of DGROUP, and that span was unreadable until the unpacker was found to
+      stop before the EXEPACK stream ends (`docs/REVERSING.md`). The baker reads it out of
+      the image as `palette.select` and checks it: greys at 1 to 4 that all four portraits
+      share, the bold face's five entries at 5 and 9 to 12, and each knight's own colours,
+      which come out blue, gold, emerald and red and so agree with `KnightGlowColours`
+      arriving from somewhere else entirely. The heading is `MOON:CRText`, out of the same
+      span: `Select a Knight`, flag 1, which is centred, at y 5.
+      **The chosen knight glows.** `SEL.CEL` cel 1 is a 64 by 76 hollow frame every pixel
+      of which is index 15, no portrait touches 15, and the screen behind is entry 0, so
+      entry 15 on this screen is that frame alone. `ChooseKnight` calls
+      `COLOURGLOW(0x0f, 0x088, 1, 0)` and `SelectPAL` puts `0x066` at 15, so the frame
+      breathes between those two for as long as the screen is up and nothing else moves.
+      That effect was recovered once, wired to a screen standing on `CH.PIV`, where entry
+      15 is the night sky, and taken out again because it repainted the whole background.
+      The backdrop was the mistake; with it gone the glow is back.
+      **The four do not differ in stats**: `InitKnights` separates them by name, colour and
+      which corner of the map they start in, and hands all four the same block. The data
+      allows four different ones; what ships is the original's.
+      **Ours on this screen**, and marked so: the line saying whose turn it is, the name
+      under each portrait, the stat line along the bottom, and the `Player N` that stands
+      in an empty slot. The original draws none of them; it draws the chosen knight's name
+      at (50, 50) once he is taken, out of `BNAME`, `GNAME`, `ENAME` or `RNAME`
 - [x] 52. **A real status panel.** The knight record and `DisplayKnight` give the whole
       sheet: strength, constitution and endurance at `+0x2e`..`+0x30`, life points, gold,
       daggers, experience, health and its maximum, the weapon and the armour, with the
@@ -583,8 +610,9 @@ the map, a lair entered, and the spoils page after its guardian fell.
 
 One thing that is worth knowing before anyone reads the numbers below: **the coordinates
 of everything but the two towns are still ours.** `MOON:MapIconsTABLE`, `LairLocation`
-and `LairType` are all inside the 2,906 bytes of DGROUP the load image carries as a stale
-duplicate. What is recovered is the *shape* of the answer, and for the lairs the ground:
+and `LairType` are all inside the 2,906 bytes of DGROUP the load image used to carry as a
+stale duplicate. That span is readable now (`docs/REVERSING.md`) and all three of those
+tables are in what came back, so they could stop being ours; nobody has done it yet. What is recovered is the *shape* of the answer, and for the lairs the ground:
 each one is sited on a cell of its own family in the real `MapType` grid, which is why a
 `fol3.t` lair stands under trees.
 

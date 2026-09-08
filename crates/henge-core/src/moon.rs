@@ -31,8 +31,10 @@
 //! three of those five.
 //!
 //! **What is not recovered is the table.** `MOON:Moons` sits at DS:05a9, inside
-//! the 2,906 bytes of DGROUP the load image carries as a stale duplicate, so its
-//! eight bytes cannot be read. [`CYCLE`] is therefore **ours**: five pictures
+//! the 2,906 bytes of DGROUP the load image used to carry as a stale duplicate,
+//! so its eight bytes could not be read. That span is readable now
+//! (`docs/REVERSING.md`) and this has not been re-read out of it, so [`CYCLE`]
+//! is still **ours**: five pictures
 //! over eight steps, starting on the full moon, waning to the sliver and waxing
 //! back, is the one arrangement that uses every picture and returns to where it
 //! began. Everything else in this file was read out of the executable.

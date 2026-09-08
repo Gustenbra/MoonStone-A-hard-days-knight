@@ -12,7 +12,7 @@
 //!   henge-bake <game-data-dir> <packs-dir>/reference
 
 use anyhow::Context;
-use henge_assets::{FrameRect, Manifest, Provenance, Sheet, RECIPE};
+use henge_assets::{palette, FrameRect, Manifest, Provenance, Sheet, RECIPE};
 use henge_core::content::{ActorDef, AttackDef};
 use henge_core::taskvm::{Bank, BankTables, Instr, ScriptSet};
 use henge_formats::taskvm::{all_scripts, Symbols};
@@ -637,6 +637,14 @@ const MAPSLOW_AT: usize = 124_890;
 /// original reads that last row past the end of it, and so do we.
 const GRID_LEN: usize = 40 * 26;
 
+/// `MOON:SelectPAL`, at `DS:0x892`, which is image offset `0x123b0 + 0x892`.
+///
+/// Thirty two Amiga words, which is what `ChooseKnight` hands to the routine
+/// that copies `0x20` words into `PALLOC` and then to the fade. It sits in the
+/// bottom of DGROUP, which the unpacker used to leave stale; see
+/// `docs/REVERSING.md`.
+const SELECTPAL_AT: usize = 0x123b0 + 0x892;
+
 fn main() -> anyhow::Result<()> {
     // `henge-bake --render-music <dir>` writes each recovered tune out as a
     // WAV, which is how a tune is listened to, or measured, without starting
@@ -902,6 +910,22 @@ fn main() -> anyhow::Result<()> {
              --image research/main.final.bin`"
         ),
         Err(e) => eprintln!("overworld tables: {e:#}"),
+    }
+
+    // `MOON:SelectPAL`, the character select screen's own thirty two, lifted
+    // out of the same image. It is the one screen in the game whose palette is
+    // in the executable rather than in a picture, because the screen has no
+    // picture: `ChooseKnight` clears to entry 0 and blits four portraits on it.
+    match select_palette(&src) {
+        Ok(Some(pal)) => {
+            m.palettes.insert("palette.select".into(), pal);
+            println!("select: SelectPAL read out of the image");
+        }
+        Ok(None) => eprintln!(
+            "no unpacked MAIN.EXE image found: baking without SelectPAL, so the \n  \
+             select screen falls back to the picture palette it used to stand on."
+        ),
+        Err(e) => eprintln!("SelectPAL: {e:#}"),
     }
 
     // Place icons, so a town is the size the artwork drew it.
@@ -1575,6 +1599,88 @@ fn overworld_tables(src: &str) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
     Ok(Some((terrain, going)))
 }
 
+/// `MOON:SelectPAL`, the character select screen's own thirty two colours.
+///
+/// **Recovered, and it used to be the one palette in the game that was not.**
+/// The select screen has no picture behind it: `ChooseKnight`'s first call
+/// clears video memory to entry 0, and the only palette it ever loads is this
+/// one, out of the executable's data segment rather than out of a PIV. Its
+/// bytes sit in the bottom of DGROUP, which the unpacker left stale until
+/// `tools/symbolmap.py` learned to finish the EXEPACK stream; see
+/// `docs/REVERSING.md`.
+///
+/// Everything about the result is checked before it is used, the same way the
+/// terrain grids are. Every entry has to be an Amiga `0x0RGB` word, so nothing
+/// may have anything in its top nibble; the whole thing may not be black, which
+/// is what a still-stale image would give; and the four ramps the portraits are
+/// painted in have to be there, which is what `saturated` counts. A wrong image
+/// fails these rather than baking a plausible lie.
+///
+/// What comes out reads as the artwork does: greys at 1 to 4 that all four
+/// portraits share, the bold face's five entries at 5 and 9 to 12 the way
+/// `CH.PIV` and `MESSAGE.PIV` carry them, greens at 6 to 8, a teal at 15 for
+/// the highlight frame, browns at 16 to 20 and then each knight's own: blue at
+/// 24 to 26, a gold at 27, red at 29 to 31. That is `KnightGlowColours`' blue,
+/// gold, emerald and red arriving independently, which is the check that these
+/// are the right sixty four bytes.
+fn select_palette(src: &str) -> anyhow::Result<Option<Vec<u32>>> {
+    let Some(bytes) = unpacked_image(src) else { return Ok(None) };
+    anyhow::ensure!(
+        bytes.len() == IMAGE_LEN,
+        "the unpacked image is {} bytes, expected {IMAGE_LEN}",
+        bytes.len()
+    );
+    let words: Vec<u16> = (0..palette::ENTRIES)
+        .map(|i| {
+            let o = SELECTPAL_AT + i * 2;
+            u16::from_le_bytes([bytes[o], bytes[o + 1]])
+        })
+        .collect();
+    anyhow::ensure!(
+        words.iter().all(|w| *w <= 0x0fff),
+        "SelectPAL holds a word wider than the twelve bits a colour has, so the \
+         bottom of DGROUP is still the stale duplicate: re-run tools/symbolmap.py"
+    );
+    anyhow::ensure!(
+        words.iter().any(|w| *w != 0),
+        "SelectPAL is all black, so it is not SelectPAL"
+    );
+    let saturated = words
+        .iter()
+        .filter(|w| {
+            let (r, g, b) = ((*w >> 8) & 0xf, (*w >> 4) & 0xf, *w & 0xf);
+            r.max(g).max(b) - r.min(g).min(b) >= 4
+        })
+        .count();
+    anyhow::ensure!(
+        saturated >= 8,
+        "SelectPAL has only {saturated} colours in it, and four knights in four \
+         colours need more than that"
+    );
+    Ok(Some(
+        words
+            .iter()
+            .map(|w| {
+                let (r, g, b) = ((*w >> 8) & 0xf, (*w >> 4) & 0xf, *w & 0xf);
+                ((r as u32 * 17) << 16) | ((g as u32 * 17) << 8) | (b as u32 * 17)
+            })
+            .collect(),
+    ))
+}
+
+/// The fully unpacked `MAIN.EXE` load image, wherever the person running this
+/// keeps it. Not something this crate can make: see `animation_scripts`.
+fn unpacked_image(src: &str) -> Option<Vec<u8>> {
+    [
+        std::env::args().nth(3).unwrap_or_default(),
+        "research/main.final.bin".into(),
+        format!("{src}/main.final.bin"),
+    ]
+    .iter()
+    .filter(|p| !p.is_empty())
+    .find_map(|p| fs::read(p).ok())
+}
+
 /// Where each place sits, and how big it is.
 ///
 /// **Two of the five coordinates are recovered and the rest are not, and the
@@ -1586,14 +1692,19 @@ fn overworld_tables(src: &str) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
 /// pairs trustworthy rather than merely present.
 ///
 /// What those numbers are is the spot a knight is sent to, not the corner of
-/// the picture. The corner lives in `MOON:MapIconsTABLE`, which is
-/// uninitialised data and so is not in the load image at all: the first 2,906
-/// bytes of DGROUP in the unpacked file are a stale duplicate of another region
-/// and cannot be read. So the box is **built** here rather than recovered: the
+/// the picture. The corner lives in `MOON:MapIconsTABLE`, which used to be
+/// unreadable: it is in the first 2,906 bytes of DGROUP, and the unpacker left
+/// that span stale. So the box is **built** here rather than recovered: the
 /// icon's size comes from the `MI.C` bank, which is real, and it is hung so
 /// that the recovered destination sits in the middle of it. Both towns land on
 /// their own artwork when it is drawn, which is the check that it is not
 /// nonsense, but it remains a construction.
+///
+/// **That span is readable now.** `tools/symbolmap.py` finishes the EXEPACK
+/// stream instead of stopping where the emulated stub stops, and
+/// `MapIconsTABLE`, `LairLocation` and `LairType` are all in what came back. So
+/// every place on the map could stop being a construction. That is the map's
+/// own change and not this one; until somebody makes it, what is below stands.
 ///
 /// The healer and the stones have no recovered coordinates at all. They are
 /// placed on the landmarks the map already draws.
@@ -1602,15 +1713,17 @@ fn overworld_tables(src: &str) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
 /// **Recovered: the arena layouts and their order.** `MOON:LairFile` at
 /// DS:0x0b7a is 24 pointers to `fol1.t`..`fol6.t`, `wal1.t`..`wal6.t`,
 /// `swl1.t`..`swl6.t`, `gll1.t`..`gll6.t`. It sits four bytes past the end of
-/// the stale duplicate that hides the rest of the lair tables, so it is the one
-/// of the four the load image does carry. That order is also what plants the
+/// the span the unpacker used to leave stale, so it is the one of the four the
+/// load image carried even then. That order is also what plants the
 /// keys: the initialiser steps six records between one key and the next, so
 /// lair 0 to 5 are the forest's, 6 to 11 the wastes', 12 to 17 the marsh's and
 /// 18 to 23 the glades', matching `moon::Key::ALL`.
 ///
 /// **Ours: which guardian, and how many.** `ForestLairs`, the table pairing a
-/// lair with an entry of `CombatTable` and a head count, is inside the
-/// unreadable 2,906 bytes. What a guardian *can* be is recovered, because
+/// lair with an entry of `CombatTable` and a head count, is inside the 2,906
+/// bytes that were unreadable when this was written and are readable now; see
+/// `docs/REVERSING.md`, and read them rather than keeping this if you get the
+/// chance. What a guardian *can* be is recovered, because
 /// `InitGameStart` fills `CombatTable` with the thirteen `InitKnightvs*`
 /// routines; which one each lair gets is chosen here. Each family fields its
 /// own road creatures for the first three, then the two the road never
@@ -1653,9 +1766,10 @@ fn lair_arena(family: &str, n: usize) -> String {
 
 /// Where the Valley of the Gods stands.
 ///
-/// **Ours, and the ground is not.** `MOON:MapIconsTABLE` is in the unreadable
-/// 2,906 bytes with every other place but the two towns, so the coordinates
-/// cannot be read. What can be read is what the fight behind the gate looks
+/// **Ours, and the ground is not.** `MOON:MapIconsTABLE` is in the 2,906 bytes
+/// that were unreadable when this was written, with every other place but the
+/// two towns. They are readable now (`docs/REVERSING.md`) and this is not yet
+/// read out of them. What can be read is what the fight behind the gate looks
 /// like: `InitKnightvsDemon` ends with `mov ax, 4; call ColourBackDrop`, and 4
 /// is the swamp in `_MAP:MapType`'s own coding. So the Valley is sited on
 /// marsh, by the same neighbourhood test the lairs use, and of the cells that
@@ -1768,14 +1882,19 @@ const LAIR_H: i32 = 5;
 /// pairs trustworthy rather than merely present.
 ///
 /// What those numbers are is the spot a knight is sent to, not the corner of
-/// the picture. The corner lives in `MOON:MapIconsTABLE`, which is
-/// uninitialised data and so is not in the load image at all: the first 2,906
-/// bytes of DGROUP in the unpacked file are a stale duplicate of another region
-/// and cannot be read. So the box is **built** here rather than recovered: the
+/// the picture. The corner lives in `MOON:MapIconsTABLE`, which used to be
+/// unreadable: it is in the first 2,906 bytes of DGROUP, and the unpacker left
+/// that span stale. So the box is **built** here rather than recovered: the
 /// icon's size comes from the `MI.C` bank, which is real, and it is hung so
 /// that the recovered destination sits in the middle of it. Both towns land on
 /// their own artwork when it is drawn, which is the check that it is not
 /// nonsense, but it remains a construction.
+///
+/// **That span is readable now.** `tools/symbolmap.py` finishes the EXEPACK
+/// stream instead of stopping where the emulated stub stops, and
+/// `MapIconsTABLE`, `LairLocation` and `LairType` are all in what came back. So
+/// every place on the map could stop being a construction. That is the map's
+/// own change and not this one; until somebody makes it, what is below stands.
 ///
 /// The healer, the stones and the wizard's tower have no recovered coordinates
 /// at all. They are placed on the landmarks the map already draws: the ruin in
@@ -2536,17 +2655,23 @@ fn bake_music(out: &Path, m: &mut Manifest) -> anyhow::Result<usize> {
 ///   twelfth frame. The symbol says what those three are: the river.
 /// * `MOON:ChooseKnight` loads `SelectPAL` and calls
 ///   `COLOURGLOW(0x0f, 0x088, 1, 0)`, so entry fifteen breathes towards a teal
-///   on the character select screen. **Recovered and deliberately not shipped.**
-///   The call is read straight off `0x158e`: index 15, target 0x088, period 1,
-///   repeat 0, and repeat 0 is the original's forever, because `COLCON` swaps
-///   the glow's two ends when it arrives. The trouble is the palette it is
-///   meant to breathe in. `ChooseKnight` loads `SelectPAL` at `DS:0x892`
-///   first, and `SelectPAL` is inside the 2,906 bytes of `DGROUP` that cannot
-///   be read, so this screen stands on `CH.PIV`'s palette instead. In that one,
-///   entry fifteen is the whole night sky, so a recovered effect aimed at a
-///   palette we do not have repaints the entire background twice a second.
-///   An effect is only as recovered as the palette it runs on, and half of a
-///   recovered pair is worse than neither.
+///   on the character select screen. The call is read straight off `0x158e`:
+///   index 15, target 0x088, period 1, repeat 0, and repeat 0 is the original's
+///   forever, because `COLCON` swaps the glow's two ends when it arrives.
+///
+///   **What breathes is one sprite, not the screen.** `SEL.CEL` cel 1 is a
+///   64 by 76 hollow frame drawn entirely in index 15 and in no other index,
+///   and `ChooseRefresh` blits it round whichever portrait is chosen; none of
+///   the four portraits touches 15, and the screen behind them is cleared to
+///   entry 0. So on this screen entry 15 belongs to the highlight frame alone,
+///   and glowing it glows the highlight and nothing else.
+///
+///   This was taken out once, for a real reason that has since gone away: the
+///   screen was being drawn over `CH.PIV`, whose entry 15 is the night sky, so
+///   the recovered glow repainted the whole background twice a second. The
+///   backdrop was the invention, not the glow. `SelectPAL` is readable now
+///   (`select_palette` above), it puts `0x066` at entry 15, and the glow walks
+///   that to `0x088` and back.
 ///
 /// The other two glows in the game hang off the fight rather than the screen:
 /// `MudmenGlowOn` (entry 14, wired in `main.rs`) and `KnightGlowOn`, which is
@@ -2558,9 +2683,10 @@ fn palette_effects() -> String {
             "cycles": [{ "first": 0x15, "last": 0x17, "up": true, "period": 12 }],
             "glows":  [{ "index": 0x1f, "target": 0x0ff, "period": 1, "repeat": 0 }]
         },
-        // The select screen's glow is left out until `SelectPAL` can be read.
-        // See the note above.
-        "select": { "glows": [] }
+        // `MOON:ChooseKnight`, `0x158e`: `ax = 0x0f`, `bx = 0x088`, `cx = 1`,
+        // `dx = 0`. On this screen entry 15 is the highlight frame and nothing
+        // else, so this is the frame breathing.
+        "select": { "glows": [{ "index": 0x0f, "target": 0x088, "period": 1, "repeat": 0 }] }
     })
     .to_string()
 }

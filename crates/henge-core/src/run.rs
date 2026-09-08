@@ -167,9 +167,11 @@ pub struct Run {
     /// `[0x718]` off the experience for one point, and `MOON:Adjplayers` fills
     /// that word from `XPlevels` indexed by the player count. `XPlevels` sits
     /// at DS:`0x4d4`, inside the first 2,906 bytes of `DGROUP`, which the load
-    /// image carries as a stale copy of another region, so its four values
-    /// are not recoverable and this one is ours: four won bouts a point,
-    /// which makes five of everything forty-eight wins away.
+    /// image used to carry as a stale copy of another region, so its four
+    /// values were not recoverable and this one is ours: four won bouts a
+    /// point, which makes five of everything forty-eight wins away. That span
+    /// is readable now (`docs/REVERSING.md`) and `XPlevels` has not been read
+    /// out of it.
     #[serde(default = "default_xp_per_level")]
     pub xp_per_level: u32,
     /// The day's travel is doubled. `CastHaste`'s flag, `[0xcca2]`, which the

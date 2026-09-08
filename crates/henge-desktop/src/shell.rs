@@ -26,9 +26,11 @@
 //! The option list is recovered too: `DoOptions` has four rows, a player count
 //! of one to four, a gore switch and two ways to start, and the arrow is
 //! `SEL.CEL` frame 0 at x 50, which is the `ARX` `DoOptions` writes with
-//! `mov word ptr [ARX], 0x32`. The four row `y` values come out of a table at
-//! `DS:0x706`, which is inside the 2,906 bytes of `DGROUP` the unpacked image
-//! carries as a stale duplicate, so the spacing below is ours.
+//! `mov word ptr [ARX], 0x32`. The four row `y` values come out of `MOON:ARR`,
+//! the table at `DS:0x706` that `DisplaySelect` indexes with `optmode`. That
+//! table was in the span of DGROUP the unpacker used to leave stale; it is
+//! readable now and holds 85, 110, 148 and 168, and the spacing below is still
+//! this project's own until somebody wires those four in and looks at it.
 //!
 //! **Nothing on it is flattened to one colour.** `CH.PIV` reserves the bold
 //! face's five entries the way `MESSAGE.PIV` does: black at 5 and `dee`,
@@ -40,28 +42,40 @@
 //! sitting in the pack unused since the baker first decoded them; showing them
 //! is the whole of it.
 //!
-//! **The select.** `CH.PIV` is the backdrop, `SEL.CEL` the art: frame 0 an
-//! arrow, frame 1 a hollow border and frames 2 to 5 the four knights. The
-//! knights stand at y 80, which is `ChooseRefresh`'s own `cx`, and the border
-//! goes round whichever is highlighted. A knight already taken is not drawn at
-//! all, which is also `ChooseRefresh`: it only draws the bits still set in
-//! `choose_knight`.
+//! **The select, and it has no picture behind it.** This screen was drawn over
+//! `CH.PIV` here for a long time and the original draws it over nothing at all.
+//! `ChooseRefresh`'s first call, at `0x174e`, writes `0x0f02` to the sequencer
+//! and then `rep stosw` of zero across `0x2000` words: it clears the screen to
+//! palette entry 0, and the only picture the whole routine puts up is four
+//! portraits. Then it loads `SelectPAL`, its own thirty two colours, out of the
+//! data segment rather than out of a plate.
 //!
-//! **The colours are recovered and the palette is not.** `CH.PIV` carries
-//! sixteen colours and the portraits index up to twenty-eight, so the top half
-//! of the select palette comes from `SelectPAL`, whose bytes did not survive
-//! into our unpacked image. What did survive is better: `KnightGlowColours`
-//! holds each knight's three shades, so the top sixteen entries are built as
-//! four four-step ramps from those, and each portrait is drawn through a
-//! substitution into its own ramp. The knight who is blue in the original is
-//! blue here because the original says so, not because the palette happened to
-//! have a blue in it.
+//! `SEL.CEL` is the art: frame 0 an arrow, frame 1 a hollow frame and frames 2
+//! to 5 the four knights. `ChooseRefresh` runs `bp` from 0 to 3, blits cel
+//! `bp + 2` at `CCOL[bp]` with `cx = 0x50`, and then blits cel 1 at the chosen
+//! knight's own x and the same y, so the frame lands exactly on the portrait it
+//! marks. All five go through the ordinary cel blit at `0x5dc8`, with **no
+//! colour substitution of any kind**: the portraits are painted in their own
+//! indices, which is what `SelectPAL` is for. A knight already taken is not
+//! drawn at all, which is also `ChooseRefresh`: it only draws the bits still
+//! set in `choose_knight`.
+//!
+//! **The chosen knight glows, and nothing else does.** Cel 1 is 64 by 76 and
+//! every one of its pixels is either transparent or index 15; no portrait
+//! touches 15 and the cleared screen is entry 0, so on this screen entry 15 is
+//! that frame and nothing else. `ChooseKnight` calls
+//! `COLOURGLOW(0x0f, 0x088, 1, 0)` right after the fade, and `COLCON` swaps a
+//! glow's two ends on arrival with repeat 0 meaning forever, so the frame
+//! breathes between `SelectPAL`'s `0x066` and `0x088` for as long as the screen
+//! is up. Ours used to glow the whole background instead, which is exactly what
+//! happens when a recovered effect is aimed at a palette that is not the one it
+//! was written for.
 
 use crate::framebuffer::Framebuffer;
 use crate::sprite;
 use crate::status;
 use crate::text::Font;
-use henge_assets::{recolour, Lut, Registry};
+use henge_assets::Registry;
 use henge_core::item::Items;
 use henge_core::knight::Knights;
 use henge_core::shell::{Row, Select, Title, SEATS};
@@ -103,8 +117,9 @@ const TITLE_PLATE: &str = "scene.ch";
 
 /// `ARX` in the original. The arrow's left edge on the option list.
 const ARROW_X: i32 = 50;
-/// Ours: `DisplaySelect` takes the arrow's `y` off a four word table at
-/// `DS:0x706`, which is in the stale span of `DGROUP` and cannot be read.
+/// Ours. `DisplaySelect` takes the arrow's `y` off `MOON:ARR` at `DS:0x706`,
+/// which reads 85, 110, 148, 168 now that the bottom of DGROUP is recovered.
+/// An even step is what is drawn until the title screen is looked at again.
 const FIRST_ROW_Y: i32 = 100;
 const ROW_STEP: i32 = 18;
 
@@ -209,54 +224,64 @@ fn show(reg: &mut Registry, fb: &mut Framebuffer, scene: &str) {
     }
 }
 
-/// Where the four stand. `ChooseRefresh` puts them at y 80 and takes the x from
-/// a table whose bytes are lost, so they are spread evenly instead.
+/// Where the four stand. `ChooseRefresh` loads `cx` with `0x50` for every one
+/// of them and takes the x out of `MOON:CCOL`, four words at `DS:0x8d2`.
+///
+/// Both are recovered. `CCOL` is in the bottom of DGROUP, which the unpacker
+/// used to leave stale and now does not, and it holds 12, 88, 164 and 240: a
+/// twelve pixel margin on the left, sixty four wide portraits and a step of
+/// seventy six.
 const PORTRAIT_Y: i32 = 80;
 const PORTRAIT_W: i32 = 64;
-const PORTRAIT_X: [i32; SEATS] = [8, 88, 168, 248];
+const PORTRAIT_X: [i32; SEATS] = [12, 88, 164, 240];
+
+/// `MOON:CRText`, the one message chain this screen puts up: `Select a Knight`,
+/// flags 1, which is `TextPTop`'s centre bit, at y 5.
+const HEADING: &str = "Select a Knight";
+const SELECT_HEADING_Y: i32 = 5;
 
 pub struct SelectScene {
     pub state: Select,
-    /// Sixteen from `CH.PIV` and sixteen built from the recovered knight
-    /// colours.
+    /// `SelectPAL`, the screen's own thirty two, out of the pack.
     palette: Vec<u32>,
-    /// One substitution per knight, into that knight's four entries.
-    luts: [Lut; SEATS],
 }
 
 impl SelectScene {
-    pub fn new(reg: &Registry, players: usize, knights: &Knights) -> SelectScene {
-        let mut palette = reg
-            .palette("palette.scene.ch")
+    pub fn new(reg: &Registry, players: usize, _knights: &Knights) -> SelectScene {
+        // `palette.select` is `MOON:SelectPAL`, baked out of the executable.
+        // A pack made before the baker could read it has none, and then the
+        // screen falls back to the plate it used to stand on rather than
+        // coming up in whatever the last screen was using.
+        let palette = reg
+            .palette("palette.select")
+            .or_else(|| reg.palette("palette.scene.ch"))
             .map(|r| r.value.clone())
             .unwrap_or_default();
-        palette.resize(16, 0);
-        for i in 0..SEATS {
-            let shade = knights.get(i).and_then(|k| k.shades.first().copied()).unwrap_or(0x808080);
-            palette.extend_from_slice(&recolour::ramp(shade));
-        }
-        let luts = std::array::from_fn(|i| {
-            let bucket: Vec<usize> = (0..4).map(|j| 16 + i * 4 + j).collect();
-            recolour::map_into_bucket(&palette, &bucket)
-        });
-        SelectScene { state: Select::new(players), palette, luts }
+        SelectScene { state: Select::new(players), palette }
     }
 
     pub fn render(
         &self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, knights: &Knights,
         items: &Items,
     ) {
-        show(reg, fb, "scene.ch");
+        // `ChooseRefresh`'s own first act: `mov ax, 0xf02; out dx, ax` to the
+        // sequencer's map mask and `rep stosw` of zero over 0x2000 words, which
+        // is every plane of every pixel set to palette entry 0. There is no
+        // backdrop on this screen; there never was.
+        fb.clear(0);
         fb.set_palette(&self.palette);
-        let (_, light) = status::extremes(fb);
 
-        // In the glyphs' own indices, over the sixteen `CH.PIV` brings: black
-        // at 5 and the warm ramp at 9 to 12, the same five `MESSAGE.PIV`
-        // reserves. The black band these two lines used to sit on was there
-        // only because they were flattened to one colour.
+        // `MOON:CRText`, in the glyphs' own five indices. `SelectPAL` reserves
+        // them the way `CH.PIV` and `MESSAGE.PIV` do: black at 5 and a warm
+        // ramp at 9 to 12, which is why a bold line reads on a black screen.
         if let Some(bold) = fonts.bold {
-            bold.draw_own_centred(reg, fb, "Choose your knight", 16);
+            bold.draw_own_centred(reg, fb, HEADING, SELECT_HEADING_Y);
         }
+        // **Ours**, and the only things on this screen that are: whose turn it
+        // is, the name under each portrait, the `Player N` left where a taken
+        // knight was, and the stat line along the bottom. The original draws
+        // none of them. What it draws once a knight is taken is that knight's
+        // name at (50, 50) out of `NAMEy`, which is a different thing again.
         if let Some(small) = fonts.small {
             let line = if self.state.done() {
                 "Ride out".to_string()
@@ -269,7 +294,13 @@ impl SelectScene {
         for i in 0..SEATS {
             let x = PORTRAIT_X[i];
             if self.state.free(i) {
-                sprite::draw_lut(reg, fb, SEL, FIRST_PORTRAIT + i, x, PORTRAIT_Y, &self.luts[i]);
+                // In its own pixels. `ChooseRefresh` puts the cel number in
+                // `ax` and the corner in `bx` and `cx` and calls the same
+                // blitter every other cel goes through; there is no ink and no
+                // substitution anywhere in it. The four portraits are already
+                // painted blue, gold, emerald and red in `SelectPAL`, and a
+                // recolour on top of that was colouring coloured artwork.
+                sprite::draw(reg, fb, SEL, FIRST_PORTRAIT + i, x, PORTRAIT_Y, false);
             } else {
                 // Taken, so not drawn: `ChooseRefresh` only ever draws the bits
                 // still set. Who took them goes in the empty slot instead.
@@ -282,22 +313,18 @@ impl SelectScene {
                     }
                 }
             }
-            let colour = (16 + i * 4 + 3) as u8;
             if i == self.state.cursor && !self.state.done() {
-                // The one sprite on this screen that has to be given a colour.
-                // `SEL.CEL` frame 1 is drawn in a single index, 15, and what 15
-                // is belongs to `SelectPAL`, whose bytes did not survive into
-                // the unpacked image; in `CH.PIV`'s own sixteen it is very
-                // nearly black. So the brightest entry the screen has, rather
-                // than the knight's own: every portrait already carries a
-                // coloured frame, and a highlight in one more colour would be
-                // one frame among five instead of the answer to which is
-                // chosen.
-                sprite::draw_mask(reg, fb, SEL, BORDER, x, PORTRAIT_Y, light);
+                // The hollow frame, in its own pixels like everything else.
+                // Every pixel of cel 1 is index 15, and `ChooseRefresh` blits
+                // it at `CCOL[Chosen]` with the same `cx = 0x50` the portraits
+                // get, so it lands exactly on the one it marks. This is the
+                // entry `COLOURGLOW` breathes, and it is the only thing on the
+                // screen that moves.
+                sprite::draw(reg, fb, SEL, BORDER, x, PORTRAIT_Y, false);
             }
             if let (Some(small), Some(k)) = (fonts.small, knights.get(i)) {
                 let w = small.width(reg, &k.name);
-                small.draw(reg, fb, &k.name, x + (PORTRAIT_W - w) / 2, PORTRAIT_Y + 80, colour);
+                small.draw_own(reg, fb, &k.name, x + (PORTRAIT_W - w) / 2, PORTRAIT_Y + 80);
             }
         }
 

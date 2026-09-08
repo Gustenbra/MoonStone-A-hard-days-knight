@@ -191,7 +191,9 @@ All 386 files decode. See `FORMATS.md`.
       overworld a glow on entry 31 towards `0x0ff` every frame and a cycle over entries
       21 to 23 every twelfth frame, whose handle it calls `RiverHANDLE`, so those three
       are the water; and `ChooseKnight` gives the select screen a glow on entry 15
-      towards `0x088`. A third, `MudmenGlowOn`, is `COLOURGLOW(0x0e, 0x100, 2, 0)` and
+      towards `0x088`, which on that screen is the highlight frame round the chosen
+      knight and nothing else, because the screen is cleared to entry 0 and cel 1 of
+      `SEL.CEL` is the only thing on it drawn in 15. A third, `MudmenGlowOn`, is `COLOURGLOW(0x0e, 0x100, 2, 0)` and
       hangs off `InitCombat` rather than off a screen. All three are built
 - [ ] `KnightGlowOn` and `KnightGlowColours`, which flash a knight down to ten health in
       his own colour on entries 6, 7 and 8, and 9 to 11 for a second knight. Recovered
@@ -355,7 +357,7 @@ stat block. These are recovered and in the pack:
 | `TroggStart`, `TroggAttacks`, `TroggChop`, `TroggSwing`, `TrollAttack`, `TrollBunt`, `ControlRatCollide`, `MudmenReach`, `MudmenIBury`, `MudmenAppear`, `MudmenEntangle`, `MudmenChoke`, `BeastCharge`, `SetBEASTZ`, `SetBeastTimer`, `BalokJump`, `DemonAttack` | per-creature behaviour | **done**, item 37 |
 | `_WIZARD:RND`, `GETPERCENT` | the shift register `TroggAttacks` rolls against | **done**, as `monster::rnd`, off a seed the bout carries |
 | actor record `+0x0a`, `+0x0b`, `+0x48`, `+0x49`, `+0x4a` | a controller's walk frame, timer, flags and cooldown | **done**, as `monster::Brain` on the fighter, in the fingerprint |
-| `TroggTABLE`, `BeastTABLE`, `RatmanTABLE`, `MudmanTABLE`, `BalokTABLE`, `DemonTABLE` | the spawn tables `InitNewMO` reads position and facing from | not readable: they sit in the first 2,906 bytes of `DGROUP`, which the unpacked image holds as a stale copy of another region |
+| `TroggTABLE`, `BeastTABLE`, `RatmanTABLE`, `MudmanTABLE`, `BalokTABLE`, `DemonTABLE` | the spawn tables `InitNewMO` reads position and facing from | were not readable: they sit in the first 2,906 bytes of `DGROUP`, which the unpacked image held as a stale copy of another region. That span reads now (`REVERSING.md`); these have not been read out of it |
 | `TotalMonsters`, `MaxMonsters`, `AdjustLevel`, `lev_adjust`, `KLTAB` | how many come, in waves, scaled to the knight | read in outline; one at a time is fielded |
 | `SETDEMONBORD` | **not a screen border**: one record written over the arena's own border list, 0 to 309 across and 10 to 99 deep, which is the ground the demon may be fought on. `InitKnightvsDemon` calls it after the arena is loaded and `GENERATELANDSCAPE` calls it before, so only the first of the two survives | **done**, as `ActorDef::border` and `Bout::apply_actor_borders` |
 | `Demon_Evolve`, `AddDemonWhirl`, `FlipDemonWhirl`, `StopDemonWhirl`, `KnightOFF`, `KnightON`, `DemonOFollowT`, `DemonOWhipFollow`, `DemonUFollowT`, `DemonUWhipFollow` | the demon's entrance, its whirl, and the whip's four phases | **done**, item 33 |
@@ -442,9 +444,11 @@ edge is the rectangle `_MAP:HawkBorders` clamps the token into.
 `MOON:CheckGROOC` decides you have arrived by overlapping the place's `MI.C` icon
 rectangle with the traveller's own 8x10 one, so a place is a box and not a radius, and
 `MOON:StackMessages` gives the nine kinds and their menu lines. What is **not** recovered
-is `MOON:MapIconsTABLE` itself: it is uninitialised data, the first 2,906 bytes of DGROUP
-in the load image are a stale duplicate, and the seven places that are not towns therefore
-have no recovered coordinates. See `REVERSING.md`.
+is `MOON:MapIconsTABLE` itself: it is in the first 2,906 bytes of DGROUP, which the load
+image held as a stale duplicate, and the seven places that are not towns therefore have no
+recovered coordinates here. **That span reads now** and `MapIconsTABLE` and
+`LairLocation` are both in it, so this is recoverable and has not been recovered. See
+`REVERSING.md`.
 
 **So the places that are not towns were put where the artwork puts them**, and that
 decision is now taken: the healer keeps the ruin in the southern woods, the stones are the
@@ -560,9 +564,11 @@ gold is zero *and* all 24 item counts are, so a lair you have beaten but could n
 is still there to go back to; and `LairWon` marks it and adds one to the knight's
 experience the first time only.
 
-**What is not recovered**: `ForestLairs` (guardian and count), `LairLocation` and
-`LairType` are all inside the 2,906 bytes of DGROUP that the load image carries as a stale
-duplicate. What a guardian *can* be is recovered, because `InitGameStart` fills
+**What is not recovered here**: `ForestLairs` (guardian and count), `LairLocation` and
+`LairType` are all inside the 2,906 bytes of DGROUP that the load image held as a stale
+duplicate. All three read now (`REVERSING.md`) and none of them has been read out of it;
+`LairType` in particular comes out as six 2s, six 6s, six 4s and six 0s, which is the
+forest, waste, marsh, glade order `LairFile` already gave. What a guardian *can* be is recovered, because `InitGameStart` fills
 `CombatTable` with the thirteen `InitKnightvs*` routines. Where each lair stands is a
 search over the real `MapType` grid for a cell whose whole neighbourhood is that family's
 ground, clear of every other place and of the four starting corners, spread by
@@ -798,8 +804,9 @@ original records about a win.
 
 **The words are recovered too, and they were hiding in the wrong place.** The message
 records `NoKeysMessage`, `ValleyEnter`, `VICTORY`, `GameOverMes` and `HengeInstruct` are
-all at DS offsets inside the 2,906 bytes of DGROUP the load image carries as a stale
-duplicate, so reading them at their own addresses gives animation script bytes. Their
+all at DS offsets inside the 2,906 bytes of DGROUP the load image held as a stale
+duplicate, so reading them at their own addresses gave animation script bytes. That span
+reads now (`REVERSING.md`), and these records have not been re-read out of it. Their
 *lines* are somewhere else entirely: MOON's text pool, at image 0xd6e0, past the end of
 every module's code.
 
@@ -897,27 +904,65 @@ with the wordmark ten pixels higher, and it is the select screen's night sky. Th
 note that the picture must be in `INTR.EXE` was wrong.
 
 `CH.PIV` also reserves the bold face's five entries, so the wordmark, the credit lines and
-the option rows are all blitted in their own indices. The row `y` values are still ours:
-`DisplaySelect` takes them off a table at `DS:0x706`, inside the stale span of `DGROUP`.
+the option rows are all blitted in their own indices. The row `y` values are still ours,
+but they need not be: `DisplaySelect` takes them off `MOON:ARR` at `DS:0x706`, which was
+in the stale span of `DGROUP` and is readable now, and holds 85, 110, 148 and 168.
 
 **Attract mode** cycles the other ten plates, which is ours; those write the five caption
 entries first, the way `INTR.EXE`'s `0x0cfb` does, because no other plate reserves them.
 
 ## 8.2 Character select `done`
 
-`CH.PIV` is the backdrop and `SEL.CEL` the art: frame 0 an arrow, frame 1 a hollow border,
-frames 2 to 5 the four knights, all at y 80 which is `ChooseRefresh`'s own coordinate. A
-knight already taken is not drawn, which is `ChooseRefresh` only drawing the bits still set
-in `choose_knight`; the highlight steps over the taken ones and stops at the ends rather
-than wrapping, which is `ChooseLoop`; and after a choice it drops to the lowest still free,
-which is `FindChosen`.
+**There is no backdrop.** `ChooseRefresh` opens with `mov ax, 0xf02; out dx, ax` to the
+sequencer and `rep stosw` of zero over `0x2000` words, which is every plane of every pixel
+set to palette entry 0. The screen is four portraits on black and nothing else. `CH.PIV`
+was drawn behind it here for a long time and that was this project's own addition, taken
+from the title screen next door; most of what was wrong with this screen followed from it.
 
-**The colours are recovered; the palette is not.** `CH.PIV` carries only sixteen colours
-and the portraits index up to twenty-eight, so the top half comes from `SelectPAL`, whose
-bytes did not survive into the unpacked image. `KnightGlowColours` did: three 12-bit shades
-per knight, blue, gold, emerald and red in knight order, which is what the initials on
-`BNAME`, `GNAME`, `ENAME` and `RNAME` stand for. The top sixteen palette entries are built
-as four ramps from those, and each portrait is drawn through a substitution into its own.
+`SEL.CEL` is the art: frame 0 an arrow, frame 1 a hollow frame, frames 2 to 5 the four
+knights. `ChooseRefresh` runs `bp` from 0 to 3, takes x from `MOON:CCOL` (12, 88, 164,
+240), passes `cx = 0x50` for y and cel `bp + 2`, and calls the ordinary cel blit at
+`0x5dc8` **with no colour substitution of any kind**. A knight already taken is not drawn,
+which is `ChooseRefresh` only drawing the bits still set in `choose_knight`; the highlight
+steps over the taken ones and stops at the ends rather than wrapping, which is
+`ChooseLoop`; and after a choice it drops to the lowest still free, which is `FindChosen`.
+
+**`SelectPAL` is recovered.** It is 32 Amiga words at `DS:0x892`, `CCOL` is the four words
+immediately after it at `DS:0x8d2`, and both were unreadable until the unpacker was found
+to stop before the EXEPACK stream ends; `docs/REVERSING.md` has that story. It is the one
+palette in the game that lives in the executable rather than in a picture, which is what
+you would expect of the one screen with no picture on it. The baker reads it out of the
+image as `palette.select` and refuses anything that is not 32 valid `0x0RGB` words.
+
+What is in it explains the artwork: greys `fff`, `aaa`, `666`, `333` at 1 to 4, which all
+four portraits share; the bold face's five entries at 5 and 9 to 12, the same reservation
+`CH.PIV` and `MESSAGE.PIV` make; greens at 6 to 8; a teal `066` at 15; browns at 16 to 20;
+then blues at 24 to 26, `f90` at 27, `0d00`/`0a00`/`0700` at 29 to 31. Cel 2 indexes the
+blues, cel 3 the golds, cel 4 the greens and cel 5 the reds, so the four come out blue,
+gold, emerald and red **from the palette alone**, agreeing with `KnightGlowColours` which
+was read out of a different part of the image. That agreement is what says these are the
+right sixty four bytes.
+
+The recolour that used to stand in for the palette is gone. Building four ramps from the
+knight shades and drawing each portrait through a substitution into its own was colouring
+artwork that is already coloured, and it is why the portraits read as saturated smears.
+
+**The chosen knight glows, and nothing else does.** Cel 1 is 64 by 76 and every pixel of
+it is transparent or index 15; no portrait touches 15, and the cleared screen is entry 0.
+So entry 15 on this screen is that frame alone, `ChooseKnight`'s
+`COLOURGLOW(0x0f, 0x088, 1, 0)` walks it from `SelectPAL`'s `066` to `088` and back
+forever, and what a player sees is the frame round the knight they are on breathing. The
+glow was recovered once and taken out again because on the `CH.PIV` backdrop entry 15 is
+the sky and glowing it repainted the whole screen. The backdrop was the mistake.
+
+The heading is `MOON:CRText`, one ten-byte record out of the same recovered span: `Select
+a Knight`, flags 1, which is `TextPTop`'s centre bit, at y 5.
+
+**Ours on this screen**, and no more than this: the line saying whose turn it is, the name
+under each portrait, the stat line along the bottom, and the `Player N` written where a
+taken knight was. The original draws none of them. What it does draw once a knight is
+taken is that knight's name at (50, 50), out of `NAMEy`, which `ChooseFIRE` points at
+`BNAME`, `GNAME`, `ENAME` or `RNAME`.
 
 **A second triple has since turned up, and it is the armour rather than the glow.**
 Item 75 read `ColourKnight`, which writes three 12-bit words into `BattlePal+12`, and
@@ -932,9 +977,14 @@ Whoever revisits `COLOURENKNIGHT` should start there rather than with hue substi
 **The four knights do not differ in stats.** `InitKnights` gives each one a name, a colour,
 one corner of the map at (10, 10), (300, 5), (26, 180) or (300, 185), and the same stat
 block as the other three. `henge` keeps the four as data so they *can* differ; what ships is what the original
-had. The names are `Enemy1Name`..`Enemy4Name`, `SIR BANNER`, `SIR DWAIN`, `SIR BALAIN` and
-`SIR GUNTHER`, which the original hands to its computer knights while a person types their
-own over the top. Which name goes with which of the four is an assumption.
+had. The names henge uses are `Enemy1Name`..`Enemy4Name`, `SIR BANNER`, `SIR DWAIN`,
+`SIR BALAIN` and `SIR GUNTHER`, which the original hands to its computer knights while a
+person types their own over the top, and which name goes with which of the four is an
+assumption. **`BNAME`, `GNAME`, `ENAME` and `RNAME` can be read now** and they are
+`SIR_GODBER`, `SIR_RICHARD`, `SIR_JEFFREY` and `SIR_EDWARD`, in blue, gold, emerald and
+red order, which is not an assumption: `ChooseFIRE` picks between them on the chosen
+index. Nothing has been renamed on the strength of that yet, because the four names run
+through the pack, the save file and the tests.
 
 ## 8.3 The status panel `done`
 
@@ -1096,8 +1146,9 @@ welcome (`WelHigh1a`..`e`, one chain with the city's name swapped into its last 
 each caller), `_TAVERN:HengeWait` and `TitleMes` all read cleanly and are quoted verbatim
 with their own coordinates. `HengeInstruct`, `GameOverMes`, `NoKeysMessage` and
 `SHMES1`..`SHMES8` sit below `DS:0b5a`, inside the 2,906 bytes of DGROUP the unpacked image
-carries as a stale copy of another region, so **their words are not readable and none of
-them is guessed at**.
+held as a stale copy of another region, so **their words were not readable and none of
+them is guessed at**. That span reads now (`REVERSING.md`) and these four have not been
+re-read out of it.
 
 Every one of the fourteen ends on `Loading...` at y 182 in the bold face, because in the
 original the box is up while a disk is read. The table keeps that line and the drawing

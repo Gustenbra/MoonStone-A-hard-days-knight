@@ -83,7 +83,71 @@ def unpack(exe_path, tools_dir=None):
         uc.emu_start(cs * 16 + ip, up.MEM, count=0)
     except UcError:
         pass                                        # faults after the payload is written
-    return bytes(uc.mem_read(base, dest_len * 16))
+    image = bytearray(uc.mem_read(base, dest_len * 16))
+
+    # The emulated stub stops short, and the last thing it fails to write is the
+    # bottom of DGROUP. See finish_exepack: the stream is finished in Python and
+    # DGROUP is taken from that, which is what makes SelectPAL, CCOL, CRText,
+    # MapIconsTABLE, LairLocation and the rest of MOON's low data readable.
+    packed = bytes(old.mem_read(base, dest_len * 16))
+    full = finish_exepack(packed, cs * 16 - base, dest_len * 16)
+    dg = DGROUP * 16
+    late = [a for a in range(dg, len(image)) if image[a] != full[a]]
+    early = sum(1 for a in range(dg) if image[a] != full[a])
+    if late:
+        image[dg:] = full[dg:]
+        print('DGROUP: %d bytes recovered by finishing the stream (%#x..%#x); '
+              '%d bytes of code left in the emulated stub\'s coordinates'
+              % (len(late), late[0], late[-1] + 1, early))
+    return bytes(image)
+
+
+def finish_exepack(packed, packed_end, total):
+    """Decompress the EXEPACK stream the whole way, in Python.
+
+    The emulated stub does not finish. Its last act before jumping to the
+    program is a `rep movsb` that leaves the destination pointer 21,400 bytes
+    above the bottom of the image, so everything below that keeps whatever the
+    packed file had there: the source bytes of that same copy, which is why the
+    unwritten span reads as a byte-for-byte duplicate of the region 0x5398
+    higher. It is stale, not uninitialised, and it was read as uninitialised
+    for a long time.
+
+    Microsoft EXEPACK's stream is read backwards from just below the header,
+    past the 0xff padding: a command byte, a 16-bit count, and for a fill one
+    more byte. `0xb0`/`0xb1` fill, `0xb2`/`0xb3` copy, and bit 0 set is the last
+    command. Run to the end it stops with source and destination pointers equal,
+    which is the packer's own signal that everything below is already in place.
+
+    Only DGROUP is taken from the result. The rest of the unwritten span is
+    past the end of the last code module, and correcting the code as well would
+    move every code address in `docs/` by up to 473 bytes, since the shift map
+    fitted below is exactly this displacement. That is a change of its own.
+    """
+    out = bytearray(packed)
+    si = packed_end - 1
+    while out[si] == 0xff:              # the packer pads the stream up to the header
+        si -= 1
+    di = total - 1
+    while True:
+        cmd = out[si]; si -= 1
+        count = out[si - 1] | (out[si] << 8); si -= 2
+        if cmd & 0xfe == 0xb0:
+            fill = out[si]; si -= 1
+            out[di - count + 1:di + 1] = bytes([fill]) * count
+            di -= count
+        elif cmd & 0xfe == 0xb2:
+            for _ in range(count):      # may overlap, so byte at a time
+                out[di] = out[si]; di -= 1; si -= 1
+        else:
+            raise ValueError('EXEPACK command %#04x at %#x is neither a fill nor a copy'
+                             % (cmd, si + 1))
+        if cmd & 1:
+            break
+    if si != di:
+        raise ValueError('EXEPACK stream ended with si %#x and di %#x, which should meet'
+                         % (si, di))
+    return bytes(out)
 
 
 # ---------------------------------------------------------------- parsing

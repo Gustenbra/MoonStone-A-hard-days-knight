@@ -304,22 +304,64 @@ enter it**.
 (297, 157) for Waterdeep, compared as grid cells (12, 7) and (37, 20). Those cells are
 exactly what the index formula above makes of those pixels, which is a check on both.
 
-### Part of DGROUP is not in the load image, and `MapIconsTABLE` is in it
+### Part of DGROUP was not in the load image, and the unpack was the reason
 
-`MapIconsTABLE` itself cannot be read. The first **2,906 bytes** of DGROUP in the unpacked
-image are a byte-for-byte duplicate of the region 0x5398 higher, which is real animation
-script data; the duplicate ends exactly where `MOON:LairFile`, the first initialised datum,
-begins. So that span is uninitialised storage the packer does not carry and the emulated
-unpack left stale, not the program's data.
+**This is fixed, and the fix is the more interesting half of the story.**
 
-Everything the symbol table places below DS:0b5a is therefore unreadable in this image:
-`MapIconsTABLE`, `LairLocation`, `LairType`, `ForestLairs`, and MOON's scratch variables.
-Everything at or above it reads correctly, which is how `LairFile` gives all 24 lair
-layouts (`fol1.t` through `gll6.t`, six per family) and how the terrain grids at 0x1e7da
-and 0x1ebc2 are trustworthy.
+What was seen first was real: the first **2,906 bytes** of DGROUP in the unpacked image
+were a byte-for-byte duplicate of the region 0x5398 higher, which is real animation script
+data, and the duplicate ended exactly where `MOON:LairFile`, the first initialised datum,
+begins. Everything the symbol table placed below DS:0b5a therefore read as nonsense:
+`SelectPAL`, `CCOL`, `CRText`, `MapIconsTABLE`, `LairLocation`, `LairType`, `ForestLairs`,
+`Moons`, `XPlevels`, `ARR`, `BNAME`..`RNAME`. That was recorded here as uninitialised
+storage the packer does not carry.
 
-Worth knowing before trusting any address in that range: a symbol having an address does
-not mean the bytes at that address are the program's.
+It is not uninitialised. **The emulated EXEPACK stub stops before it has finished.** Hook
+every write the stub makes and the whole span from image 0 to 0x12f0a is never written at
+all; the last thing the stub does before jumping to the program is a `rep movsb` of 21,400
+bytes that leaves the destination pointer at 0x12f0a. Everything below that keeps what the
+packed file had there, which is the *source* of that same copy, and a source copied 0x5398
+upwards is exactly why the span reads as a duplicate of the region 0x5398 higher. The
+duplication is a symptom of the truncation, not a property of the program.
+
+Finish the stream and it all comes back. Microsoft EXEPACK is read backwards from just
+below the `RB` header, past the 0xff padding: a command byte, a 16-bit count, and for a
+fill one more byte; `0xb0`/`0xb1` fill, `0xb2`/`0xb3` copy, and bit 0 set is the last
+command. Run to the end it terminates with source and destination pointers equal at
+0x1544, which is the packer's own way of saying everything below is already in place.
+`tools/symbolmap.py:finish_exepack` does exactly that, in Python, over the same memory the
+stub was handed.
+
+Three things say the result is right rather than merely different. It agrees with the
+emulated stub byte for byte over all 100,646 bytes the stub *did* write. `CCOL`, the
+select screen's four x positions, comes out 12, 88, 164, 240: four 64-pixel portraits on a
+320-pixel screen with a step of 76. And `SelectPAL` comes out as 32 words every one of
+which is a valid Amiga `0x0RGB`, whose entries the four portraits index into as blue,
+gold, emerald and red, matching `KnightGlowColours` from a completely different part of
+the image.
+
+**Only DGROUP is taken from the finished stream.** The rest of the unwritten span is past
+the end of the last code module, and the seven-step code correction fitted below is
+precisely this same displacement, so correcting the code as well would move every code
+address quoted in these documents by up to 473 bytes. That is a change of its own and is
+not made here.
+
+So the note that used to stand here, *a symbol having an address does not mean the bytes
+at that address are the program's*, was right about this image and wrong about the cause,
+and the better lesson is the older one two sections up: **a negative result about file
+structure is only as good as your confidence that you are looking at the whole file.**
+Twice now the answer has been that an unpacking stopped early.
+
+What came back, and what has not yet been read out of it: `SelectPAL` and `CCOL` are used
+by the select screen; `CRText` is its heading, `Select a Knight`, centred at y 5; `ARR`
+holds the title's four option rows at y 85, 110, 148 and 168; `Moons` is
+`45 47 46 48 49 48 46 47`; `XPlevels` is `3 2 1 1`; `LairType` is six 2s, six 6s, six 4s
+and six 0s, which is the forest, waste, marsh and glade order `LairFile` already gave,
+arriving a second time from a second table; `LairLocation` and `MapIconsTABLE` hold the
+map coordinates every place on the overworld is currently *placed* rather than recovered;
+and `BNAME`, `GNAME`, `ENAME` and `RNAME` are `SIR_GODBER`, `SIR_RICHARD`, `SIR_JEFFREY`
+and `SIR_EDWARD`, which is not what this project currently calls the four knights. Each of
+those belongs to the subsystem that owns it.
 
 ### The arena tables
 
@@ -479,18 +521,23 @@ TextASCII       44,634      MesFILE         46,007
 assuming it, because the debug information is appended after it.
 
 **`MAIN.EXE` was then checked, and it does not have the same fault.** This was the obvious
-next question, because if it did then its fitted code correction would be an artefact and
-its "first 2,906 bytes of DGROUP are a stale duplicate" would be the same misreading, which
-would make `MapIconsTABLE` readable. It is not so, on two independent tests. Running the
-same expander over `main.final.bin` finds no real stream: what it matches would make the
-file *shorter*, which a run-length expansion cannot do. And every one of the 411 data
-symbols that names a string has that string sitting at exactly the address the symbol
-table gives, in the unexpanded image, with none wrong. The image is already the program.
+next question, because if it did then its fitted code correction would be an artefact. It
+is not so, on two independent tests. Running the same expander over `main.final.bin` finds
+no real stream: what it matches would make the file *shorter*, which a run-length expansion
+cannot do. And every one of the 411 data symbols that names a string has that string
+sitting at exactly the address the symbol table gives, in the unexpanded image, with none
+wrong. The image is already the program.
 
 So the two executables genuinely differ: `INTR.EXE`'s image needed expanding and
 `MAIN.EXE`'s did not, and `MAIN.EXE`'s seven-step code correction stands, corroborated as
 it was by all nineteen `TaskComTable` handlers landing on entry points with it and none
-without it. `MapIconsTABLE` stays unreadable.
+without it.
+
+The question it was really asking, though, was whether the bottom of DGROUP could be
+recovered, and the answer to that turned out to be yes by another route entirely: the
+EXEPACK stub is not run to the end. See *Part of DGROUP was not in the load image* above.
+The correction and the truncation are two faces of one thing: the seven steps of the
+correction are the displacement of the copy the stub stopped in the middle of.
 
 Worth keeping beside the earlier note about the symbol table: **a negative result about
 file structure is only as good as your confidence that you are looking at the file**, and

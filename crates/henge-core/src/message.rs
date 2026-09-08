@@ -48,9 +48,10 @@
 //! welcomes and the stone circle's line are quoted from the image with their
 //! own x, y and flags. `HengeInstruct`, `GameOverMes`, `NoKeysMessage` and
 //! `SHMES1`..`SHMES8` all sit below `DS:0b5a`, inside the 2,906 bytes of
-//! `DGROUP` the unpacked image carries as a stale copy of another region
-//! (`docs/REVERSING.md`), so their text is not readable and none of it is
-//! guessed at here.
+//! `DGROUP` the unpacked image used to carry as a stale copy of another region,
+//! so their text was not readable and none of it is guessed at here. **That
+//! span is readable now** (`docs/REVERSING.md`) and these four chains have not
+//! been re-read out of it yet.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

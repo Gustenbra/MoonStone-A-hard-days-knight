@@ -47,8 +47,9 @@
 //!
 //! **What is not recovered.** Three of the four per-lair tables the initialiser
 //! copies from, `ForestLairs` (guardian and count), `LairLocation` and
-//! `LairType`, sit inside the 2,906 bytes of DGROUP that the load image carries
-//! as a stale duplicate, so they cannot be read. What the guardian can be is
+//! `LairType`, sit inside the 2,906 bytes of DGROUP that the load image used to
+//! carry as a stale duplicate. That span is readable now (`docs/REVERSING.md`)
+//! and this has not been re-read out of it. What the guardian can be is
 //! recovered, because `CombatTable` is filled by `InitGameStart` with the
 //! thirteen `InitKnightvs*` routines; which one each lair gets, how many, and
 //! where the lair is, are **ours** and marked so in the baker.

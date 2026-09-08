@@ -471,7 +471,8 @@ troll      Walk1 Walk2 Walk3 Walk4               (no up or down row)
 mudmen     Move1 Move3 Move1 Move2               (no up or down row)
 ratmen     Roll1..Roll4 / Leap1..Leap4           (no down row)
 dragon     LiftHead1..5, 5, 5, 5 / LowerHead1..5, 5, 5, 5   (rows at +0x10 and +0x20 only)
-beast      copied from BEWAL, which is in the unreadable first 2,906 bytes of DGROUP
+beast      copied from BEWAL, in the first 2,906 bytes of DGROUP, unreadable until the
+           unpacker was fixed; see REVERSING.md, and this has not been re-read since
 ```
 
 Two slips in the original are worth knowing before anyone reads a table as

@@ -5,7 +5,7 @@
 //! the sort of bug that shows up as a smear in exactly one screen.
 
 use crate::framebuffer::Framebuffer;
-use henge_assets::{Lut, Registry};
+use henge_assets::Registry;
 
 /// A frame lifted out of a sheet, with the anchor the pack gives it.
 pub struct Cut {
@@ -44,16 +44,6 @@ pub fn draw(
     }
 }
 
-/// Draw a frame through a colour substitution table.
-pub fn draw_lut(
-    reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
-    x: i32, y: i32, lut: &Lut,
-) {
-    if let Some(c) = cut(reg, sheet, index) {
-        fb.blit_lut(&c.pixels, c.w, c.h, x, y, false, lut);
-    }
-}
-
 /// Draw a frame as a flat silhouette.
 ///
 /// **Nothing the original draws is drawn this way**, so every use of it is this
@@ -62,10 +52,14 @@ pub fn draw_lut(
 /// sprite put over a screen it was not authored for comes out as noise; where
 /// henge shows a sprite somewhere the original never shows it, a silhouette in
 /// a chosen colour is the honest answer. What is left after the audit is the
-/// select screen's highlight border, which is a one index sprite whose index
-/// belongs to a palette that did not survive; the pointer, which henge puts on
-/// screens the original has no pointer on; the Valley's marker on the map; and
-/// the in-fight name plates, which the original does not have at all.
+/// pointer, which henge puts on screens the original has no pointer on; the
+/// Valley's marker on the map; and the in-fight name plates, which the original
+/// does not have at all.
+///
+/// The select screen's highlight frame used to be on that list, because it is
+/// one index and that index belonged to a palette that had not been read. It is
+/// read now, so the frame is blitted like every other cel and this is one use
+/// shorter than it was.
 pub fn draw_mask(
     reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
     x: i32, y: i32, colour: u8,

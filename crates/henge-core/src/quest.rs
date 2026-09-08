@@ -41,9 +41,11 @@
 //!
 //! **The words are the original's.** Every message in the chain lives in MOON's
 //! text pool at image 0xd6e0, which is a separate blob from the message records
-//! themselves: the records are in the 2,906 bytes of DGROUP the load image
-//! carries as a stale duplicate, so `NoKeysMessage`, `ValleyEnter`, `VICTORY`
-//! and `GameOverMes` cannot be read at their own addresses. The lines can, and
+//! themselves: the records are in the 2,906 bytes of DGROUP the load image used
+//! to carry as a stale duplicate, so `NoKeysMessage`, `ValleyEnter`, `VICTORY`
+//! and `GameOverMes` could not be read at their own addresses. That span is
+//! readable now (`docs/REVERSING.md`) and this has not been re-read out of it.
+//! The lines can be read either way, and
 //! there is exactly one candidate for each:
 //!
 //! ```text
