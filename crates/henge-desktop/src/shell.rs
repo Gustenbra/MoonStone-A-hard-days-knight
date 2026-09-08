@@ -456,22 +456,25 @@ pub fn draw_intro(
     if step.lines.is_empty() {
         return;
     }
-    let (dark, light) = status::extremes(fb);
+    // **Recovered, and the outline this used to draw is gone.** `BOLD.F`'s
+    // glyphs are drawn in five indices: 5 is the ring round each letter and
+    // its counters, 9 to 12 the bright face inside it. A silhouette paints the
+    // ring and the face the same colour, closing every counter, which is why a
+    // caption needed a halo to be read at all.
+    //
+    // The intro reserves those five entries and writes them itself: `0x0cfb`
+    // puts the ring back to black and the face to the ramp
+    // `0xfed, 0xdc9, 0xb95, 0x842`. `MESSAGE.PIV` carries the same five words
+    // in its own palette, which is what makes the game's messages legible over
+    // it, and the panorama the credits go over never uses 9 to 12 at all, so
+    // writing them there changes nothing but the lettering.
+    for (i, rgb) in henge_core::intro::CAPTION_INK {
+        fb.palette[i as usize] = rgb;
+    }
     // The intro sets its captions in the bold face, as the message system does.
     let Some(font) = fonts.bold.or(fonts.small) else { return };
     for line in step.lines {
-        // **Ours: the outline.** The original's glyphs keep their own shading,
-        // and `0x0cb0` turns the four entries that shading uses pure white
-        // while a caption is up and dims them to a grey ramp afterwards. This
-        // engine draws a glyph as a silhouette in one colour on purpose, so a
-        // white caption over the white moon these are drawn on would be
-        // unreadable. Ringing it in the picture's own darkest entry is what
-        // stands in for the shading, and it is the same trick the pointer uses.
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
-            let w = font.width(reg, line.text);
-            font.draw(reg, fb, line.text, (SCREEN_W as i32 - w) / 2 + ox, line.y + oy, dark);
-        }
-        font.draw_centred(reg, fb, line.text, line.y, light);
+        font.draw_own_centred(reg, fb, line.text, line.y);
     }
 }
 

@@ -477,6 +477,40 @@ is the half with `The End`, `And so, the tale of the Moonstone...`, `co.sti` and
 `bg5`, `bg7` and `bg8`. `ColourMoonstone` reads the same argument to colour the stone, so
 the argument is which moonstone the game was won with.
 
+## The sprite blitter, and what `blit_mask` really is
+
+`GFX` names twenty-two routines `do_1` through `do_20` after the mask byte each one
+serves, and `plane_tab`, thirty-three words in the code segment indexed by that byte,
+is how one is chosen. That table is the whole answer to a field this project had been
+guessing at.
+
+**`blit_mask` is a bit set, not a bit length.** A frame stores one plane per set bit and
+stored plane *i* goes to the mask's *i*th set bit; the bits the mask leaves out are
+zeroed. `do_17` says so in six instructions: four `mov`s through `si`, `di`, `bx` and
+`bp`, an `xor cl, cl` where bit 3 would be, four `inc`s, and then the same five
+`rol`/`rcl` pairs every routine ends with. Eleven of the table's slots hold the address
+of a bare `ret` instead, and a frame on one of those masks is not drawn at all.
+
+The project had read the mask as a bit length, which is the same answer for `0x01`,
+`0x03`, `0x07`, `0x0f` and `0x1f`. Those five are most of the release, which is why it
+survived so long. On the gapped masks it reads one plane too many and takes the head of
+the next frame as the top plane, so the sprite comes out in stripes of `index + 16`: the
+intro's walking druids in navy, and the arch-druid's lightning in red and white instead
+of blue.
+
+**It was checked against the whole release rather than against the one sprite that showed
+it.** For every pair of frames adjacent in a bank's packed blob, the gap between their
+data offsets must be `popcount(mask) * stride * height`. That holds in all 3,236 cases a
+gap can be measured, with no exceptions, across the 386 files.
+
+The same table explains the fonts. `BOLD.F` is mask `0x0f` and every glyph is drawn in
+five indices: 5 is an outline that rings the letter and fills its counters, and 9 to 12
+are the bright face inside it. `MESSAGE.PIV` carries `000`, `fed`, `dc9`, `b95`, `842` at
+exactly those five entries and uses none of them in its own picture, and `INTR.EXE`'s
+`0x0cfb` writes the same five words itself after every caption. So the font's colours are
+recovered, and a bold glyph has to be blitted with its own indices: flattened to one
+colour the ring and the face become the same colour and every letter closes up.
+
 ## The glyph map was in the executable after all
 
 `GFX:TextASCII` at image 107,446 in `MAIN.EXE` is 95 bytes indexed by `character - 32`, and

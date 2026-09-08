@@ -37,7 +37,7 @@ pub struct Sheet {
 
 /// Bumped whenever the baker starts writing something a pack could not have
 /// had before. The launcher rebakes when what is on disk does not match.
-pub const RECIPE: u32 = 3;
+pub const RECIPE: u32 = 4;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {

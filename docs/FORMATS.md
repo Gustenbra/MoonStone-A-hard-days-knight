@@ -56,7 +56,7 @@ entry[image_count]      ten bytes each:
     u16 width
     u16 height
     u8  plane_count
-    u8  blit_mask       colour mask; its bit length is how many planes are stored
+    u8  blit_mask       which output bits the stored planes feed
 u8  packed[]
 ```
 
@@ -64,8 +64,83 @@ Row stride is `((width + 15) / 16) * 2` bytes, so decoded width rounds up to a m
 of eight and each frame carries up to fifteen dead columns on the right. Colour index 0
 is transparent.
 
-`blit_mask == 32` is a special case: two planes, with bit 4 of the output set wherever
-either plane bit is set. It is a cheap outline blit, used for shadows.
+### `blit_mask` is a bit set, not a bit length
+
+**A frame stores `popcount(blit_mask)` planes, and stored plane *i* goes to the mask's
+*i*th set bit.** Bits the mask does not name are zero in every pixel of the frame.
+
+This is not inferred. `GFX` carries one hand-written routine per mask value, named after
+the byte itself, and `MAIN.EXE`'s symbol table names all twenty-two of them: `do_1`,
+`do_3` through `do_7`, `do_9` through `do_f`, `do_10`, `do_12`, `do_13`, `do_17`,
+`do_1b`, `do_1c`, `do_1e`, `do_1f` and `do_20`. That list is exactly the set of mask
+bytes the release uses. Each routine loads one byte per stored plane through `si`, `di`,
+`bx`, `bp` and a fifth pointer kept in the code segment, then rolls five bits into `al`
+with `rol`/`rcl` pairs, the last one rolled becoming bit 0. `do_17` is the clearest:
+
+```asm
+do_17:  xchg bx, dx
+        mov  dh, [si]        ; plane 0 -> bit 0
+        mov  dl, [di]        ; plane 1 -> bit 1
+        mov  ch, [bx]        ; plane 2 -> bit 2
+        xor  cl, cl          ; bit 3 has no plane, so it is zeroed
+        mov  ah, [bp]        ; plane 3 -> bit 4
+        inc si / inc di / inc bx / inc bp     ; four pointers, four planes
+```
+
+Mask `0x17` is `10111`, whose set bits are 0, 1, 2 and 4, and those are the four the four
+planes land in. `do_1b` (`11011`) skips bit 2 the same way and stores four, `do_13`
+(`10011`) stores three, `do_9` (`01001`) two.
+
+Reading the mask as a *bit length* instead gives the same answer for `0x01`, `0x03`,
+`0x07`, `0x0f` and `0x1f`, which is most of the release, so most of the game looks right
+either way. On a gapped mask it reads one plane too many, takes the head of the **next
+frame** as the top plane, and paints the sprite in stripes of `index + 16`. `DW1.CEL`'s
+walking druids are mask `0x17`: read as a length they come out navy and striped, read as
+a set they come out grey and white.
+
+Verified across the whole release: for every pair of frames adjacent in a bank's blob the
+gap between their offsets is `popcount(mask) * stride * height`, in all 3,236 cases where
+a gap can be measured, with no exceptions.
+
+`blit_mask == 32` is the one routine that is not its own set bits. `do_20` stores **two**
+planes, puts them in bits 0 and 1, and ors them together into bit 4:
+
+```asm
+do_20:  xchg bx, dx
+        mov  dh, [si]        ; plane 0 -> bit 0
+        mov  dl, [di]        ; plane 1 -> bit 1
+        xor  ch, ch / xor cl, cl
+        mov  ah, [si]
+        or   ah, [di]        ; either -> bit 4
+```
+
+It is the cheap outline blit, and `PO.CEL`, the pointer, is the only file in the release
+that uses it.
+
+The routines are reached through `plane_tab`, thirty-three words indexed by the mask byte
+and sitting in the code segment beside them. Twenty-two of its slots hold a routine and
+are exactly the twenty-two `do_` symbols, each in its own slot; the other eleven hold the
+address of a bare `ret`. So masks `0x00`, `0x02`, `0x08`, `0x11`, `0x14`, `0x15`, `0x16`,
+`0x18`, `0x19`, `0x1a` and `0x1d` **draw nothing at all**. Nine of those never occur in
+the release. The two that do are `0x00`, the forty-two placeholder entries, and `0x11`,
+which is `TROLL1.CEL` frame 46 and `MUDMEN2.CEL` frame 15: two frames the artwork carries
+and the blitter refuses.
+
+`plane_count` at `+8` is 1 in every frame of the release and nothing reads it.
+
+### Where the fonts keep their colours
+
+`BOLD.F`'s glyphs are mask `0x0f` and every one of them is drawn in five indices and no
+others: **5 is the outline**, which rings the letter and fills its counters, and **9, 10,
+11 and 12 are the letter face**, a bright stroke shaded across four steps inside that
+ring. `SMALL.FON` is mask `0x01`: one plane, index 1, a true silhouette.
+
+Those five entries are reserved. `MESSAGE.PIV`, the plate every message in the game is
+written over, carries `000`, `fed`, `dc9`, `b95`, `842` at exactly 5, 9, 10, 11 and 12,
+and uses none of them in its own picture; `INTR.EXE` writes the same five words itself
+around each caption. So a bold glyph must be blitted with its own indices, not flattened
+to one colour: flattening paints the ring and the face alike, every counter closes and
+the line reads as a row of blobs.
 
 Files with a `.C` extension are banks in this same format.
 

@@ -124,7 +124,7 @@ facing left  (task+0x14 == 3)   bit 0 clear: x += v     bit 0 set: x -= v
 |---|---|
 | `ff 00` | end of frame, next frame follows |
 | `ff fe` | end of frame; loop back if a `TASKLOOP` count is running, else advance |
-| `ff ff` | end of frame and, **unless a `TASKLOOP` count is running**, end of animation. Clears `task+1`, which is what lets `TASKHANDLE` ask the controller for a new script. The script pointer is left on the `0xff`, so the last frame keeps being drawn |
+| `ff ff` | end of frame and, **unless a `TASKLOOP` count is running**, end of animation. Clears `task+1`, which is what lets `TASKHANDLE` ask the controller for a new script. The script pointer is left on the `0xff` |
 
 The terminal form is not unconditional. The `ff ff` branch at `0x99a2` begins
 with the same three instructions as the `ff fe` branch at `0x9985`: test the
@@ -137,6 +137,17 @@ them `Knight_Burn`, `Beast_BackToss`, `TroggSpear_Toss` and the three
 plays once instead of the stated number of times.
 
 All 236 scripts end on `ff ff`.
+
+**A pointer left on the `0xff` draws nothing.** `PerformCOMMAND` builds a frame
+by walking the script from `task+2` and emitting a part for every record it
+passes; its very first test is `cmp ax, 0xff`, and a pointer sitting on the
+terminator jumps straight to `0x993a` and comes back having emitted none. In the
+game that is a single tick: `task+1` is clear, so `TASKHANDLE` hands the actor
+its next script at once and there is never an actor standing on a dead pointer.
+`INTR.EXE` has no controller behind its figures, and its own copy of the walk at
+`0x3fbe` behaves the same way, so **an intro figure whose script runs out simply
+leaves the picture**. That is how the druids walk out of shot at the left of the
+forest rather than piling up against the edge.
 
 ## The sprite-part record
 
@@ -371,7 +382,12 @@ Three choices are worth knowing.
 * **A finished script keeps showing its last frame.** The pointer stays on the
   terminal `0xff` as in the original, so a step produces no new parts; the
   task keeps the last non-empty part list and hands it back, rather than
-  re-running the frame, which would fire its sounds again every tick.
+  re-running the frame, which would fire its sounds again every tick. The
+  original draws nothing at all in that state, but never stays in it: the
+  controller replaces the script on the same tick. Where there is no
+  controller, as in the intro, the original's own behaviour is the one to have,
+  and `henge_core::content::IntroCast::frame_at` returns nothing rather than the
+  last frame.
 
 `TASKJUMP`'s ballistic step is transcribed from `0x9ceb` as it stands,
 including two branches that read oddly (the upward form stores the speed into

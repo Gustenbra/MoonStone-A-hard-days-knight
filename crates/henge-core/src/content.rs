@@ -702,15 +702,39 @@ pub struct IntroCast {
     pub banks: Vec<String>,
     /// Script offset in `DGROUP`, as `"1583"`, to its flattened frames.
     pub scripts: BTreeMap<String, Vec<IntroFrame>>,
+    /// For a script that goes round, the frame it comes back to. A script with
+    /// no entry here ends on `ff ff` and is not drawn once it has run out.
+    #[serde(default)]
+    pub loops: BTreeMap<String, u32>,
 }
 
 impl IntroCast {
     /// Which frame of a script is showing `n` of the intro's own frames after
-    /// it started. A script that has run out keeps showing its last frame,
-    /// which is what `ff ff` does: it leaves the script pointer on the `0xff`.
+    /// it started.
+    ///
+    /// A script that runs off its end shows **nothing**. The frame builder at
+    /// `0x3fbe` walks the script from the task's own pointer and emits a part
+    /// for every record it passes; a task left sitting on `ff ff` reaches
+    /// `0x418b` on the first byte and returns having emitted none. So a druid
+    /// whose walk is over is gone from the picture, not frozen in the last
+    /// pose he struck.
+    ///
+    /// A script that loops goes round from [`IntroCast::loops`], which is where
+    /// its `TASKGOTO` sends it.
     pub fn frame_at<'a>(&'a self, script: &str, n: u32) -> Option<&'a IntroFrame> {
         let frames = self.scripts.get(script)?;
+        let span = |f: &[IntroFrame]| -> u32 { f.iter().map(|f| f.hold.max(1) as u32).sum() };
+        let total = span(frames);
         let mut left = n;
+        if left >= total {
+            let from = *self.loops.get(script)? as usize;
+            let head = span(frames.get(..from.min(frames.len())).unwrap_or(frames));
+            let cycle = total.saturating_sub(head);
+            if cycle == 0 {
+                return frames.last();
+            }
+            left = head + (left - head) % cycle;
+        }
         for f in frames {
             let hold = f.hold.max(1) as u32;
             if left < hold {
@@ -719,5 +743,65 @@ impl IntroCast {
             left -= hold;
         }
         frames.last()
+    }
+}
+
+#[cfg(test)]
+mod intro_cast_tests {
+    use super::{IntroCast, IntroFrame};
+    use crate::taskvm::Part;
+    use std::collections::BTreeMap;
+
+    fn frame(cel: u8, hold: u8) -> IntroFrame {
+        IntroFrame {
+            hold,
+            parts: vec![Part { table: 1, bank: 3, cel, y: 0, flags: 0, x: 0 }],
+        }
+    }
+
+    fn cast(frames: Vec<IntroFrame>, loops: Option<u32>) -> IntroCast {
+        let mut scripts = BTreeMap::new();
+        scripts.insert("2927".to_string(), frames);
+        let mut l = BTreeMap::new();
+        if let Some(from) = loops {
+            l.insert("2927".to_string(), from);
+        }
+        IntroCast { banks: vec!["bank.dw1".into()], scripts, loops: l }
+    }
+
+    /// A script that finishes on `ff ff` is not drawn once it has run out. The
+    /// frame builder walks from the task's own pointer and a pointer left on
+    /// the `0xff` emits no parts at all, so the forest's druids leave the
+    /// screen rather than piling up against its left edge.
+    #[test]
+    fn a_script_that_has_run_out_shows_nothing() {
+        let c = cast(vec![frame(1, 1), frame(2, 1), frame(3, 1)], None);
+        assert_eq!(c.frame_at("2927", 0).unwrap().parts[0].cel, 1);
+        assert_eq!(c.frame_at("2927", 2).unwrap().parts[0].cel, 3);
+        assert!(c.frame_at("2927", 3).is_none(), "it is gone, not frozen");
+        assert!(c.frame_at("2927", 900).is_none());
+    }
+
+    /// One that loops goes round from where its `TASKGOTO` sends it, so the
+    /// standing figures keep standing for as long as the scene lasts and their
+    /// torches keep flickering.
+    #[test]
+    fn a_looping_script_goes_round_from_its_own_jump() {
+        let c = cast(vec![frame(1, 1), frame(2, 1), frame(3, 1)], Some(1));
+        assert_eq!(c.frame_at("2927", 2).unwrap().parts[0].cel, 3);
+        assert_eq!(c.frame_at("2927", 3).unwrap().parts[0].cel, 2);
+        assert_eq!(c.frame_at("2927", 4).unwrap().parts[0].cel, 3);
+        assert_eq!(c.frame_at("2927", 99).unwrap().parts[0].cel, 2);
+    }
+
+    /// A hold counts for as many of the intro's frames as it says.
+    #[test]
+    fn a_held_frame_stays_up_for_its_whole_hold() {
+        let c = cast(vec![frame(1, 4), frame(2, 1)], None);
+        for n in 0..4 {
+            assert_eq!(c.frame_at("2927", n).unwrap().parts[0].cel, 1);
+        }
+        assert_eq!(c.frame_at("2927", 4).unwrap().parts[0].cel, 2);
+        assert!(c.frame_at("2927", 5).is_none());
     }
 }

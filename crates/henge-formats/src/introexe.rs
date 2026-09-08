@@ -156,7 +156,7 @@ fn width(op: u8) -> Option<usize> {
 const CAST_BANKS: [&str; 5] =
     ["bank.au1", "bank.li1", "bank.ha1", "bank.dw1", "bank.da1"];
 
-/// Flatten one script into frames.
+/// Flatten one script into frames, and say where it rejoins itself.
 ///
 /// The intro's scripts use five of the twenty-one commands and nothing else:
 /// `TASKHOLD`, `TASKGOTO`, `TASKLOOP`, `TASKGOSUB` and the sprite-part record.
@@ -164,11 +164,25 @@ const CAST_BANKS: [&str; 5] =
 /// frame, which is what makes a script that finishes on `ff ff` carry on
 /// anyway: that is how the intro's scenery holds still while the one script
 /// with no pending jump decides how long the scene lasts.
-pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, bool)> {
+///
+/// The second return is the frame a script that outlives its own length goes
+/// back to, and `None` for one that simply stops. `0x3fbe` builds a frame by
+/// walking the script from the task's pointer, and a task sitting on `ff ff`
+/// walks straight into `0x418b`, which clears the running flag and returns
+/// **without emitting a single part**. So a script that has run out is not
+/// drawn at all, rather than holding its last frame: the forest's druids walk
+/// off the left of the screen and are gone.
+///
+/// Where a script does loop, the walk comes back to a script position it has
+/// already started a frame at, and that position's frame is where it rejoins.
+pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, Option<usize>)> {
     let mut p = DS_BASE + off as usize;
     let mut frames: Vec<Frame> = Vec::new();
     let mut cur = Frame { hold: 1, parts: Vec::new() };
     let mut pending: Option<u16> = None;
+    // Where each frame started, so a script that comes back to one is known to
+    // loop and known to loop from there.
+    let mut starts: Vec<usize> = vec![p];
     while frames.len() < cap {
         let b = *img.get(p).ok_or_else(|| anyhow::anyhow!("script {off:04x} runs off the image"))?;
         if b == 0xff {
@@ -177,11 +191,13 @@ pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, 
             p += 2;
             if let Some(t) = pending.take() {
                 p = DS_BASE + t as usize;
-                continue;
+            } else if end == 0xff {
+                return Ok((frames, None));
             }
-            if end == 0xff {
-                return Ok((frames, false));
+            if let Some(at) = starts.iter().position(|q| *q == p) {
+                return Ok((frames, Some(at)));
             }
+            starts.push(p);
             continue;
         }
         if b & 0x80 != 0 {
@@ -213,28 +229,36 @@ pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, 
         });
         p += 6;
     }
-    Ok((frames, true))
+    // Long enough to have been cut rather than ended: it is going round
+    // something, so send it back to the top.
+    Ok((frames, Some(0)))
 }
 
 /// Every script the intro's own scene routines start, flattened.
 ///
 /// The list is the `mov si, imm16` operands of the calls to the two task
 /// starters at `0x1ef` and `0x207`, read out of the intro's main module.
-pub const SCRIPTS: [u16; 16] = [
+pub const SCRIPTS: [u16; 18] = [
     0x1583, 0x1739, 0x1e29, 0x2669, 0x26e3, 0x2927, 0x2ce5, 0x2dc5, 0x2e51, 0x2e75, 0x2e99,
-    0x309f, 0x3221, 0x338f, 0x348f, 0x349b,
+    0x2ec3, 0x309f, 0x30c3, 0x3221, 0x338f, 0x348f, 0x349b,
 ];
 
 pub fn cast(img: &[u8]) -> anyhow::Result<Cast> {
     let mut scripts = BTreeMap::new();
+    let mut loops = BTreeMap::new();
     for off in SCRIPTS {
-        // A looping script is cut at the point it repeats; nothing in the
-        // intro shows one for longer than a scene lasts.
-        let (frames, _looped) = flatten(img, off, 64)?;
+        // A looping script is cut where it comes back on itself, and the frame
+        // it comes back to is kept so it can go round for as long as the scene
+        // needs. One that ends on `ff ff` gets no entry, and stops being drawn.
+        let (frames, from) = flatten(img, off, 64)?;
         anyhow::ensure!(!frames.is_empty(), "script {off:04x} has no frames");
-        scripts.insert(format!("{off:04x}"), frames);
+        let name = format!("{off:04x}");
+        if let Some(from) = from {
+            loops.insert(name.clone(), from as u32);
+        }
+        scripts.insert(name, frames);
     }
-    Ok(Cast { banks: CAST_BANKS.iter().map(|s| s.to_string()).collect(), scripts })
+    Ok(Cast { banks: CAST_BANKS.iter().map(|s| s.to_string()).collect(), scripts, loops })
 }
 
 // ------------------------------------------------------------------ the check
@@ -391,6 +415,36 @@ mod tests {
         assert_eq!((pan.width, pan.height), (320, 50));
         assert_eq!(pan.pixels[0], 99, "cell 11 starts at (32, 25) of its sheet");
         assert_eq!(pan.pixels[25 * 320], 2, "the second row comes from sheet 1");
+    }
+
+    /// A script that finishes on `ff ff` reports no loop, and one that jumps
+    /// back reports the frame it jumps to. That is the difference between a
+    /// druid who walks out of shot and one who stands there flickering his
+    /// torch for the rest of the scene.
+    #[test]
+    fn a_script_says_whether_it_stops_or_goes_round() {
+        let mut img = vec![0u8; DS_BASE + 0x100];
+        // Two frames of one part each, then `ff ff`.
+        let stops: Vec<u8> = vec![
+            0x0c, 1, 0, 0, 0, 0, 0xff, 0x00,
+            0x0c, 2, 0, 0, 0, 0, 0xff, 0xff,
+        ];
+        img[DS_BASE + 0x10..DS_BASE + 0x10 + stops.len()].copy_from_slice(&stops);
+        let (frames, from) = flatten(&img, 0x10, 64).expect("it decodes");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(from, None, "it ends rather than repeating");
+
+        // Three frames, the last arming a jump back to the second. The jump is
+        // taken at the end of the frame it is read in, not where it stands.
+        let goes: Vec<u8> = vec![
+            0x0c, 1, 0, 0, 0, 0, 0xff, 0x00,
+            0x0c, 2, 0, 0, 0, 0, 0xff, 0x00,
+            0x0c, 3, 0, 0, 0, 0, 0x82, 0x00, 0x58, 0x00, 0xff, 0x00,
+        ];
+        img[DS_BASE + 0x50..DS_BASE + 0x50 + goes.len()].copy_from_slice(&goes);
+        let (frames, from) = flatten(&img, 0x50, 64).expect("it decodes");
+        assert_eq!(frames.len(), 3);
+        assert_eq!(from, Some(1), "it rejoins at the frame the jump lands on");
     }
 
     #[test]

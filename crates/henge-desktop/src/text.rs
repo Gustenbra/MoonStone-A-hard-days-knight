@@ -51,6 +51,25 @@ impl Font {
 
     pub fn draw(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
                 x: i32, y: i32, colour: u8) -> i32 {
+        self.render(reg, fb, s, x, y, Some(colour))
+    }
+
+    /// Draw a line in the glyphs' own colours rather than as a silhouette.
+    ///
+    /// `BOLD.F`'s glyphs carry five indices: 5 rings the letter and fills its
+    /// counters, and 9 to 12 are the bright face inside that ring. A
+    /// silhouette paints both in one colour, which closes every counter and
+    /// turns the line into a row of blobs. Blitting the indices keeps the
+    /// letter shapes, and it is legible wherever the screen's palette carries
+    /// the font's own five entries: `MESSAGE.PIV` has them already, and
+    /// `henge_core::intro::CAPTION_INK` is the intro writing them itself.
+    pub fn draw_own(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
+                    x: i32, y: i32) -> i32 {
+        self.render(reg, fb, s, x, y, None)
+    }
+
+    fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
+              x: i32, y: i32, colour: Option<u8>) -> i32 {
         let mut cx = x;
         for c in s.chars() {
             if c == ' ' {
@@ -70,7 +89,10 @@ impl Font {
                     px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
                 }
             }
-            fb.blit_mask(&px, w, h, cx, y, colour);
+            match colour {
+                Some(ink) => fb.blit_mask(&px, w, h, cx, y, ink),
+                None => fb.blit(&px, w, h, cx, y, false),
+            }
             cx += w as i32 + self.tracking;
         }
         cx - x
@@ -80,6 +102,13 @@ impl Font {
                         y: i32, colour: u8) {
         let w = self.width(reg, s);
         self.draw(reg, fb, s, (henge_core::SCREEN_W as i32 - w) / 2, y, colour);
+    }
+
+    /// [`Font::draw_own`], centred the way `TextPTop` centres a line whose
+    /// record sets bit 0 of its flag word.
+    pub fn draw_own_centred(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str, y: i32) {
+        let w = self.width(reg, s);
+        self.draw_own(reg, fb, s, (henge_core::SCREEN_W as i32 - w) / 2, y);
     }
 }
 

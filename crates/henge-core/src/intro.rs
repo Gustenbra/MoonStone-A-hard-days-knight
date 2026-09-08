@@ -39,7 +39,21 @@
 //! - **The cast animates**, on the intro's own scripts. They are in its
 //!   `DGROUP` like the game's, and the intro's `INITTASK` fills one more
 //!   handler slot than the game's, so `TASKGOSUB` is `0x9a` here and `0x98`
-//!   there. Sixteen scripts drive the plates.
+//!   there. Eighteen scripts drive the plates.
+//! - **Which scripts a scene spawns is a table, and reading it corrected the
+//!   stone circle.** `0x34b` and `0x31f` step a word table at `[0x13ad]` for
+//!   `[0x13ab]` entries, spawning one and then running `16 - [0x13af]` frames.
+//!   The circle's table at `DS:0x12d3` is `2ec3, 2ec3, 30c3, 30c3` and its
+//!   walkers are torches out of `DA1.CEL`, seen from above like the plate; the
+//!   forest's at `DS:0x12db` is ten of `2927` and the dolmen's at `DS:0x1303`
+//!   five of `26e3`.
+//! - **A figure whose script runs out leaves.** The frame builder emits a part
+//!   for every record it walks past and a script pointer sitting on `ff ff`
+//!   walks past none, so nothing is drawn. Holding the last frame instead is
+//!   what left a druid standing at the left edge of the forest.
+//! - **The captions' colours are the artwork's.** `BOLD.F` draws every glyph in
+//!   five indices, 5 the ring round the letter and 9 to 12 its face, and the
+//!   intro writes those five palette entries itself. See [`CAPTION_INK`].
 //!
 //! **The intro is the first half of `INTR.EXE` and the ending is the second.**
 //! The program reads its command tail at `PSP:0x82` and jumps to a different
@@ -178,6 +192,32 @@ pub const TALE: &[Line] = &[
 ];
 pub const THE_END: &[Line] = &[l("The End", 95)];
 
+/// The font's own five palette entries, and what `0x0cfb` sets them to.
+///
+/// `BOLD.F`'s glyphs are not silhouettes. Every one of them is drawn in
+/// exactly five indices: **5 is the outline**, which rings the letter and
+/// fills its counters, and **9, 10, 11 and 12 are the letter face**, a thin
+/// bright stroke shaded across four steps inside that outline. Flatten all
+/// five to one colour and the outline and the face become the same colour, so
+/// every counter closes and the line reads as a row of blobs.
+///
+/// The intro reserves those five and writes them itself. `0x0cb0` sets all
+/// five to white while a caption goes up, and `0x0cfb` puts them back to the
+/// values below: the outline black and the face a warm ramp. `MESSAGE.PIV`,
+/// the plate every message in the game is written over, carries exactly these
+/// five words in its own palette, which is what makes the game's text legible
+/// on it; the panorama's palette leaves 9 to 12 unused entirely, so writing
+/// them over the moon costs the picture nothing. That is the whole of the
+/// caption's colour, and it is the artwork's, so nothing has to be invented
+/// for it.
+pub const CAPTION_INK: [(u8, u32); 5] = [
+    (5, 0x000000),
+    (9, 0xffeedd),
+    (10, 0xddcc99),
+    (11, 0xbb9955),
+    (12, 0x884422),
+];
+
 // ------------------------------------------------------------------ the pan
 
 /// The pan's speed schedule: the first threshold the position has not passed
@@ -279,8 +319,14 @@ pub const STEPS: &[Step] = &[
         cast: &[r("26e3", 0), r("26e3", 8), r("26e3", 16), r("26e3", 24), r("26e3", 32)],
         frames: 40,
     },
-    // `0x240`: the six standing figures of `0x4ab`, then four more alternating
-    // left and right sixteen frames apart, then the one that ends the scene.
+    // `0x240`: the six standing figures of `0x4ab`, then the four of the table
+    // at `DS:0x12d3` alternating right and left sixteen frames apart, then the
+    // one that ends the scene.
+    //
+    // That table is `2ec3, 2ec3, 30c3, 30c3`, and reading it rather than
+    // assuming is what puts the right figures on this plate: the circle is seen
+    // from above, and what walks into it is two torches out of `DA1.CEL`, not
+    // the forest's side-on walker.
     Step {
         back: Backdrop::Plate("scene.bg3"),
         wordmark: false,
@@ -288,7 +334,7 @@ pub const STEPS: &[Step] = &[
         cast: &[
             r("2e75", 0), r("2e99", 0), r("2dc5", 0),
             lf("2e75", 0), lf("2e99", 0), lf("2ce5", 0),
-            r("2927", 0), lf("2927", 16), r("2927", 32), lf("2927", 48),
+            r("2ec3", 0), lf("2ec3", 16), r("30c3", 32), lf("30c3", 48),
             r("338f", 64),
         ],
         frames: 102,
