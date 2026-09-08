@@ -126,11 +126,14 @@ impl TitleScene {
         // its own indices mean nothing here.
         let (lw, lh) = sprite::size(reg, TITLE_BANK, LOGO);
         let lx = (SCREEN_W as i32 - lw) / 2;
-        fb.rect(0, 6, SCREEN_W as i32, lh + 10, dark);
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            sprite::draw_mask(reg, fb, TITLE_BANK, LOGO, lx + ox, 10 + oy, faint);
-        }
-        sprite::draw_mask(reg, fb, TITLE_BANK, LOGO, lx, 10, light);
+        // With its own pixels, over whatever is behind it. The wordmark is
+        // artwork with a drawn outline and a shaded face; drawing it as a flat
+        // silhouette lost all of that, and the black band and the four way
+        // outline were both invented to make the silhouette read. Neither is
+        // the original's, and the band is what made the title look like a
+        // caption stuck on a black banner.
+        sprite::draw(reg, fb, TITLE_BANK, LOGO, lx, 10, false);
+        let _ = (lh, dark);
 
         if self.attracting() {
             if let Some(small) = fonts.small {
@@ -154,7 +157,9 @@ impl TitleScene {
             if on {
                 sprite::draw_mask(reg, fb, SEL, ARROW, ARROW_X, y + 3, light);
             }
-            bold.draw(reg, fb, label, text_x, y, if on { light } else { faint });
+            // Two tones, so the counters stay open. One flat colour paints a
+            // glyph's outline and its face alike, and every o and e fills in.
+            bold.draw_two_tone(reg, fb, label, text_x, y, dark, if on { light } else { faint });
         }
 
         // The original's own two credit lines, which are frames 74 and 75 of the

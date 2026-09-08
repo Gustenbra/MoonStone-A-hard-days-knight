@@ -98,6 +98,61 @@ impl Font {
         cx - x
     }
 
+    /// Draw in two tones, keeping the glyph's own structure.
+    ///
+    /// A `BOLD.F` glyph is not a silhouette. Its lowest index is an outline
+    /// that rings the letter **and fills its counters**, and the indices above
+    /// that are a bright face inside it. [`Font::draw`] paints both in one
+    /// colour, so every `o` and `e` fills in solid and a line of them reads as
+    /// blobs. Here the outline takes one colour and the face another, which
+    /// opens the counters again.
+    ///
+    /// Unlike [`Font::draw_own`] this needs no particular palette loaded, so it
+    /// suits a menu drawn over artwork whose palette is the artwork's.
+    pub fn draw_two_tone(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
+                         x: i32, y: i32, outline: u8, face: u8) -> i32 {
+        let mut cx = x;
+        for c in s.chars() {
+            if c == ' ' {
+                cx += self.space_width;
+                continue;
+            }
+            let Some(g) = self.glyph.get(&c).copied() else { continue };
+            let Some(rect) = reg.sheet(&self.sheet).and_then(|r| r.value.frames.get(g).copied())
+            else { continue };
+            let Ok(img) = reg.image(&self.sheet) else { continue };
+
+            let (w, h) = (rect.w as usize, rect.h as usize);
+            let mut px = vec![0u8; w * h];
+            for row in 0..h {
+                let src = (rect.y as usize + row) * img.width + rect.x as usize;
+                if src + w <= img.pixels.len() {
+                    px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
+                }
+            }
+            let mut seen: Vec<u8> = px.iter().copied().filter(|p| *p != 0).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            let mut lut = henge_assets::IDENTITY;
+            for (rank, idx) in seen.iter().enumerate() {
+                if (*idx as usize) < lut.len() {
+                    lut[*idx as usize] = if rank == 0 { outline } else { face };
+                }
+            }
+            fb.blit_lut(&px, w, h, cx, y, false, &lut);
+            cx += w as i32 + self.tracking;
+        }
+        cx - x
+    }
+
+    /// [`Font::draw_two_tone`], centred.
+    pub fn draw_two_tone_centred(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
+                                 y: i32, outline: u8, face: u8) {
+        let w = self.width(reg, s);
+        let x = (henge_core::SCREEN_W as i32 - w) / 2;
+        self.draw_two_tone(reg, fb, s, x, y, outline, face);
+    }
+
     pub fn draw_centred(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
                         y: i32, colour: u8) {
         let w = self.width(reg, s);
