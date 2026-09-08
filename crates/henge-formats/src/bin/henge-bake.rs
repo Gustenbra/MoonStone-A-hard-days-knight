@@ -2536,7 +2536,17 @@ fn bake_music(out: &Path, m: &mut Manifest) -> anyhow::Result<usize> {
 ///   twelfth frame. The symbol says what those three are: the river.
 /// * `MOON:ChooseKnight` loads `SelectPAL` and calls
 ///   `COLOURGLOW(0x0f, 0x088, 1, 0)`, so entry fifteen breathes towards a teal
-///   on the character select screen.
+///   on the character select screen. **Recovered and deliberately not shipped.**
+///   The call is read straight off `0x158e`: index 15, target 0x088, period 1,
+///   repeat 0, and repeat 0 is the original's forever, because `COLCON` swaps
+///   the glow's two ends when it arrives. The trouble is the palette it is
+///   meant to breathe in. `ChooseKnight` loads `SelectPAL` at `DS:0x892`
+///   first, and `SelectPAL` is inside the 2,906 bytes of `DGROUP` that cannot
+///   be read, so this screen stands on `CH.PIV`'s palette instead. In that one,
+///   entry fifteen is the whole night sky, so a recovered effect aimed at a
+///   palette we do not have repaints the entire background twice a second.
+///   An effect is only as recovered as the palette it runs on, and half of a
+///   recovered pair is worse than neither.
 ///
 /// The other two glows in the game hang off the fight rather than the screen:
 /// `MudmenGlowOn` (entry 14, wired in `main.rs`) and `KnightGlowOn`, which is
@@ -2548,9 +2558,9 @@ fn palette_effects() -> String {
             "cycles": [{ "first": 0x15, "last": 0x17, "up": true, "period": 12 }],
             "glows":  [{ "index": 0x1f, "target": 0x0ff, "period": 1, "repeat": 0 }]
         },
-        "select": {
-            "glows": [{ "index": 0x0f, "target": 0x088, "period": 1, "repeat": 0 }]
-        }
+        // The select screen's glow is left out until `SelectPAL` can be read.
+        // See the note above.
+        "select": { "glows": [] }
     })
     .to_string()
 }
