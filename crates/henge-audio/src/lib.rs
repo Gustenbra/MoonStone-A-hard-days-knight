@@ -9,9 +9,11 @@
 //! sound card, and a browser or server build replaces only the boring half.
 
 pub mod cue;
+pub mod music;
 pub mod sink;
 
 pub use cue::{Cue, Voices};
+pub use music::{Note, Score, Tunes};
 pub use sink::{Clips, Recording, Silent, Sink};
 
 #[cfg(feature = "native")]

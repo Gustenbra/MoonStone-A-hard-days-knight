@@ -78,6 +78,49 @@ plain.
 Worth keeping as a note to whoever reverses the next DOS binary: a negative result about
 file structure is only as good as your confidence that you are looking at the file.
 
+## The same trick works on the music
+
+The tune files were written off in `FORMATS.md` as "driver blobs with data welded into
+executable code rather than a readable format", which is exactly right and turned out
+not to matter. There is no format to parse, but there is a driver to run.
+
+Eighteen files ship, which is `MusicTable`'s six tunes by three sound cards, and the
+first letter of each name says which card it is for. Two of the three are hard: `a` is
+an AdLib, so recovering it would mean an OPL2 emulator, and `b` is the PC speaker.
+**The third is an MPU-401, and the bytes it puts on the port are plain MIDI.**
+
+So `tools/tunes.py` loads an `RTUNEn.BIN` at a segment, sets `ds = cs` the way its own
+first instructions do, enters it as an interrupt handler with `ah = 0` and then `ah = 1`
+once per tick, and hooks the `in` and `out` instructions. The status port is answered
+"ready" and the data port "ACK", and everything the driver writes to 0x330 is read back
+as MIDI with running status. Note, channel, velocity, start and length, all six tunes.
+
+The tick is not a guess: `Install_Timer` programs the 8253 with mode 3 and a divisor of
+0x5555, and the handler's first two instructions are `mov ah, 1; int 60h`, so one call
+of the driver is one tick of a 54.62 Hz timer and nothing else.
+
+It is the same argument as the unpacker, one floor down. The driver is the
+specification, so executing it cannot disagree with it.
+
+## A trap in the recovered code addresses
+
+The symbol table's code addresses take a seven-step monotone correction, which
+`symbolmap.py` derives and applies. That makes each symbol land on the right byte of the
+image, but it also means **a relative call that crosses one of those steps decodes to a
+target that is off by the difference between the two steps**.
+
+`COLCON` was where this bit. Its two calls into `GFX` decode to `0x5af2` and `0x5b32`,
+and both land in the middle of an instruction, which reads at first like the image being
+wrong. It is not: `COLCON` sits in a region corrected by -12 and its targets in one
+corrected by -85, so both are 73 bytes high, and the real targets are `0x5aa9`, which
+converts the palette to DAC bytes, and `0x5ae9`, which uploads them.
+
+The fix when reading a call is to undo the source's own correction and then look for the
+region the target lands in. Worth knowing before concluding that a byte is not where the
+symbol says it is; every intra-module branch is exact, so the failure only shows up when
+following a call between modules, which is exactly when it is least expected.
+
+
 The 327 `PUBLIC` names (`LOADKNIGHT`, `CALCHIT` and the rest) live in a separate appended
 blob and still carry no addresses. They are not needed: the 2,223 that do carry addresses
 already cover the code.

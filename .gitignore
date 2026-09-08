@@ -23,8 +23,10 @@
 *.HIT
 *.voc
 
-# A saved game, which a player's run makes wherever they run the game from.
+# A saved game, which a player's run makes wherever they run the game from,
+# and the control bindings, which are written beside it.
 /henge-save.json
+/henge-controls.json
 
 # Python bytecode from the research tools
 __pycache__/

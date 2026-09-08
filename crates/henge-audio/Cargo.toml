@@ -13,4 +13,6 @@ native = ["dep:rodio"]
 
 [dependencies]
 henge-core = { path = "../henge-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rodio = { version = "0.19", default-features = false, features = ["wav"], optional = true }

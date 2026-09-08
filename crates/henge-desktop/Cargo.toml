@@ -10,11 +10,16 @@ name = "henge"
 path = "src/main.rs"
 
 [features]
-default = ["audio"]
+default = ["audio", "gamepad"]
 audio = ["henge-audio/native"]
+# Gamepads. Off in a build with no player at a machine, and safe to leave on
+# anywhere: gilrs reports no pads rather than failing when there is no input
+# subsystem, which is the normal state in CI.
+gamepad = ["dep:gilrs"]
 # Opt-in developer mode for studying the original game's data. Off by default so
 # that a release build cannot contain original assets even by accident.
 research = ["dep:henge-formats"]
+gilrs = ["dep:gilrs"]
 
 [dependencies]
 henge-core = { path = "../henge-core" }
@@ -22,7 +27,9 @@ henge-assets = { path = "../henge-assets" }
 henge-audio = { path = "../henge-audio", default-features = false }
 henge-formats = { path = "../henge-formats", optional = true }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 winit = "0.29"
 softbuffer = "0.4"
 png = "0.17"
+gilrs = { version = "0.10", optional = true }

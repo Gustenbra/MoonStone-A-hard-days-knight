@@ -39,6 +39,18 @@ fi
 [ -f packs/reference/manifest.json ] || rebake=1
 
 if [ -n "$rebake" ]; then
+  # The music has to be lifted out of the tune drivers before the bake can put
+  # it in the pack. It needs python and unicorn, and the game plays without it,
+  # so a failure here is a note rather than a stop.
+  if [ ! -f research/tunes.json ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      echo "Reading the music..."
+      python3 tools/tunes.py "$data" research/tunes.json || \
+        echo "  no music this time. It needs unicorn:  pip install unicorn"
+    else
+      echo "  no python3, so no music. The rest of the game is unaffected."
+    fi
+  fi
   echo "Reading the original game files..."
   cargo run --release --bin henge-bake -- "$data"
 fi
@@ -51,6 +63,7 @@ echo "  menus: arrows move, enter or space takes"
 echo "  fighting: arrows move, space swings, escape quits"
 echo "  tab switches map and arena, [ and ] change arena, R restarts, C the sheet"
 echo "  player two: WASD and F"
+echo "  gamepads work, and F11 calibrates one"
 echo
 # shellcheck disable=SC2086
 exec target/release/henge $pass

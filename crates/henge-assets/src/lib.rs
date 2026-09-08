@@ -19,10 +19,12 @@
 //! turns "have we replaced everything yet" from a memory test into a check.
 
 pub mod manifest;
+pub mod palette;
 pub mod recolour;
 pub mod registry;
 
 pub use manifest::{FrameRect, Manifest, Provenance, Sheet};
+pub use palette::{Cycle, EffectTable, Effects, Fade, Glow, SceneEffects};
 pub use recolour::{player_colours, player_luts, ramp, Lut};
 pub use registry::{Coverage, Registry, Resolved};
 

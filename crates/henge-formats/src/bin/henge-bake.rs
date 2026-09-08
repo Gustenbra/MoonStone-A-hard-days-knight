@@ -638,6 +638,28 @@ const MAPSLOW_AT: usize = 124_890;
 const GRID_LEN: usize = 40 * 26;
 
 fn main() -> anyhow::Result<()> {
+    // `henge-bake --render-music <dir>` writes each recovered tune out as a
+    // WAV, which is how a tune is listened to, or measured, without starting
+    // the game. Research only, like the rest of this crate.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(i) = argv.iter().position(|a| a == "--render-music") {
+        let dir = argv.get(i + 1).cloned().unwrap_or_else(|| "research/music".into());
+        let text = fs::read_to_string("research/tunes.json")
+            .context("reading research/tunes.json")?;
+        let tunes: henge_audio::music::Tunes = serde_json::from_str(&text)?;
+        fs::create_dir_all(&dir)?;
+        for (name, score) in tunes.split() {
+            let pcm = henge_audio::music::render(&score);
+            let path = Path::new(&dir).join(format!("{name}.wav"));
+            fs::write(&path, henge_audio::music::wav(&pcm, henge_audio::music::RATE))?;
+            println!(
+                "{}: {} notes, {:.1}s, {}",
+                path.display(), score.notes.len(), score.seconds(),
+                if score.looping { "loops" } else { "runs once" }
+            );
+        }
+        return Ok(());
+    }
     let mut args = std::env::args().skip(1);
     let src = args.next().unwrap_or_else(|| ".".into());
     let out = args.next().unwrap_or_else(|| "packs/reference".into());
@@ -874,6 +896,22 @@ fn main() -> anyhow::Result<()> {
 
     fs::write(out.join("data/knights.json"), knight_definitions())?;
     m.data.insert("data.knights".into(), "data/knights.json".into());
+
+    fs::write(out.join("data/palette-effects.json"), palette_effects())?;
+    m.data.insert("data.palette.effects".into(), "data/palette-effects.json".into());
+
+    fs::write(out.join("data/music-places.json"), music_places())?;
+    m.data.insert("data.music.places".into(), "data/music-places.json".into());
+
+    // The tunes, if `tools/tunes.py` has been run. Music is derived data like
+    // everything else here, so it goes in the pack and never into the tree.
+    match bake_music(out, &mut m) {
+        Ok(0) => println!(
+            "no music: run `python3 tools/tunes.py \"{src}\" research/tunes.json` first"
+        ),
+        Ok(n) => println!("music: {n} tunes"),
+        Err(e) => eprintln!("music: {e:#}"),
+    }
 
     fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&m)?)?;
     println!(
@@ -2396,6 +2434,93 @@ fn knight_definitions() -> String {
         knight("Sir Balain",  [0xae8, 0x6b5, 0x473], [26, 180]),
         knight("Sir Gunther", [0xd00, 0x900, 0x500], [300, 185]),
     ])
+    .to_string()
+}
+
+/// Which tune plays where.
+///
+/// **Recovered.** `LOADMUSIC` is at image `0x900d` and takes the tune number in
+/// `ax`; `MusicTable` at DS `0x84f0` is eighteen four byte records, six tunes by
+/// three sound cards, and the second word of each is the disk it lives on.
+/// Five places call it, and each is followed by `mov ah, 0; int 60h`:
+///
+/// | caller | `ax` | tune |
+/// |---|---|---|
+/// | `_TAVERN:load_DiceBACK` | 2 | `tune3`, stopped by `LeaveTavern` |
+/// | the routine that opens the henge, before `_TAVERN:HengeLOOP` | 1 | `tune2` |
+/// | `_WIZARD:LoadWizard` | 1 | `tune2`, stopped at `e5$` |
+/// | `_WIZARD:MysticUpDown` | 3 | `tune4`, stopped by `MysticFini` |
+/// | `_WIZARD:_bestow_done` | 4 | `tune5` |
+///
+/// The last is a moment inside the wizard's tower rather than a room of its
+/// own, so it is recovered and not wired; see `BUILD_ORDER.md` item 77.
+/// Tunes 1 and 6 are never loaded by `MAIN.EXE`: they ship on disk A with the
+/// intro and belong to `INTR.EXE`, whose own `LOADMUSIC` call could not be
+/// traced to a tune number.
+fn music_places() -> String {
+    serde_json::json!({
+        "highwood.dice": "music.tune3",
+        "waterdeep.dice": "music.tune3",
+        "stones": "music.tune2",
+        "wizard": "music.tune2",
+        "waterdeep.mystic": "music.tune4"
+    })
+    .to_string()
+}
+
+/// The recovered tunes, split into one score per asset.
+///
+/// `research/tunes.json` is what `tools/tunes.py` writes: the note stream of
+/// each `RTUNEn.BIN`, taken by running the game's own MPU-401 driver under
+/// emulation. Absent is not an error, the same way a missing symbol table is
+/// not: the game plays without music and says so.
+fn bake_music(out: &Path, m: &mut Manifest) -> anyhow::Result<usize> {
+    let path = Path::new("research/tunes.json");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = fs::read_to_string(path).context("reading research/tunes.json")?;
+    let tunes: henge_audio::music::Tunes =
+        serde_json::from_str(&text).context("research/tunes.json is not a tune file")?;
+    fs::create_dir_all(out.join("music"))?;
+    let mut n = 0;
+    for (name, score) in tunes.split() {
+        let file = format!("music/{name}.json");
+        fs::write(out.join(&file), serde_json::to_string(&score)?)?;
+        m.music.insert(format!("music.{name}"), file);
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Which palette entries move on which screen.
+///
+/// **Recovered.** The original installs exactly two things through
+/// `COLOURCYCLE` and `COLOURGLOW` from a named screen, and both are here:
+///
+/// * `_MAP:MapEffects` calls `COLOURGLOW(0x1f, 0x0ff, 1, 0)` and then
+///   `COLOURCYCLE(0x15, 0x17, 1, 0x0c)`, keeping the handles in `GemXY+4` and
+///   `RiverHANDLE`. So on the overworld the last palette entry breathes towards
+///   a bright cyan every frame, and entries 21 to 23 rotate upwards every
+///   twelfth frame. The symbol says what those three are: the river.
+/// * `MOON:ChooseKnight` loads `SelectPAL` and calls
+///   `COLOURGLOW(0x0f, 0x088, 1, 0)`, so entry fifteen breathes towards a teal
+///   on the character select screen.
+///
+/// The other two glows in the game hang off the fight rather than the screen:
+/// `MudmenGlowOn` (entry 14, wired in `main.rs`) and `KnightGlowOn`, which is
+/// entries 6, 7 and 8 for a knight down to ten health. See `BUILD_ORDER.md`
+/// item 75 for why the second is recovered but not wired.
+fn palette_effects() -> String {
+    serde_json::json!({
+        "map": {
+            "cycles": [{ "first": 0x15, "last": 0x17, "up": true, "period": 12 }],
+            "glows":  [{ "index": 0x1f, "target": 0x0ff, "period": 1, "repeat": 0 }]
+        },
+        "select": {
+            "glows": [{ "index": 0x0f, "target": 0x088, "period": 1, "repeat": 0 }]
+        }
+    })
     .to_string()
 }
 

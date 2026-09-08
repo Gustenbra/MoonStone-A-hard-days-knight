@@ -5,6 +5,7 @@
 
 mod ending;
 mod framebuffer;
+mod input;
 mod map;
 mod place;
 mod shell;
@@ -162,6 +163,16 @@ fn save_path_arg(a: &[String]) -> String {
         .and_then(|i| a.get(i + 1))
         .cloned()
         .unwrap_or_else(|| "henge-save.json".to_string())
+}
+
+/// `--controls <path>`: where the binding table and the stick calibration live.
+/// Beside the save, by the same reasoning: it is a setting, not a game.
+fn controls_path_arg(a: &[String]) -> String {
+    a.iter()
+        .position(|s| s == "--controls")
+        .and_then(|i| a.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "henge-controls.json".to_string())
 }
 
 #[derive(Default)]
@@ -376,9 +387,17 @@ fn main() -> anyhow::Result<()> {
                 Mode::Place => {
                     let Some(s) = app.visiting.as_ref() else { break };
                     let Some(def) = app.places.get(&s.visit.place) else { break };
-                    format!("{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}",
+                    // The tune, when the room has one. Five of the original's
+                    // rooms do and nothing else in the game does, so a trace is
+                    // the way to check that the right one is on and that it
+                    // stops at the door.
+                    let tune = match app.audio.music() {
+                        Some(id) => format!("  [{id}]"),
+                        None => String::new(),
+                    };
+                    format!("{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}{}",
                         t, app.run.day, app.run.health, app.run.gold, carrying(&app.run),
-                        place::describe(def, &s.visit, &app.items), s.visit.said)
+                        place::describe(def, &s.visit, &app.items), s.visit.said, tune)
                 }
                 Mode::Combat => {
                     let Some(w) = app.world.as_ref() else { break };
@@ -449,6 +468,14 @@ fn main() -> anyhow::Result<()> {
                 script.drive(&mut app, &mut fed);
             }
             app.update();
+            // Drawn every tick, not just at the end. A window redraws each
+            // frame and so learns the palette each screen loads; a capture that
+            // only drew once would tick a whole run of cycles and glows against
+            // whatever palette happened to be up when it started.
+            app.render();
+        }
+        if !args.iter().any(|a| a == "--fade") {
+            app.settle_fade();
         }
         app.render();
         // --say draws a line of text over whatever was rendered, so the font
@@ -461,6 +488,13 @@ fn main() -> anyhow::Result<()> {
         }
         app.save_png(&path)?;
         println!("wrote {path} ({})", app.status);
+        // The composed palette, which is the only way to see a cycle or a glow
+        // on an entry the picture hardly uses. Item 75's own check.
+        if args.iter().any(|a| a == "--palette") {
+            let p = app.palette_now();
+            let hex: Vec<String> = p.iter().map(|c| format!("{c:06x}")).collect();
+            println!("palette {}", hex.join(" "));
+        }
         return Ok(());
     }
 
@@ -473,6 +507,17 @@ fn main() -> anyhow::Result<()> {
     app.mode = start_arg(&args_of()).unwrap_or(Mode::Intro);
     if app.mode == Mode::Select {
         app.begin_select();
+    }
+
+    // Gamepads. No pad, and no way to look for one, are both normal: the game
+    // says so once and plays on the keys, exactly as it does with no sound card.
+    let mut pads = input::Pads::open();
+    match pads.note.as_deref() {
+        Some(note) => println!("{note}"),
+        None => match pads.count() {
+            0 => println!("gamepads: none plugged in; F11 calibrates one when there is"),
+            n => println!("gamepads: {n} found; F11 calibrates player one's"),
+        },
     }
 
     let event_loop = EventLoop::new()?;
@@ -534,6 +579,11 @@ fn main() -> anyhow::Result<()> {
                     if down && code == KeyCode::Escape {
                         elwt.exit();
                     }
+                    // `Fix_JoyStick`, on a key of our choosing because the
+                    // original reached it from a menu this shell does not have.
+                    if down && code == KeyCode::F11 {
+                        app.calibrate(0);
+                    }
                     app.key(code, down);
                 }
             }
@@ -546,6 +596,11 @@ fn main() -> anyhow::Result<()> {
                 if owed > TICK * 6 {
                     owed = TICK * 6;
                 }
+                // The sticks, once a frame and before the ticks they feed.
+                // The original reads them in its own frame loop and ORs them
+                // into the key word, and this is the same place.
+                pads.poll();
+                app.pads_tick(&pads);
                 let mut ticked = false;
                 while owed >= TICK {
                     app.update();
@@ -567,7 +622,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 if let Ok(mut buffer) = surface.buffer_mut() {
                     app.render();
-                    let palette = app.fb.faded_palette(app.fade);
+                    let palette = app.palette_now();
                     app.fb.present_into(
                         &mut buffer,
                         size.width as usize,
@@ -583,9 +638,24 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `MudmenGlowOn`: `COLOURGLOW(0x0e, 0x100, 2, 0)`. Palette entry fourteen
+/// breathes towards a dark red every other frame for as long as the bout runs.
+/// Recovered, and installed by `InitCombat` when mudmen are in the arena.
+const MUDMEN_GLOW: henge_assets::Glow =
+    henge_assets::Glow { index: 0x0e, target: 0x100, period: 2, repeat: 0 };
+
 struct App {
     fb: Framebuffer,
-    fade: u8,
+    /// `COLCON`'s two tables and the fade, applied to the palette on its way
+    /// to the screen. Item 75; see `henge_assets::palette`.
+    fx: henge_assets::Effects,
+    /// What each screen installs, out of the pack rather than out of code.
+    fx_table: henge_assets::EffectTable,
+    /// Which screen is up, so a change of screen can fade the new one in the
+    /// way every one of the original's own loaders does.
+    scene: String,
+    /// Place id to tune id, recovered from `LOADMUSIC`'s callers.
+    music_places: std::collections::BTreeMap<String, String>,
     tick: u64,
     keys: [bool; 256],
     /// Keys that went down this tick. A menu wants presses, not held keys, or
@@ -613,6 +683,20 @@ struct App {
     fonts: std::collections::BTreeMap<String, Font>,
     /// Suppress ambushes, so map rendering can be checked anywhere.
     peaceful: bool,
+    /// Which key and which stick raise which action. Ours, and data: item 76.
+    bindings: input::Bindings,
+    /// Where the bindings and the calibration are kept.
+    controls_path: String,
+    /// The keyboard's half of the ten seat slots. A pad and a key can both hold
+    /// the same action, exactly as the original ORs `JOY1` into its key word,
+    /// so the two halves are kept apart and combined.
+    kb: [bool; 256],
+    /// The pads' half.
+    pad_held: [bool; 256],
+    /// `BOUNCEBUTTON`, one per seat, for the calibration screen.
+    bounce: [input::Debounce; 2],
+    /// `Fix_JoyStick`, when it is running.
+    calibrating: Option<(usize, input::Calibrating)>,
     run: Run,
     /// The last thing a cutpurse took, for the map to say so. The map has no
     /// message line of its own, so the notice rides on the purse plate in the
@@ -718,34 +802,74 @@ fn open_audio(reg: &mut henge_assets::Registry) -> Box<dyn Sink> {
     }
     let loaded = clips.len();
 
+    // The tunes, as the recovered note streams rather than as audio. They are
+    // rendered when a room asks for one, because a run may never open a door
+    // that has music behind it.
+    let tunes: Vec<(String, henge_audio::Score)> = reg
+        .all_ids()
+        .into_iter()
+        .filter(|id| id.starts_with("music."))
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|id| {
+            let r = reg.music(&id)?;
+            let text = std::fs::read_to_string(r.root.join(r.value)).ok()?;
+            Some((id, henge_audio::Score::parse(&text)?))
+        })
+        .collect();
+
     #[cfg(feature = "audio")]
     match henge_audio::Native::new(clips) {
-        Ok(n) => {
-            println!("audio: {loaded} clips");
+        Ok(mut n) => {
+            let songs = tunes.len();
+            for (id, score) in tunes {
+                n.add_score(id, score);
+            }
+            println!("audio: {loaded} clips, {songs} tunes");
             return Box::new(n);
         }
-        Err(e) => eprintln!("audio: {loaded} clips loaded but no output device ({e}), playing silently"),
+        Err(e) => eprintln!(
+            "audio: {loaded} clips and {} tunes loaded but no output device ({e}), playing silently",
+            tunes.len()
+        ),
     }
     #[cfg(not(feature = "audio"))]
-    let _ = loaded;
-    Box::new(henge_audio::Silent)
+    println!("audio: built without a backend; {loaded} clips and {} tunes go unheard", tunes.len());
+    Box::new(henge_audio::Silent::default())
 }
 
+/// The ten slots the two seats own. Everything the game reads about walking and
+/// swinging goes through one of these, which is what makes them the ten things
+/// worth rebinding.
+///
+/// Slots 0 to 3, 6 to 11 are the seats; the rest are the developer keys, which
+/// [`key_index`] still owns because they are not controls.
+fn slot_of(seat: usize, a: input::Action) -> usize {
+    use input::Action::*;
+    match (seat, a) {
+        (0, Up) => 0,
+        (0, Down) => 1,
+        (0, Left) => 2,
+        (0, Right) => 3,
+        (0, Fire) => 6,
+        (1, Up) => 7,
+        (1, Down) => 8,
+        (1, Left) => 9,
+        (1, Right) => 10,
+        (1, Fire) => 11,
+        _ => 255,
+    }
+}
+
+/// The keys that are not controls, so are not in the bindings table.
+///
+/// The ten seat slots are gone from here: they come out of `input::Bindings`
+/// now, so that changing them is editing a file rather than editing this match.
 fn key_index(c: KeyCode) -> usize {
     match c {
-        KeyCode::ArrowUp => 0,
-        KeyCode::ArrowDown => 1,
-        KeyCode::ArrowLeft => 2,
-        KeyCode::ArrowRight => 3,
         KeyCode::BracketLeft => 4,
         KeyCode::BracketRight => 5,
-        KeyCode::Space => 6,
-        // Seat two shares the keyboard, which is how this game was played.
-        KeyCode::KeyW => 7,
-        KeyCode::KeyS => 8,
-        KeyCode::KeyA => 9,
-        KeyCode::KeyD => 10,
-        KeyCode::KeyF => 11,
         // Enter takes a menu option. The original had only fire, but everyone
         // arriving at a menu presses Enter first, and finding that it does
         // nothing reads as a broken menu rather than as a different key.
@@ -811,6 +935,48 @@ impl App {
         // A pack without knights is not an error; the title simply cannot offer
         // a quest, exactly as it could not before.
         let knights: Knights = reg.read_data("data.knights").unwrap_or_default();
+        // Controls are ours and they are data: a file beside the save, read if
+        // it is there and the documented defaults if it is not.
+        let controls_path = controls_path_arg(&args_of());
+        let args = args_of();
+        let mut bindings = input::Bindings::load(&controls_path).unwrap_or_else(|| {
+            if args.iter().any(|a| a == "--original-keys") {
+                input::Bindings::as_the_original_had_them()
+            } else {
+                input::Bindings::default()
+            }
+        });
+        // `--bind 0:fire=Space`. There is no settings screen yet, so a
+        // rebinding is made here or in the file, and either way it is the
+        // same table and the same names.
+        let mut rebound = false;
+        for (i, a) in args.iter().enumerate() {
+            if a != "--bind" {
+                continue;
+            }
+            match args.get(i + 1).and_then(|s| input::Bindings::parse_bind(s)) {
+                Some((seat, action, src)) => {
+                    bindings.bind(seat, action, src);
+                    rebound = true;
+                }
+                None => eprintln!("--bind: cannot read {:?}", args.get(i + 1)),
+            }
+        }
+        if rebound || args.iter().any(|a| a == "--controls-write") {
+            match bindings.save(&controls_path) {
+                Ok(()) => println!("controls written to {controls_path}"),
+                Err(e) => eprintln!("controls not written: {e}"),
+            }
+        }
+        // Which entries cycle and which glow on each screen: recovered
+        // constants, and data rather than code, so a replacement pack can
+        // animate its own palettes.
+        let fx_table: henge_assets::EffectTable =
+            reg.read_data("data.palette.effects").unwrap_or_default();
+        // Which tune plays in which room. Recovered from `LOADMUSIC`'s five
+        // callers, and data rather than code like everything else.
+        let music_places: std::collections::BTreeMap<String, String> =
+            reg.read_data("data.music.places").unwrap_or_default();
         if world.is_none() {
             eprintln!("no arena data: {status}");
         } else {
@@ -822,7 +988,12 @@ impl App {
         }
 
         Ok(App {
-            fb, fade: 255, tick: 0,
+            fb,
+            fx: henge_assets::Effects::new(),
+            fx_table,
+            scene: String::new(),
+            music_places,
+            tick: 0,
             keys: [false; 256],
             pressed: [false; 256],
             reg, world,
@@ -840,6 +1011,12 @@ impl App {
             voices: Voices::new(),
             fonts,
             peaceful: false,
+            bindings,
+            controls_path,
+            kb: [false; 256],
+            pad_held: [false; 256],
+            bounce: [input::Debounce::default(); 2],
+            calibrating: None,
             run: Run::new(100),
             robbed: String::new(),
             robbed_for: 0,
@@ -887,11 +1064,26 @@ impl App {
                 _ => {}
             }
         }
+        // The seats' ten slots come out of the binding table; everything else
+        // is a developer key and stays where it is.
+        let named = input::Source::key(&format!("{code:?}"));
+        for (seat, action) in self.bindings.raised_by(&named) {
+            let s = slot_of(seat, action);
+            if s < 256 {
+                if down && !self.keys[s] {
+                    self.pressed[s] = true;
+                }
+                self.kb[s] = down;
+                self.keys[s] = self.kb[s] || self.pad_held[s];
+            }
+        }
         let i = key_index(code);
         if i < 256 {
             if down && !self.keys[i] {
                 self.pressed[i] = true;
             }
+        }
+        {
             if down && self.world.is_some() {
                 match code {
                     KeyCode::BracketLeft => self.world.as_mut().unwrap().step_arena(-1),
@@ -930,7 +1122,9 @@ impl App {
                     _ => {}
                 }
             }
-            self.keys[i] = down;
+            if i < 256 {
+                self.keys[i] = down;
+            }
         }
         #[cfg(feature = "research")]
         if let Some(v) = self.research.as_mut() {
@@ -938,12 +1132,183 @@ impl App {
         }
     }
 
+    /// The pads, once a frame, ORed into the same slots the keys feed.
+    ///
+    /// This is `GetInputDevice`'s shape: read the stick, read the keys, OR them
+    /// and throw away opposite directions. It runs only in the window, because
+    /// a headless run drives the slots itself.
+    fn pads_tick(&mut self, pads: &input::Pads) {
+        for seat in 0..self.bindings.seats.len().min(2) {
+            let cal = self.bindings.calibration(seat);
+            let word = pads.word(&self.bindings.seats[seat], &cal);
+            for a in input::Action::ALL {
+                let s = slot_of(seat, a);
+                if s >= 256 {
+                    continue;
+                }
+                let on = word & a.bit() != 0;
+                if on && !self.keys[s] {
+                    self.pressed[s] = true;
+                }
+                self.pad_held[s] = on;
+                self.keys[s] = self.kb[s] || on;
+            }
+            // `BOUNCEBUTTON`, kept ticking whether or not anything is asking,
+            // so a press held from before a calibration started is not counted.
+            let edge = self.bounce[seat].edge(word);
+            if let Some((who, state)) = self.calibrating {
+                if who == seat {
+                    let raw = pads.raw(self.bindings.seats[seat].pad).unwrap_or((0, 0));
+                    match state.step(raw, edge) {
+                        Ok(next) => {
+                            if next != state {
+                                self.calibrating = Some((seat, next));
+                                self.notice(next.prompt().join(" "));
+                            }
+                        }
+                        Err(cal) => {
+                            self.bindings.set_calibration(seat, cal);
+                            self.calibrating = None;
+                            let note = match self.bindings.save(&self.controls_path) {
+                                Ok(()) => format!("stick {seat} calibrated"),
+                                Err(e) => format!("calibrated, but not saved: {e}"),
+                            };
+                            self.notice(note);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Starts `Fix_JoyStick` for one seat, and says what it wants.
+    fn calibrate(&mut self, seat: usize) {
+        self.bounce[seat.min(1)].clear();
+        let state = input::Calibrating::TopLeft;
+        self.calibrating = Some((seat, state));
+        self.notice(state.prompt().join(" "));
+    }
+
     /// One tick. A key press is an edge: it lasts exactly this tick and is
     /// spent whether or not anything wanted it.
     fn update(&mut self) {
         self.simulate();
+        self.palette_tick();
+        self.music_tick();
         self.pressed = [false; 256];
         self.robbed_for = self.robbed_for.saturating_sub(1);
+    }
+
+    /// The name of the screen that is up. Compared frame to frame, so that
+    /// arriving somewhere new installs that screen's palette effects and fades
+    /// it in, which is what every one of the original's own loaders does:
+    /// `FADEPALETTEOUT`, load, `FADEPALETTEIN`.
+    fn scene_key(&self) -> String {
+        if self.interlude > 0 {
+            return "interlude".into();
+        }
+        if self.showing.is_some() {
+            return "message".into();
+        }
+        match self.mode {
+            Mode::Intro => "intro".into(),
+            Mode::Title => "title".into(),
+            Mode::Select => "select".into(),
+            Mode::Map => "map".into(),
+            Mode::Place => match self.visiting.as_ref() {
+                Some(s) => format!("place.{}", s.visit.place),
+                None => "place".into(),
+            },
+            Mode::Combat => match self.world.as_ref() {
+                Some(w) => format!("arena.{}", w.family()),
+                None => "arena".into(),
+            },
+        }
+    }
+
+    /// One frame of `COLCON`, plus a fade whenever the screen changes.
+    fn palette_tick(&mut self) {
+        let key = self.scene_key();
+        if key != self.scene {
+            self.scene = key;
+            // The base palette the effects work from is whatever the screen
+            // last drew with, which is what `PALLOC` points at.
+            let base = self.fb.palette;
+            let fx = self.fx_table.get(&self.scene).cloned().unwrap_or_default();
+            self.fx.install(&fx, &base);
+            // `InitCombat` calls `MudmenGlowOn` when mudmen are in the bout,
+            // and nothing else does, so it hangs off the fighters rather than
+            // off the screen.
+            if self.mudmen_present() {
+                self.fx.install_glow(MUDMEN_GLOW, &base);
+            }
+            self.fx.set_fade(henge_assets::Fade::In(0));
+        }
+        self.fx.tick();
+        // `FADEOUTDAY`, and the fade a message chain ends on. Both are screens
+        // that go out on their own rather than being walked away from, which
+        // is the only kind of fade out a shell with no loading time can honour:
+        // the original's other fades cover a disk read that does not happen
+        // here. `NextWHICH` fades the between days screen and all three of
+        // `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` fade the chain.
+        let leaving = if self.interlude > 0 {
+            Some(self.interlude)
+        } else if self.showing.is_some() {
+            Some(self.showing_for)
+        } else {
+            None
+        };
+        if let Some(left) = leaving {
+            let steps = henge_assets::palette::FADE_STEPS;
+            if left <= steps as u32 {
+                self.fx.set_fade(henge_assets::Fade::Out(steps - left as u16));
+            }
+        }
+    }
+
+    /// The tune for the room you are standing in, and silence everywhere else.
+    ///
+    /// That is exactly what the original does: five of its rooms call
+    /// `LOADMUSIC` and then `int 60h` with `ah = 0` on the way in, and every
+    /// one of them calls it with `ah = 2` on the way out. Nothing else in the
+    /// game has music, the map and the arenas included.
+    fn music_tick(&mut self) {
+        let want = if self.mode == Mode::Place {
+            self.visiting
+                .as_ref()
+                .and_then(|s| self.music_places.get(&s.visit.place))
+                .cloned()
+        } else {
+            None
+        };
+        match want {
+            Some(id) => self.audio.play_music(&id),
+            None => self.audio.stop_music(),
+        }
+    }
+
+    fn mudmen_present(&self) -> bool {
+        self.world
+            .as_ref()
+            .is_some_and(|w| w.bout.fighters.iter().any(|f| f.actor == "mudmen"))
+    }
+
+    /// The palette as it should reach the screen. One source for the window
+    /// and for a capture, so a screenshot shows the fade the player sees.
+    fn palette_now(&self) -> [u32; 32] {
+        self.fx.apply(&self.fb.palette)
+    }
+
+    /// Runs any fade in progress out to its sixteenth frame. A capture is a
+    /// still, and a still of the second frame of a fade is a black picture, so
+    /// every recipe written before fades existed still shows its screen.
+    fn settle_fade(&mut self) {
+        for _ in 0..henge_assets::palette::FADE_STEPS {
+            if self.fx.fade().finished() {
+                break;
+            }
+            self.fx.tick();
+        }
     }
 
     fn simulate(&mut self) {
@@ -2109,8 +2474,9 @@ impl App {
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         let mut rgb = Vec::with_capacity(SCREEN_W * SCREEN_H * 3);
+        let palette = self.palette_now();
         for p in &self.fb.pixels {
-            let c = self.fb.palette[(*p & 0x1f) as usize];
+            let c = palette[(*p & 0x1f) as usize];
             rgb.extend_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8]);
         }
         enc.write_header()?.write_image_data(&rgb)?;
@@ -2161,6 +2527,11 @@ impl App {
     /// The scene, and then the character sheet over it if it is up.
     fn render(&mut self) {
         self.draw_scene();
+        // The screen has just loaded its own palette, which is the moment the
+        // original installs a glow: `MapEffects` and `ChooseKnight` both do it
+        // straight after the picture. Anything seeded a frame early is seeded
+        // again here rather than breathing between the wrong two colours.
+        self.fx.reseed(&self.fb.palette);
         if self.sheet {
             let seat = self.run.knight.seat;
             let colour = henge_assets::player_colours(&self.fb.palette)[seat % 4];
@@ -2304,5 +2675,76 @@ impl App {
                 self.fb.pixels[y * SCREEN_W + x] = ((x + y + (self.tick / 2) as usize) / 8 % 32) as u8;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chain a key press actually walks: winit's `KeyCode`, its own name,
+    /// the binding table, and the slot the game reads. Worth a test because the
+    /// name is taken from the `Debug` impl, so a rename upstream would silently
+    /// unbind the arrow keys rather than fail to compile.
+    fn slots_for(b: &input::Bindings, code: KeyCode) -> Vec<usize> {
+        b.raised_by(&input::Source::key(&format!("{code:?}")))
+            .into_iter()
+            .map(|(seat, action)| slot_of(seat, action))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_bindings_reach_the_slots_the_game_reads() {
+        let b = input::Bindings::default();
+        for (code, slot) in [
+            (KeyCode::ArrowUp, 0),
+            (KeyCode::ArrowDown, 1),
+            (KeyCode::ArrowLeft, 2),
+            (KeyCode::ArrowRight, 3),
+            (KeyCode::Space, 6),
+            (KeyCode::KeyW, 7),
+            (KeyCode::KeyS, 8),
+            (KeyCode::KeyA, 9),
+            (KeyCode::KeyD, 10),
+            (KeyCode::KeyF, 11),
+        ] {
+            assert_eq!(slots_for(&b, code), vec![slot], "{code:?} lost its slot");
+        }
+    }
+
+    #[test]
+    fn the_developer_keys_are_not_in_the_binding_table() {
+        let b = input::Bindings::default();
+        for code in [KeyCode::BracketLeft, KeyCode::Comma, KeyCode::Enter, KeyCode::Tab] {
+            assert!(slots_for(&b, code).is_empty(), "{code:?} is bound as a control");
+        }
+        assert_eq!(key_index(KeyCode::BracketLeft), 4);
+        assert_eq!(key_index(KeyCode::Enter), 12);
+        // And none of them is one of the ten seat slots.
+        for code in [KeyCode::BracketLeft, KeyCode::BracketRight, KeyCode::Enter,
+                     KeyCode::Comma, KeyCode::Period] {
+            let i = key_index(code);
+            assert!(!(0..=3).contains(&i) && !(6..=11).contains(&i), "{code:?} took slot {i}");
+        }
+    }
+
+    #[test]
+    fn rebinding_moves_the_slot_a_key_feeds() {
+        let mut b = input::Bindings::default();
+        let (seat, action, src) =
+            input::Bindings::parse_bind("0:fire=Enter").expect("a readable spec");
+        b.bind(seat, action, src);
+        assert_eq!(slots_for(&b, KeyCode::Enter), vec![6]);
+        // And the key it replaced still works, because a list is a list.
+        assert_eq!(slots_for(&b, KeyCode::Space), vec![6]);
+    }
+
+    #[test]
+    fn the_originals_own_keys_reach_the_same_slots() {
+        let b = input::Bindings::as_the_original_had_them();
+        assert_eq!(slots_for(&b, KeyCode::Enter), vec![6]);
+        assert_eq!(slots_for(&b, KeyCode::Tab), vec![11]);
+        assert_eq!(slots_for(&b, KeyCode::KeyX), vec![8]);
+        assert_eq!(slots_for(&b, KeyCode::ArrowUp), vec![0]);
     }
 }

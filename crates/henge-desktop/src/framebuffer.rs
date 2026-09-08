@@ -2,7 +2,10 @@
 //!
 //! Working in palette indices rather than RGB is not nostalgia. It keeps colour
 //! cycling, palette fades and per-area recolouring cheap, all of which the genre
-//! leans on heavily.
+//! leans on heavily. The fades and the cycling themselves live in
+//! `henge_assets::palette`, because they are arithmetic on a palette and have
+//! nothing to do with pixels; this holds the base palette a screen drew with,
+//! and the composed one is what reaches the window.
 
 use henge_core::{SCREEN_H, SCREEN_W};
 
@@ -27,18 +30,6 @@ impl Framebuffer {
 
     pub fn clear(&mut self, index: u8) {
         self.pixels.fill(index);
-    }
-
-    /// Scales every palette entry, for fades in and out.
-    pub fn faded_palette(&self, level: u8) -> [u32; 32] {
-        let mut out = [0u32; 32];
-        for (i, c) in self.palette.iter().enumerate() {
-            let r = ((c >> 16) & 0xff) * level as u32 / 255;
-            let g = ((c >> 8) & 0xff) * level as u32 / 255;
-            let b = (c & 0xff) * level as u32 / 255;
-            out[i] = (r << 16) | (g << 8) | b;
-        }
-        out
     }
 
     /// Draws an indexed sprite, treating index 0 as transparent.

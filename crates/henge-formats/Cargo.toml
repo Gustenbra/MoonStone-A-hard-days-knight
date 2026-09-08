@@ -6,6 +6,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+henge-audio = { path = "../henge-audio", default-features = false }
 anyhow = "1"
 png = "0.17"
 serde = { version = "1", features = ["derive"] }

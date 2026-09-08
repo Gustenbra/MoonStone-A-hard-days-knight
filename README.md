@@ -123,13 +123,27 @@ need your own copy of the original, which the engine reads and converts locally.
 - A deterministic simulation with a state fingerprint, proven by test to agree tick for
   tick across independent runs and across a save/restore
 - Sound: swings, blows, deaths and footfalls
+- **Music, and it is the original's own.** The tune files are x86 driver blobs with the
+  song welded into the code, but three ship for every tune and the Roland one speaks
+  plain MIDI, so running the game's own driver under emulation gives the notes back.
+  All six, playing where the original's own `LOADMUSIC` calls put them: the dice table,
+  the stone circle, the wizard's tower and the mystic, and nowhere else. The voices are
+  ours; the notes are not
+- **The palette moves.** Fades in and out on every screen change, sixteen steps at one a
+  frame, and the original's own colour cycling and colour glows: the overworld's water,
+  the select screen's sky, and the mudmen
+- **Gamepads**, read the way the original reads a stick, with its own dead zone, its own
+  two-corner calibration and its own debounce; and controls that are a table of data
+  rather than a match on key codes
 - 326 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
 You need [Rust](https://rustup.rs) and your own copy of the original game's data
-files. Put the folder holding `KN1.OB`, `MAP.CMP` and the rest next to this one, so
-that both sit side by side, then:
+files. On Linux you also need `libudev-dev`, which is what the gamepad library builds
+against; without it, build with `--no-default-features` and play on the keys. Put the
+folder holding `KN1.OB`, `MAP.CMP` and the rest next to this one, so that both sit side
+by side, then:
 
 ```
 play.bat                 Windows
@@ -147,12 +161,20 @@ play.bat --data "C:\path\to\Moonstone"
 Pass `--rebake` after changing anything about how the data is read. Anything else you
 pass goes straight to the game, so `play.bat --start select` opens on character select.
 
+The bake also lifts the music out of the original's tune drivers, which needs Python and
+`pip install unicorn`. Without them everything works except the music, and the script
+says so and carries on.
+
 The long way, if you would rather drive it yourself:
 
 ```sh
+python3 tools/tunes.py "path/to/Moonstone" research/tunes.json   # the music, once
 cargo run --release -p henge-formats --bin henge-bake -- "path/to/Moonstone" packs/reference
 cargo run --release
 ```
+
+The first line needs `pip install unicorn`, and it is the only step that does. Skip it
+and everything works except the music, which the bake will say it could not find.
 
 It opens on the intro: the original's own eleven plates with the original's own words
 over them, out of `INTR.EXE`. Space skips it, and the title follows. Up and down move
@@ -166,6 +188,25 @@ or wherever your mouse is. Whatever it is over is the highlighted line, and the 
 takes it, on the title, the select screen, a town's menu and the character sheet.
 
 **F5 saves and F9 loads.** The original has no save at all, so that part is ours.
+
+**Gamepads work.** The original read a stick on the gameport and henge reads a modern
+pad the same way: the same five-bit word, the same four calibration thresholds, and the
+same dead zone, because `AdjustJoy` pulls each threshold an eighth of the measured range
+inwards and that is what is implemented. Seat one takes the first pad, seat two the
+second, and a pad is OR'd into the keys rather than replacing them, exactly as the
+original ORs `JOY1` into its key word. **F11 calibrates**, in the original's own words:
+*Move joystick to the top left and press the fire button*, and then the bottom right.
+
+**Controls are rebindable, and they are data.** That part is ours; the original's keys
+are five instructions with scancodes in them. The table lives in `henge-controls.json`
+beside the save, and it can be edited by hand or from the command line:
+
+```sh
+henge --bind 0:fire=Enter --bind 1:up=pad:DPadUp   # rebind, and save the file
+henge --controls-write                             # write the defaults out to edit
+henge --original-keys                              # start from the original's layout:
+                                                   # Enter and the arrows, and Tab W X A D
+```
 
 Walking onto a town, a lair, the healer, the stone circle or the wizard's tower
 opens it. In a place, up and
@@ -335,6 +376,16 @@ checked without hunting for a frame that happens to show the status bar.
 starting corner is impossible: the traveller is killed en route long before arriving, so
 half the map could never be looked at.
 
+`--palette` prints the composed palette after a capture, which is the only way to watch a
+cycle or a glow on an entry the picture hardly uses. `--fade` lets a capture show the fade
+it is in the middle of; without it a capture runs the fade out first, so that every recipe
+written before fades existed still shows its screen rather than a black rectangle.
+
+```sh
+henge --screenshot out.png 24 0 --start map --peaceful --palette   # watch the river move
+henge --screenshot out.png 8 0 --start map --fade                  # halfway through a fade in
+```
+
 ## Sound
 
 `henge-audio` keeps two things separate. Deciding **what** should be heard is done by
@@ -355,6 +406,54 @@ cargo build --workspace --no-default-features
 
 **No audio device is a normal state, not a failure.** Containers, CI and plenty of
 machines have none. The game says so once and plays silently.
+
+## Music
+
+**There is music, and it is the original's.** The tune files looked like a dead end: each
+`xTUNEn.BIN` is a relocatable x86 driver with the song welded into the code, and there is
+no format in there to parse. But three of them ship for every tune, one per sound card,
+and **the Roland one talks plain MIDI to an MPU-401**. So `tools/tunes.py` runs the game's
+own driver under the same 8086 emulator that unpacked the executable, answers the sound
+card's status port, and writes down what the driver sends. All six tunes come out with
+their notes, channels, velocities and lengths intact, on the driver's own tick, which is
+the game's timer at 54.62 Hz. Four of them loop, and the loop point falls out of comparing
+what is sounding tick for tick.
+
+Where each one plays is recovered as well. Five places in the game call `LOADMUSIC`, and
+nothing else in it has music at all: the tavern's dice table, the stone circle, Math's
+tower and the mystic's counter. The map is silent, the arenas are silent and so is the
+title, because that is how the original is.
+
+**The notes are the original's; the sound is ours.** A MIDI stream names a Roland's
+instrument numbers and nothing else, and how those actually sounded belonged to a
+synthesiser this project does not have and will not pretend to. So the tunes are played
+on a small wavetable synthesiser of ours, with voices chosen by instrument family. It is
+labelled that way everywhere rather than passed off as a recording.
+
+```sh
+python3 tools/tunes.py "path/to/Moonstone" research/tunes.json  # lift the notes
+cargo run --release -p henge-formats --bin henge-bake -- --render-music research/music
+```
+
+The second line writes each tune out as a WAV, which is how they were checked.
+
+## Colour
+
+The palette moves, and all of it is recovered. The original keeps a live palette of 32
+twelve-bit colours and queues one routine on the frame list, `COLCON`, which walks six
+colour-cycle slots and six colour-glow slots. A **cycle** rotates a span of entries by one
+every so many frames; a **glow** walks one entry one step a channel towards a target
+colour and swaps back on arrival, so it breathes. The game installs exactly two from a
+screen, and both are built: the overworld's water, which is entries 21 to 23 rotating
+every twelfth frame under a symbol the original itself calls `RiverHANDLE`, and the
+character select screen's night sky breathing towards a teal. A third belongs to the
+mudmen and arrives with them.
+
+Fades are the other half: sixteen steps, one a frame, linear, in and out. Every screen
+change fades in, and the two screens that end on their own fade out.
+
+None of it touches the framebuffer. It is arithmetic on the palette on its way to the
+screen, which is the whole reason the framebuffer is indexed.
 
 ## Combat
 

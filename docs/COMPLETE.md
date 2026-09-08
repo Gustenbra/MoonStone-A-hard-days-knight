@@ -164,16 +164,43 @@ All 386 files decode. See `FORMATS.md`.
 | `SHOWTILE`, `LOADTILEV`, `GET_TILE_SCREEN`, `TILEDATA`, `TILEFLAG` | tile drawing | done |
 | `COPYBACKDROP`, `COPYTOLOGIC`, `SHOWLOGIC`, `_PHYSIC`, `_LOGIC` | double buffering | done implicitly |
 | `LOADPALETTE`, `SETCOLOR`, `CHANGE_DAC`, `IFF_PAL`, `RGB_PAL` | palette loading | done |
-| `FADEPALETTEIN`, `FADEPALETTEOUT`, `FADEOUTDAY` | palette fades | **todo** |
-| `COLOURCYCLE`, `COLOURGLOW` | animated palette entries: water, fire, torches | **todo** |
+| `FADEPALETTEIN`, `FADEPALETTEOUT`, `FADEOUTDAY` | palette fades | done, recovered: sixteen linear steps, one a frame |
+| `ADDCOL`, `COLCON`, `DYNAMIC`, `COLOURCYCLE`, `COLOURGLOW`, `_installcycle`, `_installglow`, `CYCLES`, `GLOWS`, `PALLOC` | animated palette entries | done, recovered: `henge_assets::palette` |
 | `COLOURENKNIGHT` | per-player knight recolour | done (by hue substitution) |
 | `SCROLL`, `PAN`, `SETSCREENOFFSET`, `AROFFSET` | scrolling the map | **settled: the overworld map does not scroll** |
 | `BORD`, `BORDERS`, `SETDEMONBORD` | screen border, and a special one for the demon | **todo** |
 | `CLS`, `VBI`, `WAITVSYNC`, `WAITVBS` | clear, vblank sync | done via the frame loop |
 | `CONVERTSCREEN` | planar to linear conversion | done at bake time |
 
-- [ ] Palette fades in and out, as scene transitions
-- [ ] Colour cycling. Named entries animate on a timer; find which indices cycle per scene
+- [x] **Palette fades in and out, as scene transitions.** Both are sixteen steps at one a
+      frame and linear. `FADEPALETTEIN` builds a step of `target * 16` per DAC byte and
+      accumulates it into a 16.8 fixed-point channel, showing the high byte, so step *k*
+      of sixteen shows *k* sixteenths; `FADEPALETTEOUT` reads the DAC back through port
+      0x3c7 and subtracts its way to black. Every screen change fades in here, and the
+      two screens that end on their own fade out: the between-days screen, which is
+      `FADEOUTDAY`, and a message chain
+- [x] **Colour cycling, and which indices cycle per scene.** `ADDCOL` queues `COLCON` on
+      the frame list and points `PALLOC` at the live palette, which is 32 twelve-bit
+      words. `COLCON` walks six `CYCLES` slots of six bytes (first, last, direction,
+      period, counter) and six `GLOWS` slots of twelve (index, target, period, counter,
+      the colour it came from, repeat count), and reloads the DAC only if either moved.
+      A cycle rotates its span by one every period frames, one way with `LOOPY` and the
+      other with `POS`. A glow walks one index towards a target one step a channel with
+      `DYNAMIC` and swaps target with origin on arrival, so it breathes.
+      **The game installs exactly two of them from a screen**: `MapEffects` gives the
+      overworld a glow on entry 31 towards `0x0ff` every frame and a cycle over entries
+      21 to 23 every twelfth frame, whose handle it calls `RiverHANDLE`, so those three
+      are the water; and `ChooseKnight` gives the select screen a glow on entry 15
+      towards `0x088`. A third, `MudmenGlowOn`, is `COLOURGLOW(0x0e, 0x100, 2, 0)` and
+      hangs off `InitCombat` rather than off a screen. All three are built
+- [ ] `KnightGlowOn` and `KnightGlowColours`, which flash a knight down to ten health in
+      his own colour on entries 6, 7 and 8, and 9 to 11 for a second knight. Recovered
+      and not wired, because `ColourKnight` *writes* the knight's armour into entries 6
+      to 8 (`0x00a`, `0x007`, `0x004` for the blue knight, `0xf80`/`0xc50`/`0xa30` gold,
+      `0x8c6`/`0x593`/`0x251` emerald, `0xf22`/`0xb22`/`0x700` red, and
+      `0x206`/`0x103`/`0x001` for a fifth) and henge recolours by hue substitution
+      instead, so those entries are backdrop colours here. **Which also answers 8.2's
+      open question**: the knight palette is recovered after all
 - [x] Map scrolling: confirmed, and there is none. `MAP.CMP` is one 320x200 picture,
       `_MAP:SHOW` passes the token's position straight to the blitter with nothing
       subtracted, and `_MAP:HawkBorders` bounds that position to `0..=310` by `0..=190`,
@@ -202,10 +229,22 @@ lets a status panel print health the way the original does, as `have/most`.
 | Original | Status |
 |---|---|
 | `INSTALLKBD`, `REMOVEKBD`, `KBDHANDLER`, `READKEY`, `KEYPRESSED`, `WAITKEY`, `CLEARKEYS` | done |
-| `POLL_JOY0`, `READJOY`, `BOUNCEBUTTON`, `JOY_XMIN/XMAX/YMIN/YMAX` | **todo**: gamepads, with calibration and debounce |
+| `JOY0`, `JOY1`, `POLL_JOY0`, `BOUNCEBUTTON`, `Fix_JoyStick`, `GetJoyTL`, `GetJoyBR`, `AdjustJoy`, `GetInputDevice`, `JOY_XMIN/XMAX/YMIN/YMAX` | done, recovered: `henge-desktop/src/input.rs` |
 
-- [ ] Gamepad support. Four players on one keyboard is cramped; the original expected sticks
-- [ ] Rebindable controls `design`
+- [x] **Gamepad support.** The word is five bits, `0x01` right through `0x10` fire, and
+      `JOY0` and `JOY1` build it from the gameport: the one-shots are fired with
+      `out 0x201, 0xff`, counted to a cap of `0x400`, and compared against the four
+      calibration thresholds. An axis at the cap is a stick that is not there. The
+      button is `al & (al >> 1)` over that stick's pair of bits, so either fires.
+      `Fix_JoyStick` calibrates in two prompts whose words are recovered verbatim, and
+      `AdjustJoy` pulls each threshold an eighth of the measured range inwards.
+      `BOUNCEBUTTON` is the debounce and `GetInputDevice` cancels opposite directions.
+      Pads come from `gilrs`; on Linux that wants `libudev-dev` at build time
+- [x] **Rebindable controls** `design`. The original has none: its keys are five
+      `mov ax, <scancode>` instructions, recovered as Enter and the arrows for player one
+      and Tab, W, X, A, D for player two. Ours is a table of actions to sources that
+      serialises to `henge-controls.json`, with `--bind`, `--controls-write` and
+      `--original-keys`
 
 ## 2.5 Audio `partial`
 
@@ -213,15 +252,24 @@ lets a status panel print health the way the original does, as `have/most`.
 |---|---|---|
 | `LOADSAMPLES`, `SETUPSAMPLES`, `PLAYSAMPLE`, `PLAY_SFX`, `STOP_SAMP`, `SFX`, `SFXTYPE` | sound effects | done, 4 cues of 49 samples |
 | `TASKSOUND` | sound triggered from an animation frame | data recovered: opcode 0x92, 124 calls, 49 distinct samples. Needs 25 |
-| `LOADMUSIC`, `MUSIC`, `MUSICTYPE` | music playback | **blocked** |
+| `LOADMUSIC`, `MusicTable`, `MUSICTYPE`, `int 60h` | music playback | done, recovered: all six tunes |
 | `ADDCLICKSND` | UI click | todo |
 
 - [ ] Wire the remaining 45 samples to events
 - [ ] Sounds carried on animation frames rather than inferred from state changes. The
       sample number and the exact frame are in the recovered scripts
-- [ ] **Music.** The tune files begin with x86 machine code: they are driver blobs with data
-      welded into executable code, not a readable format. Either trace the driver to recover
-      note data, or commission new music `design`
+- [x] **Music. The driver was traced and the note data came out.** `xTUNEn.BIN` is a
+      relocatable x86 driver with the song welded into it, entered through `int 60h` with
+      `ah = 0` to start, `1` to tick and `2` to stop, and ticked by the game's own timer
+      at 1193182 / 0x5555 Hz. `MusicTable` is eighteen records, six tunes by three sound
+      cards: `a` drives an AdLib, `b` the PC speaker, and **`r` an MPU-401, which is
+      plain MIDI**. `tools/tunes.py` runs the Roland driver under the same 8086 harness
+      that unpacked the executable and reads the note stream off the port. Four of the
+      six loop, and the loop point falls out of comparing what is sounding tick for tick.
+      Five callers of `LOADMUSIC` say where each plays, and nothing else in the game has
+      music at all. **The voices are ours**, because the stream names a Roland's
+      instruments and nothing else: wavetables and envelopes by General MIDI family, in
+      `henge_audio::music`
 
 ## 2.6 Memory and DOS `done, not needed`
 
@@ -854,6 +902,16 @@ per knight, blue, gold, emerald and red in knight order, which is what the initi
 `BNAME`, `GNAME`, `ENAME` and `RNAME` stand for. The top sixteen palette entries are built
 as four ramps from those, and each portrait is drawn through a substitution into its own.
 
+**A second triple has since turned up, and it is the armour rather than the glow.**
+Item 75 read `ColourKnight`, which writes three 12-bit words into `BattlePal+12`, and
+`BattlePal` is the arena palette, so **those three words are palette entries 6, 7 and 8**:
+`0x00a`, `0x007`, `0x004` for the blue knight, `0xf80`, `0xc50`, `0xa30` for gold,
+`0x8c6`, `0x593`, `0x251` for emerald, `0xf22`, `0xb22`, `0x700` for red, and
+`0x206`, `0x103`, `0x001` for a fifth case. So **the original recolours a knight by
+rewriting three palette entries, not by substituting pixels**, and `KnightGlowColours`'
+brighter triple is what those same three entries pulse towards when he is nearly dead.
+Whoever revisits `COLOURENKNIGHT` should start there rather than with hue substitution.
+
 **The four knights do not differ in stats.** `InitKnights` gives each one a name, a colour,
 one corner of the map at (10, 10), (300, 5), (26, 180) or (300, 185), and the same stat
 block as the other three. `henge` keeps the four as data so they *can* differ; what ships is what the original
@@ -1128,7 +1186,7 @@ and F9, because core does no I/O and keeps its one dependency.
 | intro cast banks | 438 | none: their scripts are in `INTR.EXE`'s own DGROUP and are not extracted |
 | full-screen scenes | 31 | 26: the eleven intro plates carry the intro, the title and attract mode, and `MESSAGE.PIV` is the message box |
 | sound samples | 49 | 4 |
-| music | 18 files | none |
+| music | 18 files | all six tunes, from the six Roland drivers |
 
 ---
 
@@ -1158,7 +1216,8 @@ Dependency order, not preference.
 9. The dragon (3.3) and the demon as set pieces
 
 **Whenever**
-- Music (2.5), gamepads (2.4), colour cycling and fades (2.2), scrolling
+- ~~Music (2.5), gamepads (2.4), colour cycling and fades (2.2)~~ **all three done**;
+  scrolling was settled and there is none
 
 **Honest note on effort.** Steps 1 and 2 are research: they could take a day or a month,
 and no amount of planning makes that predictable. Everything after them is construction and

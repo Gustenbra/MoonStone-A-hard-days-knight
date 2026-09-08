@@ -43,6 +43,19 @@ if not exist "%DATA%\KN1.OB" (
 if not exist "packs\reference\manifest.json" set "REBAKE=1"
 
 if defined REBAKE (
+  rem The music has to be lifted out of the tune drivers before the bake can
+  rem put it in the pack. It needs python and unicorn, and the game plays
+  rem without it, so a failure here is a note rather than a stop.
+  if not exist "research\tunes.json" (
+    where python >nul 2>&1
+    if errorlevel 1 (
+      echo   no python, so no music. The rest of the game is unaffected.
+    ) else (
+      echo Reading the music...
+      python tools\tunes.py "%DATA%" research\tunes.json
+      if errorlevel 1 echo   no music this time. It needs unicorn:  pip install unicorn
+    )
+  )
   echo Reading the original game files...
   cargo run --release --bin henge-bake -- "%DATA%"
   if errorlevel 1 exit /b 1
@@ -57,5 +70,6 @@ echo   menus: arrows move, enter or space takes
 echo   fighting: arrows move, space swings, escape quits
 echo   tab switches map and arena, [ and ] change arena, R restarts, C the sheet
 echo   player two: WASD and F
+echo   gamepads work, and F11 calibrates one
 echo.
 target\release\henge.exe %PASS%

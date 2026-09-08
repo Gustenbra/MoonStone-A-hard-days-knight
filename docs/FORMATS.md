@@ -135,11 +135,50 @@ swing connects when its line crosses the target rather than when two boxes overl
 
 Creative Voice File (`.VOC`), a documented standard. Eight-bit unsigned PCM.
 
-## Music
+## Music: `xTUNEn.BIN`
 
-The tune files begin with x86 machine code. The music is driver blobs with data welded
-into executable code rather than a readable format. It is the hardest thing in the game
-to recover and the least worth recovering.
+**Not a format, and recovered anyway.** Each tune file is a relocatable x86 driver with
+the song welded into it. There are eighteen, which is `MusicTable`'s six tunes by three
+sound cards, and the first letter of the name says which card.
+
+Every one of them opens with the same dispatcher, which is the whole of its interface:
+
+```text
+1e              push ds
+53              push bx
+8c cb  8e db    mov bx, cs ; mov ds, bx      the blob addresses itself
+80 fc 00  74 xx cmp ah, 0 ; je  start
+80 fc 01  75 03 cmp ah, 1 ; jne over
+e9 xx xx        jmp tick
+80 fc 02  75 03 cmp ah, 2 ; jne over
+e9 xx xx        jmp stop
+5b  1f  cf      pop bx ; pop ds ; iret
+```
+
+`_LOADER`'s `LOADMUSIC` (image `0x900d`) reads the file whose record is
+`MusicTable + tune * 4 + MUSICTYPE * 32` to segment `0xd7f`, `Install_Timer` points
+`int 60h` at `0xd7f:0000`, and the timer handler's first instructions are `mov ah, 1;
+int 60h`. The timer runs at 1193182 / 0x5555, so **a tune ticks at 54.62 Hz**.
+
+| prefix | card | how it plays |
+|---|---|---|
+| `a` | AdLib / OPL2 | `out 0x388, register` then `out 0x389, value`, with six dummy reads of 0x388 between them as the chip wants |
+| `b` | PC speaker | ports 0x43, 0x42 and 0x61: mode 3 square waves on timer channel 2 |
+| `r` | Roland | an MPU-401 at 0x330 and 0x331, and **the bytes are plain MIDI** |
+
+The Roland driver is what makes the music recoverable. Its data port carries ordinary
+MIDI messages with running status, so running the driver under emulation and writing
+down what it sends gives note, channel, velocity and length back exactly. That is
+`tools/tunes.py`, and it needs no understanding of the song format at all: the driver is
+the specification, the same argument that unpacked the executable.
+
+What comes out is note events on the driver's own tick, which `henge-bake` splits into
+one score per tune in the pack. Four of the six loop, and the loop point is found by
+comparing what is sounding tick for tick rather than by counting events.
+
+The AdLib and PC speaker drivers are not decoded. They would give the same notes with a
+sound of their own, and reproducing either would mean writing an OPL2 or a square-wave
+emulator; the Roland one already gives the notes, so neither was attempted.
 
 ## Open questions
 

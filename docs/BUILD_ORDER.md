@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 73 done, 1 partial, 3 remaining.**
+**77 items. 76 done, 1 partial, none remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -778,21 +778,136 @@ three life points, the stone circle on the stone's own night, the victory page o
 
 Any time. None of it blocks anything.
 
-- [ ] 75. Palette fades and colour cycling
-- [ ] 76. Gamepads, with calibration and debounce; and rebindable controls
-- [ ] 77. Music. The tune files are x86 driver blobs with data welded into code, so either
-      trace the driver or commission new music
+- [x] 75. **Palette fades and colour cycling. Recovered, all four routines.** The
+      original keeps a live palette of 32 twelve-bit colours and hands it to the DAC as
+      `nibble << 2`; `ADDCOL` queues `COLCON` on the frame list, and `COLCON` walks six
+      `CYCLES` slots and six `GLOWS` slots once a frame. A **cycle** is a first index, a
+      last index, a direction and a period, and every period frames the entries in that
+      span rotate by one. A **glow** is one index walking one step a channel towards a
+      target colour every period frames, and on arrival the target and the colour it
+      started from swap, so it breathes; `DYNAMIC` is that step and it moves red, green
+      and blue independently. The **fades** are a separate pair and both are sixteen
+      steps, one a frame, linear: fade in accumulates `target * 16` into a 16.8 channel
+      and shows the high byte, fade out reads the DAC back and subtracts to black. All of
+      it is in `henge_assets::palette`, applied to the palette on its way to the screen,
+      so the framebuffer is untouched.
+      **What the game actually installs is two things, and both are built**:
+      `_MAP:MapEffects` calls `COLOURGLOW(0x1f, 0x0ff, 1, 0)` and `COLOURCYCLE(0x15,
+      0x17, 1, 0x0c)`, whose handle it keeps in `RiverHANDLE`, so on the overworld
+      entries 21 to 23 rotate every twelfth frame and that is the water moving;
+      `MOON:ChooseKnight` calls `COLOURGLOW(0x0f, 0x088, 1, 0)`, so the select screen's
+      night sky breathes towards a teal. Both are in the pack as `data.palette.effects`,
+      keyed by screen, so a replacement pack can animate its own palettes.
+      `MudmenGlowOn` is `COLOURGLOW(0x0e, 0x100, 2, 0)` and hangs off the fight rather
+      than the screen, exactly as `InitCombat` installs it.
+      **Every screen change fades in**, and the two screens that go out on their own
+      fade out: the between-days screen, which is `FADEOUTDAY`, and a message chain,
+      which all three of `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` end on. The
+      original's other fade outs cover a disk read that does not happen here.
+      **Recovered and not wired**: `KnightGlowOn`, which glows palette entries 6, 7 and 8
+      towards the knight's own colour triple when he is down to ten health, and 9, 10 and
+      11 for a second knight. It is not wired because in the original those entries *are*
+      the knight: `ColourKnight` writes his three armour colours into `BattlePal+12`
+      (0x00a/0x007/0x004 blue, 0xf80/0xc50/0xa30 gold, 0x8c6/0x593/0x251 emerald,
+      0xf22/0xb22/0x700 red, 0x206/0x103/0x001 for a fifth), whereas henge recolours by
+      hue substitution and leaves 6 to 8 as backdrop colours. **That is a real find for
+      whoever revisits `COLOURENKNIGHT`**: the knight palette was recorded as
+      unrecovered, and it is not
+- [x] 76. **Gamepads, with calibration and debounce; and rebindable controls.**
+      The reading is recovered and the binding table is ours.
+      **Recovered.** The whole game runs on one five-bit word, `0x01` right, `0x02` left,
+      `0x04` down, `0x08` up, `0x10` fire, and `Rjoystick` and `Ljoystick` index the eight
+      attacks on it. `_KBD:JOY0` and `_KBD:JOY1` build it from the gameport: `out 0x201,
+      0xff` fires the one-shots, the loop counts until each falls with a cap of `0x400`,
+      an axis that reaches the cap is a stick that is not plugged in and contributes
+      nothing, and the count is compared against `JOY_XMIN`, `JOY_XMAX`, `JOY_YMIN` and
+      `JOY_YMAX`. The button is `dl = al & (al >> 1)` over the pair of bits for that
+      stick, so either button fires. `Fix_JoyStick` calibrates in two prompts, recovered
+      verbatim (*Move joystick to / the top left / and press the / fire button.*, then
+      *the bottom right*), `GetJoyTL` and `GetJoyBR` record the raw counts and
+      **`AdjustJoy` pulls each threshold one eighth of the measured range inwards**, so
+      three quarters of the travel is dead. `BOUNCEBUTTON` waits for fire down and then
+      for fire up, so a press is worth exactly one thing. `GetInputDevice` throws away
+      left with right and up with down before anything sees the word. And the reader at
+      image `0x81ec` gives **the original's own keys**: player one Enter and the arrows,
+      player two Tab, W, X, A and D, OR'd with `JOY1` and `JOY0` respectively.
+      All of that is `crates/henge-desktop/src/input.rs` and unit tested.
+      **Ours.** The binding table, because the original's keys are five `mov ax,
+      <scancode>` instructions and there is nothing to port. It is data: actions to
+      sources, by winit's and gilrs' own names, saved to `henge-controls.json` beside the
+      save. `--bind 0:fire=Enter` rebinds from the command line, `--controls-write`
+      writes the file, `--original-keys` starts from the original's layout, and the
+      calibration is saved alongside. The default calibration's two corners are ours too:
+      `AdjustJoy`'s eighth off a modern pad's true extremes would want the stick pushed
+      seven eighths of the way, so the default pretends the corners were answered at six
+      tenths and puts *that* through `AdjustJoy` unchanged.
+      **Pads come from `gilrs`**, which was not already in `Cargo.lock`; winit has no
+      gamepad support at all, so there was nothing to prefer it to. It reports no pads
+      rather than failing when there is no input subsystem, which is the headless case.
+      **On Linux it needs `libudev-dev` at build time**; build with
+      `--no-default-features` or turn the `gamepad` feature off without it.
+      **Not verified**: anything that needs a pad plugged in. There is none here. The
+      binding table, the calibration arithmetic, the debounce, the dead zone, the
+      timed-out axis, the opposite-direction cancellation and the winit key names are all
+      tested; the actual reading of a physical stick is not
+- [x] 77. **Music. Recovered: the tune files gave up their notes.** The plan said trace
+      the driver or commission new music. Tracing worked.
+      Each `xTUNEn.BIN` is a relocatable x86 driver with the song welded into it:
+      `LOADMUSIC` at image `0x900d` reads one to segment `0xd7f`, `Install_Timer` points
+      `int 60h` at offset zero, and the timer handler's first instructions are `mov ah,
+      1; int 60h`, so the tune ticks at 1193182 / 0x5555, or 54.62 Hz. `ah = 0` starts and
+      `ah = 2` stops. `MusicTable` at DS `0x84f0` is eighteen four-byte records: **six
+      tunes by three sound cards**, and the letter of the filename says which card.
+      `a` writes register then value to 0x388 and 0x389 with the AdLib's own six dummy
+      reads between them; `b` is the PC speaker on ports 0x43, 0x42 and 0x61; and **`r`
+      is a Roland on an MPU-401 at 0x330, which turned out to be plain MIDI**.
+      So `tools/tunes.py` runs the game's own `RTUNEn.BIN` under the same 8086 harness
+      the executable was unpacked with, answers the MPU's status port, and writes down
+      what the driver sends: note, channel, velocity, start and length, on the driver's
+      own tick. All six come out. Four of them loop, and the loop point is found by
+      comparing what is sounding tick for tick: tune 2 at 39.7s, tune 3 at 112.1s, tune 4
+      at 22.5s, tune 5 at 28.1s.
+      **Where each plays is recovered too.** Five callers of `LOADMUSIC`, each followed
+      by `mov ah, 0; int 60h`: `load_DiceBACK` starts tune 3 in the tavern's dice game and
+      `LeaveTavern` stops it, the routine that opens the henge starts tune 2, `LoadWizard`
+      starts tune 2 and `e5$` stops it, `MysticUpDown` starts tune 4 and `MysticFini`
+      stops it. **Nothing else in the game has music**: not the map, not the arenas, not
+      the title. That table is in the pack as `data.music.places`.
+      **Ours: the sound.** The recovered stream is MIDI, so it names a Roland's
+      instrument numbers and nothing else; how those actually sounded belonged to a
+      synthesiser this project does not have. So the notes are the original's and the
+      voices are ours, a handful of wavetables and envelopes chosen by General MIDI
+      family with a noise burst for the drum channel, in `henge_audio::music`. It is
+      labelled that way everywhere rather than passed off as a recording.
+      **Recovered and not built**: `_bestow_done` starts tune 5 after Math's gift, which
+      is a moment inside the wizard's tower rather than a room of its own; and tunes 1
+      and 6, which `MAIN.EXE` never loads. They ship on disk A with the intro, so they
+      are `INTR.EXE`'s, but its own `LOADMUSIC` call could not be traced to a tune
+      number, so neither is placed rather than being placed by guess. Both are in the
+      pack and both play.
+      **Not verified by ear.** There is no sound device here, so the tunes were checked
+      by measurement instead: every one renders to the length its loop says, peaks at
+      0.6 of full scale with no clipping and no gap longer than a frame, and the spectral
+      peaks land on note frequencies (tune 4 on 698.5 and 66.0 Hz, which are F5 and C2;
+      tune 3 on 310.8, 278.2 and 245.8, which are the D sharp, C sharp and B of the B
+      major chord its own note stream plays). `henge-bake --render-music <dir>` writes
+      them out as WAVs for anyone who does have speakers
 
 ---
 
 ## If you only did three things
 
-**76** is the one that changes how the game feels rather than what is in it: the
-creatures fight on their own routines now, and a keyboard is a poor way to answer a
-mudman that has hold of you. **75** is what the palette work has been waiting for, and
-the demon's own `ColourDemon` and the arena fades both want it. **55** is half done and
-the other half is the intro, which is the only screen the game opens with that this
-one does not.
+**Nothing is left but 55**, which is half done: the other half is the intro's tile maps
+and its animated cast, and neither is built or faked.
+
+**75, 76 and 77 were the last three, and all three were translation.** The plan
+allowed for commissioning new music; it was not needed. `xTUNEn.BIN` looked like an
+opaque driver blob because it is one, but three of them ship for every tune and the
+Roland one speaks MIDI, so running it under the harness that already existed gave the
+notes back. `COLCON`, `COLOURCYCLE`, `COLOURGLOW`, `DYNAMIC` and the two fades are one
+screenful of assembler between them. `JOY0`, `AdjustJoy` and `BOUNCEBUTTON` are the
+same. The only invention in the three items is a binding table, a dead zone that suits a
+modern stick, and a synthesiser to play the recovered notes on.
 
 **37, 33, 59 and most of 36 were the three things, and they were all translation.**
 Every creature's controller is a named routine in `MOON` and every one of them reads;
