@@ -12,6 +12,7 @@
 pub mod cel;
 pub mod collide;
 pub mod depack;
+pub mod introexe;
 pub mod library;
 pub mod piv;
 pub mod taskvm;

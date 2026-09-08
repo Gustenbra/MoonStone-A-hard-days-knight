@@ -5,7 +5,7 @@ Every item, once each, in the order you would actually do it. One flat list.
 `COMPLETE.md` is the same work organised by subsystem, with the original's function names
 against each part. This file is the checklist.
 
-**77 items. 76 done, 1 partial, none remaining.**
+**77 items. 77 done, none partial, none remaining.**
 
 Ordering is by dependency, not preference. Where two items do not depend on each other they
 are grouped in the same phase and can go in any order, or in parallel.
@@ -513,28 +513,35 @@ Independent of everything. Makes it feel like a game rather than a demo.
       now fits the screen it was written for. **Ours:** the colour an instruction message
       comes up in, since the fade machinery its ramp drives is not built; and showing the
       fourteen on the between-days screen, which is where they were already
-- [~] 55. **`INTR.EXE` examined, and it gives up a great deal.** It unpacks with
-      `tools/symbolmap.py` unchanged: 56,128 bytes, four modules, **319 symbols**, 262
-      corroborated. Module 2 is `_TASK` symbol for symbol, so **the intro runs the same
-      animation VM**; module 0 is `GFX` with a tile engine beside the text engine. Its
-      asset list is recovered by name and every file is already in the packs: eleven
-      plates in the original's own numbering (`panfile1..3` are `bg1a`, `bg1c`, `bg1b`;
-      `picfile1..8` are `bg4`, `bg5a`, `bg3`, `bg2`, `bg2a`, `bg5`, `bg7`, `bg8`), nine
-      cast banks, `bold.f` and `message.piv`. **Its words are recovered**: the credits,
-      `MINDSCAPE PRESENTS`, `The End` and three story cards, verbatim. What is built is
-      an intro that plays: the eleven plates in the recovered order with the recovered
-      words over them and then the credits, skippable, and the title behind it, which is
-      what a window now opens on. The six credit headings and the six names are two
-      adjacent blocks in the image and pairing them off positionally would put a composer
-      on the programming line, so the names are shown without headings rather than under
-      guessed ones. **What remains**, and it is most of the sequence: `intro.sti` and
-      `co.sti` (960 bytes each) and `intro1.sti` (105) are not decoded and neither is the
-      tile engine that reads them; the cast's animation scripts are in the intro's own
-      DGROUP and are not extracted, so none of the nine banks moves; the captions' own
-      coordinates are not recovered, because nothing in the image points at those strings
-      and the code that draws them builds its record from registers; and `MINDSCAP`, the
-      publisher's logo, is not baked. Which word goes over which plate, and for how long,
-      is therefore ours and is marked so in `henge_core::intro`
+- [x] 55. **`INTR.EXE` read to the end, and the intro is the original's.** It unpacks with
+      `tools/symbolmap.py` unchanged: four modules, **319 symbols**, 262 corroborated.
+      What had stopped everything is that **the image that tool writes is still packed**:
+      its tail is Microsoft EXEPACK's run-length stream, so every zero-filled span of the
+      program is four bytes standing for hundreds. That is the whole of why the code
+      addresses appeared to need a fitted seven-step correction and the data addresses
+      appeared to be 14,911 bytes out. Expand the stream and **every symbol, code and
+      data, lands on its own byte with no correction at all**. After that:
+      **`.STI` is a tile map** and the opening is a **vertical pan**: `FindTile` cuts tile
+      *n* at `((n % 10) * 32, (n / 10) * 25)`, the 32x25 grid ten across a `CMP` uses, and
+      the map is ten big-endian words to a row with the sheet chosen by `n / 80`, so
+      `INTRO.STI` is 48 rows: **a 320 by 1200 panorama** out of `bg1a`, `bg1c` and `bg1b`,
+      panned 0 to 1000 on its own ramp of eleven thresholds and eleven speeds.
+      `INTRO1.STI` is not a map at all: it is byte for byte `F09.T` and `SW9.T`.
+      **The captions have coordinates**: ten-byte records with bit 0 centring the line,
+      which is why every x is zero, and the story cards go over `MESSAGE.PIV`, not over a
+      plate, so the black bands that used to cut a picture in half are gone entirely.
+      **The credits are the loading screens** and their pairing is read off the table at
+      `DS:0x152` rather than guessed, so `Programmed by` gets Anthony Mack and Nicholas
+      Snape and `Music and Sound by` gets Audio Visual Magic. **The cast animates** on the
+      intro's own scripts, whose opcode table has one slot more than the game's, and the
+      scene lengths are those scripts' own tick counts. **`MINDSCAP` is a PIV** with no
+      extension, which is the only reason nothing had baked it. And **the intro is the
+      first half of `INTR.EXE`, the ending the second**: given a command tail it plays
+      `The End`, `co.sti` and `bg5`, `bg7`, `bg8` instead, so those three plates are
+      deliberately not in the intro. **Ours:** how long the logo and each credit screen
+      holds, since in the original that is a floppy's seek time; the rounding of 9.1
+      frames a second onto sixty ticks; and the dark ring round a caption, standing in for
+      the glyph shading silhouette text throws away
 - [x] 56. **Save and load, ours by design.** The original has none: `MOON.CFG` is a
       sound-card profile and there is no slot, no file and no routine anywhere in the
       2,223 symbols. What made it small is that the simulation was already built for it.

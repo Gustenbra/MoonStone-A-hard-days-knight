@@ -865,7 +865,7 @@ panel's own.
 | `LOADICONS`, `ICONBUFFER`, `ICONMEMORY` | UI icons | done for the panel's own |
 | `LOADMESSAGE`, `WAITMESSAGE`, `OCCURMESSAGE`, `INSTRUCTMESSAGE`, `MESSAGE`, `MesFILE` | message boxes | done |
 | `TextASCII`, `TextPTop`, `TextP`, `TextPDone`, `TextLen`, `CheckBOLD` | the text engine the boxes draw through | done |
-| `INTR.EXE`: `picfile1..8`, `panfile1..3`, `intro.sti`, `co.sti` | the intro sequence | **partial** |
+| `INTR.EXE`: `picfile1..8`, `panfile1..3`, `intro.sti`, `co.sti` | the intro sequence | **done**; `co.sti` and three plates belong to the ending |
 | nothing: the original has no save | save and load | done, **ours** |
 
 ## 8.1 The title `done`
@@ -1087,37 +1087,83 @@ tight, the small face not at all, and the space is glyph 69 like any other chara
 fifteen wide in the bold bank, five in the small. Those are now what the pack says, which
 is why a recovered line fits the screen it was written for.
 
-## 8.6 The intro `partial`
+## 8.6 The intro `done`
 
-`INTR.EXE` unpacks with `tools/symbolmap.py` unchanged: 56,128 bytes, four modules,
-**319 symbols**, 262 of them independently corroborated. `docs/REVERSING.md` has the
-details; what matters here is what it makes possible.
+`INTR.EXE` unpacks with `tools/symbolmap.py` unchanged: four modules, **319 symbols**, 262
+of them independently corroborated. **The image that tool writes, though, is still
+packed**: its tail is Microsoft EXEPACK's run-length stream, so every zero-filled span of
+the program is four bytes standing for hundreds. That one fact was the whole blockage, and
+it explains both of the corrections the record carried against this executable and could
+not account for: the code addresses looked as though they needed a fitted seven-step
+correction because the image is short by exactly the fills that precede each step, and the
+data addresses looked 14,911 bytes out because by `DGROUP` the fills have accumulated to
+that. `henge_formats::introexe::expand` walks the stream, and afterwards **every symbol,
+code and data, lands on its own byte with no correction of any kind**: `TextPTop` at
+12,589, `PerformCOMMAND` at 16,332, `TextASCII` at 44,634, `MesFILE` at 46,007.
 
-**Recovered:** that the intro runs the same task VM and the same text and tile engines; its
-whole asset list by name, every file of which the packs already hold; the plate order, from
-two runs of consecutively named symbols whose filenames are not in alphabetical order; and
-**its words**, plain in the image from offset 18,551: the credits, `MINDSCAPE PRESENTS`,
-`The End`, and three story cards.
+With the image expanded, everything that had been written off came out of it.
 
-**Built:** the eleven plates in the recovered order with the recovered words over them,
-then the credits, skippable with fire, and the title behind it. That is what a window opens
-on now.
+**`.STI` is a tile map, and the opening is a vertical pan.** `FindTile` cuts tile *n* out
+of a 320x200 sheet at `((n % 10) * 32, (n / 10) * 25)`, the same 32x25 grid ten across a
+`CMP` scenery sheet uses, and the routine at `0x0e6f` walks the map ten **big-endian** words
+to a row, dividing each by 80 to choose between three loaded sheets. `INTRO.STI`'s 960
+bytes are therefore 48 rows: **a 320 by 1200 panorama** out of `bg1a`, `bg1c` and `bg1b`,
+which is what the three `panfile` symbols are for. The moon is at the top of it, the
+treeline in the middle and a colonnade of trunks at the foot, and the intro moves a 200-tall
+window down it from 0 to 1000 on a speed ramp of its own: eleven thresholds at `DS:0x124`
+and eleven speeds at `DS:0x13a`, accelerating to six pixels a frame and easing back to one.
+`INTRO1.STI` is not a tile map at all; it is byte for byte `F09.T` and `SW9.T`, a 105-byte
+stub arena that ships three times.
 
-**One thing deliberately not shown.** The image holds six credit headings and six names in
-two adjacent blocks. Reading them off positionally puts a composer on the programming line,
-so the two blocks are plainly not drawn in that order, and which heading goes with which
-name is in code this project has not disassembled. The six names are therefore shown
-without headings rather than under guessed ones. `conversion by` is different: four names
-follow it and no second heading, so that grouping is the image's own and it keeps it.
+**The captions have coordinates after all.** They are ordinary ten-byte
+`[string][x][y][flags][next]` records, the same chain the message system walks; the flag's
+bit 0 centres the line, which is why every x in the intro is zero. So the whole of the
+guessing is gone: `MINDSCAPE PRESENTS` at y 20 with `copyright 1992` at 165, and the story
+cards at 55, 75, 95, 115, 135 and 175.
 
-**Not built, precisely:** `intro.sti` and `co.sti` are 960 bytes each and `intro1.sti` 105,
-the `.STI` format is not decoded and the tile engine that reads them is not written; the
-cast's animation scripts live in the intro's own DGROUP and are not extracted, so none of
-the nine cast banks moves; the captions' own coordinates are not recovered, because nothing
-in the image points at those strings and the code that draws them builds its record from
-registers, so finding it means disassembling the intro's main module; and `MINDSCAP`, the
-publisher's logo, is not baked. Which word goes over which plate, and for how long, is
-therefore **ours**, and `henge_core::intro` says so.
+**The credits are the loading screens, and the pairing is read rather than guessed.** A
+seven-entry table at `DS:0x152` is stepped once per file the opening loads, so what had been
+left as six names without headings is simply there: `conversion by` / Images Software Ltd,
+`created by` / Rob Anderson, `Programmed by` / Anthony Mack and Nicholas Snape, `Artwork by`
+/ Rob Anderson and Dennis Turner, `Music and Sound by` / Audio Visual Magic, `Additional Art
+by` / Steve Leney, `Design by` / Rob Anderson and Todd Prescott. `Richard Joseph` and `Kevin
+Hoare` are strings no record points at, so they are left out rather than placed.
+
+**The story cards are not drawn over a plate.** `0x36c4` puts `MESSAGE.PIV` up first, the
+same stone-circle box the game's own messages go over. The black bands this project used to
+cut through the artwork were an invention of the missing coordinates, and there was nothing
+to invent.
+
+**The cast animates.** Its scripts are ordinary data in the intro's own `DGROUP`, and the
+intro's `INITTASK` fills one handler slot more than the game's, so `TASKGOSUB` is `0x9a`
+here and `0x98` there. Sixteen scripts drive the plates, using five of the twenty-one
+commands and nothing else, and a `TASKGOTO` whose mode is not 3 arms a jump taken at the
+*next* end of frame, which is what makes the scenery hold still while the one script with no
+pending jump decides how long a scene lasts. So the scene lengths are the scripts' own tick
+counts, not a choice.
+
+**`MINDSCAP` is a PIV.** It has no extension, which is the only reason nothing had baked it:
+the loop that turns full-screen images into sheets asks for `.piv`, `.cmp` and `.p`.
+
+**The intro is the first half of `INTR.EXE` and the ending is the second.** The program
+reads its command tail at `PSP:0x82` and jumps to a different sequence when it is given
+one, and that is the half with `The End`, `And so, the tale of the Moonstone...`, `co.sti`
+and the plates `bg5`, `bg7` and `bg8`; `ColourMoonstone` reads the same argument to colour
+the stone. So the intro is five plates and a panorama, not eleven, and the other three are
+deliberately not in it. `CO.STI` decodes as the ending's own pan: 48 rows again, with the
+bottom eight a whole screen and everything above it one repeated tile, so the camera rises
+off `bg7` into empty sky.
+
+**Built:** the logo, the wordmark and the publisher's card, the seven credit screens, the
+pan, and the plates in the order the scene routines hand them to the blitter, with the cast
+running on the intro's own scripts and every caption at its own y, then the story card over
+`MESSAGE.PIV`. Skippable with fire, and the title behind it.
+
+**Ours, and marked so in `henge_core::intro`:** how long the logo and each credit screen is
+held, because in the original each is up for exactly as long as the next file takes to come
+off a floppy; the rounding of the intro's 9.1 frames a second onto this engine's sixty ticks;
+and the dark ring drawn round a caption, which stands in for the glyph shading this engine's
+silhouette text throws away. The ending's own sequence is recovered above but not built.
 
 ## 8.7 Save and load `done, ours`
 
@@ -1166,8 +1212,8 @@ and F9, because core does no I/O and keeps its one dependency.
 - [ ] Typing your own name over the knight's, and the panel's other pages
 - [x] Mouse pointer and clickable widgets
 - [x] The message system: three distinct kinds (wait, occurrence, instruction)
-- [~] The intro sequence. `INTR.EXE` examined; the plates and the words play, the
-      `.STI` tile maps and the cast's scripts do not
+- [x] The intro sequence. `INTR.EXE`'s image expanded, the `.STI` tile map decoded, the
+      pan, the cast, the credits and the captions' own coordinates all recovered
 - [x] Save and load `ours`, the original has none
 
 ---
@@ -1183,8 +1229,8 @@ and F9, because core does no I/O and keeps its one dependency.
 | `PO.CEL` the pointer | 1 | the one, and it is the pointer |
 | `DICE.CEL`, `DICE.PIV` | dice game | none |
 | `BLO.CEL` blood and gore | 41 | none |
-| intro cast banks | 438 | none: their scripts are in `INTR.EXE`'s own DGROUP and are not extracted |
-| full-screen scenes | 31 | 26: the eleven intro plates carry the intro, the title and attract mode, and `MESSAGE.PIV` is the message box |
+| intro cast banks | 438 | five of the nine, on the intro's own scripts; the other four are the ending's |
+| full-screen scenes | 32 | 27: five plates and a 320x1200 panorama carry the intro, the other plates the title and attract mode, `MESSAGE.PIV` is the message box, and `MINDSCAP` is the publisher's logo |
 | sound samples | 49 | 4 |
 | music | 18 files | all six tunes, from the six Roland drivers |
 

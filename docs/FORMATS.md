@@ -111,6 +111,40 @@ Every arena shares the same walkable rectangle except for its depth: `x` always 
 full width and the band always begins at the same `y`, while the bottom edge varies per
 arena. That one number is what makes some fights feel cramped and others open.
 
+## `.STI`: tile maps
+
+Three files, all in the intro's own set: `INTRO.STI` and `CO.STI` at 960 bytes and
+`INTRO1.STI` at 105. **`INTRO1.STI` is not one of these at all**: it is byte for byte
+`F09.T` and `SW9.T`, a stub `.T` arena that ships three times under three names.
+
+The other two are tile maps, and the engine that reads them is `GFX`'s tile half
+(`PlaceTile`, `FindTile`, `CalcOffset`, `ClipTile`, `Dump_Tile`), which `MAIN.EXE` carries
+as well. Nothing in the shipped game data needs it: these three files are the only tile
+maps in the release.
+
+```
+u16be tile[]        ten to a row, rows top to bottom
+```
+
+- **Ten tiles to a row.** The walker steps x by 32 until it passes 319.
+- **A tile is 32 by 25**, cut from a 320x200 image ten across: `FindTile` computes
+  `x = (n % 10) * 32`, `y = (n / 10) * 25`. That is the same grid a `CMP` scenery sheet is
+  cut on, so a `PIV` used this way holds eighty tiles.
+- **The words are big-endian**, which the walker does with an `xchg ch, cl` after the load.
+- **`n / 80` chooses the sheet.** The intro loads three and keeps their segments in a table
+  of three words, with a second table of the first tile number in each.
+
+`INTRO.STI` is therefore 48 rows: a 320 by 1200 panorama, its three sheets `bg1a.piv`,
+`bg1c.piv` and `bg1b.piv`, with the moon at the top, the treeline in the middle and a
+colonnade of trunks at the foot. Only the first sheet's palette is copied to the live one,
+so all three are drawn in `bg1a`'s. `CO.STI` is 48 rows as well, one sheet, the bottom
+eight rows a whole screen and everything above them tile 0 repeated.
+
+Nothing draws the map whole. `Dump_Tile` stamps one 32x25 tile straight into mode X, the
+pan scrolls what is already on the screen by whole rows of pixels and stamps two fresh tile
+rows at the edge it uncovered, and `ClipTile` handles the tile row that is half off the
+top.
+
 ## COLLIDE.HIT: hit lines
 
 Plain text, unusually for this game.

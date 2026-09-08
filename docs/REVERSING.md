@@ -372,19 +372,60 @@ also carries: `PlaceTile`, `FindTile`, `CalcOffset`, `ClipTile`, `Dump_Tile`, `T
 `TileNum`, `TileX`, `TileY`. Module 1 is `_LOADER` and module 3 the DOS error table. So the
 intro is not a separate engine; it is the game's engine with a different program on top.
 
-### Its data segment sits somewhere else, and the tool does not know that
+### The image the tool writes is still packed, and that was the whole blockage
 
 `symbolmap.py` resolves a data symbol as `seg * 16 + offset`, which is right for
-`MAIN.EXE`. In `INTR.EXE` that lands 14,911 bytes past where the bytes actually are: the
-true base is image 13,025. The check is unambiguous once found. `MesFILE`, `MoonFont`,
-`aufile1`, `lifile1`, `dafile1` and the rest are consecutive symbols, and at the corrected
-base they are consecutive NUL-terminated filenames of exactly the right lengths.
+`MAIN.EXE`. In `INTR.EXE` it appeared to land 14,911 bytes past where the bytes actually
+are, and the code addresses appeared to need the same seven-step monotone correction the
+tool fits for `MAIN.EXE`. Both readings were recorded here as facts about the executable.
+**Neither is one.** They are two symptoms of the same thing:
 
-The tool is left as it is, because it is fitted to `MAIN.EXE` and a second executable does
-not justify guessing at a general rule from one sample. Anything reading `INTR.EXE`'s data
-subtracts 14,911.
+> **The `--image` `symbolmap.py` writes for `INTR.EXE` has not been fully unpacked.** Its
+> tail is Microsoft EXEPACK's run-length stream, one command every few hundred bytes, and
+> every zero-filled span of the program is sitting there as a four-byte `fill` command
+> instead of the bytes it stands for.
 
-### What its symbols give
+```text
+read backwards from the last command byte:
+  b0 / b1   fill:  [u8 value][u16 count][cmd]
+  b2 / b3   copy:  [count bytes][u16 count][cmd]
+  bit 0 set on the command is the last one executed, and it is the lowest in the file
+```
+
+The code region is nearly all `copy` blocks, which is why it disassembled correctly and
+why the correction the tool fitted was monotone and stepped: each step is one `fill` the
+image is short by. By `DGROUP` the fills have accumulated to 14,911, which is the other
+number. Expand the stream and **every symbol, code and data, lands on its own byte with no
+correction of any kind**:
+
+```text
+TextPTop        12,589      PerformCOMMAND  16,332
+LoadScreen      14,156      TaskGosub       17,170
+TextASCII       44,634      MesFILE         46,007
+```
+
+`henge_formats::introexe::expand` does the walk; it finds the end of the stream rather than
+assuming it, because the debug information is appended after it.
+
+**`MAIN.EXE` was then checked, and it does not have the same fault.** This was the obvious
+next question, because if it did then its fitted code correction would be an artefact and
+its "first 2,906 bytes of DGROUP are a stale duplicate" would be the same misreading, which
+would make `MapIconsTABLE` readable. It is not so, on two independent tests. Running the
+same expander over `main.final.bin` finds no real stream: what it matches would make the
+file *shorter*, which a run-length expansion cannot do. And every one of the 411 data
+symbols that names a string has that string sitting at exactly the address the symbol
+table gives, in the unexpanded image, with none wrong. The image is already the program.
+
+So the two executables genuinely differ: `INTR.EXE`'s image needed expanding and
+`MAIN.EXE`'s did not, and `MAIN.EXE`'s seven-step code correction stands, corroborated as
+it was by all nineteen `TaskComTable` handlers landing on entry points with it and none
+without it. `MapIconsTABLE` stays unreadable.
+
+Worth keeping beside the earlier note about the symbol table: **a negative result about
+file structure is only as good as your confidence that you are looking at the file**, and
+that applies to an unpacked image as much as to a packed one.
+
+### What its symbols and its data give, once the image is expanded
 
 **The asset list, by name and in order.** The numbering is a real ordering, not an
 artefact: the filenames are not in alphabetical order and the symbols are.
@@ -398,29 +439,43 @@ also          bold.f  message.piv  mindscap  blo.cel  be1.c
 mapfile1,2    intro.sti  co.sti
 ```
 
-Every one of those except `mindscap` is already decoded in the packs.
+**`.STI` is a tile map.** `FindTile` cuts tile *n* out of a 320x200 sheet at
+`((n % 10) * 32, (n / 10) * 25)`, which is the 32x25 grid ten across that a `CMP` scenery
+sheet is cut on, and the walker at `0x0e6f` reads ten **big-endian** words to a row and
+divides each by 80 to choose between three loaded sheets. `INTRO.STI`'s 960 bytes are 48
+rows: a 320 by 1200 panorama out of `bg1a`, `bg1c` and `bg1b`. `docs/FORMATS.md` has the
+format. `INTRO1.STI` is not a tile map: it is byte for byte `F09.T` and `SW9.T`.
 
-**Its words**, plain in the image from offset 18,551: `MOONSTONE`, `Mindscape`, `presents`,
-the eight credit headings and the eight names under them, `MINDSCAPE PRESENTS`, `The End`,
-and three story cards: `The ceremony of the / Moonstone / is about to begin`,
-`The druids sent their / best knights to Stonehenge / so they may be dubbed / into the /
-Quest for the / MOONSTONE`, and `And so, the tale of the / Moonstone and the courage / of
-the knights that fought / for it is passed on from / one generation to the next`.
+**The opening is a vertical pan down that panorama**, 0 to 1000, on a ramp of eleven
+thresholds at `DS:0x124` and eleven speeds at `DS:0x13a`: one pixel a frame, up to six,
+and back to one. `0x0f0d` and `0x0f57` scroll what is on the screen by whole pixel rows and
+stamp two fresh tile rows into the edge they uncover.
 
-### Where the trail stops on the intro
+**Its captions are ten-byte records**, the same `[string][x][y][flags][next]` chain the
+game's message system walks, and bit 0 of the flag word centres the line, which is why
+every x in the intro is zero. Nothing points at the *strings*, which is why the earlier
+search for them failed; the records point at them.
 
-- **`.STI` is not decoded.** `INTRO.STI` and `CO.STI` are 960 bytes, `INTRO1.STI` 105.
-  `INTRO.STI` reads as 480 big-endian words of small indices with consecutive runs in it,
-  which is what a tile map looks like, and the intro carries a tile engine; 960 is also
-  40 by 24 bytes, which is a screen of 8 by 8 tiles minus a row. Neither reading is
-  confirmed. `CO.STI` is almost entirely zero and `INTRO1.STI` looks compressed.
-- **The cast's animation scripts are not extracted.** They are ordinary data in the
-  intro's own DGROUP, as `MAIN.EXE`'s are, but no symbol names them, so finding them means
-  walking the data for well-formed scripts rather than reading a name off a list.
-- **The captions' coordinates are not recovered.** Unlike the message chains, nothing in
-  the image points at these strings, and there are no ten-byte records around them. They
-  are drawn by the path that builds a `TextTemp` record from registers, so the numbers are
-  immediates in code, and finding them means disassembling module 0's main body.
+**The credits are the loading screens.** A seven-entry table at `DS:0x152` is stepped once
+per file the opening loads, so the heading-to-name pairing this project had refused to
+guess at is simply read off: `Programmed by` with Anthony Mack and Nicholas Snape,
+`Music and Sound by` with Audio Visual Magic. `Richard Joseph` and `Kevin Hoare` are
+strings no record points at.
+
+**The intro's task VM is the game's with one slot more.** Its `INITTASK` at `0x3be8` fills
+`TaskCommandTable` with twenty-one handlers where the game's fills nineteen, inserting
+`TaskStop` at `+0x14`, so every opcode above it moves up one: `TASKGOSUB` is `0x9a` here
+and `0x98` there. Its scripts use `TASKHOLD`, `TASKGOTO`, `TASKLOOP`, `TASKGOSUB` and the
+part record and nothing else, and a `TASKGOTO` whose mode is not 3 arms a jump taken at the
+*next* end of frame, which is how a script that finishes on `ff ff` carries on anyway.
+That is what holds the intro's scenery still while the one script with no pending jump
+decides how long a scene lasts.
+
+**The intro is the first half of the program and the ending is the second.** `0x000c` reads
+the command tail at `PSP:0x82`; given one, `0x006a` jumps to a different sequence, and that
+is the half with `The End`, `And so, the tale of the Moonstone...`, `co.sti` and the plates
+`bg5`, `bg7` and `bg8`. `ColourMoonstone` reads the same argument to colour the stone, so
+the argument is which moonstone the game was won with.
 
 ## The glyph map was in the executable after all
 

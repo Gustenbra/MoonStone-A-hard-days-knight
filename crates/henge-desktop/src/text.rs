@@ -17,6 +17,10 @@ pub struct Font {
     glyph: BTreeMap<char, usize>,
     space_width: i32,
     tracking: i32,
+    /// Carried from the pack for a caller that wants to stack lines itself.
+    /// Nothing here does: every screen in the game places its lines at the y
+    /// the original's own text records give them.
+    #[allow(dead_code)]
     pub line_height: i32,
 }
 

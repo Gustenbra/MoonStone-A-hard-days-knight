@@ -678,3 +678,46 @@ mod tests {
         assert!(err.contains("fall"), "{err}");
     }
 }
+
+/// One frame of an intro animation: how many of the intro's own frames it is
+/// held for, and the sprite parts it is made of.
+///
+/// The intro runs the same task VM the game does, but its `INITTASK` fills one
+/// more handler slot, so its opcode numbers are its own; and its scripts use
+/// only `TASKHOLD`, `TASKGOTO`, `TASKLOOP`, `TASKGOSUB` and part records. That
+/// makes them flattenable at bake time, which is why the intro carries frames
+/// rather than a [`ScriptSet`]: nothing in it branches on the state of a fight.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct IntroFrame {
+    pub hold: u8,
+    pub parts: Vec<crate::taskvm::Part>,
+}
+
+/// The intro's cast.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct IntroCast {
+    /// Slot to asset id. The routine that starts an intro task loads `bp` with
+    /// `0x445d` and the bank table entries are four bytes apart, so a part
+    /// record's selector divided by four is the slot.
+    pub banks: Vec<String>,
+    /// Script offset in `DGROUP`, as `"1583"`, to its flattened frames.
+    pub scripts: BTreeMap<String, Vec<IntroFrame>>,
+}
+
+impl IntroCast {
+    /// Which frame of a script is showing `n` of the intro's own frames after
+    /// it started. A script that has run out keeps showing its last frame,
+    /// which is what `ff ff` does: it leaves the script pointer on the `0xff`.
+    pub fn frame_at<'a>(&'a self, script: &str, n: u32) -> Option<&'a IntroFrame> {
+        let frames = self.scripts.get(script)?;
+        let mut left = n;
+        for f in frames {
+            let hold = f.hold.max(1) as u32;
+            if left < hold {
+                return Some(f);
+            }
+            left -= hold;
+        }
+        frames.last()
+    }
+}

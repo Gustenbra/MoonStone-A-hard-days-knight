@@ -760,6 +760,9 @@ struct App {
     showing_for: u32,
     /// The intro sequence.
     intro: Intro,
+    /// The intro's own cast, out of the pack. Absent when the pack was baked
+    /// without an unpacked `INTR.EXE`, in which case the plates simply hold.
+    intro_cast: Option<std::rc::Rc<henge_core::content::IntroCast>>,
     /// Where a save is written and read. Relative to wherever the game is run
     /// from unless `--save` says otherwise, and never written into the save
     /// itself.
@@ -994,6 +997,7 @@ impl App {
             println!("R restarts, escape quits");
         }
 
+        let intro_cast = reg.read_data("data.intro").ok().map(std::rc::Rc::new);
         Ok(App {
             fb,
             fx: henge_assets::Effects::new(),
@@ -1042,6 +1046,7 @@ impl App {
             showing: None,
             showing_for: 0,
             intro: Intro::new(),
+            intro_cast,
             save_path: save_path_arg(&args_of()),
             status,
             #[cfg(feature = "research")]
@@ -1218,7 +1223,10 @@ impl App {
             return "message".into();
         }
         match self.mode {
-            Mode::Intro => "intro".into(),
+            // Each step of the intro is its own screen, because the original
+            // fades between them: every scene routine calls the fade out, puts
+            // its plate up and fades back in.
+            Mode::Intro => format!("intro.{}", self.intro.card),
             Mode::Title => "title".into(),
             Mode::Select => "select".into(),
             Mode::Map => "map".into(),
@@ -2597,7 +2605,8 @@ impl App {
                 small: self.fonts.get("small"),
             };
             let intro = self.intro;
-            shell::draw_intro(&mut self.reg, &mut self.fb, &fonts, &intro);
+            let cast = self.intro_cast.clone();
+            shell::draw_intro(&mut self.reg, &mut self.fb, &fonts, &intro, cast.as_deref());
             return;
         }
         if self.mode == Mode::Title {

@@ -858,6 +858,14 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("data/fonts.json"), font_definitions())?;
     m.data.insert("data.fonts".into(), "data/fonts.json".into());
 
+    // The intro. `MINDSCAP` is a PIV with no extension, so nothing had picked
+    // it up; `INTRO.STI` is the tile map behind the opening pan, and the cast
+    // comes out of `INTR.EXE` once its image is expanded.
+    match bake_intro(&lib, &out, &mut m) {
+        Ok(what) => println!("intro: {what}"),
+        Err(e) => eprintln!("intro: {e:#}"),
+    }
+
     // The overworld's two grids, lifted out of the unpacked executable. The
     // terrain half is kept, because it is also what sites the lairs: each one
     // stands on ground of its own family, and only this table says which that is.
@@ -2776,4 +2784,100 @@ mod tests {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------- the intro
+
+/// The publisher's logo, the opening panorama and the cast.
+///
+/// **`MINDSCAP` has no extension**, which is the only reason it was never
+/// baked: the loop that turns full-screen images into sheets asks for `.piv`,
+/// `.cmp` and `.p`. It is an ordinary five-plane PIV.
+///
+/// **`INTRO.STI` is a tile map.** `FindTile` cuts tile *n* out of a 320x200
+/// sheet at `((n % 10) * 32, (n / 10) * 25)` and the routine that walks the map
+/// reads ten big-endian words to a row, dividing each by 80 to pick which of
+/// three loaded sheets it comes from. `panfile1..3` are `bg1a`, `bg1c` and
+/// `bg1b`, and the 960 bytes are 48 rows: one 320 by 1200 panorama, which the
+/// intro pans a 200-tall window down. Only `bg1a`'s palette is copied to the
+/// live one, so all three sheets are composited in it, as the original does.
+///
+/// **The cast** is the intro's own animation scripts, flattened to frames.
+fn bake_intro(
+    lib: &Library,
+    out: &std::path::Path,
+    m: &mut Manifest,
+) -> anyhow::Result<String> {
+    use henge_formats::introexe;
+    let mut done: Vec<String> = Vec::new();
+
+    if let Ok(bytes) = lib.bytes("mindscap") {
+        let p = piv::Piv::parse(&bytes)?;
+        let file = "sheets/scene_mindscap.png".to_string();
+        write_indexed(&out.join(&file), piv::W, piv::H, &p.pixels, &p.palette)?;
+        m.sheets.insert(
+            "scene.mindscap".into(),
+            Sheet {
+                file,
+                frames: vec![FrameRect {
+                    x: 0, y: 0, w: piv::W as u32, h: piv::H as u32, ox: 0, oy: 0,
+                }],
+            },
+        );
+        m.palettes.insert("palette.scene.mindscap".into(), p.palette);
+        done.push("the Mindscape logo".into());
+    }
+
+    if let Ok(sti) = lib.bytes("intro.sti") {
+        let a = lib.piv("bg1a.piv")?;
+        let c = lib.piv("bg1c.piv")?;
+        let b = lib.piv("bg1b.piv")?;
+        let pan = introexe::panorama(&sti, &[&a, &c, &b])?;
+        anyhow::ensure!(
+            pan.width == henge_core::intro::PAN_W as usize
+                && pan.height == henge_core::intro::PAN_H as usize,
+            "the panorama came out {}x{}, not the 320x1200 the map describes",
+            pan.width,
+            pan.height
+        );
+        let file = "sheets/scene_intropan.png".to_string();
+        write_indexed(&out.join(&file), pan.width, pan.height, &pan.pixels, &a.palette)?;
+        m.sheets.insert(
+            "scene.intropan".into(),
+            Sheet {
+                file,
+                frames: vec![FrameRect {
+                    x: 0, y: 0, w: pan.width as u32, h: pan.height as u32, ox: 0, oy: 0,
+                }],
+            },
+        );
+        m.palettes.insert("palette.scene.intropan".into(), a.palette);
+        done.push(format!("a {}x{} panorama", pan.width, pan.height));
+    }
+
+    match intro_cast() {
+        Ok(Some(cast)) => {
+            let n = cast.scripts.len();
+            fs::write(out.join("data/intro.json"), serde_json::to_string(&cast)?)?;
+            m.data.insert("data.intro".into(), "data/intro.json".into());
+            done.push(format!("{n} animation scripts"));
+        }
+        Ok(None) => done.push("no cast (no unpacked INTR.EXE image)".into()),
+        Err(e) => done.push(format!("no cast ({e:#})")),
+    }
+
+    anyhow::ensure!(!done.is_empty(), "nothing of the intro could be baked");
+    Ok(done.join(", "))
+}
+
+/// The intro's cast, if the unpacked `INTR.EXE` image is to hand.
+fn intro_cast() -> anyhow::Result<Option<henge_core::content::IntroCast>> {
+    use henge_formats::introexe;
+    let candidates = ["research/intro.final.bin"];
+    let Some(raw) = candidates.iter().find_map(|p| fs::read(p).ok()) else {
+        return Ok(None);
+    };
+    let img = introexe::expand(&raw)?;
+    introexe::check(&img)?;
+    Ok(Some(introexe::cast(&img)?))
 }

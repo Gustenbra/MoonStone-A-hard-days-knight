@@ -409,48 +409,128 @@ fn warmest(fb: &Framebuffer) -> u8 {
         .unwrap_or(1) as u8
 }
 
-/// The intro, one card at a time.
+/// The intro, as `INTR.EXE`'s own main module plays it.
 ///
-/// The plates and the words are the original's, out of `INTR.EXE`; which word
-/// goes over which plate is ours, and `henge_core::intro` says so. The words go
-/// on a plate of their own for the same reason the wordmark does: they have to
-/// read over eleven different pictures.
+/// All of it is the original's now: the publisher's logo, the vertical pan
+/// down the panorama its `.STI` tile map describes, the seven credit screens
+/// the loader steps through, the plates in the order the scene routines hand
+/// them to the blitter, the cast animating on the intro's own scripts, and
+/// every caption at the `y` its own ten-byte record carries. `henge_core::intro`
+/// says what was recovered and what little is ours.
+///
+/// Nothing here draws a box behind a caption. It used to, because the
+/// coordinates were invented and a line had to be made readable wherever it
+/// landed; the recovered story cards are drawn over `MESSAGE.PIV`, which is
+/// what the original puts behind them.
 pub fn draw_intro(
     reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, intro: &henge_core::intro::Intro,
+    cast: Option<&henge_core::content::IntroCast>,
 ) {
-    let Some(card) = intro.showing() else { return };
-    show(reg, fb, card.plate);
-    if card.lines.is_empty() {
+    use henge_core::intro::Backdrop;
+    let Some(step) = intro.showing() else { return };
+    match step.back {
+        Backdrop::Logo => show(reg, fb, LOGO_PLATE),
+        Backdrop::Message => show(reg, fb, MESSAGE_PLATE),
+        Backdrop::Plate(plate) => show(reg, fb, plate),
+        Backdrop::Pan { .. } => draw_pan(reg, fb, intro.pan as i32),
+    }
+
+    if let Some(cast) = cast {
+        draw_cast(reg, fb, intro, cast);
+    }
+
+    // `0x0c6a` blits `BOLD.F`'s wordmark cel before it draws the publisher's
+    // card, at the literal (9, 60) the registers are loaded with.
+    if step.wordmark {
+        sprite::draw(
+            reg, fb, TITLE_BANK, henge_core::intro::WORDMARK_CEL,
+            henge_core::intro::WORDMARK_AT.0, henge_core::intro::WORDMARK_AT.1, false,
+        );
+    }
+
+    if step.lines.is_empty() {
         return;
     }
     let (dark, light) = status::extremes(fb);
+    // The intro sets its captions in the bold face, as the message system does.
     let Some(font) = fonts.bold.or(fonts.small) else { return };
-    let n = card.lines.len() as i32;
-    let step = font.line_height.max(14);
-    let h = n * step + 12;
-    // Put the words over the emptiest half of the picture rather than always at
-    // the foot of it. Five lines at the bottom of the last plate cover the
-    // knight the plate is of, and the plates differ too much for one fixed
-    // position to be right on all eleven, so the picture is asked: whichever
-    // band is darker is the one with least in it.
-    let top = if band_ink(fb, 12) <= band_ink(fb, 200 - 16 - n * step) { 12 } else { 200 - 16 - n * step };
-    fb.rect(0, top - 6, SCREEN_W as i32, h, dark);
-    for (i, line) in card.lines.iter().enumerate() {
-        font.draw_centred(reg, fb, line, top + i as i32 * step, light);
+    for line in step.lines {
+        // **Ours: the outline.** The original's glyphs keep their own shading,
+        // and `0x0cb0` turns the four entries that shading uses pure white
+        // while a caption is up and dims them to a grey ramp afterwards. This
+        // engine draws a glyph as a silhouette in one colour on purpose, so a
+        // white caption over the white moon these are drawn on would be
+        // unreadable. Ringing it in the picture's own darkest entry is what
+        // stands in for the shading, and it is the same trick the pointer uses.
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
+            let w = font.width(reg, line.text);
+            font.draw(reg, fb, line.text, (SCREEN_W as i32 - w) / 2 + ox, line.y + oy, dark);
+        }
+        font.draw_centred(reg, fb, line.text, line.y, light);
     }
 }
 
-/// How bright a horizontal band of the frame is. Sampled rather than summed
-/// whole: this decides where a caption goes, not what it says.
-fn band_ink(fb: &Framebuffer, y: i32) -> u32 {
-    let mut total = 0u32;
-    for row in (y.max(0)..(y + 40).min(SCREEN_H as i32)).step_by(4) {
-        for col in (0..SCREEN_W).step_by(4) {
-            let c = fb.palette[(fb.pixels[row as usize * SCREEN_W + col] & 0x1f) as usize];
-            total += ((c >> 16) & 0xff) + ((c >> 8) & 0xff) + (c & 0xff);
+/// `MINDSCAP`, the publisher's logo. A PIV with no extension, which is the
+/// only reason nothing had ever baked it.
+const LOGO_PLATE: &str = "scene.mindscap";
+
+/// The panorama, 200 rows of it.
+///
+/// The original never holds this picture anywhere: it stamps 32x25 tiles
+/// straight into video memory and scrolls what is already there, two tile rows
+/// at a time. The picture is composited whole at bake time instead, because a
+/// framebuffer this engine can blit from costs 384KB and a tile engine over
+/// mode X costs a mode X.
+fn draw_pan(reg: &mut Registry, fb: &mut Framebuffer, top: i32) {
+    if let Some(p) = reg.palette("palette.scene.intropan").map(|r| r.value.clone()) {
+        fb.set_palette(&p);
+    }
+    let Ok(img) = reg.image(PAN_SHEET) else {
+        fb.clear(0);
+        return;
+    };
+    let top = top.clamp(0, (img.height as i32 - SCREEN_H as i32).max(0)) as usize;
+    for row in 0..SCREEN_H {
+        let src = (top + row) * img.width;
+        let dst = row * SCREEN_W;
+        if src + SCREEN_W <= img.pixels.len() {
+            fb.pixels[dst..dst + SCREEN_W].copy_from_slice(&img.pixels[src..src + SCREEN_W]);
         }
     }
-    total
+}
+
+const PAN_SHEET: &str = "scene.intropan";
+
+/// Everything the step has put on the plate.
+///
+/// A figure is placed the way the task VM places one: x from the task's own,
+/// or mirrored about it, and y from the task's y plus its z. The two starters
+/// differ only in x and facing, and their numbers are `henge_core::intro`'s.
+fn draw_cast(
+    reg: &mut Registry, fb: &mut Framebuffer, intro: &henge_core::intro::Intro,
+    cast: &henge_core::content::IntroCast,
+) {
+    use henge_core::intro::{SPAWN_LEFT_X, SPAWN_RIGHT_X, SPAWN_Y, SPAWN_Z};
+    let Some(step) = intro.showing() else { return };
+    let now = intro.frame();
+    for spawn in step.cast {
+        if now < spawn.at {
+            continue;
+        }
+        let Some(frame) = cast.frame_at(spawn.script, now - spawn.at) else { continue };
+        let ox = if spawn.left { SPAWN_LEFT_X } else { SPAWN_RIGHT_X };
+        for part in &frame.parts {
+            let Some(sheet) = cast.banks.get(part.bank as usize).cloned() else { continue };
+            let Some(cut) = sprite::cut(reg, &sheet, part.cel as usize) else { continue };
+            let x = if spawn.left {
+                ox - (part.x as i32 + cut.w as i32)
+            } else {
+                ox + part.x as i32
+            };
+            let y = SPAWN_Y + SPAWN_Z + part.y as i32;
+            fb.blit(&cut.pixels, cut.w, cut.h, x, y, spawn.left);
+        }
+    }
 }
 
 /// `KI.CEL`, whose cels 0x2d to 0x31 are the five moons.

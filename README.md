@@ -112,11 +112,21 @@ need your own copy of the original, which the engine reads and converts locally.
   sky, and each fires where the original fires it: the two cities greet you, the stone
   circle tells you the druids are preparing, and the wizard's tower is the one door that
   takes one off the Gods' pile
-- **An intro.** `INTR.EXE` had never been examined; it unpacks the same way `MAIN.EXE`
-  does and gives up 319 symbols, its whole asset list and its words. The eleven plates
-  play in the original's own order with the original's own captions, and the people who
-  made the game are named at the end. The tile maps its `.STI` files hold and the animated
-  cast are not built and are not faked
+- **An intro, and it is the original's.** `INTR.EXE` had never been examined. It unpacks
+  the same way `MAIN.EXE` does, but the image the unpacker writes is **still packed**: its
+  tail is EXEPACK's run-length stream, which is why its addresses looked as though they
+  needed corrections. Expand it and everything lands on its own byte, and the whole intro
+  is in there. `.STI` turns out to be a tile map: `INTRO.STI` is 48 rows of ten tiles, a
+  **320 by 1200 panorama** out of `bg1a`, `bg1c` and `bg1b`, and the intro opens by panning
+  a screen-tall window down it from the moon, through the treeline, to the forest floor,
+  on the original's own eleven-step speed ramp. Then the plates, in the order the scene
+  routines hand them to the blitter, with **the cast animating on the intro's own scripts**:
+  the druids' torchlit procession, the circle filling, the arch-druid on his dais. The
+  captions have coordinates after all, in ten-byte records like the message system's, and
+  the story card goes over `MESSAGE.PIV` where the original puts it. The credits are the
+  loading screens, so who did what is read off the table that steps them rather than
+  guessed. `MINDSCAP`, the publisher's logo, is a PIV with no extension, which is the only
+  reason nothing had baked it
 - **Save and load**, which the original has none of, so that part is designed rather than
   ported: a versioned serialization of the simulation with a fingerprint over it, three
   distinguishable refusals, and no path of any kind inside the file
@@ -135,7 +145,7 @@ need your own copy of the original, which the engine reads and converts locally.
 - **Gamepads**, read the way the original reads a stick, with its own dead zone, its own
   two-corner calibration and its own debounce; and controls that are a table of data
   rather than a match on key codes
-- 326 tests, all of it verifiable headlessly with no display or sound card
+- 382 tests, all of it verifiable headlessly with no display or sound card
 
 ## Running it
 
@@ -176,8 +186,9 @@ cargo run --release
 The first line needs `pip install unicorn`, and it is the only step that does. Skip it
 and everything works except the music, which the bake will say it could not find.
 
-It opens on the intro: the original's own eleven plates with the original's own words
-over them, out of `INTR.EXE`. Space skips it, and the title follows. Up and down move
+It opens on the intro, out of `INTR.EXE`: the publisher's logo, the wordmark over the
+moon, the credits, the pan down the panorama, and the plates with their cast. Space skips
+it, and the title follows. Up and down move
 the highlight, left and right change the setting on the row you are on, and space takes
 it. The moon quest goes to the select screen, where left and right pick a knight and
 space takes him.
