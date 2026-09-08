@@ -1397,7 +1397,6 @@ impl App {
                             w.set_player_health(self.run.health_for_fight());
                             w.set_moon(self.run.moon.phase().key());
                         }
-                        self.title.touched();
                         self.mode = Mode::Title;
                     }
                     return;
@@ -1762,7 +1761,6 @@ impl App {
         self.intro.tick();
         if self.intro.done {
             self.mode = Mode::Title;
-            self.title.touched();
         }
     }
 
@@ -1775,13 +1773,7 @@ impl App {
         let (up, down) = (self.pressed[0], self.pressed[1]);
         let (left, right, take) = (self.pressed[2], self.pressed[3], self.takes());
         let touched = up || down || left || right || take;
-        let was_attracting = self.title.attracting();
-        if touched {
-            self.title.touched();
-        } else {
-            self.title.tick();
-        }
-        if was_attracting || !touched {
+        if !touched {
             return;
         }
         if up {
@@ -2106,7 +2098,7 @@ impl App {
             status::sheet_menu_rects(n, Some(self.sheet_cursor))
         } else {
             match self.mode {
-                Mode::Title if !self.title.attracting() => shell::title_rects(),
+                Mode::Title => shell::title_rects(),
                 Mode::Select => shell::select_rects(),
                 Mode::Place => self
                     .visiting

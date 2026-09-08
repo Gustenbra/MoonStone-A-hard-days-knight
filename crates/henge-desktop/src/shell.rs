@@ -85,15 +85,21 @@ const RESERVED: usize = 75;
 /// `_LOADER:MoonPic` is the string `CH.PIV`, and the routine at `0x87c3` loads
 /// it, keeps a copy and draws the wordmark and the two credit lines on it.
 const TITLE_PLATE: &str = "scene.ch";
-const ATTRACT: [&str; 10] = [
-    "scene.bg1a", "scene.bg1b", "scene.bg1c", "scene.bg2", "scene.bg3",
-    "scene.bg4", "scene.bg5", "scene.bg5a", "scene.bg7", "scene.bg8",
-];
 
 /// Ticks of nobody touching anything before the title gives up and starts
-/// showing off, and how long each plate stays.
-const ATTRACT_AFTER: u32 = 420;
-const PLATE_TICKS: u32 = 220;
+/// showing off.
+///
+/// **There is no such thing.** `DoOptions` at `0x1241` sets its three counters
+/// up and then polls the input and dispatches, with no idle count, no timer and
+/// nowhere to go: the original's title screen simply sits there until somebody
+/// presses something. An attract mode was invented here and cycled ten of the
+/// intro's files as though each were a picture. Three of them are not pictures
+/// at all: `bg1a`, `bg1b` and `bg1c` are the tile sheets `INTRO.STI` arranges
+/// into the opening panorama, so showing one raw put half a moon above a row of
+/// trunks with a hard cut between them, which is what it looked like.
+///
+/// Removed rather than repaired. Restoring it means a list of the seven plates
+/// that really are pictures and a counter, but it would still be ours.
 
 /// `ARX` in the original. The arrow's left edge on the option list.
 const ARROW_X: i32 = 50;
@@ -110,38 +116,14 @@ const LOGO_AT: (i32, i32) = (5, 10);
 const COPYRIGHT_AT: (i32, i32) = (22, 181);
 const RESERVED_AT: (i32, i32) = (110, 190);
 
+#[derive(Default)]
 pub struct TitleScene {
     pub state: Title,
-    /// Ticks since anyone pressed anything.
-    idle: u32,
-}
-
-impl Default for TitleScene {
-    fn default() -> TitleScene {
-        TitleScene { state: Title::default(), idle: 0 }
-    }
 }
 
 impl TitleScene {
-    pub fn touched(&mut self) {
-        self.idle = 0;
-    }
-
-    pub fn tick(&mut self) {
-        self.idle = self.idle.saturating_add(1);
-    }
-
-    /// Is the title showing off rather than waiting?
-    pub fn attracting(&self) -> bool {
-        self.idle >= ATTRACT_AFTER
-    }
-
     fn plate(&self) -> &'static str {
-        if !self.attracting() {
-            return TITLE_PLATE;
-        }
-        let n = ((self.idle - ATTRACT_AFTER) / PLATE_TICKS) as usize;
-        ATTRACT[n % ATTRACT.len()]
+        TITLE_PLATE
     }
 
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts) {
@@ -164,13 +146,6 @@ impl TitleScene {
         // went, and the black band and the four way outline were both invented
         // to make the silhouette read.
         sprite::draw(reg, fb, TITLE_BANK, LOGO, LOGO_AT.0, LOGO_AT.1, false);
-
-        if self.attracting() {
-            if let Some(small) = fonts.small {
-                small.draw_own_centred(reg, fb, "Press fire", 180);
-            }
-            return;
-        }
 
         // The option list. The arrow's left edge is `ARX`, which `DoOptions`
         // sets to 50; the words follow it.

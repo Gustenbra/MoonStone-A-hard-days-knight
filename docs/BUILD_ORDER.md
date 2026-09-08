@@ -460,13 +460,20 @@ the decapitation beside the bloodless collapse from the same fight.
 
 Independent of everything. Makes it feel like a game rather than a demo.
 
-- [x] 50. **Title screen and attract mode.** The wordmark was in the font: `BOLD.F` has 76
+- [x] 50. **Title screen.** The wordmark was in the font: `BOLD.F` has 76
       frames and the glyph map only ever used 66, and frames 73, 74 and 75 are the
       `Moonstone / A Hard Days Knight` logo and the two credit lines. The option list is
       `DoOptions`: four rows, a player count of one to four, a gore switch, practice combat
       and moon quest, clamping at both ends rather than wrapping, with the arrow at `ARX`
-      50. What the original drew it over is in `INTR.EXE` and still unknown, so it goes
-      over an intro plate, and attract mode cycles the other ten
+      50. What it is drawn over is recovered: `_LOADER:MoonPic` is the string `CH.PIV`
+      and `0x87c3` loads it, keeps a copy, and draws the wordmark and the two credit
+      lines on it, while `DisplaySelect` blits the wordmark again ten pixels higher.
+      **There is no attract mode**, and the one that was here has been removed:
+      `DoOptions` polls the input and dispatches, with no idle count and nowhere to go,
+      so the original's title sits there until somebody presses something. Ours cycled
+      ten of the intro's files as though each were a picture, and three of them are not:
+      `bg1a`, `bg1b` and `bg1c` are the tile sheets `INTRO.STI` arranges into the opening
+      panorama, so one shown raw was half a moon above a row of trunks
 - [x] 51. **Character select.** `CH.PIV` and `SEL.CEL`, both of which the pack had decoded
       and never shown, and the rules from `ChooseKnight`, `ChooseRefresh`, `FindChosen` and
       `ChooseFIRE`. `KnightGlowColours` gives each knight's three shades, so the four are
