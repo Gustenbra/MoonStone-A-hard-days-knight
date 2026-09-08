@@ -644,6 +644,67 @@ const GRID_LEN: usize = 40 * 26;
 /// bottom of DGROUP, which the unpacker used to leave stale; see
 /// `docs/REVERSING.md`.
 const SELECTPAL_AT: usize = 0x123b0 + 0x892;
+/// `MOON:CCOL`, the four portrait columns, right after `SelectPAL`.
+const CCOL_AT: usize = 0x123b0 + 0x8d2;
+
+/// The exit code the baker leaves when the image is missing or stale, so a
+/// launcher can tell that case from every other failure and run
+/// `tools/symbolmap.py` before trying again.
+const STALE_IMAGE: i32 = 3;
+
+/// Refuse to bake around a missing or stale `MAIN.EXE` image.
+///
+/// Everything that matters comes out of that image: the animation scripts,
+/// the overworld grids, the lairs, the places and the select palette. For a
+/// long time the baker printed a note and carried on without whichever of
+/// those it could not read, and the game then started and quietly had the
+/// wrong thing on screen. The select screen went black around its knights on
+/// one machine that way: the code had learned to read `SelectPAL`, the pack
+/// had been rebaked to the new recipe, and the image on that machine was the
+/// one the old unpacker had left with the bottom of DGROUP stale. The recipe
+/// stamp cannot see that, because the recipe is about the code and not about
+/// the research files it reads.
+///
+/// So: no image is an error, the wrong length is an error, and a stale bottom
+/// of DGROUP is an error, each with the command that fixes it. The stale test
+/// is two facts about the recovered span that the stale copy cannot have:
+/// `SelectPAL` entry 1 is white, `0x0fff`, and `CCOL` is `12, 88, 164, 240`.
+/// Returns the fingerprint that goes into the manifest.
+fn check_image(src: &str) -> anyhow::Result<String> {
+    let fix = format!(
+        "make it with\n  python3 tools/symbolmap.py \"{src}/MAIN.EXE\" research/symbols.json \
+         --image research/main.final.bin"
+    );
+    let Some(bytes) = unpacked_image(src) else {
+        anyhow::bail!("no unpacked MAIN.EXE image found (research/main.final.bin); {fix}");
+    };
+    anyhow::ensure!(
+        bytes.len() == IMAGE_LEN,
+        "the unpacked image is {} bytes, expected {IMAGE_LEN}; {fix}",
+        bytes.len()
+    );
+    let word = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+    let ccol: Vec<u16> = (0..4).map(|i| word(CCOL_AT + i * 2)).collect();
+    anyhow::ensure!(
+        word(SELECTPAL_AT + 2) == 0x0fff && ccol == [12, 88, 164, 240],
+        "the unpacked image is stale: the bottom of DGROUP still holds the packed \
+         file's bytes, which an older tools/symbolmap.py left there. {fix}"
+    );
+    Ok(fingerprint(&bytes))
+}
+
+/// FNV-1a over the image, as sixteen hex digits. Not a security hash: it is
+/// here so the manifest can say which image it was baked from, and the skip
+/// at the top of `main` can see a research file change the way it sees a
+/// recipe change.
+fn fingerprint(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
 
 /// The four tables that say where the map's places and lairs stand, all of
 /// them in the bottom of DGROUP the unpacker used to leave stale.
@@ -697,16 +758,31 @@ fn main() -> anyhow::Result<()> {
     // silently stays as it was, and the game quietly runs without the music,
     // the animation scripts and the overworld grid it needs.
     let force = argv.iter().any(|a| a == "--force" || a == "--rebake");
+    // The image comes first, before the skip: a pack that was baked from a
+    // stale image and stamped with the current recipe must not be left alone.
+    let image = match check_image(&src) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("henge-bake: {e:#}");
+            std::process::exit(STALE_IMAGE);
+        }
+    };
     if !force && out.join("manifest.json").exists() {
         if let Ok(text) = fs::read_to_string(out.join("manifest.json")) {
             if let Ok(old) = serde_json::from_str::<serde_json::Value>(&text) {
-                if old.get("recipe").and_then(|r| r.as_u64()) == Some(RECIPE as u64) {
-                    println!("pack is already baked to recipe {RECIPE}; nothing to do");
+                let same_recipe = old.get("recipe").and_then(|r| r.as_u64()) == Some(RECIPE as u64);
+                let same_image = old.get("image").and_then(|r| r.as_str()) == Some(image.as_str());
+                if same_recipe && same_image {
+                    println!("pack is already baked to recipe {RECIPE} from this image; nothing to do");
                     return Ok(());
+                }
+                if same_recipe {
+                    println!("the pack was baked from a different MAIN.EXE image; rebaking");
+                } else {
+                    println!("the pack was baked by an older recipe than {RECIPE}; rebaking");
                 }
             }
         }
-        println!("the pack was baked by an older recipe than {RECIPE}; rebaking");
     }
 
     let lib = Library::open(&src).context("opening the original game data")?;
@@ -714,6 +790,7 @@ fn main() -> anyhow::Result<()> {
     fs::create_dir_all(out.join("sounds"))?;
 
     let mut m = Manifest::new("reference", Provenance::DerivedFromOriginal);
+    m.image = image;
 
     // Palettes, named after the arena family that owns them.
     for (name, _, sheet, _, _) in ARENAS {
@@ -882,19 +959,14 @@ fn main() -> anyhow::Result<()> {
             m.data.insert("data.scripts".into(), "data/scripts.json".into());
             set
         }
-        Ok(None) => {
-            eprintln!(
-                "no unpacked MAIN.EXE image and symbol table found: baking without the \n  \
-                 animation scripts, so the knight will have no animation at all.\n  \
-                 make them with `python3 tools/symbolmap.py MAIN.EXE research/symbols.json \\\n    \
-                 --image research/main.final.bin`"
-            );
-            ScriptSet::new()
-        }
-        Err(e) => {
-            eprintln!("animation scripts: {e:#}");
-            ScriptSet::new()
-        }
+        // `check_image` has already found the image, so what is missing is
+        // the symbol table beside it, which the same command writes.
+        Ok(None) => anyhow::bail!(
+            "no symbol table found (research/symbols.json): make it with\n  \
+             python3 tools/symbolmap.py \"{src}/MAIN.EXE\" research/symbols.json \
+             --image research/main.final.bin"
+        ),
+        Err(e) => return Err(e.context("animation scripts")),
     };
 
     fs::write(out.join("data/actors.json"), actor_definitions(&scripts, &banks)?)?;
@@ -921,12 +993,8 @@ fn main() -> anyhow::Result<()> {
             fs::write(out.join("data/overworld.json"), serde_json::to_string(&land)?)?;
             m.data.insert("data.overworld".into(), "data/overworld.json".into());
         }
-        Ok(None) => eprintln!(
-            "no unpacked MAIN.EXE image found: baking without the terrain grids.\n  \
-             make one with `python3 tools/symbolmap.py MAIN.EXE symbols.json \
-             --image research/main.final.bin`"
-        ),
-        Err(e) => eprintln!("overworld tables: {e:#}"),
+        Ok(None) => anyhow::bail!("overworld tables: the image vanished during the bake"),
+        Err(e) => return Err(e.context("overworld tables")),
     }
 
     // `MOON:SelectPAL`, the character select screen's own thirty two, lifted
@@ -938,11 +1006,8 @@ fn main() -> anyhow::Result<()> {
             m.palettes.insert("palette.select".into(), pal);
             println!("select: SelectPAL read out of the image");
         }
-        Ok(None) => eprintln!(
-            "no unpacked MAIN.EXE image found: baking without SelectPAL, so the \n  \
-             select screen falls back to the picture palette it used to stand on."
-        ),
-        Err(e) => eprintln!("SelectPAL: {e:#}"),
+        Ok(None) => anyhow::bail!("SelectPAL: the image vanished during the bake"),
+        Err(e) => return Err(e.context("SelectPAL")),
     }
 
     // Place icons, so a town is the size the artwork drew it.
@@ -966,28 +1031,16 @@ fn main() -> anyhow::Result<()> {
             println!("map: {} places read out of MapIconsTABLE", m.len());
             m
         }
-        Ok(None) => BTreeMap::new(),
-        Err(e) => {
-            eprintln!("MapIconsTABLE: {e:#}");
-            BTreeMap::new()
-        }
+        Ok(None) => anyhow::bail!("MapIconsTABLE: the image vanished during the bake"),
+        Err(e) => return Err(e.context("MapIconsTABLE")),
     };
     let lairs = match lair_table(&src) {
         Ok(Some(l)) => {
             println!("lairs: {} read out of ForestLairs, LairLocation and LairType", l.len());
             l
         }
-        Ok(None) => {
-            eprintln!(
-                "no unpacked MAIN.EXE image found: baking without the lairs and \
-                 without every place but the two towns."
-            );
-            Vec::new()
-        }
-        Err(e) => {
-            eprintln!("lair tables: {e:#}");
-            Vec::new()
-        }
+        Ok(None) => anyhow::bail!("lair tables: the image vanished during the bake"),
+        Err(e) => return Err(e.context("lair tables")),
     };
     fs::write(out.join("data/places.json"), place_definitions(&icons, &marks, &lairs))?;
     m.data.insert("data.places".into(), "data/places.json".into());

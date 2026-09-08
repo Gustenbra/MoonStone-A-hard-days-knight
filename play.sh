@@ -56,7 +56,26 @@ if true; then
       echo "  no python3, so no music. The rest of the game is unaffected."
     fi
   fi
-  cargo run --release --quiet --bin henge-bake -- "$data" ${rebake:+--force}
+  # The baker refuses a missing or stale MAIN.EXE image with exit code 3,
+  # and that is the one failure this script can fix itself: the unpacker is
+  # tools/symbolmap.py, which needs the same python and unicorn the music
+  # does. Run it and ask the baker once more. Any other failure stops here,
+  # loudly, rather than starting a game with the wrong thing on screen.
+  status=0
+  cargo run --release --quiet --bin henge-bake -- "$data" ${rebake:+--force} || status=$?
+  if [ "$status" = 3 ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      echo "Unpacking MAIN.EXE..."
+      python3 tools/symbolmap.py "$data/MAIN.EXE" research/symbols.json \
+        --image research/main.final.bin || exit 1
+      cargo run --release --quiet --bin henge-bake -- "$data" ${rebake:+--force} || exit 1
+    else
+      echo "  that needs python3 and unicorn (pip install unicorn)."
+      exit 1
+    fi
+  elif [ "$status" != 0 ]; then
+    exit 1
+  fi
 fi
 
 echo "Building..."
@@ -70,4 +89,5 @@ echo "  player two: WASD and F"
 echo "  gamepads work, and F11 calibrates one"
 echo
 # shellcheck disable=SC2086
+[ -n "$HENGE_NO_LAUNCH" ] && exit 0
 exec target/release/henge $pass

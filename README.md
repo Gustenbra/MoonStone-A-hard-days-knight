@@ -201,12 +201,17 @@ play.bat --data "C:\path\to\Moonstone"
 ./play.sh --data /path/to/Moonstone
 ```
 
-Pass `--rebake` after changing anything about how the data is read. Anything else you
-pass goes straight to the game, so `play.bat --start select` opens on character select.
+You never need to ask for a rebake. The pack carries a recipe stamp and a fingerprint of
+the unpacked `MAIN.EXE` it was read from, and the baker rebakes when either differs from
+what it has now. `--rebake` is still there for forcing one. Anything else you pass goes
+straight to the game, so `play.bat --start select` opens on character select.
 
-The bake also lifts the music out of the original's tune drivers, which needs Python and
-`pip install unicorn`. Without them everything works except the music, and the script
-says so and carries on.
+The bake reads most of the game out of the unpacked `MAIN.EXE`, and the unpacker is
+`tools/symbolmap.py`, which needs Python and `pip install unicorn`. The launcher runs it
+when the image is missing or was left by an older unpacker, and the baker refuses to
+carry on without it: a pack baked around a stale image used to start a game that quietly
+had the wrong thing on screen. The music comes out the same way and is the one thing the
+launcher lets go of when Python is not there.
 
 The long way, if you would rather drive it yourself:
 

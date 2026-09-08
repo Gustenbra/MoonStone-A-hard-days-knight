@@ -63,7 +63,27 @@ rem overworld grid.
 set "FORCE="
 if defined REBAKE set "FORCE=--force"
 cargo run --release --quiet --bin henge-bake -- "%DATA%" %FORCE%
+rem Exit code 3 is the one failure this script can fix itself: the MAIN.EXE
+rem image is missing or was left by an older unpacker. tools\symbolmap.py
+rem needs the same python and unicorn the music does. Run it and ask once
+rem more. Anything else stops here, loudly, rather than starting a game
+rem with the wrong thing on screen.
+if errorlevel 4 exit /b 1
+if errorlevel 3 goto unpack
 if errorlevel 1 exit /b 1
+goto baked
+:unpack
+where python >nul 2>&1
+if errorlevel 1 (
+  echo   that needs python and unicorn:  pip install unicorn
+  exit /b 1
+)
+echo Unpacking MAIN.EXE...
+python tools\symbolmap.py "%DATA%\MAIN.EXE" research\symbols.json --image research\main.final.bin
+if errorlevel 1 exit /b 1
+cargo run --release --quiet --bin henge-bake -- "%DATA%" %FORCE%
+if errorlevel 1 exit /b 1
+:baked
 
 echo Building...
 cargo build --release

@@ -37,7 +37,7 @@ pub struct Sheet {
 
 /// Bumped whenever the baker starts writing something a pack could not have
 /// had before. The launcher rebakes when what is on disk does not match.
-pub const RECIPE: u32 = 8;
+pub const RECIPE: u32 = 9;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {
@@ -51,6 +51,12 @@ pub struct Manifest {
     /// game cannot tell by looking at a sheet count. This is how it can tell.
     #[serde(default)]
     pub recipe: u32,
+    /// A fingerprint of the unpacked `MAIN.EXE` image this pack was baked
+    /// from. The recipe says which baker wrote the pack; this says which
+    /// research file it read, so that a regenerated image rebakes the pack
+    /// the same way a new recipe does. Empty in packs baked before it existed.
+    #[serde(default)]
+    pub image: String,
     #[serde(default)]
     pub sheets: BTreeMap<String, Sheet>,
     #[serde(default)]
@@ -71,6 +77,7 @@ impl Manifest {
             pack: pack.into(),
             provenance,
             recipe: RECIPE,
+            image: String::new(),
             sheets: BTreeMap::new(),
             sounds: BTreeMap::new(),
             music: BTreeMap::new(),
