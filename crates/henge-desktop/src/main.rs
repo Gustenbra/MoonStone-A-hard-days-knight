@@ -1288,7 +1288,15 @@ impl App {
     /// one of them calls it with `ah = 2` on the way out. Nothing else in the
     /// game has music, the map and the arenas included.
     fn music_tick(&mut self) {
-        let want = if self.mode == Mode::Place {
+        let want = if self.mode == Mode::Intro {
+            // Tune 1, by elimination rather than by trace. MAIN.EXE loads tunes
+            // 2 to 5 and never 1 or 6; disk A holds the intro and exactly two
+            // tunes, 1 and 6; and the intro comes before the ending. Which of
+            // the two INTR.EXE's own start call selects was not read out of the
+            // code, so this is inference, not recovery, and is the one place
+            // music plays that the table did not decide.
+            self.music_places.get("intro").cloned()
+        } else if self.mode == Mode::Place {
             self.visiting
                 .as_ref()
                 .and_then(|s| self.music_places.get(&s.visit.place))

@@ -74,6 +74,47 @@ pub fn draw_mask(
     }
 }
 
+/// Draw a frame keeping its own shading, but in the current screen's colours.
+///
+/// A frame like the title's copyright line is not a silhouette: it is a dark
+/// panel with lettering shaded across several indices on top of it. Flattening
+/// all of that to one colour paints the panel and the letters the same, which
+/// closes every letter up into a blob. Blitting the raw indices instead keeps
+/// the shape but takes the colours from whatever palette happens to be up,
+/// which is how the line came out pink.
+///
+/// So the frame's own distinct indices are ranked and mapped onto a ramp the
+/// caller chooses: the lowest becomes the background and is not drawn, and the
+/// rest run from `faint` to `light`. That keeps the letters legible against any
+/// backdrop without inventing a palette for the bank.
+pub fn draw_shaded(
+    reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
+    x: i32, y: i32, faint: u8, light: u8,
+) -> (i32, i32) {
+    let Some(c) = cut(reg, sheet, index) else { return (0, 0) };
+
+    let mut seen: Vec<u8> = c.pixels.iter().copied().filter(|p| *p != 0).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    let mut lut: Lut = [0; 32];
+    // Three roles, not a gradient: interpolating between two palette indices
+    // means nothing, because neighbouring entries are not neighbouring colours.
+    // The lowest index is the panel the lettering sits on and is dropped; the
+    // next is the letters' own outline; everything above is the letter face.
+    for (rank, idx) in seen.iter().enumerate() {
+        if *idx as usize >= lut.len() {
+            continue;
+        }
+        lut[*idx as usize] = match rank {
+            0 => 0,
+            1 if seen.len() > 2 => faint,
+            _ => light,
+        };
+    }
+    fb.blit_lut(&c.pixels, c.w, c.h, x, y, false, &lut);
+    (c.w as i32, c.h as i32)
+}
+
 /// How big a frame is, without drawing it.
 pub fn size(reg: &Registry, sheet: &str, index: usize) -> (i32, i32) {
     reg.sheet(sheet)

@@ -2463,15 +2463,19 @@ fn knight_definitions() -> String {
 /// The last is a moment inside the wizard's tower rather than a room of its
 /// own, so it is recovered and not wired; see `BUILD_ORDER.md` item 77.
 /// Tunes 1 and 6 are never loaded by `MAIN.EXE`: they ship on disk A with the
-/// intro and belong to `INTR.EXE`, whose own `LOADMUSIC` call could not be
-/// traced to a tune number.
+/// intro and belong to `INTR.EXE`, whose own start call could not be traced to
+/// a tune number. **The intro is given tune 1 by elimination**, which is
+/// inference and not recovery: disk A holds exactly the intro, the ending and
+/// those two tunes, and the intro comes first. The ending's tune 6 waits with
+/// the rest of the ending sequence.
 fn music_places() -> String {
     serde_json::json!({
         "highwood.dice": "music.tune3",
         "waterdeep.dice": "music.tune3",
         "stones": "music.tune2",
         "wizard": "music.tune2",
-        "waterdeep.mystic": "music.tune4"
+        "waterdeep.mystic": "music.tune4",
+        "intro": "music.tune1"
     })
     .to_string()
 }

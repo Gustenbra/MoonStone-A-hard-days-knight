@@ -164,7 +164,12 @@ impl TitleScene {
         fb.rect(0, 176, SCREEN_W as i32, 24, dark);
         for (cel, y) in [(COPYRIGHT, 180), (RESERVED, 190)] {
             let (w, _) = sprite::size(reg, TITLE_BANK, cel);
-            sprite::draw_mask(reg, fb, TITLE_BANK, cel, (SCREEN_W as i32 - w) / 2, y, light);
+            // With their own pixels, not as a silhouette. These two lines are
+            // eight pixels tall and carry six shades apiece; flattened to one
+            // colour every letter closes up into a blob and the line cannot be
+            // read at all. The wordmark above them survived that treatment only
+            // because it is 54 pixels tall.
+            sprite::draw_shaded(reg, fb, TITLE_BANK, cel, (SCREEN_W as i32 - w) / 2, y, faint, light);
         }
     }
 
