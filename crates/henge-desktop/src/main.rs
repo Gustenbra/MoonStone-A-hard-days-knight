@@ -1051,8 +1051,14 @@ struct App {
     /// to the tick the bout ends on, when `Knight1Won` and the rest run.
     duel_settled: Option<henge_core::rival::Settled>,
     /// The trade page, `StatTYPE` 1, while it is up: the loser's record and
-    /// `TakeCNT`, which `ReDisplay` (0xbee6) reads to turn the page into the
-    /// winner's own sheet once one thing has come off a living loser.
+    /// `TakeCNT`. `ReDisplay+0x73` (0xbeda) reads `[StatHAND2+0x31]`, the
+    /// loser's own lives, before `TakeCNT`: a dead loser (a grave) has it
+    /// forced back to nought every redraw (0xbee0), so a grave can be taken
+    /// from more than once; a living one does not, so the `cmp [TakeCNT], 0`
+    /// at 0xbee6 finds it set the moment one thing has been taken and turns
+    /// the page into the winner's own plain sheet (`StatTYPE = 9`, 0xbeed),
+    /// for good. See `sheet_tick`, where a successful take closes this the
+    /// same way for a living loser and keeps it open for a dead one.
     trade_page: Option<(usize, bool)>,
     /// The dice table's own one-bank table, `dice.cel` in `DiceHANDLE`.
     dice_banks: Option<henge_core::taskvm::BankTables>,
@@ -3331,8 +3337,7 @@ impl App {
             };
             if moved {
                 self.audio.play(CLICK_SOUND);
-                // `HGTakeDone`: `inc [TakeCNT]`.
-                self.trade_page = Some((loser, true));
+                self.trade_took(loser);
                 self.sync_sheet();
             }
             return;
@@ -3662,16 +3667,9 @@ impl App {
                 }
             }
             // `Knight1Won+6` (0x46b): a person takes through the trade
-            // page, `StatTYPE` 1, and nothing is taken for him.
-            //
-            // TODO: `ReDisplay` (0xbee6) reads `TakeCNT` to decide something
-            // more about how the page redraws once one thing has come off a
-            // living loser ("turn the page into the winner's own sheet"),
-            // and the bytes at 0xbee6 are not transcribed anywhere in this
-            // codebase to say exactly what. `trade_page`'s bool tracks
-            // `TakeCNT` faithfully (set from `Run::trade_take`'s own
-            // return); nothing further is done with it here rather than
-            // guessing at a screen change no cited disassembly describes.
+            // page, `StatTYPE` 1, and nothing is taken for him. It opens
+            // with `TakeCNT` clear; what happens once it is not is
+            // `HotGadget`'s own affair, in `sheet_tick`.
             Some(Settled::PlayerWon { loser }) => {
                 self.trade_page = Some((loser, false));
                 self.mode = Mode::Map;
@@ -3696,6 +3694,31 @@ impl App {
     /// so there is nothing left to settle on the way out.
     fn close_trade_page(&mut self) {
         self.trade_page = None;
+    }
+
+    /// `HGTakeDone`: `inc [TakeCNT]`, then `call ReDisplay` (0xbe6b) at
+    /// once. `ReDisplay+0x73` (0xbeda) reads `[StatHAND2+0x31]`, the
+    /// loser's own lives, before it ever looks at `TakeCNT`: a dead one (a
+    /// grave) has `TakeCNT` forced back to nought right there (0xbee0), so
+    /// the `cmp [TakeCNT], 0` at 0xbee6 always finds it clear and the trade
+    /// page simply redraws for another take. A loser still standing does
+    /// not get that reset, so the same compare finds `TakeCNT` set and
+    /// takes `StatTYPE = SaveTYPE = 9` (0xbeed): the page becomes the
+    /// winner's own plain sheet, single arch, and does not come back. One
+    /// thing taken from a body still breathing is all a person is shown.
+    fn trade_took(&mut self, loser: usize) {
+        if self
+            .run
+            .knights_alive()
+            .get(loser)
+            .copied()
+            .unwrap_or(false)
+        {
+            self.trade_page = None;
+            self.sheet = true;
+        } else {
+            self.trade_page = Some((loser, true));
+        }
     }
 
     /// `MapLOOP+19` (0xa319) round to `NextWHICH`, for whichever computer
@@ -4740,6 +4763,38 @@ mod tests {
         assert_eq!((app.run.gold, app.run.rivals[0].gold), (40, 0), "0cd1a");
         app.close_trade_page();
         assert!(app.trade_page.is_none());
+    }
+
+    /// `ReDisplay+0x73` (0xbeda): one thing taken off a loser who is still
+    /// standing turns the page into the winner's own sheet at once, rather
+    /// than staying open for another (`StatTYPE = SaveTYPE = 9`, 0xbeed).
+    #[test]
+    fn taking_one_thing_from_a_living_loser_closes_the_trade_page_to_the_sheet() {
+        let Some(mut app) = quest_app() else { return };
+        app.run.rivals[0].lives = 1;
+        app.trade_page = Some((1, false));
+        app.sheet = false;
+        app.trade_took(1);
+        assert!(app.trade_page.is_none(), "0bee6: TakeCNT was not cleared");
+        assert!(app.sheet, "0beed: StatTYPE = 9");
+    }
+
+    /// `ReDisplay+0x1b` (0xbee0): a dead loser (a grave) has `TakeCNT`
+    /// forced back to nought on every redraw, so the page never turns into
+    /// the sheet and a grave can be picked clean, one thing at a time.
+    #[test]
+    fn taking_from_a_grave_leaves_the_trade_page_open() {
+        let Some(mut app) = quest_app() else { return };
+        app.run.rivals[0].lives = 0;
+        app.trade_page = Some((1, false));
+        app.sheet = false;
+        app.trade_took(1);
+        assert_eq!(
+            app.trade_page,
+            Some((1, true)),
+            "0bee0: TakeCNT is forced clear"
+        );
+        assert!(!app.sheet);
     }
 
     /// `NextWHICH` (0xa434): the day turns and the between-days screen
