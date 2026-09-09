@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.75"
 license = "MIT"
 repository = "https://github.com/Gustenbra/MoonStone-A-hard-days-knight"
-authors = ["Fjord3D AS <info@fjord3d.no>"]
+authors = ["Carl Brandt <226579881+Gustenbra@users.noreply.github.com>"]
 
 [profile.release]
 opt-level = 3
