@@ -686,6 +686,20 @@ fn display_gold(panel: &mut Panel, side: usize, offset: i32, gold: u32) {
 /// Five single goods and a row of thirteen daggers, all with `STPL` on the field
 /// the purchase writes and `STRP`'s low nibble 0xa, which is `BuyGoods`. The
 /// high nibble picks which of the three armours or two swords it is.
+///
+/// ```text
+/// 0c7ad  cel 0x1c at (0x17, 0x91)  id 0x0e  STRP 0x1a  STPL 0x42   chain mail
+/// 0c7d5  cel 0x1d at (0x40, 0x91)  id 0x10  STRP 0x2a  STPL 0x42   plate
+/// 0c7fd  cel 0x1e at (0x6a, 0x90)  id 0x12  STRP 0x4a  STPL 0x42   battle
+/// 0c825  cel 0x17 at (0x32, 0x6b)  id 0x16  STRP 0x1a  STPL 0x40   broad sword
+/// 0c84d  cel 0x18 at (0x2f, 0x7d)  id 0x18  STRP 0x2a  STPL 0x40   claymore
+/// 0c875  cel 0x15 at (0x20, 0x59)  id 0x0a  STRP 0x0a  STPL 0x34   thirteen
+///        daggers, STI 9
+/// ```
+///
+/// The ids are twice the slots whose `Purchase` lines carry the prices
+/// `BuyArmour`, `BuyWeapon` and `BuyDagger` charge, so the line over the
+/// gadget and the coin taken agree without a table between them.
 pub fn display_merchant(panel: &mut Panel, side: usize, offset: i32) {
     for (cel, x, y, id, strp, field) in [
         (0x1cusize, 0x17i32, 0x91i32, 0x0eusize, 0x1au16, 0x42u16),
@@ -782,8 +796,9 @@ pub fn display_acquire(panel: &mut Panel) {
 ///
 /// `DisplayPillars` first, then `DisplayKnight` with `StatsOffset` at 0 or
 /// `0x4a`, then `StatsOffset` to `0x96` and the type's own page in the other
-/// arch. Only the plain sheet is reachable in henge today; the rest are here
-/// because they are one routine each and the panel is the same panel.
+/// arch. The plain sheet, the lair's floor, the merchant and the temple are
+/// reached; the rest are here because they are one routine each and the
+/// panel is the same panel.
 pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
     let mut panel = Panel::new();
     panel.tables.push(screen.left_table());
@@ -835,16 +850,17 @@ pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
         Screen::Lair => display_lair(&mut panel, 1, right, &hoard, gold),
         Screen::Dragon => display_dragon(&mut panel, 1, right, &hoard, gold),
         Screen::Merchant => display_merchant(&mut panel, 1, right),
-        // `ReDisplay` 0xbf66 hands `DisplayMagic` the stock at `SaveTYPE+2` and
-        // then `DisplayMSword` the same record.
-        Screen::Mystic => {
-            display_magic(&mut panel, 1, right, &hoard);
-            display_msword(&mut panel, 1, right, &hoard);
+        // `ReDisplay` 0xbf66: `mov word ptr [Address], 0xed96`, which is the
+        // temple's own stock, then `DisplayMagic` and `DisplayMSword` on it.
+        Screen::Temple => {
+            display_magic(&mut panel, 1, right, &run.temple);
+            display_msword(&mut panel, 1, right, &run.temple);
         }
         Screen::Acquire | Screen::AcquirePair => display_acquire(&mut panel),
         // A second knight in the other arch, which one traveller on a map never
         // has: `_displayknight` wants a second record and there is not one.
-        Screen::Trade | Screen::Temple | Screen::Sheet => {}
+        // The stone circle's page is one arch and draws nothing on the right.
+        Screen::Trade | Screen::Henge | Screen::Sheet => {}
     }
     panel
 }

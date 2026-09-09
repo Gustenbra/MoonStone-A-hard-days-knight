@@ -221,6 +221,31 @@ impl Symbols {
         self.data.get(&(off as u32)).map(String::as_str)
     }
 
+    /// The image offset a routine starts at, by name.
+    pub fn entry(&self, name: &str) -> Option<u32> {
+        self.code
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(a, _)| *a)
+    }
+
+    /// The `DS` offset of the first data symbol after `off`, which is
+    /// where whatever starts at `off` has to end.
+    pub fn next_datum(&self, off: u16) -> Option<u16> {
+        self.data
+            .range(off as u32 + 1..)
+            .next()
+            .and_then(|(o, _)| u16::try_from(*o).ok())
+    }
+
+    /// The `DS` offset a data symbol sits at, by name.
+    pub fn data_offset(&self, name: &str) -> Option<u16> {
+        self.data
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .and_then(|(off, _)| u16::try_from(*off).ok())
+    }
+
     /// Every animation script, by name, with its `DS` offset.
     pub fn scripts(&self) -> Vec<(String, u16)> {
         let mut v: Vec<(String, u16)> = self

@@ -10,6 +10,7 @@ pub mod bout;
 pub mod combat;
 pub mod content;
 pub mod dice;
+pub mod dragon;
 pub mod ending;
 pub mod harness;
 pub mod intro;
@@ -31,6 +32,7 @@ pub mod sound;
 pub mod status;
 pub mod stones;
 pub mod taskvm;
+pub mod town;
 pub mod wave;
 
 /// The original ran at 320x200 on a 4:3 display. Keeping that resolution keeps the

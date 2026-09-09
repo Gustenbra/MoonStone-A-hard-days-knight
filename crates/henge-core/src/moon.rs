@@ -30,14 +30,16 @@
 //! constants the rest of the game compares against, 0x2d, 0x2e and 0x31, are
 //! three of those five.
 //!
-//! **What is not recovered is the table.** `MOON:Moons` sits at DS:05a9, inside
-//! the 2,906 bytes of DGROUP the load image used to carry as a stale duplicate,
-//! so its eight bytes could not be read. That span is readable now
-//! (`docs/REVERSING.md`) and this has not been re-read out of it, so [`CYCLE`]
-//! is still **ours**: five pictures
-//! over eight steps, starting on the full moon, waning to the sliver and waxing
-//! back, is the one arrangement that uses every picture and returns to where it
-//! began. Everything else in this file was read out of the executable.
+//! **The table is recovered.** `MOON:Moons` sits at DS:0x5a9, image 0x12959,
+//! and reads `2d 2f 2e 30 31 30 2e 2f`; `MoonCount` follows it at 0x12963.
+//! `EncounterFini+0x49` (0x118d) does `mov ax, [MoonCount]; mov di, Moons;
+//! add di, ax; mov al, [di]; cbw; mov [0x8989], ax`, so each byte is the cel
+//! number the `Next Day` screen then hands to the blitter, and the cycle is
+//! [`MOONS`]: full, half, gibbous, crescent, sliver, crescent, gibbous, half.
+//! Looked at in the select screen's palette, cel 0x2e is the gibbous and 0x2f
+//! the half, so the original's wane goes full, half, gibbous, and its wax
+//! comes back gibbous, half; the pictures are out of order and the code is
+//! what runs. The cycle used to be ours and monotone; it is not any more.
 //!
 //! **What the moon gates**, all of it recovered:
 //!
@@ -120,21 +122,22 @@ impl Phase {
 /// `jle`, so the fourth day is the one that moves it.
 pub const DAYS_PER_PHASE: u32 = 4;
 
-/// The eight steps of the cycle. `and word ptr [MoonCount], 7`.
+/// `MOON:Moons`, image 0x12959: the eight bytes `2d 2f 2e 30 31 30 2e 2f`,
+/// which `EncounterFini` (0x118d) indexes by `MoonCount & 7`.
 ///
-/// **Ours, not recovered.** See the module docs: the eight bytes live in the
-/// part of DGROUP the load image does not carry. What is recovered is that
-/// there are eight of them, that they are cel numbers, that five such cels
-/// exist, and that the quest opens on [`Phase::Full`].
-pub const CYCLE: [Phase; 8] = [
-    Phase::Full,
-    Phase::Gibbous,
-    Phase::Half,
-    Phase::Crescent,
-    Phase::New,
-    Phase::Crescent,
-    Phase::Half,
-    Phase::Gibbous,
+/// **Recovered.** Each is the `KI.CEL` cel the `Next Day` screen draws, and
+/// `[0x8989]` holds the one for tonight.
+// Hand-aligned: one byte of the table per line, with the byte beside it.
+#[rustfmt::skip]
+pub const MOONS: [Phase; 8] = [
+    Phase::Full,     // 2d
+    Phase::Half,     // 2f
+    Phase::Gibbous,  // 2e
+    Phase::Crescent, // 30
+    Phase::New,      // 31
+    Phase::Crescent, // 30
+    Phase::Gibbous,  // 2e
+    Phase::Half,     // 2f
 ];
 
 /// Where the calendar has got to.
@@ -154,9 +157,9 @@ impl Moon {
         Moon::default()
     }
 
-    /// Tonight's moon.
+    /// Tonight's moon: `Moons[MoonCount]`.
     pub fn phase(self) -> Phase {
-        CYCLE[(self.count & 7) as usize]
+        MOONS[(self.count & 7) as usize]
     }
 
     /// A day turned over. Returns whether the moon moved with it, which is
@@ -354,7 +357,7 @@ mod tests {
             assert!(!m.new_day(), "the first three days leave it where it is");
         }
         assert!(m.new_day(), "the fourth moves it");
-        assert_eq!(m.phase(), Phase::Gibbous);
+        assert_eq!(m.phase(), Phase::Half, "Moons[1] is 0x2f");
         let mut moved = 1;
         for _ in 0..(DAYS_PER_PHASE * 7) {
             if m.new_day() {
@@ -366,19 +369,28 @@ mod tests {
         assert_eq!(m.days_left(), 4);
     }
 
-    /// The cycle waxes back to where it started, so every stone's night comes
-    /// round and no phase is a dead end.
+    /// The table is the eight bytes at image 0x12959, byte for byte, and
+    /// every stone's night is in it, so no phase is a dead end.
     #[test]
-    fn every_night_a_moonstone_wants_comes_round() {
+    fn the_cycle_is_the_bytes_of_moons() {
+        let cels: Vec<usize> = MOONS.iter().map(|p| p.cel()).collect();
+        assert_eq!(cels, [0x2d, 0x2f, 0x2e, 0x30, 0x31, 0x30, 0x2e, 0x2f]);
         for stone in Moonstone::ALL {
             assert!(
-                CYCLE.contains(&stone.phase()),
+                MOONS.contains(&stone.phase()),
                 "{stone:?} waits for a moon that never rises"
             );
         }
-        assert_eq!(CYCLE.iter().filter(|p| **p == Phase::Full).count(), 1);
-        assert_eq!(CYCLE.iter().filter(|p| **p == Phase::New).count(), 1);
-        assert_eq!(CYCLE.iter().filter(|p| **p == Phase::Gibbous).count(), 2);
+        // Every night the code compares against comes round exactly as the
+        // table says: 0x2d once, 0x31 once, 0x2e twice.
+        assert_eq!(MOONS.iter().filter(|p| **p == Phase::Full).count(), 1);
+        assert_eq!(MOONS.iter().filter(|p| **p == Phase::New).count(), 1);
+        assert_eq!(MOONS.iter().filter(|p| **p == Phase::Gibbous).count(), 2);
+        // The unpacked image, when it is beside the tree, says the same.
+        if let Ok(img) = std::fs::read("../../research/main.final.bin") {
+            let bytes: Vec<usize> = img[0x12959..0x12961].iter().map(|b| *b as usize).collect();
+            assert_eq!(bytes, cels, "Moons at image 0x12959");
+        }
     }
 
     /// The cel numbers are the original's own constants, and a picture exists
@@ -387,7 +399,7 @@ mod tests {
     fn a_phase_is_a_cel_of_the_bank() {
         assert_eq!(Phase::Full.cel(), 0x2d);
         assert_eq!(Phase::New.cel(), 0x31);
-        for p in CYCLE {
+        for p in MOONS {
             assert!((0x2d..=0x31).contains(&p.cel()));
             assert_eq!(Phase::from_cel(p.cel()), Some(p));
         }

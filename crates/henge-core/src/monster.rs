@@ -26,6 +26,7 @@
 use crate::arena::Bounds;
 use crate::combat::{Attack, Fighter, State};
 use crate::content::ActorDef;
+use crate::jump::Plan;
 use serde::{Deserialize, Serialize};
 
 /// Which of the original's controllers an actor runs.
@@ -182,13 +183,6 @@ pub struct Brain {
 pub mod flag {
     /// The demon has not made its entrance yet (`Demon_Evolve`).
     pub const UNBORN: u32 = 0x0001;
-    /// `DragonFLAGS & 0x20`: the head is up.
-    pub const HEAD_UP: u32 = 0x0002;
-    /// `DragonFLAGS & 0x10`: a head lift or lower is running.
-    pub const HEAD_MOVING: u32 = 0x0004;
-    /// `DragonFLAGS & 0x80`: the knight has landed a blow, so the high attack
-    /// is the breath rather than the bite.
-    pub const STRUCK: u32 = 0x0008;
     /// `+0x48 & 0x10` on a mudman: it is under the ground.
     pub const BURIED: u32 = 0x0010;
     /// `MudmenFLAGS & 1`: it has hold of the knight.
@@ -268,6 +262,83 @@ pub struct Shared {
     /// `BalokJumping` (0x36f5) reads it a frame after `BalokJump` wrote it, so
     /// it has to outlive the call.
     pub jump_steps: i32,
+    /// `DragonFLAGS`, DS:`0x7786`, the word the whole of `ControlDragon` keys
+    /// off. `InitKnightvsDragon+84` (0x248c) zeroes it. See [`dragon_flag`].
+    #[serde(default)]
+    pub dragon: u32,
+    /// `DDIS`, DS:`0x778a`: what `FindDistance` answered on the last
+    /// `DragonMove` (0x387d), which `DragonAttack+38` (0x39fe) reads back.
+    #[serde(default)]
+    pub ddis: i32,
+    /// `dragonbodge1`, `dragonbodge2` and `dragonbodge3`, DS:`0x77ec`,
+    /// `0x77ee` and `0x77f0`. The first two are the two frames of nothing
+    /// between one breath and the next (`DragonAttack+56`, 0x3a10, and
+    /// `DragonLowAttack`, 0x3a51); the third is raised by `DragonHit2+26`
+    /// (0x3aed) when the bite closes and read by `ControlKnight+21` (0x3ed7).
+    /// `InitGameStart+380` (0x1d89) zeroes all three.
+    #[serde(default)]
+    pub dragon_bodge: [i32; 3],
+    /// `DEAD_CLAWS`, DS:`0x77f4`: `InitKnightvsDragon+251` (0x2531) zeroes
+    /// it, `DrDropClaws` (0x3be1) writes `0xffff`, and `ControlClaw` (0x3b24)
+    /// kills its own task when it finds it so.
+    #[serde(default)]
+    pub dead_claws: i32,
+    /// The dragon record's `+0x52` and `+0x54` as `TrackKnight` leaves them,
+    /// once it has changed them from what `SetUpDragonTables` wrote.
+    ///
+    /// `TrackKnight+26` (0x3c02) saves `+0x52` into `DRN` and `TrackKnight+32`
+    /// (0x3c08) saves `+0x52` **again** into `DCL`, and the restore at 0x3c7e
+    /// puts `DRN` back into `+0x52` and `DCL` into `+0x54`. So the first
+    /// breath the head tracks through leaves the back-off range equal to the
+    /// approach range, sixty, for the rest of the fight. That is the code,
+    /// and it is kept.
+    #[serde(default)]
+    pub dragon_ranges: Option<(i32, i32)>,
+}
+
+/// `DragonFLAGS`' four bits, by the numbers the code tests.
+pub mod dragon_flag {
+    /// `0x10`: a head lift or lower is running (`DragonMove+2`, 0x386c).
+    pub const HEAD_MOVING: u32 = 0x10;
+    /// `0x20`: the head is up (`DragonMove+27`, 0x3885).
+    pub const HEAD_UP: u32 = 0x20;
+    /// `0x40`: the high breath is playing, so `TrackKnight` tracks to two
+    /// (`DragonAttack+82`, 0x3a2a; `TrackKnight+20`, 0x3bfa).
+    pub const BREATHING: u32 = 0x40;
+    /// `0x80`: the knight has landed a blow, so the next high attack is the
+    /// breath whatever the range (`DragonStruck+43`, 0x3a9c; `DragonAttack+93`,
+    /// 0x3a35).
+    pub const STRUCK: u32 = 0x80;
+}
+
+/// `TalismanWrym`, image 0x43f4: what the dragon's blow comes down to for a
+/// knight carrying Talismans of the Wyrm.
+///
+/// ```text
+/// 043f4  mov bx, [di+0x44]         ; the knight's magic record
+/// 043f7  xor cx, cx
+/// 043f9  mov cl, [bx+8]            ; how many talismans, slot 8
+/// 043fc  shr ax, cl                ; the blow, halved once per talisman
+/// 043fe  cmp ax, 5
+/// 04401  jg  04406
+/// 04403  mov ax, 5                 ; and never under five
+/// 04406  ret
+/// ```
+///
+/// `DragonStruck1` (0x43ad) puts the bite's twenty and the fire's thirty
+/// through it, `ClawStruck1` (0x43d3) the claw's ten, and nothing else calls
+/// it. `shr ax, cl` on a 16 bit register with a count over fifteen is zero,
+/// which the floor then lifts to five.
+pub fn talisman_wrym(blow: i32, talismans: i32) -> i32 {
+    let cl = talismans.clamp(0, 31) as u32;
+    // 043fc  shr ax, cl
+    let ax = (blow as u16).checked_shr(cl).unwrap_or(0) as i32;
+    // 043fe  cmp ax, 5; jg; mov ax, 5
+    if ax > 5 {
+        ax
+    } else {
+        5
+    }
 }
 
 /// The knight sheet's endurance, `+0x30` of the actor record, which
@@ -322,6 +393,9 @@ pub enum Act {
     /// its head down and `Dragon_HighStance` with it up, which the original
     /// swaps by having `Dragon_LiftHead1` write the new one into `+0x10`.
     Stand(String),
+    /// `[0x783a]` left at zero: the task is killed and the record freed,
+    /// which is `CLAWS_DEAD` (0x3b61) and nothing else a controller does.
+    Vanish,
     /// Play this script outright, committed, with no blow of its own.
     Play(String),
     /// `MudmenAppear`: surface at this x, facing this way, on this script.
@@ -403,7 +477,12 @@ pub enum Act {
 ///
 /// Returns what it writes into `+8`. Equal x faces left: the branch is `jl`.
 pub fn face_knight(me: &Fighter, foe: &Fighter) -> i32 {
-    if me.x < foe.x {
+    face_from(me.x, foe)
+}
+
+/// `FaceKnight` with `me.x` handed in, for a record about to be moved.
+fn face_from(me_x: i32, foe: &Fighter) -> i32 {
+    if me_x < foe.x {
         // 03d0c  mov byte ptr [di + 8], 1
         1
     } else {
@@ -422,8 +501,8 @@ pub fn face_knight(me: &Fighter, foe: &Fighter) -> i32 {
 /// 03d4e  mov ax, 3
 /// 03d54  mov ax, 1
 /// ```
-fn find_side(me: &Fighter, foe: &Fighter) -> i32 {
-    if me.x < foe.x {
+fn find_side(me_x: i32, foe: &Fighter) -> i32 {
+    if me_x < foe.x {
         1
     } else {
         3
@@ -448,7 +527,12 @@ fn find_side(me: &Fighter, foe: &Fighter) -> i32 {
 /// This engine keeps the depth row in `Fighter::y`, which is the original's
 /// `+6`.
 fn check_z(me: &Fighter, foe: &Fighter, def: &ActorDef) -> bool {
-    let mut bx = foe.y - me.y;
+    check_z_from(me.y, foe, def)
+}
+
+/// `CheckZ` with `me.z` handed in.
+fn check_z_from(me_y: i32, foe: &Fighter, def: &ActorDef) -> bool {
+    let mut bx = foe.y - me_y;
     if bx < 0 {
         bx = -bx;
     }
@@ -469,8 +553,8 @@ fn check_z(me: &Fighter, foe: &Fighter, def: &ActorDef) -> bool {
 /// 03cce  jg  CheckXDone            ; further than bp: ax stays 0
 /// 03cd0  mov ax, 1
 /// ```
-fn check_x_axis(me: &Fighter, foe: &Fighter, bp: i32) -> (bool, i32) {
-    let mut bx = foe.x - me.x;
+fn check_x_axis(me_x: i32, foe: &Fighter, bp: i32) -> (bool, i32) {
+    let mut bx = foe.x - me_x;
     if bx < 0 {
         bx = -bx;
     }
@@ -576,19 +660,35 @@ pub struct Track {
 /// 05782  ret
 /// ```
 pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> Track {
+    track_from((me.x, me.y), foe, def, (def.approach, def.back_off), facing)
+}
+
+/// `MonsterTrack` with the record's `+2`, `+6`, `+0x52` and `+0x54` handed in
+/// rather than read off the fighter: `TrackKnight` (0x3c0e, 0x3c13) writes
+/// two and one into the ranges before it calls the tracker, and the position
+/// it tracks from is the one it is about to move.
+fn track_from(
+    at: (i32, i32),
+    foe: &Fighter,
+    def: &ActorDef,
+    ranges: (i32, i32),
+    facing: &mut i32,
+) -> Track {
+    let (approach, back_off) = ranges;
+    let (me_x, me_y) = at;
     let mut dx = 0;
     let mut dy = 0;
     // 056eb..056f5: the globals are cleared and the two records picked up.
     // 056f9  call FaceKnight
-    *facing = face_knight(me, foe);
+    *facing = face_from(me_x, foe);
     // 056fc  mov [TrackFLAG], 0
     let mut track_flag = false;
     let mut plane = false;
     // 05702  call CheckZAxis
-    if check_z(me, foe, def) {
+    if check_z_from(me_y, foe, def) {
         // 05709  mov [ZPLANE], 1
         plane = true;
-    } else if me.y > foe.y {
+    } else if me_y > foe.y {
         // 05711..05717: me.z > foe.z
         // 05719  or byte ptr [si + 0x26], 8    (MoveU)
         dy = -1;
@@ -602,11 +702,11 @@ pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> T
     }
     // SameZPlane:
     // 0572f  mov bp, [si+0x54]; 05732 call CheckXAxis; 05737 jne TrackBack
-    let (inside_back_off, distance) = check_x_axis(me, foe, def.back_off);
+    let (inside_back_off, distance) = check_x_axis(me_x, foe, back_off);
     if inside_back_off {
         // TrackBack:
         // 0576b..05773: bx = foe.x - me.x; jns T1$
-        if foe.x - me.x < 0 {
+        if foe.x - me_x < 0 {
             // 05775  or byte ptr [si + 0x26], 1
             dx = 1;
         } else {
@@ -623,7 +723,7 @@ pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> T
         };
     }
     // 05739  mov bp, [si+0x52]; 0573c call CheckXAxis; 05741 je TrackOpponent
-    let (inside_approach, distance) = check_x_axis(me, foe, def.approach);
+    let (inside_approach, distance) = check_x_axis(me_x, foe, approach);
     if inside_approach {
         // 05746  mov ax, [TrackFLAG]; 05749 ret
         return Track {
@@ -636,7 +736,7 @@ pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> T
     }
     // TrackOpponent:
     // 0574a  call FindSide; 05750 cmp ax, 1; 05753 je TrackRight
-    if find_side(me, foe) == 1 {
+    if find_side(me_x, foe) == 1 {
         // 0575b  or byte ptr [si + 0x26], 1
         dx = 1;
     } else {
@@ -717,6 +817,10 @@ pub struct Sight<'a> {
     /// (0x2d67) called with the opponent in `si`, which `RatHangKnight+29`
     /// (0x330a) is the one controller that does.
     pub foe_blow: i32,
+    /// `[0x6e26+0x38]`, the dragon's own hit points, which `ControlClaw+43`
+    /// (0x3b4e) reads off the fixed record whichever claw is running. None
+    /// when there is no dragon in the fight.
+    pub head_health: Option<i32>,
 }
 
 /// The tree at DS:`0x69ae`, as far as anything in a fight cares about it.
@@ -741,12 +845,18 @@ pub struct Perch {
 /// copies it into the task on the way out (`NOTEND+20`, `mov dh, [di+8]`, to
 /// `TASKHANDLE` 0x9741, `mov [di+0x14], dh`). A controller that never
 /// touches it leaves the creature facing the way it was.
+///
+/// `at` is the record's `+2` and `+6` the same way: `TrackKnight` (0x3c36,
+/// 0x3c49, 0x3c51, 0x3c5a) writes them in place and `DragonMove` reads the
+/// distance off what it wrote (0x387a), so the dragon's controller hands its
+/// position back beside its facing. Every other controller leaves it alone.
 pub fn decide(
     s: &Sight,
     brain: &mut Brain,
     seed: &mut u16,
     facing: &mut i32,
     shared: &mut Shared,
+    at: &mut (i32, i32),
 ) -> Act {
     match s.def.controller() {
         Controller::Trogg => trogg(s, brain, seed, false, facing),
@@ -757,8 +867,8 @@ pub fn decide(
         Controller::Balok => balok(s, brain, facing, shared),
         Controller::Beast => beast(s, brain, seed, facing),
         Controller::Demon => demon(s, brain, facing),
-        Controller::Dragon => dragon(s, brain, facing),
-        Controller::Claw => claw(s, brain),
+        Controller::Dragon => dragon(s, brain, facing, shared, at),
+        Controller::Claw => claw(s, shared),
         Controller::Knight => black_knight(s, brain, seed, facing),
     }
 }
@@ -2341,131 +2451,515 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     walk(t)
 }
 
-/// `ControlDragon`: the set piece. The head lifts when you come inside a
-/// hundred and forty and lowers when you go back out, and what it does to you
-/// depends on which it is doing.
-fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
-    let d = (s.foe.x - s.me.x).abs();
-    let up = brain.flags & flag::HEAD_UP != 0;
-    if brain.flags & flag::HEAD_MOVING != 0 {
-        // `DragonHeadMove`: the counter runs the lift or the lower, and the
-        // head follows him in depth five rows a frame while it does.
-        brain.cooldown -= 1;
-        if brain.cooldown <= 0 {
-            brain.flags &= !flag::HEAD_MOVING;
-        }
-        let dy = (s.foe.y - s.me.y).signum();
-        let row = if up { "lift" } else { "lower" };
-        let n = s.def.scripts_for(row).len();
-        let frame = (brain.walk as usize).min(n.saturating_sub(1));
-        brain.walk += 1;
-        return Act::Walk {
-            dx: 0,
-            dy,
-            script: s.def.scripts_for(row).get(frame).cloned(),
-        };
-    }
-    // DragonMove+0xb (0x3877): `call TrackKnight`, before the range at
-    // 0x3880 is looked at, so the head has faced right (`TrackKnight+0x37`,
-    // 0x3c1f: `mov byte ptr [si + 8], 1`, whatever `FaceKnight` wrote) on
-    // every frame a head move is not already running.
-    let t = track(s.me, s.foe, s.def, facing);
-    *facing = 1;
-    if !s.foe.alive() && brain.flags & flag::HEAD_MOVING == 0 {
-        return Act::Stand(if up {
-            "Dragon_HighStance".into()
-        } else {
-            "Dragon_Stance".into()
-        });
-    }
-    // 0387a  call FindDistance; 03880 cmp ax, 0x8c; 03883 jge DragonMoveLow
-    if d >= 140 && up {
-        brain.flags &= !flag::HEAD_UP;
-        brain.flags |= flag::HEAD_MOVING;
-        brain.cooldown = 9;
-        brain.walk = 0;
-        return Act::Idle;
-    }
-    if d < 140 && !up {
-        brain.flags |= flag::HEAD_UP | flag::HEAD_MOVING;
-        brain.cooldown = 13;
-        brain.walk = 0;
-        return Act::Idle;
-    }
-    let stance = || {
-        Act::Stand(if up {
-            "Dragon_HighStance".into()
-        } else {
-            "Dragon_Stance".into()
-        })
-    };
-    if !s.foe.alive() {
-        return stance();
-    }
-    // `TrackKnight`: the head shifts five pixels at a time inside thirty to a
-    // hundred, and follows him in depth. `MonsterTrack` does the choosing; the
-    // clamp is the original's own, and it is why the dragon never leaves its
-    // corner of the arena.
-    // `TrackKnight`, 0x3be8: `MonsterTrack` on the head's record (0x3c18),
-    // and then, whatever `FaceKnight` wrote, `mov byte ptr [si + 8], 1` at
-    // 0x3c1f. The head always faces right. `t` is what it answered above.
-    let dx = if s.me.x + t.dx * 5 < 30 || s.me.x + t.dx * 5 > 100 {
-        0
+// ------------------------------------------------------------------ the dragon
+//
+// `ControlDragon` (0x3843) and everything under it, translated block for
+// block off `research/main.final.bin`. The dragon is not a creature that
+// walks up to you: its record is the fixed one at DS:`0x6e26`, its head sits
+// in a corridor thirty to a hundred wide at the left of the arena, and the
+// only movement it has is `TrackKnight` shuffling that head five pixels at a
+// time and the two ballistic arcs `DragonMove` and `DragonMoveLow` put it on
+// to lift it and lower it. The two claws are records of their own on
+// `ControlClaw` (0x3b24), pinned to the head's depth by `DragonMoveClaw1`
+// (0x3bb4), which every path out of the head's controller runs through.
+//
+// The two branches at the top of `ControlDragon`, `DragonStruck` (0x3a73) for
+// `+0xe` and `DragonHit2` (0x3ad5) for `+0xc`, are the bout's: this engine
+// resolves a blow after the controllers have spoken, so they are in
+// `Bout::dragon_struck` and `Bout::dragon_bites` with the same listings.
+
+/// `TrackKnight`, image 0x3be8: the head follows the knight, five pixels at a
+/// time, inside its corridor, and faces right whatever `FaceKnight` said.
+///
+/// ```text
+/// 03be8  mov si, 0x6e26            ; the dragon's record
+/// 03beb  mov word [si+0x26], 0
+/// 03bf0  mov [0x77e8], si
+/// 03bf4  mov ax, [KnightTable]; mov [Opponent], ax
+/// 03bfa  test word [DragonFLAGS], 0x40
+/// 03c00  je  03c18
+/// 03c02  mov ax, [si+0x52]; mov [DRN], ax    ; breathing: the ranges saved
+/// 03c08  mov ax, [si+0x52]; mov [DCL], ax    ; (+0x52 twice, see Shared)
+/// 03c0e  mov word [si+0x52], 2
+/// 03c13  mov word [si+0x54], 1               ; and tracked to two
+/// 03c18  call MonsterTrack
+/// 03c1b  mov si, [0x77e8]
+/// 03c1f  mov byte [si+8], 1                  ; the head faces right
+/// 03c23  mov ax, [si+0x26]
+/// 03c26  test ax, 1; je 03c39
+/// 03c2b  mov bx, [si+2]; add bx, 5
+/// 03c31  cmp bx, 0x64; jge 03c39             ; right, up to a hundred
+/// 03c36  mov [si+2], bx
+/// 03c39  test ax, 2; je 03c4c
+/// 03c3e  mov bx, [si+2]; sub bx, 5
+/// 03c44  cmp bx, 0x1e; jle 03c4c             ; left, down to thirty
+/// 03c49  mov [si+2], bx
+/// 03c4c  test ax, 8; je 03c55
+/// 03c51  sub word [si+6], 5                  ; up a row of five
+/// 03c55  test ax, 4; je 03c5e
+/// 03c5a  add word [si+6], 5                  ; down a row of five
+/// 03c5e  mov ax, [0x77e8]; call 0x96a2       ; its task
+/// 03c6a  mov ax, [di+2]; mov [si+4], ax      ; task x
+/// 03c70  mov ax, [di+6]; mov [si+8], ax      ; task z
+/// 03c76  test word [DragonFLAGS], 0x40; je 03c8a
+/// 03c7e  mov ax, [DRN]; mov [si+0x52], ax    ; the ranges put back
+/// 03c84  mov ax, [DCL]; mov [si+0x54], ax
+/// 03c8a  ret
+/// ```
+///
+/// Called from `DragonMove+11` (0x3877) every frame a head move is not
+/// running, and by `TASKGOSUB` from inside `Dragon_HighBreath` (0x4448) and
+/// `Dragon_LowBreath` (0x4130), five times each, which is how the head keeps
+/// pointing at him while the fire is out. The task's x and z are copied off
+/// the record here (0x3c6a, 0x3c70); this engine's task follows the fighter
+/// every tick, so `at` going back onto the fighter is that copy.
+pub fn track_knight(
+    foe: &Fighter,
+    def: &ActorDef,
+    shared: &mut Shared,
+    facing: &mut i32,
+    at: &mut (i32, i32),
+) -> Track {
+    // 03bfa  test word ptr [DragonFLAGS], 0x40
+    let breathing = shared.dragon & dragon_flag::BREATHING != 0;
+    let standing = shared.dragon_ranges.unwrap_or((def.approach, def.back_off));
+    let ranges = if breathing {
+        // 03c0e  mov word ptr [si + 0x52], 2; 03c13 mov word ptr [si + 0x54], 1
+        (2, 1)
     } else {
-        t.dx
+        standing
     };
-    if t.dy != 0 || dx != 0 {
-        return Act::Walk {
-            dx,
-            dy: t.dy,
-            script: None,
-        };
-    }
-    if cooling(brain) {
-        return stance();
-    }
-    if up {
-        // `DragonAttack`: past seventy the head is too far back to bite, so it
-        // breathes; and once the knight has landed a blow (`DragonFLAGS` bit
-        // 7) it breathes whatever the range.
-        if d > 70 || brain.flags & flag::STRUCK != 0 {
-            brain.flags &= !flag::STRUCK;
-            brain.cooldown = 8;
-            // `Dragon_HighBreath`, kind 0x10, with `AddDragonFIRE` beside it.
-            return Act::Attack {
-                kind: Attack::Chop,
-                spawn: Some("Dragon_Fire".into()),
-            };
+    // 03c18  call MonsterTrack
+    let t = track_from(*at, foe, def, ranges, facing);
+    // 03c1f  mov byte ptr [si + 8], 1
+    *facing = 1;
+    // 03c26  test ax, 1
+    if t.dx == 1 {
+        // 03c2b  mov bx, [si+2]; add bx, 5; cmp bx, 0x64; jge
+        let bx = at.0 + 5;
+        if bx < 0x64 {
+            at.0 = bx;
         }
-        brain.cooldown = 6;
-        return Act::Attack {
-            kind: Attack::Lunge,
-            spawn: None,
-        };
     }
-    brain.cooldown = 8;
-    // `Dragon_LowBreath`, kind 4.
-    Act::Attack {
-        kind: Attack::Swing,
-        spawn: Some("Dragon_Fire".into()),
+    // 03c39  test ax, 2
+    if t.dx == -1 {
+        // 03c3e  mov bx, [si+2]; sub bx, 5; cmp bx, 0x1e; jle
+        let bx = at.0 - 5;
+        if bx > 0x1e {
+            at.0 = bx;
+        }
+    }
+    // 03c4c  test ax, 8
+    if t.dy == -1 {
+        // 03c51  sub word ptr [si + 6], 5
+        at.1 -= 5;
+    }
+    // 03c55  test ax, 4
+    if t.dy == 1 {
+        // 03c5a  add word ptr [si + 6], 5
+        at.1 += 5;
+    }
+    // 03c76  test word ptr [DragonFLAGS], 0x40; 03c7e..03c87 the restore,
+    // with `DCL` holding what `+0x52` held (0x3c08).
+    if breathing {
+        shared.dragon_ranges = Some((standing.0, standing.0));
+    }
+    t
+}
+
+/// The stance `ControlDragon` opens with: `mov ax, [si+0x10]` (0x3843),
+/// which `Dragon_LiftHead1`'s `TASKSAVE` (0x4200) has made
+/// `Dragon_HighStance` and `Dragon_LowerHead1`'s (0x433c) `Dragon_Stance`.
+/// Bit 0x20 is set on the same controller pass that names `LiftHead1`, so
+/// the bit and the saved word agree on every pass that reads them.
+fn dragon_stance(shared: &Shared) -> Act {
+    Act::Stand(if shared.dragon & dragon_flag::HEAD_UP != 0 {
+        "Dragon_HighStance".into()
+    } else {
+        "Dragon_Stance".into()
+    })
+}
+
+/// The `JUMPD` template `DragonMove+68` (0x38af) and `DragonMoveLow+43`
+/// (0x3929) fill and hand to `ADDJUMP`: the head from where it is to x 100,
+/// the knight's own depth row and the height given, over the frames given.
+///
+/// ```text
+/// 038ac  mov si, 0x77cc            ; JUMPD
+/// 038af  mov di, 0x6e26            ; the head
+/// 038b2  mov word [di+0x4a], 0xd   ; (9 at 0x392c)
+/// 038b7  mov [si], di              ; +0   the actor
+/// 038bc  mov ax, [di+2]; mov [si+4], ax     ; x0
+/// 038c4  mov ax, [di+6]; mov [si+6], ax     ; z0
+/// 038cc  mov ax, [di+4]; mov [si+8], ax     ; y0, the height
+/// 038d4  mov word [si+0xa], 0x64            ; x1 = 100
+/// 038db  mov ax, [bx+6]; mov [si+0xc], ax   ; z1 = the knight's depth
+/// 038e3  mov word [si+0xe], 0xffba          ; y1 = -70 (-30 at 0x395d)
+/// 038ea  mov word [si+0x10], 0xd            ; 13 frames (9 at 0x3964)
+/// 038f1  mov word [si+0x12], 0x50           ; rise 0x50 (0x78 at 0x396b)
+/// 038f9  call ADDJUMP
+/// ```
+fn dragon_head_plan(
+    at: (i32, i32),
+    height: i32,
+    foe: &Fighter,
+    y1: i32,
+    steps: i32,
+    rise: i32,
+) -> Plan {
+    Plan {
+        x0: at.0,
+        z0: at.1,
+        y0: height,
+        x1: 0x64,
+        z1: foe.y,
+        y1,
+        steps,
+        rise,
     }
 }
 
-/// `ControlClaw`: it never moves and never takes a blow. It slaps whatever
-/// comes inside a hundred on its own plane, and it dies when the dragon does.
-fn claw(s: &Sight, _brain: &mut Brain) -> Act {
-    if !s.foe.alive() {
+/// `DragonHeadMove`, image 0x3979: one frame of the lift or the lower.
+///
+/// ```text
+/// 03979  sub word [di+0x4a], 1
+/// 0397d  jne 03984
+/// 0397f  and word [DragonFLAGS], 0xffef   ; the count ran out: not moving
+/// 03984  mov si, [Opponent]
+/// 03988  mov ax, [di+6]
+/// 0398b  cmp ax, [si+6]
+/// 0398e  jl  03996
+/// 03990  sub word [di+6], 5                ; deeper than him: up five
+/// 03994  jmp 0399a
+/// 03996  add word [di+6], 5                ; nearer: down five
+/// 0399a  mov ax, di; call ControlJump      ; bx = x, dx = height (cx, the
+/// 0399f  mov di, 0x6e26                    ; arc's own z, is not stored)
+/// 039a2  mov [di+2], bx
+/// 039a5  mov [di+4], dx
+/// 039a8  add byte [di+0xa], 1
+/// 039ac  xor ax, ax; mov al, [di+0xa]
+/// 039b1  cmp al, 8; jl 039b7
+/// 039b5  mov al, 7                         ; the row is eight long
+/// 039b7  shl ax, 1
+/// 039b9  mov si, [di+0x1c]                 ; DragonWal
+/// 039bc  test word [DragonFLAGS], 0x20
+/// 039c2  je  039cf
+/// 039c4  add si, ax; mov ax, [si+0x10]     ; up: the lift row
+/// 039c9  mov [0x783a], ax
+/// 039cc  jmp DragonMoveClaw1
+/// 039cf  add si, ax; mov ax, [si+0x20]     ; down: the lower row
+/// 039d4  mov [0x783a], ax
+/// 039d7  jmp DragonMoveClaw1
+/// ```
+///
+/// The frame counter and the arc are the same number of frames (0x38b2 and
+/// 0x38ea, 0x392c and 0x3964), so the arc lands on the pass that clears the
+/// bit. The walk byte runs on past seven and the row's last script is held.
+fn dragon_head_move(s: &Sight, brain: &mut Brain, shared: &mut Shared, at: &mut (i32, i32)) -> Act {
+    // 03979  sub word ptr [di + 0x4a], 1; 0397d jne
+    brain.cooldown -= 1;
+    if brain.cooldown == 0 {
+        // 0397f  and word ptr [DragonFLAGS], 0xffef
+        shared.dragon &= !dragon_flag::HEAD_MOVING;
+    }
+    // 03988  mov ax, [di+6]; cmp ax, [si+6]; jl
+    if at.1 < s.foe.y {
+        // 03996  add word ptr [di + 6], 5
+        at.1 += 5;
+    } else {
+        // 03990  sub word ptr [di + 6], 5
+        at.1 -= 5;
+    }
+    // 0399c  call ControlJump; 039a2 mov [di+2], bx; 039a5 mov [di+4], dx
+    if let Some(j) = brain.jump.as_mut() {
+        let step = j.step();
+        at.0 = step.x;
+        brain.height = step.y;
+        if step.done {
+            brain.jump = None;
+        }
+    }
+    // 039a8  add byte ptr [di + 0xa], 1
+    brain.walk = (brain.walk + 1) & 0xff;
+    // 039ae  mov al, [di+0xa]; cmp al, 8; jl; mov al, 7
+    let frame = brain.walk.min(7) as usize;
+    // 039bc  test word ptr [DragonFLAGS], 0x20
+    let row = if shared.dragon & dragon_flag::HEAD_UP != 0 {
+        // 039c6  mov ax, [si+0x10]: `DragonWal` +0x10, the lift row
+        "lift"
+    } else {
+        // 039d1  mov ax, [si+0x20]: +0x20, the lower row
+        "lower"
+    };
+    match s.def.scripts_for(row).get(frame) {
+        Some(script) => Act::Stand(script.clone()),
+        None => dragon_stance(shared),
+    }
+}
+
+/// `ControlDragon`, image 0x3843, from `DragonMove` (0x386c) down.
+///
+/// ```text
+/// 03843  mov ax, [si+0x10]; mov [0x783a], ax   ; the stance, see dragon_stance
+/// 03849  mov [0x77e8], si; mov di, si
+/// 0384f  mov ax, [KnightTable]; mov [Opponent], ax
+/// 03855  cmp word [di+0xe], 0; jne DragonStruck  ; Bout::dragon_struck
+/// 0385e  cmp word [di+0xc], 0; jne DragonHit2    ; Bout::dragon_bites
+/// 03867  mov word [di+0x28], 0
+/// DragonMove:
+/// 0386c  test word [DragonFLAGS], 0x10
+/// 03872  jne DragonHeadMove
+/// 03877  call TrackKnight
+/// 0387a  call FindDistance; mov [DDIS], ax
+/// 03880  cmp ax, 0x8c
+/// 03883  jge DragonMoveLow
+/// 03885  test word [DragonFLAGS], 0x20
+/// 0388b  jne DragonAttack                  ; inside 140 and up: attack
+/// 03890  or  word [DragonFLAGS], 0x10
+/// 03895  or  word [DragonFLAGS], 0x20      ; inside 140 and down: lift
+/// 0389a  mov byte [di+0xa], 0
+/// 0389e  mov si, [di+0x1c]; mov ax, [si+0x10]; mov [0x783a], ax   ; LiftHead1
+/// 038a7  ...the JUMPD template, see dragon_head_plan, to -70 in 13
+/// 038f9  call ADDJUMP
+/// 038fc  jmp DragonMoveClaw1
+/// DragonMoveLow:
+/// 038ff  test word [DragonFLAGS], 0x20
+/// 03905  je  DragonAttack                  ; outside 140 and down: attack
+/// 0390a  or  word [DragonFLAGS], 0x10
+/// 0390f  and word [DragonFLAGS], 0xffdf    ; outside 140 and up: lower
+/// 03914  mov byte [di+0xa], 0
+/// 03918  mov si, [di+0x1c]; mov ax, [si+0x20]; mov [0x783a], ax   ; LowerHead1
+/// 03921  ...the template, to -30 in 9
+/// 03973  call ADDJUMP
+/// 03976  jmp DragonMoveClaw1
+/// DragonAttack:
+/// 039da  and word [DragonFLAGS], 0xffbf    ; not breathing
+/// 039df  mov si, [Opponent]
+/// 039e3  cmp word [si+0x38], 0; jg 039ec
+/// 039e9  jmp DragonMoveClaw1               ; he is down: the stance
+/// 039ec  cmp word [ZPLANE], 0; jne 039f6
+/// 039f3  jmp DragonMoveClaw1               ; off his plane: the stance
+/// 039f6  test word [DragonFLAGS], 0x20
+/// 039fc  je  DragonLowAttack
+/// 039fe  cmp word [DDIS], 0x46
+/// 03a03  jle 03a35                         ; inside seventy: see below
+/// 03a05  and word [DragonFLAGS], 0xff7f
+/// 03a0b  mov word [di+0x28], 0x10
+/// 03a10  cmp word [dragonbodge1], 0
+/// 03a15  je  03a1e
+/// 03a17  dec word [dragonbodge1]
+/// 03a1b  jmp DragonMoveClaw1               ; a frame of nothing
+/// 03a1e  mov word [dragonbodge1], 2
+/// 03a24  mov word [0x783a], Dragon_HighBreath
+/// 03a2a  or  word [DragonFLAGS], 0x40
+/// 03a2f  call AddDragonFIRE
+/// 03a32  jmp DragonMoveClaw1
+/// 03a35  test word [DragonFLAGS], 0x80
+/// 03a3b  jne 03a05                         ; struck: the breath anyway
+/// 03a3d  and word [DragonFLAGS], 0xff7f
+/// 03a43  mov word [di+0x28], 2
+/// 03a48  mov word [0x783a], Dragon_HighBite
+/// 03a4e  jmp DragonMoveClaw1
+/// DragonLowAttack:
+/// 03a51  cmp word [dragonbodge2], 0
+/// 03a56  je  03a5f
+/// 03a58  dec word [dragonbodge2]
+/// 03a5c  jmp DragonMoveClaw1
+/// 03a5f  mov word [dragonbodge2], 2
+/// 03a65  mov word [di+0x28], 4
+/// 03a6a  mov word [0x783a], Dragon_LowBreath
+/// 03a70  jmp DragonMoveClaw1
+/// DragonMoveClaw1:
+/// 03bb4  mov bx, [Claw1TABLE]; mov bp, [Claw2TABLE]
+/// 03bbc  mov si, 0x6e26
+/// 03bbf  mov ax, [si+6]; add ax, 0xa; mov [bx+6], ax    ; claw one ten deeper
+/// 03bc8  sub ax, 0x1e; mov [bp+6], ax                   ; claw two twenty nearer
+/// 03bcf  jmp NOTEND+3
+/// ```
+///
+/// `DragonMoveClaw1` is the bout's: `Bout::monster_intent` pins each claw
+/// to the head's depth on the claw's own pass, which is the same two numbers
+/// on the same frame. Nothing here reads a cooldown: the two `dragonbodge`
+/// words are the only wait the dragon has, and the ranges the head tracks
+/// by are `TrackKnight`'s.
+fn dragon(
+    s: &Sight,
+    brain: &mut Brain,
+    facing: &mut i32,
+    shared: &mut Shared,
+    at: &mut (i32, i32),
+) -> Act {
+    use dragon_flag::*;
+    // 0386c  test word ptr [DragonFLAGS], 0x10; 03872 jne DragonHeadMove
+    if shared.dragon & HEAD_MOVING != 0 {
+        return dragon_head_move(s, brain, shared, at);
+    }
+    // 03877  call TrackKnight
+    let t = track_knight(s.foe, s.def, shared, facing, at);
+    // 0387a  call FindDistance; 0387d mov [DDIS], ax
+    let mut ax = at.0 - s.foe.x;
+    if ax < 0 {
+        ax = -ax;
+    }
+    shared.ddis = ax;
+    // 03880  cmp ax, 0x8c; 03883 jge DragonMoveLow
+    if ax >= 0x8c {
+        // DragonMoveLow: 038ff test 0x20; je DragonAttack
+        if shared.dragon & HEAD_UP != 0 {
+            // 0390a  or 0x10; 0390f and 0xffdf; 03914 mov byte [di+0xa], 0
+            shared.dragon |= HEAD_MOVING;
+            shared.dragon &= !HEAD_UP;
+            brain.walk = 0;
+            // 0392c  mov word ptr [di + 0x4a], 9
+            brain.cooldown = 9;
+            // 03921..03973: the template, and ADDJUMP
+            brain.jump = Some(dragon_head_plan(*at, brain.height, s.foe, -0x1e, 9, 0x78).start());
+            // 0391b  mov ax, [si+0x20]: `DragonWal` +0x20, Dragon_LowerHead1
+            return match s.def.scripts_for("lower").first() {
+                Some(script) => Act::Stand(script.clone()),
+                None => dragon_stance(shared),
+            };
+        }
+    } else if shared.dragon & HEAD_UP == 0 {
+        // 03890  or 0x10; 03895 or 0x20; 0389a mov byte [di+0xa], 0
+        shared.dragon |= HEAD_MOVING | HEAD_UP;
+        brain.walk = 0;
+        // 038b2  mov word ptr [di + 0x4a], 0xd
+        brain.cooldown = 13;
+        // 038a7..038f9: the template, and ADDJUMP
+        brain.jump = Some(dragon_head_plan(*at, brain.height, s.foe, -0x46, 13, 0x50).start());
+        // 038a1  mov ax, [si+0x10]: `DragonWal` +0x10, Dragon_LiftHead1
+        return match s.def.scripts_for("lift").first() {
+            Some(script) => Act::Stand(script.clone()),
+            None => dragon_stance(shared),
+        };
+    }
+    // DragonAttack:
+    // 039da  and word ptr [DragonFLAGS], 0xffbf
+    shared.dragon &= !BREATHING;
+    // 039e3  cmp word ptr [si + 0x38], 0; jg
+    if s.foe.health <= 0 {
+        return dragon_stance(shared);
+    }
+    // 039ec  cmp word ptr [ZPLANE], 0; jne
+    if !t.plane {
+        return dragon_stance(shared);
+    }
+    // 039f6  test word ptr [DragonFLAGS], 0x20; je DragonLowAttack
+    if shared.dragon & HEAD_UP == 0 {
+        // DragonLowAttack:
+        // 03a51  cmp word ptr [dragonbodge2], 0; je
+        if shared.dragon_bodge[1] != 0 {
+            // 03a58  dec word ptr [dragonbodge2]
+            shared.dragon_bodge[1] -= 1;
+            return dragon_stance(shared);
+        }
+        // 03a5f  mov word ptr [dragonbodge2], 2
+        shared.dragon_bodge[1] = 2;
+        // 03a65  mov word ptr [di + 0x28], 4; 03a6a Dragon_LowBreath
+        return Act::Attack {
+            kind: Attack::Swing,
+            spawn: None,
+        };
+    }
+    // 039fe  cmp word ptr [DDIS], 0x46; jle 03a35
+    // 03a35  test word ptr [DragonFLAGS], 0x80; jne 03a05
+    if shared.ddis > 0x46 || shared.dragon & STRUCK != 0 {
+        // 03a05  and word ptr [DragonFLAGS], 0xff7f
+        shared.dragon &= !STRUCK;
+        // 03a0b  mov word ptr [di + 0x28], 0x10
+        // 03a10  cmp word ptr [dragonbodge1], 0; je
+        if shared.dragon_bodge[0] != 0 {
+            // 03a17  dec word ptr [dragonbodge1]
+            shared.dragon_bodge[0] -= 1;
+            return dragon_stance(shared);
+        }
+        // 03a1e  mov word ptr [dragonbodge1], 2
+        shared.dragon_bodge[0] = 2;
+        // 03a2a  or word ptr [DragonFLAGS], 0x40
+        shared.dragon |= BREATHING;
+        // 03a24  Dragon_HighBreath; 03a2f call AddDragonFIRE
+        return Act::Attack {
+            kind: Attack::Chop,
+            spawn: Some("Dragon_Fire".into()),
+        };
+    }
+    // 03a3d  and word ptr [DragonFLAGS], 0xff7f
+    shared.dragon &= !STRUCK;
+    // 03a43  mov word ptr [di + 0x28], 2; 03a48 Dragon_HighBite
+    Act::Attack {
+        kind: Attack::Lunge,
+        spawn: None,
+    }
+}
+
+/// `ControlClaw`, image 0x3b24: a forelimb.
+///
+/// ```text
+/// 03b24  cmp word [DEAD_CLAWS], -1
+/// 03b29  je  CLAWS_DEAD
+/// 03b2b  mov ax, [si+0x10]; mov [0x783a], ax   ; the stance, Dragon_Claw
+/// 03b31  mov [0x77e8], si; mov di, si
+/// 03b37  mov ax, [KnightTable]; mov [Opponent], ax; mov si, [Opponent]
+/// 03b41  cmp word [di+0xe], 0; jne ClawStruck
+/// 03b47  cmp word [di+0xc], 0; jne ClawHit
+/// 03b4d  push bx; mov bx, 0x6e26
+/// 03b51  cmp word [bx+0x38], 0; pop bx
+/// 03b56  jg  DragonAlive
+/// 03b58  mov word [0x783a], Dragon_ClawDead   ; the head is down: so is this
+/// 03b5e  jmp NOTEND+3
+/// CLAWS_DEAD:
+/// 03b61  mov word [0x783a], 0                 ; the task killed
+/// 03b67  jmp NOTEND+3
+/// DragonAlive:
+/// 03b6a  cmp word [si+0x38], 0; jle 03b8b     ; he is down: the stance
+/// 03b70  call CheckZAxis; or ax, ax; je 03b8b ; off its plane: the stance
+/// 03b77  cmp word [si+2], 0x64; jg 03b8b      ; past a hundred: the stance
+/// 03b7d  mov word [di+0x28], 0xa
+/// 03b82  mov word [0x783a], Dragon_ClawSlap
+/// 03b88  jmp NOTEND+3
+/// 03b8b  jmp DragonMoveClaw1
+/// ClawStruck:
+/// 03b8d  mov ax, [di+0x10]; mov [0x783a], ax  ; struck: the stance, no damage
+/// 03b93  jmp NOTEND+3
+/// ClawHit:
+/// 03b96  mov si, [di+0xc]
+/// 03b99  cmp byte [si+0x35], 0xa; je 03bb1    ; it hit the head: nothing
+/// 03b9f  mov word [SLAP], 1
+/// 03ba5  mov word [SLAPY], BalokSLAP          ; the slap's direction and table
+/// 03bab  mov ax, [di+0x10]; mov [0x783a], ax  ; and the stance
+/// 03bb1  jmp NOTEND+3
+/// ```
+///
+/// `ClawStruck` is [`Fighter::struck`] with [`Controller::takes_damage`]
+/// false: the stance is the claw's own `*Hit` row. `ClawHit`'s `SLAP` words
+/// feed `KnightSLAP` inside `Knight_SwSlapped`, which is not built, so the
+/// branch is the stance here too.
+fn claw(s: &Sight, shared: &Shared) -> Act {
+    // 03b24  cmp word ptr [DEAD_CLAWS], -1; je CLAWS_DEAD
+    if shared.dead_claws == -1 {
+        // 03b61  mov word ptr [0x783a], 0
+        return Act::Vanish;
+    }
+    // 03b51  cmp word ptr [bx + 0x38], 0; jg DragonAlive
+    if s.head_health.is_none_or(|h| h <= 0) {
+        // 03b58  mov word ptr [0x783a], Dragon_ClawDead
+        return Act::Stand("Dragon_ClawDead".into());
+    }
+    // DragonAlive:
+    // 03b6a  cmp word ptr [si + 0x38], 0; jle
+    if s.foe.health <= 0 {
         return Act::Idle;
     }
-    if !s.me.alive() {
+    // 03b70  call CheckZAxis; or ax, ax; je
+    if !check_z(s.me, s.foe, s.def) {
         return Act::Idle;
     }
-    if (s.foe.y - s.me.y).abs() > s.def.depth_tolerance {
+    // 03b77  cmp word ptr [si + 2], 0x64; jg
+    if s.foe.x > 0x64 {
         return Act::Idle;
     }
-    if s.foe.x > 100 {
-        return Act::Idle;
-    }
+    // 03b7d  mov word ptr [di + 0x28], 0xa; 03b82 Dragon_ClawSlap
     Act::Attack {
         kind: Attack::RThrust,
         spawn: None,
@@ -3138,14 +3632,17 @@ mod tests {
             progression: 0,
             perch: None,
             foe_blow: 0,
+            head_health: None,
         };
         let mut seed = 0x2f1du16;
+        let mut at = (me.x, me.y);
         decide(
             &s,
             brain,
             &mut seed,
             facing,
             &mut crate::monster::Shared::default(),
+            &mut at,
         )
     }
 
@@ -3175,10 +3672,12 @@ mod tests {
             progression: 0,
             perch,
             foe_blow: 3,
+            head_health: None,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
-        decide(&s, brain, &mut seed, &mut facing, shared)
+        let mut at = (me.x, me.y);
+        decide(&s, brain, &mut seed, &mut facing, shared, &mut at)
     }
 
     /// One tick of one controller against a knight standing at `foe_x`.
@@ -3341,6 +3840,7 @@ mod tests {
             progression: 0,
             perch: None,
             foe_blow: 0,
+            head_health: None,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
@@ -3350,7 +3850,8 @@ mod tests {
                 &mut b,
                 &mut seed,
                 &mut facing,
-                &mut Shared::default()
+                &mut Shared::default(),
+                &mut (0, 0)
             ),
             Act::Idle
         ));
@@ -3360,7 +3861,8 @@ mod tests {
                 &mut b,
                 &mut seed,
                 &mut facing,
-                &mut Shared::default()
+                &mut Shared::default(),
+                &mut (0, 0)
             ),
             Act::Idle
         ));
@@ -3374,7 +3876,8 @@ mod tests {
                 &mut b,
                 &mut seed,
                 &mut facing,
-                &mut Shared::default()
+                &mut Shared::default(),
+                &mut (0, 0)
             )),
             Some(Attack::Swing),
             "TroggAttack+0x41: jmp TroggSwing"
@@ -3505,6 +4008,7 @@ mod tests {
                 progression: 0,
                 perch: None,
                 foe_blow: 0,
+                head_health: None,
             }
         }
         // Walk the register until it hands out a roll at thirty or under,
@@ -3534,7 +4038,8 @@ mod tests {
                 &mut Brain::default(),
                 &mut s,
                 &mut facing,
-                &mut Shared::default()
+                &mut Shared::default(),
+                &mut (0, 0)
             )),
             Some(Attack::Swing)
         );
@@ -3546,7 +4051,8 @@ mod tests {
                 &mut Brain::default(),
                 &mut s,
                 &mut facing,
-                &mut Shared::default()
+                &mut Shared::default(),
+                &mut (0, 0)
             )),
             Some(Attack::Chop)
         );
@@ -3557,7 +4063,8 @@ mod tests {
                 &mut Brain::default(),
                 &mut s,
                 &mut facing,
-                &mut Shared::default()
+                &mut Shared::default(),
+                &mut (0, 0)
             )),
             Some(Attack::Swing),
             "a low roll on an open knight is still the swing"
@@ -3843,6 +4350,7 @@ mod tests {
             progression: 0,
             perch: None,
             foe_blow: 0,
+            head_health: None,
         };
         let mut seed = 1u16;
         let mut brain = Brain::default();
@@ -3852,7 +4360,14 @@ mod tests {
         // own arc: `CalcJUMP` aims it eighty short of him, `ADDJUMP` starts it
         // and `BalokFLAGS` bit 1 goes up.
         assert_eq!(
-            decide(&s, &mut brain, &mut seed, &mut facing, &mut shared),
+            decide(
+                &s,
+                &mut brain,
+                &mut seed,
+                &mut facing,
+                &mut shared,
+                &mut (0, 0)
+            ),
             Act::Play("Balok_Jump".into()),
             "a thrown dagger brings it in"
         );
@@ -3888,8 +4403,16 @@ mod tests {
                 progression: 0,
                 perch: None,
                 foe_blow: 0,
+                head_health: None,
             };
-            match decide(&s, &mut brain, &mut seed, &mut facing, &mut shared) {
+            match decide(
+                &s,
+                &mut brain,
+                &mut seed,
+                &mut facing,
+                &mut shared,
+                &mut (0, 0),
+            ) {
                 Act::Fly { x, y, script } => {
                     walked.x = x;
                     walked.y = y;
@@ -3988,72 +4511,428 @@ mod tests {
         assert!(b.flags & flag::CAUGHT != 0);
     }
 
-    /// `ControlDragon`: the head lifts inside a hundred and forty and lowers
-    /// again outside it, and what it does to you depends on which it is.
-    #[test]
-    fn the_dragon_lifts_and_lowers_its_head_by_range() {
-        let def = creature("dragon", 60, 20);
-        // The head sits at the far end of its own corridor, which is where
-        // `TrackKnight` clamps it: thirty to a hundred and no further.
-        let mut b = Brain::default();
-        assert_eq!(
-            kind(&ask(&def, &mut b, 100, 250, 0)),
-            Some(Attack::Swing),
-            "the low breath"
-        );
-        // Inside a hundred and forty the head comes up, over thirteen frames.
-        let mut b = Brain::default();
-        assert_eq!(ask(&def, &mut b, 100, 200, 0), Act::Idle);
-        assert!(b.flags & flag::HEAD_UP != 0 && b.flags & flag::HEAD_MOVING != 0);
-        assert_eq!(b.cooldown, 13, "thirteen frames to lift it");
-        let mut lifting = 0;
-        while b.flags & flag::HEAD_MOVING != 0 {
-            assert!(matches!(ask(&def, &mut b, 100, 200, 0), Act::Walk { .. }));
-            lifting += 1;
-            assert!(lifting < 40, "the head never stopped");
+    /// The dragon's definition as the pack carries it: the two `DragonWal`
+    /// rows and the ranges `SetUpDragonTables` (0x2556) writes.
+    fn dragon_def() -> ActorDef {
+        let mut def = creature("dragon", 60, 20);
+        for (row, names) in [
+            (
+                "lift",
+                vec![
+                    "Dragon_LiftHead1",
+                    "Dragon_LiftHead2",
+                    "Dragon_LiftHead3",
+                    "Dragon_LiftHead4",
+                    "Dragon_LiftHead5",
+                    "Dragon_LiftHead5",
+                    "Dragon_LiftHead5",
+                    "Dragon_LiftHead5",
+                ],
+            ),
+            (
+                "lower",
+                vec![
+                    "Dragon_LowerHead1",
+                    "Dragon_LowerHead2",
+                    "Dragon_LowerHead3",
+                    "Dragon_LowerHead4",
+                    "Dragon_LowerHead5",
+                    "Dragon_LowerHead5",
+                    "Dragon_LowerHead5",
+                    "Dragon_LowerHead5",
+                ],
+            ),
+        ] {
+            def.scripts
+                .insert(row.into(), names.into_iter().map(String::from).collect());
         }
-        assert_eq!(lifting, 13);
-        // Head up and far out: the breath. Head up and close: the bite.
-        let mut up = b;
-        up.cooldown = 0;
-        assert_eq!(
-            kind(&ask(&def, &mut up, 100, 200, 0)),
-            Some(Attack::Chop),
-            "the high breath"
-        );
-        let mut up = b;
-        up.cooldown = 0;
-        assert_eq!(
-            kind(&ask(&def, &mut up, 100, 170, 0)),
-            Some(Attack::Lunge),
-            "the bite"
-        );
-        // Once a blow has landed on it, it breathes rather than bites.
-        let mut up = b;
-        up.cooldown = 0;
-        up.flags |= flag::STRUCK;
-        assert_eq!(kind(&ask(&def, &mut up, 100, 170, 0)), Some(Attack::Chop));
-        // And backing off lowers the head again, in nine.
-        let mut down = b;
-        down.cooldown = 0;
-        assert_eq!(ask(&def, &mut down, 100, 250, 0), Act::Idle);
-        assert!(down.flags & flag::HEAD_UP == 0 && down.flags & flag::HEAD_MOVING != 0);
-        assert_eq!(down.cooldown, 9, "nine frames to lower it");
+        def
     }
 
-    /// `ControlClaw`: it slaps whatever comes inside a hundred on its plane
-    /// and does nothing else at all.
+    /// One pass of `ControlDragon` with the record's `+2`, `+6` and `+4`
+    /// handed in and back, as the routine reads and writes them.
+    fn ask_dragon(
+        def: &ActorDef,
+        brain: &mut Brain,
+        shared: &mut Shared,
+        at: &mut (i32, i32),
+        foe: (i32, i32),
+    ) -> Act {
+        let me = at_height(at.0, at.1, brain.height);
+        let foe = super::tests::at(foe.0, foe.1);
+        let s = Sight {
+            me: &me,
+            foe: &foe,
+            def,
+            bounds: Bounds {
+                left: 0,
+                right: 319,
+                top: 10,
+                bottom: 114,
+            },
+            gore: true,
+            body: false,
+            decapped: false,
+            progression: 0,
+            perch: None,
+            foe_blow: 0,
+            head_health: Some(200),
+        };
+        let mut seed = 0x2f1du16;
+        let mut facing = 1;
+        decide(&s, brain, &mut seed, &mut facing, shared, at)
+    }
+
+    fn at_height(x: i32, y: i32, height: i32) -> Fighter {
+        let mut f = at(x, y);
+        f.brain.height = height;
+        f
+    }
+
+    /// `DragonMove` (0x386c): inside a hundred and forty the head comes up
+    /// on a thirteen frame arc to x 100 and a height of minus seventy, and
+    /// outside it goes back down on a nine frame arc to minus thirty, each
+    /// walking its `DragonWal` row and following him in depth five rows at
+    /// a time. `DragonHeadMove` clears bit 0x10 on the pass the count runs
+    /// out, which is the pass the arc lands.
     #[test]
-    fn a_claw_slaps_only_what_comes_inside_a_hundred() {
-        let def = creature("claw", 0, 0);
-        let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 5, 90, 0)), Some(Attack::RThrust));
+    fn the_dragon_lifts_and_lowers_its_head_on_the_jump_engine() {
+        use dragon_flag::*;
+        let def = dragon_def();
+        let mut b = Brain {
+            height: -40,
+            ..Brain::default()
+        };
+        let mut sh = Shared::default();
+        // `InitKnightvsDragon` (0x2476): x 80, height -40, z 100.
+        let mut at = (80, 100);
+        // 03880  cmp ax, 0x8c; jl: inside a hundred and forty, head down.
+        let act = ask_dragon(&def, &mut b, &mut sh, &mut at, (200, 110));
         assert_eq!(
-            ask(&def, &mut b, 5, 150, 0),
-            Act::Idle,
-            "and nothing beyond it"
+            act,
+            Act::Stand("Dragon_LiftHead1".into()),
+            "0x38a4: DragonWal+0x10"
         );
-        assert_eq!(ask(&def, &mut b, 5, 90, 40), Act::Idle, "nor off its plane");
+        assert_eq!(
+            sh.dragon & (HEAD_MOVING | HEAD_UP),
+            HEAD_MOVING | HEAD_UP,
+            "0x3890, 0x3895"
+        );
+        assert_eq!(b.cooldown, 13, "0x38b2: mov word [di+0x4a], 0xd");
+        assert!(b.jump.is_some(), "0x38f9: call ADDJUMP");
+        // `TrackKnight` ran first (0x3877): he is to the right and further
+        // out than the approach range, so the head stepped five towards him.
+        assert_eq!(at.0, 85, "0x3c36: five to the right");
+        // `DragonHeadMove` thirteen times: the row is walked, the arc is
+        // stepped, and the head follows him down in depth.
+        let mut frames = 0;
+        let mut seen: Vec<String> = Vec::new();
+        while sh.dragon & HEAD_MOVING != 0 {
+            let act = ask_dragon(&def, &mut b, &mut sh, &mut at, (200, 110));
+            match act {
+                Act::Stand(name) => seen.push(name),
+                other => panic!("a head move is a stance frame, not {other:?}"),
+            }
+            frames += 1;
+            assert!(frames < 40, "the head never stopped");
+        }
+        assert_eq!(
+            frames, 13,
+            "0x3979: one off +0x4a a frame until it is nought"
+        );
+        assert_eq!(
+            seen[0], "Dragon_LiftHead2",
+            "0x39a8: the walk byte is one on the first pass"
+        );
+        assert_eq!(seen[3], "Dragon_LiftHead5");
+        assert_eq!(seen[12], "Dragon_LiftHead5", "0x39b5: capped at seven");
+        assert!(
+            b.jump.is_none(),
+            "the arc landed on the pass the count ran out"
+        );
+        // `ADDJUMP` divides the run into 10.6 steps and `ControlJump` shifts
+        // them back, so the arc lands a pixel short of the hundred it was
+        // aimed at: fifteen pixels over thirteen frames is 73/64 a frame,
+        // thirteen of which is 949/64, and 85 + 949/64 is 99.
+        assert_eq!(
+            at.0, 99,
+            "0x38d4: x1 is a hundred, less the arc's own rounding"
+        );
+        assert!(
+            (b.height + 70).abs() <= 1,
+            "0x38e3: y1 is minus seventy: {}",
+            b.height
+        );
+        // 03990 / 03996: five rows toward him each pass, and no further
+        // than the arc's own frames carry it.
+        assert_eq!(
+            at.1, 110,
+            "he was ten deeper and it followed, then stayed put"
+        );
+        // Head up and the knight backing out past a hundred and forty:
+        // `DragonMoveLow` (0x390a) lowers it in nine.
+        let act = ask_dragon(&def, &mut b, &mut sh, &mut at, (260, 110));
+        assert_eq!(
+            act,
+            Act::Stand("Dragon_LowerHead1".into()),
+            "0x391b: DragonWal+0x20"
+        );
+        assert_eq!(
+            sh.dragon & HEAD_UP,
+            0,
+            "0x390f: and word [DragonFLAGS], 0xffdf"
+        );
+        assert_eq!(b.cooldown, 9, "0x392c");
+        let mut frames = 0;
+        while sh.dragon & HEAD_MOVING != 0 {
+            ask_dragon(&def, &mut b, &mut sh, &mut at, (260, 110));
+            frames += 1;
+        }
+        assert_eq!(frames, 9);
+        assert!(
+            (b.height + 30).abs() <= 1,
+            "0x395d: y1 is minus thirty: {}",
+            b.height
+        );
+    }
+
+    /// `DragonAttack` (0x39da): head up, past seventy or once struck it is
+    /// the high breath with the fire beside it, two frames of nothing between
+    /// (`dragonbodge1`); inside seventy it is the bite; and with the head
+    /// down `DragonLowAttack` is the low breath, with its own two frames of
+    /// nothing (`dragonbodge2`) and no fire task, because that script draws
+    /// its own.
+    #[test]
+    fn the_dragon_bites_close_and_breathes_far_with_two_frames_between() {
+        use dragon_flag::*;
+        let def = dragon_def();
+        let mut b = Brain {
+            height: -70,
+            ..Brain::default()
+        };
+        let mut sh = Shared {
+            dragon: HEAD_UP,
+            ..Shared::default()
+        };
+        // On the head's own plane, 0x39ec, and inside seventy of x 100.
+        let mut at = (100, 100);
+        let bite = ask_dragon(&def, &mut b, &mut sh, &mut at, (160, 100));
+        assert_eq!(
+            bite,
+            Act::Attack {
+                kind: Attack::Lunge,
+                spawn: None
+            },
+            "0x3a43: kind 2, Dragon_HighBite"
+        );
+        assert_eq!(sh.ddis, 60, "0x387d: DDIS is what FindDistance answered");
+        // Past seventy: the breath, the fire, the bit, and then two passes
+        // of the stance before the next.
+        let mut at = (100, 100);
+        let breath = ask_dragon(&def, &mut b, &mut sh, &mut at, (190, 100));
+        assert_eq!(
+            breath,
+            Act::Attack {
+                kind: Attack::Chop,
+                spawn: Some("Dragon_Fire".into())
+            },
+            "0x3a24: Dragon_HighBreath and AddDragonFIRE"
+        );
+        assert_eq!(sh.dragon & BREATHING, BREATHING, "0x3a2a");
+        assert_eq!(sh.dragon_bodge[0], 2, "0x3a1e");
+        for _ in 0..2 {
+            let mut at = (100, 100);
+            assert_eq!(
+                ask_dragon(&def, &mut b, &mut sh, &mut at, (190, 100)),
+                Act::Stand("Dragon_HighStance".into()),
+                "0x3a17: dec and the stance"
+            );
+        }
+        assert_eq!(sh.dragon_bodge[0], 0);
+        let mut at = (100, 100);
+        assert!(matches!(
+            ask_dragon(&def, &mut b, &mut sh, &mut at, (190, 100)),
+            Act::Attack {
+                kind: Attack::Chop,
+                ..
+            }
+        ));
+        // Struck: the breath even inside seventy, and the bit comes down.
+        sh.dragon |= STRUCK;
+        sh.dragon_bodge[0] = 0;
+        let mut at = (100, 100);
+        assert!(matches!(
+            ask_dragon(&def, &mut b, &mut sh, &mut at, (160, 100)),
+            Act::Attack {
+                kind: Attack::Chop,
+                ..
+            }
+        ));
+        assert_eq!(
+            sh.dragon & STRUCK,
+            0,
+            "0x3a05: and word [DragonFLAGS], 0xff7f"
+        );
+        // Off his plane, or with him down: the stance and nothing else.
+        let mut at = (100, 100);
+        assert_eq!(
+            ask_dragon(&def, &mut b, &mut sh, &mut at, (160, 130)),
+            Act::Stand("Dragon_HighStance".into()),
+            "0x39ec: ZPLANE"
+        );
+        // Head down, outside a hundred and forty: the low breath, with its
+        // own wait and no fire task.
+        let mut sh = Shared::default();
+        let mut b = Brain {
+            height: -30,
+            ..Brain::default()
+        };
+        let mut at = (100, 100);
+        assert_eq!(
+            ask_dragon(&def, &mut b, &mut sh, &mut at, (250, 100)),
+            Act::Attack {
+                kind: Attack::Swing,
+                spawn: None
+            },
+            "0x3a6a: Dragon_LowBreath"
+        );
+        assert_eq!(sh.dragon_bodge[1], 2, "0x3a5f");
+        let mut at = (100, 100);
+        assert_eq!(
+            ask_dragon(&def, &mut b, &mut sh, &mut at, (250, 100)),
+            Act::Stand("Dragon_Stance".into())
+        );
+    }
+
+    /// `TrackKnight` (0x3be8): five pixels at a time, never to a hundred or
+    /// down to thirty, five rows in depth, always facing right; and while
+    /// the breath bit is up it tracks to two and one and puts the ranges
+    /// back with `+0x54` taking what `+0x52` held (0x3c08, 0x3c84).
+    #[test]
+    fn the_head_keeps_to_its_corridor_and_the_breath_spoils_its_back_off() {
+        let def = dragon_def();
+        let foe = at(300, 100);
+        let mut sh = Shared::default();
+        let mut facing = -1;
+        // At ninety five the next step would reach a hundred: refused.
+        let mut at_ = (95, 100);
+        track_knight(&foe, &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(at_.0, 95, "0x3c31: cmp bx, 0x64; jge");
+        assert_eq!(facing, 1, "0x3c1f: mov byte [si+8], 1");
+        let mut at_ = (90, 100);
+        track_knight(&foe, &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(at_.0, 95);
+        // Inside the back-off range it gives ground, but never to thirty.
+        let near = at(50, 100);
+        let mut at_ = (35, 100);
+        track_knight(&near, &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(at_.0, 35, "0x3c44: cmp bx, 0x1e; jle");
+        let mut at_ = (40, 100);
+        track_knight(&near, &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(at_.0, 35);
+        // Depth: five rows toward him when off his plane.
+        let deep = at(300, 120);
+        let mut at_ = (95, 100);
+        track_knight(&deep, &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(at_.1, 105, "0x3c5a: add word [si+6], 5");
+        assert_eq!(
+            sh.dragon_ranges, None,
+            "not breathing: the ranges untouched"
+        );
+        // Breathing: tracked to two, and the back-off spoiled on the way out.
+        sh.dragon |= dragon_flag::BREATHING;
+        let close = at(97, 100);
+        let mut at_ = (90, 100);
+        track_knight(&close, &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(at_.0, 95, "outside two: closes");
+        assert_eq!(sh.dragon_ranges, Some((60, 60)), "0x3c84: DCL was +0x52");
+        // And from then on, breath or not, the back-off is sixty: inside it
+        // the head backs away from him.
+        sh.dragon &= !dragon_flag::BREATHING;
+        let mut at_ = (95, 100);
+        let t = track_knight(&at(140, 100), &def, &mut sh, &mut facing, &mut at_);
+        assert_eq!(t.dx, -1, "TrackBack inside a back-off of sixty");
+        assert_eq!(at_.0, 90);
+    }
+
+    /// `TalismanWrym` (0x43f4): the blow halved once per talisman, floored
+    /// at five, and a shift count past the register's width is nought.
+    #[test]
+    fn the_talisman_halves_the_dragons_blow_down_to_five() {
+        assert_eq!(talisman_wrym(30, 0), 30);
+        assert_eq!(talisman_wrym(30, 1), 15);
+        assert_eq!(talisman_wrym(30, 2), 7);
+        assert_eq!(talisman_wrym(30, 3), 5, "04403: mov ax, 5");
+        assert_eq!(talisman_wrym(20, 1), 10);
+        assert_eq!(talisman_wrym(10, 1), 5);
+        assert_eq!(talisman_wrym(10, 20), 5);
+    }
+
+    /// `ControlClaw` (0x3b24): it slaps whatever comes inside a hundred on
+    /// its plane while the head lives, holds `Dragon_ClawDead` once the head
+    /// is down, and kills its own task when `DrDropClaws` has run.
+    #[test]
+    fn a_claw_slaps_inside_a_hundred_and_dies_with_the_head() {
+        let def = creature("claw", 0, 0);
+        let me = at(5, 90);
+        let ask = |foe: &Fighter, shared: &Shared, head: Option<i32>| {
+            let s = Sight {
+                me: &me,
+                foe,
+                def: &def,
+                bounds: Bounds {
+                    left: 0,
+                    right: 319,
+                    top: 10,
+                    bottom: 114,
+                },
+                gore: true,
+                body: false,
+                decapped: false,
+                progression: 0,
+                perch: None,
+                foe_blow: 0,
+                head_health: head,
+            };
+            let mut seed = 0x2f1du16;
+            let mut facing = 1;
+            let mut sh = *shared;
+            let mut b = Brain::default();
+            decide(&s, &mut b, &mut seed, &mut facing, &mut sh, &mut (5, 90))
+        };
+        let sh = Shared::default();
+        assert_eq!(
+            kind(&ask(&at(90, 90), &sh, Some(200))),
+            Some(Attack::RThrust),
+            "0x3b7d: kind 0xa, Dragon_ClawSlap"
+        );
+        assert_eq!(
+            ask(&at(150, 90), &sh, Some(200)),
+            Act::Idle,
+            "0x3b77: past a hundred"
+        );
+        assert_eq!(
+            ask(&at(90, 130), &sh, Some(200)),
+            Act::Idle,
+            "0x3b70: off its plane"
+        );
+        let mut down = at(90, 90);
+        down.health = 0;
+        assert_eq!(ask(&down, &sh, Some(200)), Act::Idle, "0x3b6a: he is down");
+        assert_eq!(
+            ask(&at(90, 90), &sh, Some(0)),
+            Act::Stand("Dragon_ClawDead".into()),
+            "0x3b58: the head is down"
+        );
+        let dropped = Shared {
+            dead_claws: -1,
+            ..Shared::default()
+        };
+        assert_eq!(
+            ask(&at(90, 90), &dropped, Some(0)),
+            Act::Vanish,
+            "0x3b61: CLAWS_DEAD"
+        );
     }
 
     #[test]

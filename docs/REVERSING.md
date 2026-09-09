@@ -274,9 +274,12 @@ SlowFLAG = 1
 
 and `_MAP:MapMovement` increments the step counter, sees `SlowFLAG`, and throws the
 direction away. **So a refused step still costs the day**; hard ground is a tax on time,
-not a wall. Mask 1 and mask 2 are half speed on different rhythms, mask 3 a quarter. Laid
-over the artwork the 3s are the mountain spine and the escarpments, the 1s the deep forest
-and the 2s the marsh and the broken waste.
+not a wall. Mask 1 and mask 2 are half speed on different rhythms, mask 3 a quarter. Read
+against `MapType`, all but eight forest cells are 1; the wastes are 0, 2 and 3 in roughly
+equal measure, the 3s along the spine and the escarpments; the swamp is mostly open (89 of
+220) with patches of all three; and the map's own top row is 3 and its side columns 2
+whatever the ground. A step into `HawkBorders`' edge is counted by `MapMovement` too, since
+the count comes before `FOLLOW` calls it.
 
 The only hard limit is a rectangle. `_MAP:HawkBorders` clears whichever direction bit would
 take the token out of `0..=310` by `0..=190`, using four literal comparisons against 0,

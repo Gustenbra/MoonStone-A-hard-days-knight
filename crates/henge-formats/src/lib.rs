@@ -15,6 +15,7 @@ pub mod depack;
 pub mod introexe;
 pub mod library;
 pub mod piv;
+pub mod tables;
 pub mod taskvm;
 pub mod terrain;
 pub mod voc;

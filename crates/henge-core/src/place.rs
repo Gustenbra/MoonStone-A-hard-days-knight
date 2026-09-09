@@ -1,25 +1,33 @@
 //! Places on the map: where you can go, and what you can do once you are there.
 //!
-//! Until now the overworld was terrain and ambushes, which meant walking had
-//! exactly one outcome. A place is somewhere walking can take you *on purpose*.
+//! The map itself is only ground and distance. A place is somewhere walking can
+//! take you *on purpose*, and every fight and every service the original has is
+//! inside one.
 //!
 //! Everything here is logic and data with no drawing in it: which coordinates a
 //! place occupies, what its menu offers, and what choosing an option does to a
 //! [`Run`]. The renderer is handed a [`PlaceDef`] and a [`Visit`] and decides
 //! nothing.
 //!
-//! **Two prices, and they are different prices.** Time is what a service in the
-//! wilds costs: days matter because the map keeps its ambushes, so a week under
-//! a healer is a week the world moved without you. Coin is what a service in a
-//! town costs, now that there is coin. A place may ask for either or both, and
-//! which it asks for is authored in the pack rather than decided here.
+//! **A town's five options are not a menu and open no menus.** `MOON:HWLOOP`
+//! (image 0xe35) and `WDLOOP` (0xd7a) are a ladder on the id of the gadget
+//! fire was over, and each rung is a routine of its own: the merchant and the
+//! high temple are pages of the status panel (`mov ax, 5` and `mov ax, 6`
+//! before `call 0xbdd3`), the tavern is `_TAVERN`'s loop at 0xb007, and the
+//! healer and the mystic are `_WIZARD`'s at 0xba66 and 0xb935. All five are
+//! [`crate::town`]; here they are [`Effect::Door`], which a [`Visit`] answers
+//! with [`Answer::Door`] and nothing else. The rooms with lists of lines that
+//! stood behind those five here, a stall, a tavern menu, a dice room, a
+//! healer's menu, a temple's list and a mystic's menu, are gone with the
+//! effects that opened them.
 
-use crate::item::{Items, Purchase};
+use crate::item::Items;
 use crate::lair::Raid;
 use crate::overworld::{TOKEN_H, TOKEN_W};
 use crate::quest::Gate;
-use crate::run::{Run, Used};
-use crate::service::{Gift, Rite, Sale, Wager};
+use crate::run::Run;
+use crate::service::{Gift, Rite};
+use crate::town::Door;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -36,8 +44,10 @@ pub enum Effect {
     /// **Recovered.** `ForestVillage`, `MooresVillage` and `WasteVillage` are
     /// three public names on one routine at image `0x112a`, which is all four
     /// villages: `cmp byte [si+0x31], 3 / jge / add byte [si+0x31], 1`, then
-    /// `ColourStatus 9` and back out to the map. Nothing is bought, nothing is
-    /// sold and no day passes.
+    /// `ColourStatus 9` and, through `EncounterAllDone` (0x113e, `mov ax,
+    /// [0xccac]; mov [0xcc98], ax`), back out to the map with the day's
+    /// distance spent. Nothing is bought and nothing is sold; the day's
+    /// remaining walk is the price, and the map charges it, not this.
     ///
     /// Which village is whose is `MOON:CheckGROOC` at `0x732`: icon frames
     /// 0x15 to 0x18 are each gated on `[di+0x20]` being 0, 1, 2 or 3, the
@@ -49,54 +59,10 @@ pub enum Effect {
         /// Said when there was not: three is the ceiling.
         refused: String,
     },
-    /// A stall. One line, one item, at the price the item data names, so the
-    /// menu and the goods can never disagree about what a thing costs.
-    Buy {
-        item: String,
-        said: String,
-        too_dear: String,
-        no_room: String,
-    },
-    /// Use something you are carrying, here and now.
-    Use {
-        item: String,
-        said: String,
-        /// Said when you have none, or when using it would achieve nothing.
-        refused: String,
-    },
-    /// Through a door inside this place: the merchant's stall is not the town
-    /// square. The place it names is normally `hidden`, so it exists only as
-    /// somewhere you are already standing can send you.
-    Go { place: String },
-    /// The tavern's table: a stake on three dice. `_TAVERN`, and the five
-    /// painted bets of `TAV.PIV`. The throw is shown in `room`, the dice
-    /// screen, which is a hidden place whose one option leads back.
-    Wager { stake: u32, room: String },
-    /// Open the bowl: the coin-at-a-time donation panel both the healer and the
-    /// mystic take their fee through.
-    ///
-    /// **Recovered.** `_WIZARD:InitDonation` at image `0xbb34` copies the purse
-    /// into `GOLDP`, clears `DONATION`, and adds four gadgets whose `[si+0x10]`
-    /// is 4, 5, 3 and 2; `DonateLoop` at `0xbbe6` reads that word itself and
-    /// `AddDonation`/`SubDonation` move exactly one coin each way, refusing at
-    /// an empty purse and an empty bowl. So there is no list of sums anywhere
-    /// and never was; the three this project offered were its own. See
-    /// [`crate::status::Donation`].
-    Bowl {
-        /// `false` is the healer and `HealDon`, `true` the mystic and
-        /// `MysticJudge`.
-        #[serde(default)]
-        consult: bool,
-    },
-    /// A donation to the town healer, `HEA.PIV`: ten mends, fifteen buys a
-    /// life point, and the pot is his whatever it bought. What the bowl commits
-    /// to when `OkDonation` is taken.
-    Donate { gold: u32 },
-    /// A donation to the mystic, `MYS.PIV`: a point of an ability given or
-    /// taken, on a roll the size of the donation shifts.
-    Consult { gold: u32 },
-    /// Sell something to the temple for half its price.
-    Sell { item: String },
+    /// One of a town's five gadgets, which `HWLOOP`'s ladder sends straight
+    /// into its own routine. What is behind each is [`crate::town`]; a place
+    /// only says which rung.
+    Door { door: Door },
     /// Ring the bell at the wizard's tower and take what Math gives.
     Wizard,
     /// Stand in the stone circle: the moonstone of the night ends the quest,
@@ -132,48 +98,6 @@ impl Effect {
     /// open one is [`Effect::offered`].
     pub fn available(&self) -> bool {
         !matches!(self, Effect::Closed { .. })
-    }
-
-    /// Whether taking this option right now would do anything, given the purse
-    /// and the pack. The renderer dims the rest, so a man with eight coins can
-    /// see that the potion is out of reach before he tries for it.
-    pub fn offered(&self, items: &Items, run: &Run) -> bool {
-        match self {
-            Effect::Closed { .. } => false,
-            Effect::Buy { item, .. } => items
-                .get(item)
-                .is_some_and(|d| run.gold >= d.price && run.kit.room() > 0),
-            Effect::Use { item, .. } => run.kit.count(item) > 0,
-            Effect::Wager { stake, .. } => run.gold >= *stake,
-            Effect::Donate { gold } | Effect::Consult { gold } => run.gold >= *gold,
-            // `InitDonation` opens with whatever is in the purse, and an empty
-            // one opens a bowl that can only be closed again.
-            Effect::Bowl { .. } => run.gold > 0,
-            Effect::Sell { item } => run.kit.count(item) > 0,
-            Effect::Go { .. }
-            | Effect::Village { .. }
-            | Effect::Wizard
-            | Effect::Offer
-            | Effect::Raid { .. }
-            | Effect::Valley { .. }
-            | Effect::Leave => true,
-        }
-    }
-
-    /// What this option costs in coin, for a menu to show against its line. The
-    /// number lives with the item or with the place, never in the label.
-    pub fn cost(&self, items: &Items) -> Option<u32> {
-        match self {
-            Effect::Buy { item, .. } => items.get(item).map(|d| d.price),
-            // Not the wager. The tavern's five gadgets are painted `1 gold` to
-            // `5 gold`, so the stake is already the label and a price column
-            // beside it would print the same number twice.
-            Effect::Donate { gold } | Effect::Consult { gold } => Some(*gold),
-            Effect::Bowl { .. } => None,
-            // `GoldSell`: `shr ax, 1` on the price.
-            Effect::Sell { item } => items.get(item).map(|d| d.price / 2),
-            _ => None,
-        }
     }
 }
 
@@ -239,17 +163,14 @@ pub struct PlaceDef {
     /// of it, and a panel over it is a panel over the art.
     #[serde(default)]
     pub boxes: Option<Vec<[i32; 4]>>,
-    /// The dice table: three faces drawn where `_TAVERN:RollDice` blits them.
-    ///
-    /// The screen behind them is `DICE.PIV`, which is a picture of three dice
-    /// already on the wood; the faces go on top of it. Nothing else in the game
-    /// draws a prop over a place, so this is a flag rather than a prop list.
+    /// Where the town's loop puts the pointer on the way in and every time a
+    /// door hands the screen back: `HWINIT` at 0xe1a writes (0x122, 0x64) and
+    /// `WDINIT` at 0xd5f (0x1e, 0x64) before `InitHighWood` or `InitWaterDeep`.
     #[serde(default)]
-    pub dice: bool,
+    pub pointer: Option<[i32; 2]>,
     pub options: Vec<Choice>,
-    /// Not on the map. A hidden place is a room inside another one, reached
-    /// only through an [`Effect::Go`], so its coordinates mean nothing and
-    /// walking can never stumble into it.
+    /// Not on the map. A beaten and emptied lair is taken off it by
+    /// `CheckLairClear`, and this is how the map is told.
     #[serde(default)]
     pub hidden: bool,
     /// What the place says before anything is chosen: the wizard's bell, the
@@ -465,10 +386,6 @@ pub struct Visit {
     pub cursor: usize,
     /// The last thing that happened here, for the renderer to show.
     pub said: String,
-    /// The last throw of the dice, faces zero based, for the dice screen to
-    /// draw from `DICE.CEL`. Carried through the door into that screen.
-    #[serde(default)]
-    pub dice: Option<[u8; 3]>,
     /// Whether the last choice was an offering the druids took.
     ///
     /// `MOON:Henge` (0x1053) does not hand a line back and leave it there: it
@@ -485,8 +402,9 @@ pub struct Visit {
 pub enum Answer {
     /// Still here. `days` is what the choice cost in time.
     Stayed { days: u32 },
-    /// Through a door into another place, without going back out to the map.
-    Went { place: String },
+    /// One of a town's five, which the caller runs and then comes back from
+    /// through `HWINIT`, to this same screen.
+    Door(Door),
     /// Out onto the map.
     Left,
     /// A guardian is waiting. The caller sets the bout up in `arena` with
@@ -502,9 +420,6 @@ pub enum Answer {
     /// panel, which is where a lair's floor is handed over, one gadget at a
     /// time. See [`crate::lair::Page`].
     Floor { lair: usize },
-    /// Open the donation bowl over this screen. `DonateLoop`, which is a loop
-    /// of its own with `MovePointer` and `CHECKGADGET` in it and two ways out.
-    Bowl { consult: bool },
     /// The Valley gate stood open. The caller sets the bout up the same way
     /// and comes back through [`Run::valley_won`] or [`Run::valley_lost`].
     ///
@@ -524,7 +439,6 @@ impl Visit {
             place: place.to_string(),
             cursor: 0,
             said: String::new(),
-            dice: None,
             rite: false,
         }
     }
@@ -534,18 +448,6 @@ impl Visit {
         Visit {
             said: def.intro.clone(),
             ..Visit::open(place)
-        }
-    }
-
-    /// Step through a door, keeping what was just said and thrown: the dice
-    /// screen shows the throw the tavern made.
-    pub fn through(&self, place: &str) -> Visit {
-        Visit {
-            place: place.to_string(),
-            cursor: 0,
-            said: self.said.clone(),
-            dice: self.dice,
-            rite: false,
         }
     }
 
@@ -579,9 +481,7 @@ impl Visit {
         self.rite = false;
         match &choice.effect {
             Effect::Leave => Answer::Left,
-            Effect::Go { place } => Answer::Went {
-                place: place.clone(),
-            },
+            Effect::Door { door } => Answer::Door(*door),
             Effect::Closed { said } => {
                 self.said = said.clone();
                 Answer::Stayed { days: 0 }
@@ -593,73 +493,6 @@ impl Visit {
                     said.clone()
                 } else {
                     refused.clone()
-                };
-                Answer::Stayed { days: 0 }
-            }
-            Effect::Buy {
-                item,
-                said,
-                too_dear,
-                no_room,
-            } => {
-                self.said = match run.buy(item, items) {
-                    Purchase::Bought { .. } => said.clone(),
-                    Purchase::TooDear => too_dear.clone(),
-                    Purchase::NoRoom => no_room.clone(),
-                    Purchase::Unknown => format!("No {item} here."),
-                };
-                Answer::Stayed { days: 0 }
-            }
-            Effect::Use {
-                item,
-                said,
-                refused,
-            } => {
-                self.said = match run.use_item(item, items) {
-                    Used::Did => said.clone(),
-                    _ => refused.clone(),
-                };
-                Answer::Stayed { days: 0 }
-            }
-            Effect::Wager { stake, room } => match run.throw_dice(*stake) {
-                Wager::Threw(t) => {
-                    self.dice = Some(t.dice);
-                    self.said = t.describe(run.gold);
-                    Answer::Went {
-                        place: room.clone(),
-                    }
-                }
-                Wager::TooPoor => {
-                    self.said = "Your purse will not cover that.".into();
-                    Answer::Stayed { days: 0 }
-                }
-                // `TavernOpenScene` turns an empty purse out of the door.
-                Wager::Skint => {
-                    self.said = "No coin, no game. Out.".into();
-                    Answer::Left
-                }
-            },
-            // The panel is the caller's: it is a pointer loop over four
-            // gadgets, and `DonateLoop` does not return until one of the two
-            // that close it is pressed.
-            Effect::Bowl { consult } => Answer::Bowl { consult: *consult },
-            Effect::Donate { gold } => {
-                self.said = match run.donate_to_healer(*gold) {
-                    Some(healing) => healing.describe().to_string(),
-                    None => "Your purse will not stretch to that.".into(),
-                };
-                Answer::Stayed { days: 0 }
-            }
-            Effect::Consult { gold } => {
-                self.said = run.consult_the_mystic(*gold, items).describe().to_string();
-                Answer::Stayed { days: 0 }
-            }
-            Effect::Sell { item } => {
-                self.said = match run.sell_to_temple(item, items) {
-                    Sale::Sold { paid } => format!("The temple gives you {paid} gold for it."),
-                    Sale::HaveNone => "You have none to sell.".into(),
-                    Sale::NotWanted => "The temple has no use for that.".into(),
-                    Sale::Unknown => format!("No {item} here."),
                 };
                 Answer::Stayed { days: 0 }
             }
@@ -680,7 +513,10 @@ impl Visit {
             }
             Effect::Offer => {
                 let rite = run.rite_at_the_stones(None, items);
-                self.said = rite.describe(items);
+                // Nothing is said: `Henge` has no line for any outcome, and
+                // what an offering puts up is `HengeWait` from `noswap`, which
+                // `Rite::message` names and the caller shows before the set
+                // piece.
                 // `0x10a0` compares `[0xf378]` against `0xffff` and leaves when
                 // it is still that, so the set piece runs for an offering the
                 // druids took and for nothing else.
@@ -784,7 +620,7 @@ mod tests {
             menu: [8, 8, 100, 100],
             boxes: None,
             text: None,
-            dice: false,
+            pointer: None,
             options: vec![
                 Choice {
                     label: "Merchant".into(),
@@ -807,48 +643,43 @@ mod tests {
         }
     }
 
-    /// A stall, as the pack authors one: a way in, a thing to buy, a potion to
-    /// drink, and a way back to the room you came from.
-    fn merchant() -> PlaceDef {
+    /// A town, as the pack authors one: `InitHighWood`'s five gadgets on the
+    /// painted parchment, each a rung of `HWLOOP`'s ladder.
+    fn town() -> PlaceDef {
+        let door = |label: &str, door: Door| Choice {
+            label: label.into(),
+            effect: Effect::Door { door },
+        };
         PlaceDef {
-            name: "The Merchant".into(),
+            name: "Highwood".into(),
             scene: "scene.highwood".into(),
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-            hidden: true,
+            x: 86,
+            y: 36,
+            w: 25,
+            h: 32,
+            hidden: false,
             intro: String::new(),
             icon: None,
-            line: String::new(),
+            line: "Enter the city of Highwood".into(),
             knight: None,
-            menu: [8, 8, 100, 100],
-            boxes: None,
+            menu: [256, 0, 62, 200],
+            boxes: Some(vec![
+                [256, 0x1e, 64, 0x10],
+                [256, 0x42, 64, 0x10],
+                [256, 0x6a, 64, 0x10],
+                [256, 0x8c, 64, 0x1a],
+                [256, 0xb7, 64, 0x0c],
+            ]),
             text: None,
-            dice: false,
+            pointer: Some([0x122, 0x64]),
             options: vec![
+                door("Merchant", Door::Merchant),
+                door("Tavern", Door::Tavern),
+                door("Healer", Door::Healer),
+                door("Temple", Door::Temple),
                 Choice {
-                    label: "Flask of healing".into(),
-                    effect: Effect::Buy {
-                        item: "potion".into(),
-                        said: "The potion is yours.".into(),
-                        too_dear: "Come back with coin.".into(),
-                        no_room: "You cannot carry another.".into(),
-                    },
-                },
-                Choice {
-                    label: "Drink a potion".into(),
-                    effect: Effect::Use {
-                        item: "potion".into(),
-                        said: "You drain it.".into(),
-                        refused: "You have none, or no need.".into(),
-                    },
-                },
-                Choice {
-                    label: "Back".into(),
-                    effect: Effect::Go {
-                        place: "highwood".into(),
-                    },
+                    label: "Leave".into(),
+                    effect: Effect::Leave,
                 },
             ],
         }
@@ -919,7 +750,7 @@ mod tests {
             menu: [0, 0, 0, 0],
             boxes: None,
             text: None,
-            dice: false,
+            pointer: None,
             options: vec![],
         };
         // Highwood: icon 0x19 is 25x32, hung so that (94, 47) is in the middle.
@@ -1041,7 +872,9 @@ mod tests {
         assert_eq!(d.paper_line(), "Enter the city of Highwood");
     }
 
-    /// `ForestVillage` (0x112a): one life point, free, and no day passes.
+    /// `ForestVillage` (0x112a): one life point, free. The day's remaining
+    /// distance goes with it, but that is `EncounterAllDone`'s write into the
+    /// map's `[0xcc98]`, which the overworld owns and the run never sees.
     #[test]
     fn your_own_village_gives_a_life_point_and_asks_nothing() {
         let def = village();
@@ -1057,7 +890,7 @@ mod tests {
         );
         assert_eq!(run.lives, 2, "one life point");
         assert_eq!(run.health, 30, "and the routine touches nothing else");
-        assert_eq!(run.day, day, "no day passes");
+        assert_eq!(run.day, day, "the run's own day is the map's to turn");
         assert_eq!(run.gold, gold, "and nothing is paid");
         assert_eq!(v.said, "Your own people take you in.");
     }
@@ -1164,101 +997,79 @@ mod tests {
         );
     }
 
-    // The merchant.
+    // The town.
 
+    /// `HWLOOP`'s ladder: fire over each of the first four gadgets is one
+    /// routine and nothing else, and the fifth is `CEXIT`. Nothing is said,
+    /// nothing is bought here, no day passes, and the run is untouched until
+    /// the routine behind the door runs.
     #[test]
-    fn the_merchant_sells_and_the_coin_actually_moves() {
-        let (def, items) = (merchant(), shop());
+    fn a_towns_four_doors_answer_with_the_door_and_change_nothing() {
+        let (def, items) = (town(), shop());
         let mut run = Run::new(100);
         run.earn(60);
-        let mut v = Visit::open("highwood.merchant");
-        assert_eq!(v.choose(&def, &items, &mut run), Answer::Stayed { days: 0 });
-        assert_eq!(run.gold, 35, "twenty five went across the counter");
-        assert_eq!(run.kit.count("potion"), 1, "and a potion came back");
-        assert_eq!(v.said, "The potion is yours.");
+        let before = run.clone();
+        let mut v = Visit::open("highwood");
+        for expect in [Door::Merchant, Door::Tavern, Door::Healer, Door::Temple] {
+            assert_eq!(v.choose(&def, &items, &mut run), Answer::Door(expect));
+            assert!(v.said.is_empty(), "a door says nothing of its own");
+            assert_eq!(run, before, "and the run is the door's routine's to change");
+            v.move_by(&def, 1);
+        }
+        assert_eq!(v.choose(&def, &items, &mut run), Answer::Left, "`CEXIT`");
     }
 
+    /// Waterdeep's fourth rung is `MYST` where Highwood's is `HTEM`, and that
+    /// is the only difference between `WDLOOP` and `HWLOOP`.
     #[test]
-    fn a_merchant_turns_away_an_empty_purse_and_says_which_reason() {
-        let (def, items) = (merchant(), shop());
-        let mut run = Run::new(100);
-        let mut v = Visit::open("m");
-        v.choose(&def, &items, &mut run);
-        assert_eq!(v.said, "Come back with coin.");
-        assert!(run.kit.is_empty(), "nothing changed hands");
-
-        run.earn(1000);
-        run.kit.capacity = 0;
-        v.choose(&def, &items, &mut run);
-        assert_eq!(v.said, "You cannot carry another.");
-        assert_eq!(run.gold, 1000, "and a refused sale takes no coin");
-    }
-
-    /// The price is a property of the goods, so a menu can show it without the
-    /// label ever repeating it and the two can never drift apart.
-    #[test]
-    fn a_stall_line_carries_the_price_of_what_it_sells() {
-        let (def, items) = (merchant(), shop());
-        assert_eq!(def.options[0].effect.cost(&items), Some(25));
-        assert_eq!(def.options[2].effect.cost(&items), None, "a door is free");
-    }
-
-    /// A man with eight coins should be able to see that the potion is out of
-    /// reach before he chooses it.
-    #[test]
-    fn what_you_cannot_afford_is_not_offered() {
-        let (def, items) = (merchant(), shop());
-        let mut run = Run::new(100);
-        assert!(def.options[0].effect.available(), "the stall is open");
-        assert!(
-            !def.options[0].effect.offered(&items, &run),
-            "but not to a pauper"
-        );
-        run.earn(25);
-        assert!(def.options[0].effect.offered(&items, &run));
-        // Nor is a potion you are not carrying.
-        assert!(!def.options[1].effect.offered(&items, &run));
-        run.kit.take("potion", 1);
-        assert!(def.options[1].effect.offered(&items, &run));
-    }
-
-    #[test]
-    fn drinking_at_the_stall_mends_you_and_empties_the_potion() {
-        let (def, items) = (merchant(), shop());
-        let mut run = Run::new(100);
-        run.kit.take("potion", 1);
-        run.finished_fight(40, true, 0);
-        let mut v = Visit::open("m");
-        v.move_by(&def, 1);
-        v.choose(&def, &items, &mut run);
-        // The recovered potion: `cmp` the two health words, and when they
-        // differ health becomes the maximum outright (0xcad0).
-        assert_eq!(run.health, 100);
-        assert!(run.kit.is_empty(), "the potion is gone");
-        assert_eq!(v.said, "You drain it.");
-    }
-
-    #[test]
-    fn a_door_inside_a_place_leads_to_the_other_room_and_not_to_the_map() {
-        let (def, items) = (merchant(), shop());
-        let mut run = Run::new(100);
-        let mut v = Visit::open("m");
-        v.move_by(&def, -1);
+    fn waterdeeps_fourth_door_is_the_mystic() {
+        let mut def = town();
+        def.options[3] = Choice {
+            label: "Mystic".into(),
+            effect: Effect::Door { door: Door::Mystic },
+        };
+        let mut v = Visit::open("waterdeep");
+        v.cursor = 3;
         assert_eq!(
-            v.choose(&def, &items, &mut run),
-            Answer::Went {
-                place: "highwood".into()
-            }
+            v.choose(&def, &shop(), &mut Run::new(100)),
+            Answer::Door(Door::Mystic)
         );
     }
 
-    /// A stall is a room inside a town, not a landmark. Walking must never find
-    /// it, however close to the map's origin its unused coordinates happen to
-    /// put it.
+    /// A door is always offered: `HWLOOP` tests nothing about the purse or
+    /// the pack before it jumps, and the routines behind the doors do their
+    /// own refusing (`0xb00b` for the tavern).
+    #[test]
+    fn a_door_is_offered_to_a_pauper() {
+        let def = town();
+        for choice in &def.options {
+            assert!(choice.effect.available(), "{}", choice.label);
+        }
+    }
+
+    /// The pointer's home on the parchment, which `HWINIT` and `WDINIT` write
+    /// before the gadgets, survives the pack.
+    #[test]
+    fn a_town_keeps_where_its_pointer_starts() {
+        let def = town();
+        assert_eq!(def.pointer, Some([0x122, 0x64]));
+        let json = serde_json::to_string(&def).unwrap();
+        let back: PlaceDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, def);
+        assert!(json.contains("\"do\":\"door\""));
+        assert!(json.contains("\"door\":\"merchant\""));
+    }
+
+    /// A lair taken off the map is not under anyone's feet, however close to
+    /// the token its coordinates put it.
     #[test]
     fn a_hidden_place_is_not_on_the_map() {
         let mut places = world();
-        places.insert("highwood.merchant".into(), merchant());
+        let mut gone = village();
+        gone.hidden = true;
+        gone.x = 0;
+        gone.y = 0;
+        places.insert("lair.gone".into(), gone);
         let mut s = Overlaps::default();
         s.gather(&places, 0, 0, 0);
         assert!(s.is_empty(), "standing on its coordinates finds nothing");
@@ -1331,7 +1142,7 @@ mod tests {
             menu: [8, 12, 168, 40],
             boxes: None,
             text: None,
-            dice: false,
+            pointer: None,
             options: vec![
                 Choice {
                     // `_MAP:knvalley`, verbatim.
@@ -1353,7 +1164,7 @@ mod tests {
         run.kit.capacity = 20;
         let mut visit = Visit::open("valley");
         // The gate is always offered; what it does depends on the pack.
-        assert!(def.options[0].effect.offered(&items, &run));
+        assert!(def.options[0].effect.available());
         assert_eq!(
             visit.choose(&def, &items, &mut run),
             Answer::Stayed { days: 0 }

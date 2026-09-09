@@ -566,13 +566,20 @@ by the feet and the original places against a point near the head. The
 baked offsets advance about 47 pixels over one four-frame stride, at two
 pixels a tick. Which script a state plays was thought to be ours too, because
 `CONTROLTABLE` is uninitialised data; it is not, and the next section says
-where it was found.
+where it was found. Since then the baker has stopped transcribing those
+tables and reads them by running the routines that fill them
+(`henge_formats::tables`): a small interpreter of the `mov`, `loop`, `cmp`
+and `jne` they use, whose writes are resolved through the symbol table. The
+knight's `ActorDef` and every creature's are built from what it collects.
 
 ### What the knight does with it
 
-The fighter's five states map onto `Knight_SwStance`, the four
-`Knight_SwWalkR` frames cycled in turn, `Knight_SwSwing`,
-`Knight_SwShoulderHit` and `Knight_SwDeath`. The swing's hit shape is no
+The fighter's states map onto `Knight_SwStance` (`+0x10`), the three rows of
+`KnightWalSw` cycled in turn (`Knight_SwWalkR1..4` for any horizontal step,
+`U1..4` straight up, `D1..4` straight down, chosen the way `ControlKnight`'s
+`A1$` to `A4$` at 0x3fd6 choose them), `KnightAttSw[kind]`,
+`KnightHitSw[attacker's kind]` and, through that script's own `TASKDEAD`,
+`Knight_SwDeath`. The swing's hit shape is no
 longer a hand drawn line: it is the rectangle of every part the frame flags
 `WEAPON`, placed by the same arithmetic that draws it. The data gates it
 better than a state check could: the stance carries the sword as a `BODY`

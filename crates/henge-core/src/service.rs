@@ -22,6 +22,7 @@
 
 use crate::item::{Items, Virtue};
 use crate::knight::Ability;
+use crate::message::{Message, Messages};
 use crate::moon::{is_token, Moonstone};
 use crate::run::{Run, LIFE_CEILING, WIZARD_GRUDGE};
 
@@ -72,8 +73,9 @@ pub const ODDS: [([u8; DICE], u32); 11] = [
 /// saturates there.
 pub const PURSE_CEILING: u32 = 150;
 
-/// One throw of the three dice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One throw of the three dice. [`Run::roll_dice`] in [`crate::town`] makes
+/// one, and the tavern keeps it while the dice picture is up.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Throw {
     /// The faces, sorted ascending, zero based. `_TAVERN:DiceSort` is a bubble
     /// sort over the three bytes, so the odds are matched against a sorted
@@ -94,34 +96,6 @@ impl Throw {
     pub fn odds(&self) -> Option<u32> {
         ODDS.iter().find(|(d, _)| *d == self.dice).map(|(_, m)| *m)
     }
-
-    /// What the table says. `WIN` and `LOST` at DS:cd7a and cd70, with
-    /// `BETWINPOT`, `BETLOSTPOT` and `GOLDTOTAL` filled in.
-    pub fn describe(&self, purse: u32) -> String {
-        if self.winner() {
-            format!(
-                "You won {} gold pieces. You now have {} gold pieces.",
-                self.won, purse
-            )
-        } else {
-            format!(
-                "You lost {} gold pieces. You now have {} gold pieces.",
-                self.stake, purse
-            )
-        }
-    }
-}
-
-/// What came of walking up to the table.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Wager {
-    Threw(Throw),
-    /// The purse will not cover the stake. `SetBET` compares the bet against
-    /// the purse and refuses rather than going into debt.
-    TooPoor,
-    /// The tavern turns an empty purse round at the door: `cmp word ptr
-    /// [si+0x32], 0; jg` then `ret`, before anything is drawn.
-    Skint,
 }
 
 // ------------------------------------------------------------- the town healer
@@ -176,21 +150,10 @@ pub const HEALER_MEND: i32 = 10;
 pub const HEALER_LIFE: i32 = 15;
 
 // ---------------------------------------------------------------- the temple
-
-/// What the temple paid for something. `GoldSell`: the item's price shifted
-/// right once, into a purse that saturates at a hundred and fifty.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Sale {
-    Sold {
-        paid: u32,
-    },
-    /// You are carrying none.
-    HaveNone,
-    /// The temple deals in magic, not in keys, moonstones, or what you wear.
-    NotWanted,
-    /// No such item in the packs.
-    Unknown,
-}
+//
+// `_STATUS:TTemple`, `SellToTemple` and `GoldSell` are gadget arms on the
+// status panel's type 6 page, and they are in `crate::town` with the rest of
+// what a town's doors open onto. `MAGIC_PRICES` below is the table they read.
 
 // ---------------------------------------------------------------- the mystic
 
@@ -451,28 +414,24 @@ pub enum Rite {
 }
 
 impl Rite {
-    /// The between-days hint gives the words: `Offer a magic item within
-    /// Stonehenge and Danu will grant you a longer life`. `HengeInstruct`,
-    /// what the druids say on the night, is inside the unreadable part of
-    /// DGROUP, so these lines are ours; `The druids prepare for the ritual`
-    /// is the one recovered string, `_TAVERN:HengeWait`.
-    pub fn describe(&self, items: &Items) -> String {
+    /// What goes up for this, which is what `MOON:Henge` puts up and nothing
+    /// more. The druids have no lines of their own: three worded outcomes
+    /// used to stand here, and the original says none of them.
+    ///
+    /// ```text
+    /// 010a0  cmp word ptr [0xf378], -1     ; nothing offered
+    /// 010a5  je 010ca                      ; fade out, EncounterAllDone: silent
+    /// 010a7  call 0xb35e                   ; noswap: `HengeWait` and the ceremony
+    /// ...
+    /// 0b372  mov si, HengeWait; call INSTRUCTMESSAGE
+    /// ```
+    ///
+    /// A win never reaches the offering: `KnightWonGame` shows `VICTORY`,
+    /// which is [`crate::quest::Tally::message`].
+    pub fn message<'a>(&self, messages: &'a Messages) -> Option<&'a Message> {
         match self {
-            Rite::Won(stone) => format!(
-                "The druids prepare for the ritual. The {} blazes in your hand. The quest is done.",
-                stone.name()
-            ),
-            Rite::Blessed { offered, life } => {
-                let name = items
-                    .get(offered)
-                    .map_or(offered.clone(), |d| d.name.clone());
-                if *life {
-                    format!("The druids prepare for the ritual. Danu accepts the {name}, and grants you a longer life.")
-                } else {
-                    format!("The druids prepare for the ritual. Danu accepts the {name}, and your wounds close.")
-                }
-            }
-            Rite::NothingToOffer => "The druids wait. You have nothing to offer Danu.".into(),
+            Rite::Blessed { .. } => messages.named("henge.ritual"),
+            Rite::Won(_) | Rite::NothingToOffer => None,
         }
     }
 }
@@ -480,48 +439,6 @@ impl Rite {
 // ----------------------------------------------------------------- the work
 
 impl Run {
-    /// Throw three dice for a stake.
-    ///
-    /// `_TAVERN`: the stake leaves the purse first, the three dice are rolled
-    /// and sorted, and a winning pattern multiplies the stake back in. The
-    /// purse saturates at a hundred and fifty, so a big win can pay less than
-    /// the arithmetic says, exactly as it does in the original.
-    pub fn throw_dice(&mut self, stake: u32) -> Wager {
-        if self.gold == 0 {
-            return Wager::Skint;
-        }
-        if stake == 0 || stake > self.gold {
-            return Wager::TooPoor;
-        }
-        self.gold -= stake;
-        let mut dice = [0u8; DICE];
-        for d in dice.iter_mut() {
-            // `and ax, 7; cmp ax, 5; jg` rolls again: a bounded re-roll here,
-            // and a modulus past it, so a run can never hang on a die.
-            let mut face = FACES;
-            for _ in 0..8 {
-                let n = self.next_roll() & 7;
-                if n < FACES {
-                    face = n;
-                    break;
-                }
-            }
-            if face == FACES {
-                face = self.roll(FACES);
-            }
-            *d = face as u8;
-        }
-        dice.sort_unstable();
-        let won = ODDS
-            .iter()
-            .find(|(pattern, _)| *pattern == dice)
-            .map_or(0, |(_, odds)| stake.saturating_mul(*odds));
-        if won > 0 {
-            self.gold = (self.gold + won).min(PURSE_CEILING);
-        }
-        Wager::Threw(Throw { dice, stake, won })
-    }
-
     /// Donate to the town healer, and take what the pot buys.
     ///
     /// `HealDon`, in full: while there are ten in the pot, clear the bite for
@@ -558,32 +475,6 @@ impl Run {
         }
         got.unspent = pot;
         Some(got)
-    }
-
-    /// Sell something to the temple. `SellToTemple` then `GoldSell`: one off
-    /// the record, half the price into the purse, the purse capped at a
-    /// hundred and fifty, and a sword sold out of the hand leaves a long
-    /// sword in it (`mov word ptr [bp+0x40], 0x16`).
-    pub fn sell_to_temple(&mut self, id: &str, items: &Items) -> Sale {
-        let Some(def) = items.get(id) else {
-            return Sale::Unknown;
-        };
-        if is_token(id)
-            || matches!(def.virtue, Virtue::Weapon { .. } | Virtue::Armour { .. })
-                && magic_slot(id).is_none()
-        {
-            return Sale::NotWanted;
-        }
-        if self.kit.lose(id, 1) == 0 {
-            return Sale::HaveNone;
-        }
-        let paid = def.price / 2;
-        self.gold = (self.gold + paid).min(PURSE_CEILING);
-        if self.knight.weapon == id && self.kit.count(id) == 0 {
-            self.knight.weapon = "long_sword".into();
-        }
-        self.refresh(items);
-        Sale::Sold { paid }
     }
 
     /// Donate at the mystic, and let the cosmos decide.
@@ -831,6 +722,7 @@ mod tests {
     use super::*;
     use crate::item::{ItemDef, Items};
     use crate::knight::{KnightDef, MAX_ABILITY};
+    use crate::message::{Kind, Until};
     use crate::moon::Phase;
     use crate::run::NEVER_MET;
 
@@ -912,99 +804,8 @@ mod tests {
         assert_eq!(ODDS.len(), 11);
     }
 
-    #[test]
-    fn a_stake_leaves_the_purse_and_a_win_comes_back_multiplied() {
-        let (mut r, _) = run();
-        r.earn(100);
-        let before = r.gold;
-        let Wager::Threw(t) = r.throw_dice(5) else {
-            panic!("should have thrown")
-        };
-        assert_eq!(t.stake, 5);
-        assert!(
-            t.dice.windows(2).all(|w| w[0] <= w[1]),
-            "DiceSort leaves them ascending"
-        );
-        assert!(t.dice.iter().all(|d| (*d as u32) < FACES));
-        if t.winner() {
-            assert_eq!(t.won, 5 * t.odds().unwrap());
-            assert_eq!(r.gold, (before - 5 + t.won).min(PURSE_CEILING));
-            assert!(t.describe(r.gold).starts_with("You won"));
-        } else {
-            assert_eq!(r.gold, before - 5);
-            assert_eq!(
-                t.describe(r.gold),
-                format!(
-                    "You lost 5 gold pieces. You now have {} gold pieces.",
-                    r.gold
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn the_table_will_not_take_a_stake_you_cannot_cover() {
-        let (mut r, _) = run();
-        assert_eq!(r.gold, 10);
-        assert_eq!(r.throw_dice(25), Wager::TooPoor);
-        assert_eq!(r.gold, 10, "and nothing left the purse");
-        r.spend(10);
-        assert_eq!(
-            r.throw_dice(5),
-            Wager::Skint,
-            "the tavern turns out an empty purse"
-        );
-    }
-
-    /// The whole point of taking the roll from the run's own seed: two
-    /// machines in the same tavern on the same day see the same dice, and a
-    /// run restored from its own serialization carries on the same sequence.
-    #[test]
-    fn a_seeded_dice_game_replays_identically() {
-        let (mut a, _) = run();
-        a.earn(100);
-        let mut b = a.clone();
-        let left: Vec<Wager> = (0..40).map(|_| a.throw_dice(5)).collect();
-        let right: Vec<Wager> = (0..40).map(|_| b.throw_dice(5)).collect();
-        assert_eq!(left, right, "the same seed throws the same dice");
-        let json = serde_json::to_string(&a).unwrap();
-        let mut restored: Run = serde_json::from_str(&json).unwrap();
-        assert_eq!(a.throw_dice(5), restored.throw_dice(5));
-    }
-
-    /// Two hundred throws is enough to see every face and at least one win,
-    /// which is what says the dice are dice and not a constant.
-    #[test]
-    fn the_dice_use_all_six_faces_and_sometimes_pay() {
-        let (mut r, _) = run();
-        let mut seen = [false; FACES as usize];
-        let mut wins = 0;
-        for _ in 0..200 {
-            r.gold = r.gold.max(5);
-            if let Wager::Threw(t) = r.throw_dice(1) {
-                for d in t.dice {
-                    seen[d as usize] = true;
-                }
-                wins += t.winner() as u32;
-            }
-        }
-        assert!(seen.iter().all(|s| *s), "every face comes up: {seen:?}");
-        assert!(wins > 0, "and a night at the table pays at least once");
-    }
-
-    #[test]
-    fn a_purse_cannot_pass_the_ceiling_the_original_clamps_it_to() {
-        let (mut r, _) = run();
-        r.gold = 149;
-        for _ in 0..200 {
-            r.gold = r.gold.max(5);
-            let _ = r.throw_dice(5);
-            assert!(
-                r.gold <= PURSE_CEILING,
-                "a win is capped at a hundred and fifty"
-            );
-        }
-    }
+    // The rest of the tavern, `SetBET`, `RollDice` and `DiceWinner`, is
+    // `crate::town`, and its tests are there.
 
     // The town healer.
 
@@ -1084,35 +885,8 @@ mod tests {
 
     // The temple.
 
-    #[test]
-    fn the_temple_buys_magic_at_half_price_and_nothing_else() {
-        let (mut r, items) = run();
-        r.kit.take("gem_of_seeing", 1);
-        r.kit.take("long_sword", 1);
-        r.kit.take("moonstone.full", 1);
-        assert_eq!(
-            r.sell_to_temple("gem_of_seeing", &items),
-            Sale::Sold { paid: 16 }
-        );
-        assert_eq!(r.gold, 26);
-        assert_eq!(r.kit.count("gem_of_seeing"), 0);
-        assert_eq!(r.sell_to_temple("gem_of_seeing", &items), Sale::HaveNone);
-        assert_eq!(r.sell_to_temple("long_sword", &items), Sale::NotWanted);
-        assert_eq!(r.sell_to_temple("moonstone.full", &items), Sale::NotWanted);
-        assert_eq!(r.sell_to_temple("grail", &items), Sale::Unknown);
-    }
-
-    #[test]
-    fn selling_the_sword_in_your_hand_leaves_a_long_sword_there() {
-        let (mut r, items) = run();
-        r.kit.take("sword_of_sharpness", 1);
-        r.knight.weapon = "sword_of_sharpness".into();
-        assert_eq!(
-            r.sell_to_temple("sword_of_sharpness", &items),
-            Sale::Sold { paid: 50 }
-        );
-        assert_eq!(r.knight.weapon, "long_sword");
-    }
+    // `TTemple`, `SellToTemple` and `GoldSell` are `crate::town`, and their
+    // tests are there.
 
     #[test]
     fn the_temples_prices_are_the_panels_own_lines() {
@@ -1434,7 +1208,23 @@ mod tests {
         assert_eq!(r.kit.count("potion"), 0, "and the offering is gone");
         assert_eq!(r.kit.count("gem_of_seeing"), 1);
         assert!(!r.won);
-        assert!(rite.describe(&items).contains("Potion of healing"));
+        // `0x10a7 call 0xb35e`: an offering the druids took is what runs
+        // `noswap`, and `noswap+31` puts `HengeWait` up.
+        let messages = Messages::recovered();
+        let said = rite.message(&messages).expect("HengeWait");
+        assert_eq!(said.lines[0].text, "The druids prepare");
+        assert_eq!(said.kind, Kind::Instruction);
+        assert_eq!(said.until, Until::Loaded);
+        assert_eq!(
+            Rite::NothingToOffer.message(&messages),
+            None,
+            "0x10a5 leaves without a word"
+        );
+        assert_eq!(
+            Rite::Won(Moonstone::Full).message(&messages),
+            None,
+            "VICTORY is KnightWonGame's, not the offering's"
+        );
     }
 
     #[test]

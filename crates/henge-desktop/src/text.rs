@@ -16,13 +16,35 @@
 //! and turns a line into a row of blobs.
 //!
 //! `Font::draw`, which took an ink and painted the glyph as a silhouette, is
-//! gone and so is the `blit_mask` under it. What stood in its way was that the
-//! five entries mean something else over an arena, and the fix is the one
-//! `docs/ROADMAP.md` already named: **the manifest says which palette a sheet's
-//! indices were authored against**, so the glyph's own shades can be translated
-//! into whatever the screen loaded, by nearest colour. Over `MESSAGE.PIV`,
-//! `CH.PIV` and the intro's panorama, which are the screens the original writes
-//! on, the two palettes agree and the translation is the identity.
+//! gone and so is the `blit_mask` under it. **So is the translation that
+//! replaced it**, which sent each of a glyph's indices to the nearest colour in
+//! whatever palette was loaded: the original has nothing of the kind. `TextP`
+//! at image 0x7aee is, in full,
+//!
+//! ```text
+//! 07af4  lodsb; or al, al; jne / jmp TextPDone      ; the NUL ends the line
+//! 07b00  sub al, 0x20; mov di, 0x8006; add di, ax   ; TextASCII[c - 0x20]
+//! 07b09  mov al, [di]                               ; the cel number
+//! 07b0b  les si, [0x8981]                           ; the current font bank
+//! 07b21  mov dx, es:[bx+0xe]; xchg; mov [textwidth], dx    ; the cel's width
+//! 07b2b  mov dx, es:[bx+0x10]; xchg; mov [texthieght], dx  ; and height
+//! 07b37  mov bx, [TextX]; mov cx, [TextY]
+//! 07b47  test byte ptr [bp+6], 8; je / sub word ptr [textwidth], 3
+//! 07b53  call 0x5d7f                                ; the cel blit
+//! 07b56  add bx, [textwidth]; mov [TextX], bx       ; advance
+//! ```
+//!
+//! and 0x5d7f is the blit every other cel in the game goes through, which
+//! writes the glyph's indices and nothing else. Nothing in `MAIN.EXE` writes
+//! the bold face's five entries either: the only immediates `0xfed`, `0xdc9`,
+//! `0xb95` and `0x842` in the code are creature colours (`ColourBalok+14`).
+//! So a line means whatever the loaded palette says its indices mean, and the
+//! original chooses where it writes: the bold face over `MESSAGE.PIV` and
+//! `CH.PIV`, which reserve those five, and `SMALL.FON`, which is drawn in
+//! index 1 alone, over the map, where index 1 is white. The place-entry
+//! dispatch at 0xc7f sets the small face (`mov ax, [0x8903+2]; mov [0x8981],
+//! ax` is `SMALL.FON`'s slot) before it jumps to any place; the three message
+//! routines, the title and the between-days screen set the bold one.
 
 use crate::framebuffer::Framebuffer;
 use henge_assets::Registry;
@@ -91,12 +113,8 @@ impl Font {
         s.chars().map(|c| self.advance(reg, c)).sum()
     }
 
-    /// Draw a line in the glyphs' own colours, which is the only way there is.
-    ///
-    /// Where the screen's palette is not the one the font bank was authored
-    /// against, each of the glyph's indices is sent to the nearest colour in
-    /// the palette that *is* loaded. That keeps the letter shapes, which a
-    /// silhouette destroys.
+    /// Draw a line in the glyphs' own indices, which is the only way there is:
+    /// `TextP` puts each cel through the ordinary blit at 0x5d7f.
     pub fn draw_own(
         &self,
         reg: &mut Registry,
@@ -108,58 +126,7 @@ impl Font {
         self.render(reg, fb, s, x, y)
     }
 
-    /// The table that carries this sheet's indices into the loaded palette.
-    ///
-    /// The identity where the manifest names no palette for the sheet, and the
-    /// identity again where the two palettes are the same, which is every
-    /// screen the original itself writes on.
-    fn translation(&self, reg: &Registry, fb: &Framebuffer) -> [u8; 32] {
-        let mut map = [0u8; 32];
-        for (i, m) in map.iter_mut().enumerate() {
-            *m = i as u8;
-        }
-        let Some(id) = reg.sheet(&self.sheet).and_then(|r| r.value.palette.clone()) else {
-            return map;
-        };
-        let Some(own) = reg.palette(&id).map(|r| r.value.clone()) else {
-            return map;
-        };
-        let same = own
-            .iter()
-            .take(32)
-            .enumerate()
-            .all(|(i, c)| fb.palette[i] == *c);
-        if same {
-            return map;
-        }
-        let split = |c: u32| -> [i32; 3] {
-            [
-                ((c >> 16) & 0xff) as i32,
-                ((c >> 8) & 0xff) as i32,
-                (c & 0xff) as i32,
-            ]
-        };
-        // Nearest by squared distance, weighted the way luminance is: a glyph
-        // that has to move ends up on the entry a viewer would call the same
-        // colour rather than the one with the smallest arithmetic difference.
-        for (i, want) in own.iter().take(32).enumerate() {
-            let [wr, wg, wb] = split(*want);
-            let mut best = (i32::MAX, i as u8);
-            for (j, have) in fb.palette.iter().enumerate() {
-                let [hr, hg, hb] = split(*have);
-                let d =
-                    2 * (wr - hr) * (wr - hr) + 4 * (wg - hg) * (wg - hg) + (wb - hb) * (wb - hb);
-                if d < best.0 {
-                    best = (d, j as u8);
-                }
-            }
-            map[i] = best.1;
-        }
-        map
-    }
-
     fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str, x: i32, y: i32) -> i32 {
-        let map = self.translation(reg, fb);
         let mut cx = x;
         for c in s.chars() {
             if c == ' ' {
@@ -187,7 +154,7 @@ impl Font {
                     px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
                 }
             }
-            fb.blit_mapped(&px, w, h, cx, y, &map);
+            fb.blit(&px, w, h, cx, y, false);
             cx += w as i32 + self.tracking;
         }
         cx - x

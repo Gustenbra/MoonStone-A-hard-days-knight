@@ -123,7 +123,7 @@
 //! place but the two towns. Nothing else.
 
 use crate::item::Items;
-use crate::message::{Kind, Line, Message, FLAG_CENTRE};
+use crate::message::{Kind, Line, Message, Until, FLAG_CENTRE};
 use crate::moon::{Key, Moonstone, Phase};
 use crate::run::Run;
 use serde::{Deserialize, Serialize};
@@ -250,8 +250,10 @@ impl Tally {
             Ending::Won { .. } => (Kind::Occurrence, &VICTORY),
             Ending::Slain => (Kind::Instruction, &GAME_OVER),
         };
+        // `KnightWonGame+75` and `0x61d` are both `call 0x8251`, `WaitFIRE`.
         Message {
             kind,
+            until: Until::Fire,
             lines: chain
                 .iter()
                 .map(|(t, y)| Line::new(t, 0, *y, FLAG_CENTRE))

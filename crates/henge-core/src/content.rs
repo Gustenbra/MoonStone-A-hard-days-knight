@@ -59,27 +59,9 @@ pub struct Family {
     /// eighth fight in it.
     #[serde(default)]
     pub arenas: Vec<String>,
-    /// What waylays a traveller on this kind of ground, by actor id.
-    ///
-    /// **Design, not recovered.** The original decides its encounters in
-    /// `_MAP`, and which creature a stretch of ground produces has not been
-    /// read out of it. Troggs and ratmen in the woods, mudmen in the marsh and
-    /// a troll in the waste is the obvious reading of the artwork and the
-    /// manual, and it lives here so a better one is an edit to the data. An
-    /// empty list means a knight, which is what stood in before the bestiary.
-    #[serde(default)]
-    pub creatures: Vec<String>,
 }
 
 impl Family {
-    /// The creature the family's turn counter lands on, if it has any.
-    pub fn creature(&self, pick: usize) -> Option<&str> {
-        if self.creatures.is_empty() {
-            return None;
-        }
-        Some(self.creatures[pick % self.creatures.len()].as_str())
-    }
-
     /// Which sheet a placement's first byte asks for, and whether it is drawn
     /// at all. `None` means the original draws nothing for it.
     ///
@@ -196,12 +178,20 @@ pub struct ActorDef {
     ///
     /// A cycle is how the original walks: `Knight_SwWalkR1` through `R4` are
     /// four single-frame scripts, and the controller hands over the next one
-    /// each time the last has ended. The original's tables are `BSS` and were
-    /// thought lost; they are filled by `SetKnightAnims` and `SetMonsterAnims`
-    /// in `MOON`, which is where the walk cycles, the attack scripts and the
-    /// blow-taken scripts here were read from. Which of an actor's attacks the
-    /// one button gets, and which blow it takes, is still a choice made in the
-    /// baker, and it lives in the data where it can be changed.
+    /// each time the last has ended.
+    ///
+    /// **Recovered, and read at bake time.** The tables are `BSS`, filled by
+    /// `SetKnightAnims` (0x1771) and `SetMonsterAnims` (0x186b), and each
+    /// actor's record points at its own through `Set*Tables`; the baker runs
+    /// those routines. `idle` is the record's `+0x10`, `recover` its `+0x12`,
+    /// `walk`, `walk_up` and `walk_down` the three rows of its `*Wal` table
+    /// at `+0`, `+0x10` and `+0x20`, which `ControlKnight` (0x3fd6) and
+    /// `MoveU`/`MoveD`/`MoveR`/`MoveL` (0x4e39, 0x4e64, 0x4e09, 0x4dd5) pick
+    /// between by the direction held: a horizontal bit takes row 0, else
+    /// down takes `+0x20`, else up takes `+0x10`. See [`ActorDef::walk_row`].
+    /// `hurt` is the `*Hit` entry for a swing and `death` where that script's
+    /// own `TASKDEAD` goes. What a pack still chooses is `attack`, the row a
+    /// caller with one button plays.
     #[serde(default)]
     pub scripts: BTreeMap<String, Vec<String>>,
     /// The bank tables the scripts index through, keyed the way `TASKCELBUF`
@@ -665,6 +655,33 @@ impl ActorDef {
         self.scripts.get(state).map_or(&[], Vec::as_slice)
     }
 
+    /// The walk row a step plays: `ControlKnight`'s `A1$` to `A4$` (0x3fd6
+    /// to 0x4012) and `TroggMove` (0x2e2b) both test up, then down, then
+    /// right, then left, and each sets the row offset as it goes, so the
+    /// last bit set wins: a horizontal step is drawn on row 0 whatever else
+    /// is held, a plain step down on `+0x20`, a plain step up on `+0x10`.
+    ///
+    /// `TrollWal` and `MudmenWal` have one row, so a row the table has not
+    /// got falls back to the right-facing one. The original would read the
+    /// next table's bytes as a script there; nothing in it ever does.
+    pub fn walk_row(&self, dx: i32, dy: i32) -> &[String] {
+        let row = if dx != 0 {
+            "walk"
+        } else if dy > 0 {
+            "walk_down"
+        } else if dy < 0 {
+            "walk_up"
+        } else {
+            "walk"
+        };
+        let names = self.scripts_for(row);
+        if names.is_empty() {
+            self.scripts_for("walk")
+        } else {
+            names
+        }
+    }
+
     /// The bank a part names, through the table `TASKCELBUF` last selected.
     pub fn bank(&self, table: u8, slot: u8) -> Option<&crate::taskvm::Bank> {
         self.banks
@@ -703,9 +720,6 @@ impl ActorDef {
             .or_else(|| self.scripts_for("hurt").first().cloned())
     }
 
-    /// What an attack takes off against the default attack's figure: the
-    /// `*Dam` table entry for it over the entry for [`ActorDef::attack`], so
-    /// the knight's chop is twice his swing and his rear thrust half of it.
     /// The hit points and blow this actor has under a given moon: the entry
     /// for that phase, or its everyday numbers.
     pub fn under_moon(&self, phase: &str) -> (i32, i32) {
@@ -714,7 +728,12 @@ impl ActorDef {
             .map_or((self.health, self.damage), |m| (m.health, m.damage))
     }
 
-    /// One to one when the actor has no table to say otherwise.
+    /// What an attack takes off against the default attack's figure: the
+    /// `*Dam` table entry for it over the entry for [`ActorDef::attack`], so
+    /// the knight's rear thrust is half his swing. His chop is the same
+    /// entry as the swing, four; it is `CalcDamage` that doubles it, after
+    /// adding the sheet. One to one when the actor has no table to say
+    /// otherwise.
     pub fn blow_ratio(&self, attack: crate::combat::Attack) -> (i32, i32) {
         let this = self.attacks.get(attack.name()).map_or(0, |a| a.damage);
         let base = self.attacks.get(&self.attack).map_or(0, |a| a.damage);
@@ -783,7 +802,6 @@ mod tests {
             backdrop: "scene.fob1".into(),
             tiles,
             arenas: Vec::new(),
-            creatures: Vec::new(),
         };
         assert_eq!(f.tile_sheet(3), Some("scene.fo1"));
         assert_eq!(f.tile_sheet(4), Some("scene.fo2"));
@@ -805,7 +823,6 @@ mod tests {
             backdrop: "scene.wab1".into(),
             tiles: BTreeMap::new(),
             arenas: Vec::new(),
-            creatures: Vec::new(),
         };
         assert_eq!(f.tile_sheet(4), Some("scene.wa1"));
         assert_eq!(f.tile_sheet(0xfe), None);

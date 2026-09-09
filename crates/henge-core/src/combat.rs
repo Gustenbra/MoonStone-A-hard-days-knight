@@ -271,6 +271,17 @@ pub struct Fighter {
     /// have one more thing to disagree about if they ever do.
     #[serde(default)]
     pub blocked: u8,
+    /// The direction held on the last tick, as `dx` and `dy` signs: the walk
+    /// bits of `+0x26` before the borders take any away, which is what
+    /// `ControlKnight` (0x3fd6) and `TroggMove` (0x2e2b) choose the walk row
+    /// by. See [`ActorDef::walk_row`].
+    #[serde(default)]
+    pub heading: [i32; 2],
+    /// `[bx+8]` of the knight's magic record (`+0x44`): how many Talismans of
+    /// the Wyrm he carries, which `TalismanWrym` (0x43f4) halves the dragon's
+    /// blows by. Zero for anything that has no magic record.
+    #[serde(default)]
+    pub talismans: i32,
 }
 
 /// What a creature's own controller told it to do, as against what a joystick
@@ -330,6 +341,8 @@ impl Fighter {
             holder: None,
             hidden: false,
             blocked: 0,
+            heading: [0, 0],
+            talismans: 0,
         };
         // The demon's own stance slot (`[di+0x10]`) is `Demon_Evolve`, so the
         // first thing it does is arrive. Nothing else has an entrance.
@@ -507,6 +520,7 @@ impl Fighter {
         } else {
             intent
         };
+        self.heading = [intent.dx.signum(), intent.dy.signum()];
         // The dead, and the dying. A scripted fighter whose hit points are
         // gone is still on his blow-taken script, whose own `TASKDEAD` picks
         // the death: the same recoil ends in a fall for a stab and a split
@@ -826,10 +840,13 @@ impl Fighter {
     /// `al` negative.
     fn run_task(&mut self, def: &ActorDef, bloodless: bool, back: bool) -> Vec<(i32, i32)> {
         // The state's own list, or the one script the state was entered on.
-        let names: Vec<String> = if self.script.is_empty() {
-            def.scripts_for(self.state.sequence_name()).to_vec()
-        } else {
+        // A walk is drawn on the row the direction picks (`ActorDef::walk_row`).
+        let names: Vec<String> = if !self.script.is_empty() {
             vec![self.script.clone()]
+        } else if self.state == State::Walk {
+            def.walk_row(self.heading[0], self.heading[1]).to_vec()
+        } else {
+            def.scripts_for(self.state.sequence_name()).to_vec()
         };
         if names.is_empty() {
             return Vec::new();
@@ -1205,6 +1222,24 @@ impl Fighter {
     pub fn depth(&self) -> i32 {
         self.y
     }
+
+    /// The task killed and the record freed: the routine at 0x96c9, which
+    /// `DragonHit2+21` (0x3aea) calls on the knight the bite has closed on,
+    /// and what `TASKHANDLE` does with a `[0x783a]` of zero, which is
+    /// `CLAWS_DEAD` (0x3b61). Nothing is drawn, nothing is hit, and nothing
+    /// counts this fighter among the standing.
+    pub(crate) fn vanish(&mut self) {
+        self.health = 0;
+        self.state = State::Dead;
+        self.hidden = true;
+        self.restart = false;
+        self.ordered = None;
+        if let Some(t) = self.task.as_mut() {
+            t.active = false;
+            t.running = false;
+            t.shown.clear();
+        }
+    }
 }
 
 /// Does a swept hit line cross a body rectangle?
@@ -1544,9 +1579,11 @@ pub(crate) mod tests {
                 stop.clone(),
             ]),
         );
+        // `KnightDamSw` as `SetUpKnight` (0x17e4) writes it: four for the
+        // swing and four for the chop, three for the knife.
         for (name, script, damage) in [
             ("swing", "swing", 4),
-            ("chop", "chop", 8),
+            ("chop", "chop", 4),
             ("knife", "throw", 3),
             ("block", "block", 0),
             ("evade", "evade", 0),
@@ -1933,6 +1970,78 @@ pub(crate) mod tests {
         assert_eq!(seen, ["walk1", "walk2", "walk3", "walk4", "walk1"]);
     }
 
+    /// `ControlKnight`'s `A1$` to `A4$` (0x3fd6 to 0x4012): a step straight
+    /// up is drawn on `KnightWalSw+0x10`, straight down on `+0x20`, and any
+    /// horizontal step on row 0 whatever else is held, since the horizontal
+    /// tests come last and overwrite the row. The frame counter is shared
+    /// across the rows, so changing row does not restart the stride.
+    #[test]
+    fn the_walk_row_follows_the_direction_held() {
+        let mut d = scripted_def();
+        let body = |cel: u8| {
+            Instr::Part(Part {
+                table: 1,
+                bank: 0,
+                cel,
+                x: -8,
+                y: 0,
+                flags: part_flags::BODY,
+            })
+        };
+        let stop = Instr::EndFrame { end: End::Stop };
+        for (i, n) in [
+            "up1", "up2", "up3", "up4", "down1", "down2", "down3", "down4",
+        ]
+        .iter()
+        .enumerate()
+        {
+            d.animation.insert(
+                n.to_string(),
+                Script::new(vec![body(1 + (i as u8 & 3)), stop.clone()]),
+            );
+        }
+        d.scripts.insert(
+            "walk_up".into(),
+            ["up1", "up2", "up3", "up4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        d.scripts.insert(
+            "walk_down".into(),
+            ["down1", "down2", "down3", "down4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        let mut go = |dx: i32, dy: i32| {
+            f.step(
+                &d,
+                Intent {
+                    dx,
+                    dy,
+                    attack: false,
+                },
+                &field(),
+            );
+            f.task.as_ref().unwrap().pc.script.clone()
+        };
+        assert_eq!(go(0, -1), "up1", "straight up: the +0x10 row");
+        assert_eq!(go(0, -1), "up2");
+        assert_eq!(
+            go(0, 1),
+            "down3",
+            "straight down: the +0x20 row, same frame count"
+        );
+        assert_eq!(go(1, 1), "walk4", "down and right: right wins, row 0");
+        assert_eq!(go(-1, -1), "walk1", "up and left: left wins, row 0");
+        assert_eq!(d.walk_row(0, 0), d.scripts_for("walk"));
+        // A creature whose table has one row, as `TrollWal` and `MudmenWal`.
+        let one = scripted_def();
+        assert_eq!(one.walk_row(0, -1), one.scripts_for("walk"));
+    }
+
     /// The hit shape comes out of the frame's own weapon parts, so only the
     /// frame that draws a blade can cut, and the frames either side cannot.
     #[test]
@@ -2286,6 +2395,7 @@ pub(crate) mod tests {
                 progression: 0,
                 perch: None,
                 foe_blow: 0,
+                head_health: None,
             };
             let mut seed = seed;
             let mut facing = 1;
@@ -2295,6 +2405,7 @@ pub(crate) mod tests {
                 &mut seed,
                 &mut facing,
                 &mut crate::monster::Shared::default(),
+                &mut (0, 0),
             )
         };
         // `BKBlock` spends one roll before `BKAttack` spends its own, so the
@@ -2433,6 +2544,7 @@ pub(crate) mod tests {
                 progression: 0,
                 perch: None,
                 foe_blow: 0,
+                head_health: None,
             };
             let mut brain = Brain::default();
             let mut seed = wary;
@@ -2443,6 +2555,7 @@ pub(crate) mod tests {
                 &mut seed,
                 &mut f,
                 &mut crate::monster::Shared::default(),
+                &mut (0, 0),
             )
         };
         assert_eq!(

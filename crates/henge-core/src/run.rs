@@ -3,17 +3,20 @@
 //! Without this the game is a fight simulator. Every bout starts fresh, dying
 //! costs nothing, and there is no reason to avoid a fight or to break one off.
 //!
-//! The rule that makes travel matter: **wounds persist, and only travelling
-//! mends them**. Walking is how you heal, and walking is also how you run into
-//! trouble, so the same action that repairs you is the one that risks you. That
-//! tension is the whole game loop.
+//! The rule that makes travel matter: **wounds persist, and only the days mend
+//! them**. `AdjustTIME` (0x119f) closes a quarter of what is missing every
+//! night and nothing else does outside a healer, so a fight taken today is
+//! carried into tomorrow's. Walking itself mends nothing and risks nothing:
+//! the original has no healing per step and no cutpurse on the road, and the
+//! two of ours that stood here are gone.
 //!
 //! A run also carries what it has won: a purse and a pack. Coin comes off the
 //! fallen, so a fight is worth taking as well as worth avoiding, and the pack
 //! is the only reason a town has anything to sell. Both are ordinary state,
 //! serialized with everything else, so a run still round-trips.
 
-use crate::item::{Inventory, ItemDef, Items, Loss, Purchase, Virtue};
+use crate::dragon::Flight;
+use crate::item::{Inventory, ItemDef, Items, Purchase, Virtue};
 use crate::knight::{Ability, Knight, KnightDef};
 use crate::moon::Moon;
 use serde::{Deserialize, Serialize};
@@ -54,6 +57,9 @@ pub enum Cast {
     Warded,
     /// Put on, and whatever it replaced is in the pack.
     Worn,
+    /// The dragon over the map is after the knight in this seat: the scroll
+    /// of the Wyrm, through `StatusDone` (0xbe57).
+    Wyrm { seat: usize },
     /// You are carrying none.
     HaveNone,
     /// It would do nothing right now, so nothing was spent.
@@ -261,16 +267,16 @@ pub struct Run {
     /// by a lair, and the bestowal rolls past that slot for good.
     #[serde(default)]
     pub sword_out: bool,
-    /// Steps of travel banked toward the next point of healing.
-    progress: u32,
-    /// How far you must walk to mend one point.
-    pub steps_per_point: u32,
-    /// One step of travel in this many meets a cutpurse. Zero is a safe road.
-    pub theft_odds: u32,
     /// The run's own randomness, carried in the state and never taken from the
-    /// system, so two machines walking the same road are robbed on the same
-    /// step.
+    /// system, so two machines making the same cast get the same roll.
     seed: u32,
+    /// The high temple's own counter: the twenty four bytes at `DS:0xed96`
+    /// (`SaveTYPE+2`), which `_STATUS:TTemple` (0xce15) trades against and
+    /// `ReDisplay`'s type 6 arm (0xbf66) draws in the right arch. Zero in the
+    /// image, so the temple begins with nothing and sells what knights have
+    /// sold it. One record for the whole game, so it lives on the run.
+    #[serde(default)]
+    pub temple: crate::status::Hoard,
     /// Where each arena family's rotation has got to.
     ///
     /// **Recovered.** The original keeps one counter per family beside its
@@ -281,6 +287,23 @@ pub struct Run {
     /// it. A `BTreeMap` so the order is defined on every machine.
     #[serde(default)]
     pub arena_turn: BTreeMap<String, u32>,
+    /// The dragon over the map: `DR_X` to `DR_WALK`, `TrackCNT`, the two
+    /// flags at DS:`0xccb0` and `0xccb2`, and whom it is after. See
+    /// [`crate::dragon`].
+    #[serde(default)]
+    pub dragon: Flight,
+    /// `_WIZARD:RND`'s register as the flight rolls it: `ContinueDragon+131`
+    /// (0xa63b) picks the knight the dragon is after off it. The original
+    /// has one register for the whole game at DS:`0xe22f`; this run keeps its
+    /// own generator for everything else, and the dragon's rolls are kept
+    /// apart so that adding them changed nothing that was already rolled.
+    #[serde(default = "default_wyrm_seed")]
+    pub wyrm_seed: u16,
+}
+
+/// Any non-zero start, the same one a bout opens on.
+fn default_wyrm_seed() -> u16 {
+    0x2f1d
 }
 
 impl Run {
@@ -311,11 +334,11 @@ impl Run {
             won: false,
             magic_last: NO_SLOT,
             sword_out: false,
-            progress: 0,
-            steps_per_point: 12,
-            theft_odds: 700,
             seed: 0x51ed_270b,
+            temple: crate::status::Hoard::default(),
             arena_turn: BTreeMap::new(),
+            dragon: Flight::default(),
+            wyrm_seed: default_wyrm_seed(),
         }
     }
 
@@ -357,8 +380,8 @@ impl Run {
         !self.over && self.health > 0
     }
 
-    /// Small xorshift, the same shape the overworld uses. Deterministic,
-    /// seedable, and enough for deciding who meets a thief.
+    /// Small xorshift. Deterministic, seedable, and what every cast in here
+    /// rolls off.
     fn next_random(&mut self) -> u32 {
         let mut s = self.seed;
         s ^= s << 13;
@@ -368,57 +391,6 @@ impl Run {
         s
     }
 
-    /// One step of travel. Returns true when a point of health was recovered,
-    /// so a caller can make it audible or visible.
-    pub fn travelled(&mut self) -> bool {
-        if !self.alive() || self.health >= self.max_health {
-            return false;
-        }
-        self.progress += 1;
-        if self.progress < self.steps_per_point {
-            return false;
-        }
-        self.progress = 0;
-        self.health = (self.health + 1).min(self.max_health);
-        true
-    }
-
-    /// A cutpurse on the road. Returns what was taken, if anything.
-    ///
-    /// This is the world's half of `TAKEFROMKNIGHT`: without it, a pack is a
-    /// list that only ever grows and losing is a method nothing calls. A thief
-    /// prefers coin and settles for goods, and someone carrying neither is not
-    /// worth robbing.
-    ///
-    /// Not recovered from the original, which names the routine but not its
-    /// trigger. Rolled per travelled step so the risk is in the walking, like
-    /// every other risk on this map.
-    pub fn waylaid(&mut self) -> Option<Loss> {
-        if !self.alive() || self.theft_odds == 0 {
-            return None;
-        }
-        // The roll is taken on every step of the road, whether or not there is
-        // anything on you worth taking. Rolling only when you are carrying
-        // something would tie the sequence to the moment you got it, and every
-        // run in the world would then be robbed the same number of steps after
-        // its first purse.
-        let roll = self.next_random();
-        if self.gold == 0 && self.kit.is_empty() {
-            return None;
-        }
-        if !roll.is_multiple_of(self.theft_odds) {
-            return None;
-        }
-        if self.gold > 0 {
-            // A share of the purse rather than all of it: being cleaned out by
-            // one unlucky step would make carrying coin pointless.
-            let taken = (self.gold / 4).max(1).min(self.gold);
-            self.gold -= taken;
-            return Some(Loss::Gold(taken));
-        }
-        self.kit.take_one(roll).map(Loss::Item)
-    }
-
     /// The health to enter the next fight with. Whatever you have left.
     pub fn health_for_fight(&self) -> i32 {
         self.health.max(1)
@@ -426,9 +398,9 @@ impl Run {
 
     /// Record how a fight ended. Returns whether the run continues.
     ///
-    /// Winning restores nothing. A victory that healed you would remove the
-    /// reason to ever avoid a fight, and turn the map into a corridor between
-    /// free health.
+    /// Winning restores nothing: `Combat` (0x351) ends through `WhoLived`
+    /// (0xabe), which makes a fallen knight whole and a standing one no
+    /// better.
     ///
     /// `purse` is what the fallen were carrying. A purse is picked up after the
     /// fight, so only a winner still on their feet collects it: coin is the
@@ -671,6 +643,17 @@ impl Run {
             // Taking off another knight needs another knight. There is one
             // traveller on this map, so the scroll has nobody to rob.
             Virtue::Seize => Cast::Pointless,
+            // `MagicCast` slot 0x10 (0xcb60): `WyrmFLAG` up and the knight
+            // picker opened by `InitAKnight` (0xc90d), whose `NextKnight`
+            // offers the seats in order from the one after nought and skips
+            // the caster's own; `StatusDone` (0xbe57) then copies the seat
+            // taken into the dragon's `+0x46`. The picker's page is not
+            // built, so the seat taken is the first one it offers.
+            Virtue::Wyrm => {
+                let seat = if self.knight.seat == 1 { 2 } else { 1 };
+                self.dragon.target = Some(seat);
+                Cast::Wyrm { seat }
+            }
             // Worn things are handled by `wear`; anything inert says so.
             Virtue::Weapon { .. } | Virtue::Armour { .. } | Virtue::Ward { .. } | Virtue::Inert => {
                 Cast::Pointless
@@ -919,8 +902,12 @@ impl Run {
     /// ```
     ///
     /// So a village is one life point and no more than three of them, which is
-    /// below the five a potion may reach (`0xcad0`). Nothing is paid and no day
-    /// passes: the routine neither calls `AdjustTIME` nor touches the purse.
+    /// below the five a potion may reach (`0xcad0`). Nothing is paid: the
+    /// routine never touches the purse. What it does cost is the rest of the
+    /// day: `EncounterDone` runs on into `EncounterAllDone` (0x113e), which
+    /// writes `[0xccac]` over `[0xcc98]`, and the map's next frame turns the
+    /// day. That write is [`crate::overworld::Overworld::end_turn`], and the
+    /// caller makes it; this only gives the point.
     pub fn rest_at_village(&mut self) -> bool {
         if self.lives >= VILLAGE_CEILING {
             return false;
@@ -969,6 +956,62 @@ impl Run {
         self.next_random()
     }
 
+    /// `[0x5b1]` as `InitDragon` (0xa571) and `KnightWyrm` (0xabe8) test it:
+    /// how many times the moon has moved, which `EncounterFini+35` (0x1167)
+    /// counts up once every four days. Day one is nought.
+    pub fn moon_moves(&self) -> i32 {
+        (self.day.saturating_sub(1) / crate::moon::DAYS_PER_PHASE) as i32
+    }
+
+    /// `+0x31 > 0` for each of the four knight records, as `ContinueDragon`
+    /// rolls over them: this knight while the run is on, and the other three
+    /// always, since nothing on this map kills them.
+    pub fn knights_alive(&self) -> [bool; 4] {
+        let mut alive = [true; 4];
+        if let Some(mine) = alive.get_mut(self.knight.seat) {
+            *mine = !self.over;
+        }
+        alive
+    }
+
+    /// `MapEffects+63` (0xa545) at the start of this knight's turn: the
+    /// dragon into the air, or on across the map after a knight rolled for.
+    pub fn dragon_turn_begins(&mut self) {
+        let alive = self.knights_alive();
+        let day = self.moon_moves();
+        self.dragon.turn_begins(day, alive, &mut self.wyrm_seed);
+    }
+
+    /// One frame of the dragon over the map, as `DragonWander` (0xa66b) and
+    /// `CheckEncounterDone+128` (0x816) run it: `homes` is where each of the
+    /// four knights stands, this one's own token at `at`. Returns the script
+    /// the frame is drawn on, or nothing when it is not in the air.
+    pub fn dragon_frame(&mut self, at: (i32, i32), homes: [(i32, i32); 4]) -> Option<String> {
+        if !self.dragon.aloft {
+            return None;
+        }
+        let mut positions = homes;
+        if let Some(mine) = positions.get_mut(self.knight.seat) {
+            *mine = at;
+        }
+        // 0a6a2  mov ax, [di+0x5e]: the row of the knight it is after, and
+        // its own row when `+0x46` is nought, which reads the free record.
+        let row = self
+            .dragon
+            .target
+            .and_then(|t| positions.get(t))
+            .map_or(self.dragon.z, |p| p.1);
+        let script = self.dragon.wander(row);
+        self.dragon
+            .frame_ends(positions, crate::dragon::SHADOW_SIZE);
+        Some(script)
+    }
+
+    /// `DragonEncounter` (0xa3e2) for this knight.
+    pub fn dragon_comes_down(&self, aloft_on_magic: bool) -> bool {
+        self.dragon.comes_down_on(self.knight.seat, aloft_on_magic)
+    }
+
     /// Start again. A finished run is read, then cleared.
     ///
     /// Who you are survives. The tally, the purse and the pack do not: a new run
@@ -986,10 +1029,9 @@ impl Run {
     /// is one of a fight.
     ///
     /// Every field goes in, the private ones included: the generator's seed
-    /// and the steps banked toward the next point of healing are as much of
-    /// the state as the purse is, and a save that dropped them would reload
-    /// into a run that mended and was robbed on different steps. This is what
-    /// a save is checked against, and what proves a reloaded run is the same
+    /// is as much of the state as the purse is, and a save that dropped it
+    /// would reload into a run whose casts rolled differently. This is what a
+    /// save is checked against, and what proves a reloaded run is the same
     /// run rather than one that merely looks like it.
     pub fn state_hash(&self) -> u64 {
         fn mix(h: &mut u64, v: i64) {
@@ -1027,13 +1069,12 @@ impl Run {
             self.won as i64,
             self.magic_last as i64,
             self.sword_out as i64,
-            self.progress as i64,
-            self.steps_per_point as i64,
-            self.theft_odds as i64,
             self.seed as i64,
+            self.wyrm_seed as i64,
         ] {
             mix(h, v);
         }
+        self.dragon.hash_into(&mut |v| mix(h, v));
         text(h, &self.knight.name);
         for v in [
             self.knight.seat as i64,
@@ -1149,19 +1190,24 @@ mod tests {
         assert_eq!(r.victories, 1);
     }
 
+    /// `AdjustTIME` (0x119f): `bx = [si+0x3c] - [si+0x38]`, then when it is
+    /// not zero `bx = (bx >> 2) | 1` and `[si+0x38] += bx`, clamped to the
+    /// maximum. Nothing on the road mends you between one night and the next.
     #[test]
-    fn walking_mends_you_but_only_so_far() {
+    fn the_nights_mend_you_but_only_so_far() {
         let mut r = Run::new(100);
         r.finished_fight(90, true, 0);
-        let mut healed = 0;
-        for _ in 0..(r.steps_per_point * 30) {
-            if r.travelled() {
-                healed += 1;
-            }
+        let mut mended = Vec::new();
+        for _ in 0..10 {
+            let before = r.health;
+            r.new_day();
+            mended.push(r.health - before);
         }
         assert_eq!(r.health, 100);
-        assert_eq!(healed, 10, "exactly the missing points, no more");
-        assert!(!r.travelled(), "already whole, so nothing to mend");
+        // 10 missing: (10 >> 2) | 1 = 3; 7: 1 | 1 = 1; 6: 1; 5: 1; 4: 1;
+        // 3: 0 | 1 = 1; 2: 1; 1: 1; then nothing.
+        assert_eq!(mended, [3, 1, 1, 1, 1, 1, 1, 1, 0, 0]);
+        assert_eq!(r.day, 11, "and every night is a day");
     }
 
     #[test]
@@ -1228,8 +1274,7 @@ mod tests {
         assert!(!r.finished_fight(0, false, 0));
         assert!(r.over);
         assert!(!r.alive());
-        // Nothing continues afterwards: no healing, no further fights, no days.
-        assert!(!r.travelled());
+        // Nothing continues afterwards: no further fights, no days.
         assert!(!r.finished_fight(50, true, 0));
         let before = r.day;
         r.new_day();
@@ -1391,7 +1436,10 @@ mod tests {
         assert_eq!(r.lives, 3);
         assert!(!r.rest_at_village(), "three is the ceiling");
         assert_eq!(r.lives, 3);
-        assert_eq!(r.day, day, "and a village costs no time");
+        assert_eq!(
+            r.day, day,
+            "the day it costs is the map's `[0xcc98]`, not the run's to turn"
+        );
         assert_eq!(r.gold, 0, "nor coin");
         // A potion may still carry a man past it, to five, so the village's
         // three is the village's ceiling and not the knight's.
@@ -1518,67 +1566,6 @@ mod tests {
         r.kit.take("key", 1);
         assert_eq!(r.use_item("key", &items), Used::Pointless);
         assert_eq!(r.kit.count("key"), 1, "and it is still in the pack");
-    }
-
-    /// The world's half of `TAKEFROMKNIGHT`.
-    #[test]
-    fn a_cutpurse_takes_coin_from_a_man_who_has_it() {
-        let mut r = Run::new(100);
-        r.earn(80);
-        r.theft_odds = 1; // certain, so the test is about the loss and not the odds
-        assert_eq!(r.waylaid(), Some(Loss::Gold(20)));
-        assert_eq!(r.gold, 60, "a share, not the lot");
-    }
-
-    #[test]
-    fn a_cutpurse_settles_for_goods_when_the_purse_is_empty() {
-        let mut r = Run::new(100);
-        r.kit.take("potion", 1);
-        r.theft_odds = 1;
-        assert_eq!(r.waylaid(), Some(Loss::Item("potion".into())));
-        assert!(r.kit.is_empty());
-    }
-
-    #[test]
-    fn nobody_bothers_robbing_a_pauper() {
-        let mut r = Run::new(100);
-        r.theft_odds = 1;
-        assert_eq!(r.waylaid(), None, "nothing to take");
-        r.earn(40);
-        r.theft_odds = 0;
-        assert_eq!(r.waylaid(), None, "and a safe road takes nothing");
-        assert_eq!(r.gold, 40);
-    }
-
-    /// Rolling only for a man worth robbing would phase the sequence to the
-    /// moment he first had coin, and every run in the world would then be
-    /// robbed the same number of steps after its first purse.
-    #[test]
-    fn the_road_rolls_whether_or_not_you_are_worth_robbing() {
-        let mut walked = Run::new(100);
-        for _ in 0..30 {
-            walked.waylaid();
-        }
-        walked.earn(400);
-        let mut straight = Run::new(100);
-        straight.earn(400);
-        let take = |r: &mut Run| (0..30).find(|_| r.waylaid().is_some());
-        assert_ne!(
-            take(&mut walked),
-            take(&mut straight),
-            "thirty steps of empty road are still thirty steps"
-        );
-    }
-
-    #[test]
-    fn the_road_is_robbed_the_same_way_twice() {
-        let mut a = Run::new(100);
-        a.earn(500);
-        let mut b = a.clone();
-        let walk = |r: &mut Run| (0..4000).filter_map(|_| r.waylaid()).collect::<Vec<_>>();
-        let (first, second) = (walk(&mut a), walk(&mut b));
-        assert_eq!(first, second, "the roll is state, not the clock");
-        assert!(!first.is_empty(), "and a long enough road does get robbed");
     }
 }
 

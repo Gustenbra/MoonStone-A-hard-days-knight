@@ -324,6 +324,25 @@ impl Run {
     /// 0xcbdf  call 0x28d                ; and the maximum recomputed
     /// ```
     ///
+    /// and `TakeSword` at 0xccd4, which the magic sword's field goes to:
+    ///
+    /// ```text
+    /// 0xccd4  mov word ptr [si+4], 1    ; the taker's record has the sword
+    /// 0xccd9  mov word ptr [di+4], 0    ; the floor's has not
+    /// 0xccde  si = StatHAND1
+    /// 0xcce2  mov word ptr [si+0x40], 0x19   ; and it is in his hand
+    /// 0xcce7  cmp word ptr [StatTYPE], 2; je HGTakeDone
+    /// 0xccee  si = StatHAND2; mov word ptr [si+0x40], 0x16  ; not on a floor
+    /// 0xccf7  jmp HGTakeDone
+    /// ```
+    ///
+    /// So the sword goes through the weapon slot and never into the pack:
+    /// whatever was in the hand is simply written over, and the `0x16` to the
+    /// other knight is skipped on a lair page because the other party is the
+    /// floor. This used to take it as an ordinary item and leave the hand as
+    /// it was, which drew a long sword on the sheet over a pack that held
+    /// the magic one.
+    ///
     /// `field` is the gadget's `STPL`, which is the byte offset into the
     /// record it moves. Returns whether anything moved, which is what
     /// `TakeCNT` counts.
@@ -353,7 +372,11 @@ impl Run {
         let Some(at) = lair.magic.iter().position(|held| held == id) else {
             return false;
         };
-        if self.kit.take(id, 1) == 0 {
+        if field == 4 {
+            // `TakeSword`: `[si+0x40] = 0x19`, and the routine at 0x28d
+            // keeps it there while `+4` is set.
+            self.knight.weapon = MAGIC_SWORD.to_string();
+        } else if self.kit.take(id, 1) == 0 {
             return false;
         }
         self.lairs[index].magic.remove(at);
@@ -788,12 +811,53 @@ mod tests {
             "and there is no second key to press"
         );
         for id in &floor.magic {
+            if id == MAGIC_SWORD {
+                // `TakeSword` writes the hand, not the pack, so a full pack
+                // does not stop it.
+                assert!(
+                    take(&mut r, key_at, id, &items),
+                    "the sword goes to the hand"
+                );
+                assert_eq!(r.knight.weapon, MAGIC_SWORD);
+                continue;
+            }
             assert!(!take(&mut r, key_at, id, &items), "{id} should not fit");
         }
-        assert_eq!(r.lairs[key_at].magic, floor.magic);
-        if !floor.magic.is_empty() {
+        let left: Vec<&String> = floor.magic.iter().filter(|m| *m != MAGIC_SWORD).collect();
+        assert_eq!(r.lairs[key_at].magic.iter().collect::<Vec<_>>(), left);
+        if !left.is_empty() {
             assert!(r.lair_on_the_map(key_at));
         }
+    }
+
+    /// `TakeSword` at 0xccd4: `[si+0x40] = 0x19` on the taker, `[di+4] = 0`
+    /// on the floor, and no field of the pack touched. The `0x16` written to
+    /// `StatHAND2` at 0xccf2 is skipped on `StatTYPE` 2, so nothing else
+    /// changes on a lair page.
+    #[test]
+    fn the_magic_sword_goes_into_the_hand_and_not_the_pack() {
+        let (mut r, items) = run(3);
+        let at = 0;
+        r.lairs[at].magic = vec![MAGIC_SWORD.to_string(), "potion".to_string()];
+        r.lair_beaten(at);
+        r.knight.weapon = "long_sword".into();
+        r.kit.capacity = r.kit.carried();
+        assert!(
+            r.lair_floor(at).0.magic_sword,
+            "`DisplayMSword` has it to draw"
+        );
+        assert!(r.take_from_lair(at, 4, &items));
+        assert_eq!(
+            r.knight.weapon, MAGIC_SWORD,
+            "`mov word ptr [si+0x40], 0x19`"
+        );
+        assert_eq!(r.kit.count(MAGIC_SWORD), 0, "and it is not in the pack");
+        assert!(!r.lair_floor(at).0.magic_sword, "`mov word ptr [di+4], 0`");
+        assert_eq!(r.lairs[at].magic, vec!["potion".to_string()]);
+        assert!(
+            !r.take_from_lair(at, 4, &items),
+            "and there is no second sword"
+        );
     }
 
     /// A beaten lair you could not empty is worth coming back to, and coming

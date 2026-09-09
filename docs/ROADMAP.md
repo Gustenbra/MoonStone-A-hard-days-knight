@@ -28,12 +28,15 @@ Ordered by what the project is missing most, not by what is easiest.
       silently rather than refusing to start.
       *Next: more than four cues, and sounds carried on animation frames rather than
       inferred from state changes.*
-- [x] **Text.** Done. The lookup table in `MAIN.EXE` is still not recovered, so the glyph
-      order was read off the artwork instead: the banks run A-Z, then a-z, then 0-9, then
-      punctuation, with a few unidentified ornaments at the end left unmapped rather than
-      guessed at. The mapping lives in the pack as content, so a replacement font is a data
-      change. Text draws as a silhouette in a chosen colour, because a glyph's own shades
-      are legible over one arena's palette and invisible over the next.
+- [x] **Text.** Done. The lookup table is `GFX:TextASCII` at image 107,446 and the
+      reading off the artwork agreed with it. The mapping lives in the pack as content, so
+      a replacement font is a data change. A glyph draws in its own indices through the
+      same blit as every other cel, because that is all `GFX:TextP` (0x7aee) does: the
+      silhouette, and the nearest-colour translation that replaced it, are both gone.
+      Every message chain is quoted from the image with its records' own coordinates
+      (`HengeInstruct` 0x129f9, `SCR_PRO` 0x12965, `VICTORY` 0x12a21, `NextDayMes`
+      0x1b19a among the last read), and what takes a box down is what its caller does
+      next: `WaitFIRE` at 0x8251 or a disk load. See `COMPLETE.md` 2.3 and 8.5.
 
 ## Next
 
@@ -74,21 +77,21 @@ before assuming it does not.
 - [ ] Use the rest: creature tokens for roaming enemies, crystals for whatever the quest
       turns out to need, the ringed variants for the active player
 
-## Known defect: sheets do not record which palette they mean
+## Sheets do not record which palette they mean, and the original does not either
 
-A sheet's pixels are palette **indices**, and nothing in the manifest says which
-palette they were baked against. Draw a sheet over a scene that loads a different
-palette and every index means a different colour, which is not a visible error so much
-as a plausible-looking one: the traveller's token drew as a smear of browns and blues
-that read as map dithering, so it appeared to be missing rather than wrong.
+A sheet's pixels are palette **indices**, and nothing in the manifest says which palette
+they were baked against. Draw a sheet over a scene that loads a different palette and
+every index means a different colour, which is not a visible error so much as a
+plausible-looking one: the traveller's token once drew as a smear of browns and blues
+that read as map dithering.
 
-The traveller's token no longer suffers from this, but only because it turned out to
-belong to the map's palette after all: it was the wrong sprite from the wrong file, not a
-palette problem. **The real fix remains to record each sheet's source palette in the
-manifest**, so indices can be translated into whatever palette is loaded, by nearest
-colour. Any sheet genuinely drawn over a foreign palette still has this problem.
-
-- [ ] Record a `palette` id per sheet in the manifest, and translate on draw
+The token turned out to belong to the map's palette after all. A `palette` field per
+sheet was then added and used to translate text by nearest colour, and it is gone again,
+with the recipe stepped: the original blits every cel, glyphs included, in its own indices through
+0x5d7f and chooses which screens it writes on, and the translation was wrong where it did
+anything, sending the small face's index 1 to the map palette's nearest purple instead
+of the white the original shows. Anything drawn over a palette it was not painted for is
+a wrong screen, not a missing table, and the fix is to draw what the original draws.
 
 ## Reverse engineering still open
 

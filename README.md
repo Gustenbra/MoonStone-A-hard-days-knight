@@ -11,9 +11,10 @@ A modern engine reimplementation of *Moonstone: A Hard Days Knight* (Amiga 1991,
 ## Features
 
 * **Combat & Arenas:** 56 arenas across four terrain types with accurate depth sorting, terrain boundaries, up to 4 local/AI fighters, 8 directional attack types, blocks, evades, and blood/gore toggles.
-* **Overworld & World Map:** Full travel with day/night cycles, terrain movement penalties, ambushes, moon phases affecting ratman strength, and 24 lairs containing keys and loot.
+* **Overworld & World Map:** Travel as the original measures it: a day is the knight's stride times sixteen held frames (`_MAP:DistanceDONE`, `GoTheDistance`), slow ground and the map's edge both cost steps (`CheckSLOW`, `MapMovement`), every encounter spends the rest of the day (`EncounterAllDone`), the moon moves every fourth day, and the 24 lairs hold the keys and the loot. There are no random ambushes, because the original has none: every fight is something you stand on and enter.
 * **Locations & NPCs:** Highwood, Waterdeep, healers, stone circle, Math the Wizard, taverns (dice gambling), mystics, and merchants.
 * **Bestiary:** Full enemy roster (Troll, Troggs, Ratmen, Mudmen, Beast, Balok, Demon, Dragon) matching original AI scripts, attack ranges, and setup attributes.
+* **Text & Messages:** Every message chain is the executable's own ten-byte records (`{text, x, y, flags, next}`, walked as `GFX:TextPTop` at `0x7a8a` walks them), glyphs blit in their own indices exactly as `GFX:TextP` at `0x7aee` does, `INSTRUCTMESSAGE`'s red ramp is the six palette words at `0x8f3b`, and a box waits for fire (`WaitFIRE`, `0x8251`) or covers a load, whichever its caller does.
 * **Music & Sound:** MIDI notes extracted directly from the original DOS Roland drivers, played through a built-in wavetable synth alongside original SFX.
 * **Modern Enhancements:** Rebindable controls (keyboard & gamepads), headless CLI runner, deterministic state serialization, and cross-platform save/load.
 

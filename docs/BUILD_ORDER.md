@@ -34,8 +34,9 @@ The engine and a vertical slice. Roughly a quarter of the game.
       depth sorting for the fighters
 - [x] 14. Combat: positional hit lines, committed attacks, damage, death
 - [x] 15. Bouts of up to four fighters, in the simulation, deterministic and serializable
-- [x] 16. Overworld: travel, day cycle, ambushes, terrain off `_MAP:MapType`
-- [x] 17. Runs: wounds carry, travel mends, death ends the run
+- [x] 16. Overworld: travel, the day as a distance, terrain off `_MAP:MapType`. The
+      ambushes this item once listed were ours and are gone: item 84
+- [x] 17. Runs: wounds carry, the nights mend (`AdjustTIME`), death ends the run
 - [x] 18. Four locations with menus, and a working healer
 - [x] 19. Sound: 49 clips, played where the scripts say, silent without a device
 
@@ -145,6 +146,32 @@ each `InitKnightvs*` calls a `Set*Tables` that writes the stat block into the ac
 record: hit points at `+0x38` and `+0x3c`, the tracker's approach and back-off ranges
 at `+0x52` and `+0x54`, its plane tolerance at `+0x56`, the kind at `+0x35`. So the
 numbers below are the original's, not chosen. `docs/TASKVM.md` has the tables.
+
+**And they are read at bake time rather than transcribed.** `henge_formats::tables`
+runs `SetKnightAnims` (0x1771, falling into `SetUpKnight` at 0x1786), `SetMonsterAnims`
+(0x186b), the ten `Set*Tables` routines (`SetKnightSwTables` 0x1f6a, `SetTroggAxeTables`
+0x20f7, `SetTroggHammerTables` 0x2183, `SetTroggSpTables` 0x2220, `SetBeastTables`
+0x22e2, `SetRatmenTables` 0x23ae with `RatNewMoon` 0x241b, `SetUpDragonTables` 0x2538,
+`SetBalokTables` 0x25d5, `SetUpMudmenTables` 0x2665, `SetTrollTable` 0x26fd), the
+demon's inline record (`InitKnightvsDemon` 0x2771 to 0x27af) and the claw's
+(`InitKnightvsDragon` 0x249c to 0x24cb) through an interpreter of the instructions they
+use, and the baker builds every `ActorDef` from what they wrote: the stance and the
+recovery, the three walk rows as `walk`, `walk_up` and `walk_down`, the `*Att` and
+`*Dam` tables as `attacks`, the `*Hit` table as `hurt_by` with `hurt` its swing entry and
+`death` that script's `TASKDEAD`, the `*Blo` table as `blocks`, and the hit points and
+the tracker's three ranges. The ratman's moon table is the same routine run under 0x2d
+and 0x31. The hand-written `KNIGHT_SCRIPTS`, `KNIGHT_ATTACKS`, `KNIGHT_HURT` and
+`KNIGHT_BLOCKS`, and the creatures' `idle`, `walk`, `hurt`, `death`, `hurt_by`,
+`health`, `approach`, `back_off`, `depth` and `moon` fields, are deleted. What a creature
+entry still says is what its controller decides in code: the attack it plays and the
+kind it writes, the rows its branches name, the seats, the wave, and what its
+`*Struck1` handler takes off the knight, which is not always its `*Dam` table:
+`TroggStruck1` (0x42e7) and `RatmanStruck1` (0x4295, 0x42b1) read the table, but
+`TroggSpearStruck1` (0x432e) subtracts three, `TrollStruck1` (0x438a) seven,
+`BalokStruck1` (0x4285) five, `BeastStruck1` (0x4430) five, `DemonStruck1` (0x4366,
+0x4372, 0x4378) ten, eight and ten, `DragonStruck1` twenty for the bite (0x43bd) and
+thirty for the fire (0x43c2), `ClawStruck1` (0x43d3) ten; `TrollDam` and `BalokDam` are
+never read. The troll used to carry three and Balok four, from those dead tables.
 
 Each creature is an `ActorDef` like the knight's: the closure of the scripts its
 states reach, its loader's bank tables starting on table 2 (the actor record's `+0x18`,
@@ -261,10 +288,41 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       `ki.cel` is `mi.c`; cels 34 to 41 of `MI.C` composite to a dragon seen from
       above with its wings beating. `DRAGON5.CEL` is slot 4 of the creature table
       and it is the fire. The flight bank is in the pack as the dragon's table 5 and
-      `tools/taskvm.py --actor dragon_flight` draws it. **Not built**: flying it
-      over the map, which is `_MAP`'s `InitDragon`, `DragonWander` and
-      `DragonTRACK`, and `Dragon_BitKnight`, the chewing a bite that connects goes
-      into (`KillKnight` is wired, the eating animation is not)
+      `tools/taskvm.py --actor dragon_flight` draws it. **All of it is built now,
+      and the earlier reading of the fight was not the code.** `ControlDragon`
+      (0x3843) has no cooldown and no walk: the head's lift and lower are two
+      jumps on `ADDJUMP` (0x38af and 0x3929: to x 100, the knight's row and -70
+      over 13 frames, or -30 over 9), `DragonHeadMove` (0x3979) steps the arc
+      and rocks the row five toward him each pass, and the only waits are the two
+      `dragonbodge` words, two frames of the stance between breaths. `TrackKnight`
+      (0x3be8) runs before every attack decision and five times inside each
+      breath by `TASKGOSUB`, and its restore at 0x3c84 puts `+0x52` into `+0x54`,
+      so the first high breath leaves the back-off at sixty for good. The low
+      breath starts no fire task: its own weapon parts run 43 to 259 out.
+      `DragonHit2` (0x3ad5) is the bite closing: the knight's task killed and
+      record freed (0x96c9), `Dragon_BitKnight` put on in the bite's place, the
+      chewing, `KillKnight` and `StopCombat`. `Dragon_Dead` calls `DrDropHead`
+      (0x3bd2, the head's task thirty eight rows down), `StopCombat` and
+      `DrDropClaws` (0x3be1, `DEAD_CLAWS` to `0xffff` and the claws' tasks
+      killed on their next pass). What the knight takes is `DragonStruck1`
+      (0x43ad), `DragonFire1` (0x43c2) and `ClawStruck1` (0x43d3), twenty,
+      thirty and ten through `TalismanWrym`, onto the rows `InitKnightvsDragon`
+      writes over his table, and the head's own blows put him on the head's row
+      less one. **The flight is flown**: `henge_core::dragon` is `InitDragon`
+      (0xa571), `ContinueDragon` (0xa5b3), `DragonWander` (0xa66b) through
+      `DragonControlDone` (0xa707), `CheckEncounterDone+128` (0x816) and
+      `DragonEncounter` (0xa3e2), and the routine at 0xcf6 with `_dragon_won`
+      (0xd23) is the fight's aftermath. From the second moon the dragon takes the
+      air at the start of every turn, after a knight `RND` names (up to four
+      rolls over the living), sweeps the map two pixels a frame at his row
+      (`DR_YADD` is one in the load image), and comes down the frame its nine by
+      five shadow (`MI.C` frame 0x14, ten left of `DR_X`) covers the knight it
+      is after, with neither the gem nor the hawk up. A knight who kills it
+      grounds it for good (0xd38, 0xd50); one who does not leaves it flying.
+      The desktop draws it over the map on `DrAnim[DR_WALK]` from the pack's
+      table 5, and the trace line carries `dragon@x,z after seat`. **Not built**:
+      the hoard, `WhoLived+57` (0xaf7) for a dragon and `DisplayDragon` on
+      `StatTYPE` 0xa, and the knight picker page the Scroll of the Wyrm opens
 - [x] 37. **Per-creature behaviour, and it is translation, not design.** Every
       controller is a named routine in `MOON` and every one of them reads. They are
       in `henge-core/src/monster.rs`, dispatched by the `controller` each actor now
@@ -421,8 +479,8 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       - **Demon** and **dragon**: items 33 and 36
       **The repertoire under all this is built now** and has an item of its own,
       51 below: the ratman's leap, tree, head and gouge; Balok's hop, grab and
-      landing; the beast's toss and impale. What is still not built is the
-      dragon's own two, `Dragon_BitKnight` and `DrDropHead`
+      landing; the beast's toss and impale; and the dragon's own two,
+      `Dragon_BitKnight` and `DrDropHead`, with 36
 
 ## Phase 3: economy and character
 
@@ -435,8 +493,9 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
       he sold
 - [x] 39. Inventory: carrying, using, losing. A bounded pack on the run, items as
       data with a price and a virtue, potions bought and drunk, and losing made real
-      both ways: a potion is spent when drunk, and a cutpurse on the road takes coin
-      or, failing that, something out of the pack. **The goods are the original's
+      both ways: a potion is spent when drunk, and the druids keep what they are given.
+      The cutpurse on the road that stood here was ours and is gone (item 84).
+      **The goods are the original's
       ten and nothing else**: a Flask of healing and a Draught of life were invented
       here, and with them `Virtue::Heal`, which mended by a fixed amount; all three
       are gone, and the recovered `Potion of healing` (the routine at 0xcad0, which
@@ -452,7 +511,7 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
 - [x] 41. **Potions beyond healing.** The ten magic slots `_WIZARD:MagicRND` hands
       out are items with a virtue apiece: the potion restores, the gem and the hawk
       fly, the ring wards, the scroll of haste doubles the day, acquisition seizes,
-      protection turns an ambush away or backfires. Two are still inert and honestly
+      protection turns a challenge away or backfires. Two are still inert and honestly
       so, because the talisman and the scroll of the Wyrm both act on the dragon and
       the dragon's set piece is item 36
 - [x] 42. **Magic: spells, casting, costs.** `MagicCast` is a chain of `cmp bx,
@@ -466,7 +525,7 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
       `_MAP:NextWHICH` tests that byte and passes straight to the next knight, so a
       toad's turn goes by without a step
 - [x] 44. **The hawk and the gem.** Both are `EffectFLAG`: the token crosses the map
-      with no step count, no slow ground and no ambush while either is up, and it is
+      with no step count and no slow ground while either is up, and it is
       drawn as the token's own frame plus five for the gem and plus ten for the hawk,
       which in `MI.C` are the crystal row and the hawk row, one per knight's colour.
       The gem's flight comes back to where it began, the hawk's lands where you put it
@@ -518,7 +577,12 @@ the decapitation beside the bloodless collapse from the same fight.
       block. Fire alone is slot 0 of `KnightAttSw`, the stance, which is to say
       nothing; here it is the swing, so that one button still fights and the
       plain opponent, which only knows one button, does too. That one cell is
-      ours. The kind is the offset into `KnightAttSw`, and it is what indexes
+      ours. The walk row is `ControlKnight`'s `A1$` to `A4$` (0x3fd6 to
+      0x4012): up sets 0x10, down 0x20, left or right 0, in that order, so a
+      knight walking straight up is drawn on `Knight_SwWalkU1..4` and straight
+      down on `Knight_SwWalkD1..4`, and `MoveU`/`MoveD`/`MoveR`/`MoveL`
+      (0x4e39, 0x4e64, 0x4e09, 0x4dd5) do the same for a creature; that is
+      `ActorDef::walk_row`. The kind is the offset into `KnightAttSw`, and it is what indexes
       every `*Hit` and `*Dam` table, so a creature's blow-taken script now
       follows the knight's attack (`TroggHitAxe`: stabbed by a lunge or a rear
       thrust, cut at the waist by a swing, at the shoulder by the rest) and each
@@ -610,9 +674,9 @@ the decapitation beside the bloodless collapse from the same fight.
       `TrollOHead` (0x4397) for the overhead chop alone and plays
       `Knight_Explode` when that blow left nothing, and `TroggHit+12` (0x2f59)
       has the spear, and only the spear, take a dead player knight's task away
-      and play `TroggSpear_Toss` with the gore on. **Not built**: `DrDropHead`
-      and `DrDropClaws`, the dragon's, which are 36's; and the screen shake
-      `ShakeADD` asks for
+      and play `TroggSpear_Toss` with the gore on. `DrDropHead` and
+      `DrDropClaws`, the dragon's, are built with 36. **Not built**: the screen
+      shake `ShakeADD` asks for
 
 - [x] 50. **The computer knight. Recovered.** What was here was an invention:
       close the distance, swing, cool down twenty, one attack and no answer to
@@ -800,7 +864,10 @@ the decapitation beside the bloodless collapse from the same fight.
       frames and its two tree frames, and every one of them is a creature that
       is meant to hurt you with it.
 
-      **Not built**: the dragon's own two, `Dragon_BitKnight` and `DrDropHead`.
+      The dragon's own two, `Dragon_BitKnight` and `DrDropHead`, are built with
+      36: the bite that closes replaces itself with the chewing on the spot, as
+      `TASKHANDLE` runs `DragonHit2` on the frame after the touch, and the dead
+      head drops thirty eight rows.
 
 ## Phase 5: the shell
 
@@ -951,9 +1018,20 @@ Independent of everything. Makes it feel like a game rather than a demo.
       only correction is the bold font's glyph 71, a slash and not a bar, and glyph 63 is
       the one entry no character maps to. The metrics come with it: `TextP` advances by
       the cel's own width, less three for the bold face, which is why a recovered line
-      now fits the screen it was written for. **Ours:** the colour an instruction message
-      comes up in, since the fade machinery its ramp drives is not built; and showing the
-      fourteen on the between-days screen, which is where they were already
+      now fits the screen it was written for. **The ramp is recovered too**: the six
+      words at 0x8f3b to 0x8f54 go to `DS:0x80bb + 2` onwards, which is entries 1 to 6 of
+      the loaded picture's palette, and the fade in at 0x8f5c is from that palette; so an
+      instruction is the same box with `MESSAGE.PIV`'s four purples and the outline
+      entry gone red, for one message. **And so are the chains the stale span hid**:
+      `HengeInstruct` (0x129f9, five records ending on the shared `Press fire to
+      continue` at DS:0x5dd), `SCR_PRO` (0x12965, the knight's name copied into `promes0`
+      first), `VICTORY` (0x12a21) and `NextDayMes` (0x1b19a, two records). `SHMES1`..`8`
+      are the strings, not records. **What takes a box down is the caller's**: seven
+      callers follow the routine with `WaitFIRE` at 0x8251 and then a fade out, and
+      every other one loads over it; `henge_core::message::Until` carries which, no
+      timer clears the first kind, and fire does nothing to the second. **Ours:** how
+      long a box that covers a disk read holds (`LOAD_TICKS`), since nothing here reads
+      one
 - [x] 55. **`INTR.EXE` read to the end, and the intro is the original's.** It unpacks with
       `tools/symbolmap.py` unchanged: four modules, **319 symbols**, 262 corroborated.
       What had stopped everything is that **the image that tool writes is still packed**:
@@ -1077,9 +1155,11 @@ the southern woods was the last one and the original has no such place, so he is
 - [x] 60. **Recovered: nothing on the map is impassable; ground is slow instead.**
       `_MAP:MapSLOW` is a second grid on the same index holding a two-bit mask, and
       `_MAP:CheckSLOW` refuses the step when `counter & mask` is not zero, having already
-      charged it to the day. Forest and marsh are half speed, the mountain spine a quarter.
+      charged it to the day. What the table holds is in item 84: the forest is mask 1
+      (half), the wastes 0, 2 and 3 (open, half in bursts, a quarter), the swamp mostly
+      open with patches of all three, and the map's own border row and columns 3 and 2.
       The only hard limit is a rectangle: `_MAP:HawkBorders` clamps the token to
-      `0..=310` by `0..=190`.
+      `0..=310` by `0..=190`, and a step into it is charged too.
       **That is the overworld, and it is right. The arena is nothing like it, and what
       this item used to imply about arenas was wrong.** An arena's `.T` header is a count
       and that many impassable rectangles, not one walkable box, and the ground is what is
@@ -1145,10 +1225,13 @@ the southern woods was the last one and the original has no such place, so he is
       days come round; `InitGameStart` writes 0x2d, so a quest opens on the full moon.
       The screen is the routine at 0x8e5b: `Next Day` at y 95 over `CH.PIV`, the night
       sky the select screen uses, with cel `Moons[MoonCount]` of `KI.CEL` blitted at
-      (119, 12). **Ours**: the eight byte `Moons` table itself, which is in the
-      unreadable part of DGROUP, so the cycle is five pictures over eight steps waning
-      and waxing back, which is the one arrangement that uses every picture and returns
-      to where it began; and putting the hint under it. The fourteen hints are
+      (119, 12). **The eight byte `Moons` table is read now**: DS:0x5a9, image
+      0x12959, `2d 2f 2e 30 31 30 2e 2f`, indexed by `MoonCount & 7` at
+      `EncounterFini+0x49` (0x118d), and looked at in the select screen's palette cel
+      0x2e is the gibbous and 0x2f the half, so the original's own cycle runs full,
+      half, gibbous, crescent, sliver and back, the two middle pictures out of order.
+      `moon::MOONS` is that table and the monotone cycle that stood in for it is gone.
+      **Ours** was putting the hint under it. The fourteen hints are
       `_LOADER:WaitMES` verbatim, in its own order, cycled the way `WaitCOUNT` cycles
       them, and the original shows them while a disk loads, which is a thing henge does
       not do
@@ -1165,7 +1248,8 @@ the southern woods was the last one and the original has no such place, so he is
 - [x] 65. **Tavern.** The whole of `_TAVERN` is the dice table and the henge, so the
       tavern *is* the dice game: `TavernOpenScene` turns an empty purse out of the door
       before anything is drawn, and the six gadgets `TAV.PIV` paints are five stakes of
-      one to five gold and an exit. The live menu goes exactly over that painted panel
+      one to five gold and an exit. **The menu that went over that panel is gone**; the
+      six gadgets themselves are built, see item 85
 - [x] 66. **Temple and mystic.** The temple is `_STATUS:SellToTemple` and `GoldSell`:
       one off the record, the price shifted right once into a purse that saturates at a
       hundred and fifty, and a sword sold out of the hand leaves a long sword in it. Its
@@ -1178,10 +1262,12 @@ the southern woods was the last one and the original has no such place, so he is
       (0xa2, 0xa9), (0x83, 0xb9) and (0xad, 0xb9), moving one coin at a time between
       `GOLDP` and `DONATION`, with the two purses, the two words and the two numbers where
       `DonationRefresh` puts them. The three fixed amounts that stood in for it are gone.
-      **Not built**: the temple's other counter, which buys and sells a moonstone
-      (`pu18`, `se18`, `BuyMoonstone`), because item 71 owns the moonstones; and the temple
-      and the merchant as `_STATUS` panels rather than as rooms with lists, which is
-      item 53
+      **Two corrections, item 85:** the "temple" above was the Waterdeep mystic's list;
+      the high temple is the status panel on type 6, with `TTemple` at 0xce11 dividing
+      buying from selling at the pointer's x, and it buys and sells the moonstones and
+      the keys too (`BuyMoonstone` 0xce5a, `SellMoonstone` 0xce60, against its own stock
+      at DS:0xed96, not against another knight). And the healer and the mystic have no
+      menu in front of the bowl: the greeting, `WaitFIRE`, the bowl, the verdict
 - [x] 67. **The wizard.** `WizardIntro` on the way in, one roll plus the grudge against
       thirty, seventy and ninety for magic, an ability, gold and the toad, and the
       fourteen `WizardText` lines cycled by `WIZGOLD_CNT` and `WIZMAG_CNT`, all
@@ -1479,8 +1565,8 @@ Any time. None of it blocks anything.
       tokens, `MOON:CheckLairEncounter` (0x88f) frame 0x1f over the lair the token
       overlaps, and `_MAP:SHOW` (0xa1f0) the traveller. The frame body at 0xa2d7 is
       exactly that list, in that order. A status bar across the bottom, a purse plate in
-      the corner, a cutpurse notice and one-colour silhouettes of `MI.C` 0x15 and up are
-      all gone; those frames are one-pixel outlines in index 31 that the original blits
+      the corner, the cutpurse's notice (and since, item 84, the cutpurse) and one-colour
+      silhouettes of `MI.C` 0x15 and up are all gone; those frames are one-pixel outlines in index 31 that the original blits
       nowhere and keeps only for `MOON:GetWIDTH` to measure a box out of.
       **Entering.** `_MAP:FOLLOW` calls the walker at 0x6b5 once a frame, which clears
       the five eight-byte slots at `DS:043c` and pushes `[x][y][kind]` for everything the
@@ -1500,9 +1586,14 @@ Any time. None of it blocks anything.
 - [x] 80. **The between-days screen waits, and `FADEOUTDAY` is built.**
       `_MAP:NextWHICH` at 0xa454 calls the screen (0x8e5b), then `WaitFIRE` (0x8251),
       then the fade out (0x5b65). It used to dismiss itself after 150 ticks. The screen
-      itself is `CH.PIV`, `NextDayMes` at y 95 and one cel of `KI.CEL` at (119, 12), and
+      itself is `CH.PIV`, the `NextDayMes` chain and one cel of `KI.CEL` at (119, 12), and
       nothing else: a day number and one of the fourteen `WaitMES` hints are gone, since
-      the fourteen belong to `WAITMESSAGE`, a different screen shown while a disk loads
+      the fourteen belong to `WAITMESSAGE`, a different screen shown while a disk loads.
+      `NextDayMes` (0x1b19a) is **two** records, `Next Day` at y 95 and the shared `Press
+      fire to continue` at y 182, and the second is drawn now. `WaitFIRE` reads fire
+      (`test bx, 0x10`) and nothing else, so the screen no longer goes on any key; and
+      `WaitCOUNT` is stepped only at 0x8ecf inside `WAITMESSAGE`, so turning a day over
+      no longer steps it
 - [x] 81. **Waves, and a lair is a lair now.** The number in a lair record ran from three
       to fourteen and only as many as a bout seated ever arrived, so a lair of fourteen
       ratmen was three ratmen. All of the machinery is named and all of it reads, and
@@ -1520,7 +1611,7 @@ Any time. None of it blocks anything.
 
       Three corrections came out of reading it. **`TotalMonsters` is not the head count**,
       it is what is still owed, so a fight shows `MaxMonsters + TotalMonsters - 1`
-      creatures. **A road ambush is not one creature either**: `InitKnightvsTroggAxe`
+      creatures. **A trogg fight is not one creature either**: `InitKnightvsTroggAxe`
       writes 3, so three troggs come one after another, and four people playing is worth
       one more (`cmp [0x91e], 4`). And **`AdjustLevel` scales the lair to the knight**: the
       creature's row of `lev_adjust` is subtracted from the count, so a knight fresh off
@@ -1558,6 +1649,45 @@ Any time. None of it blocks anything.
       over 800 dots over 449 lines, which is **70.0863 frames a second**, the same figure
       `henge_core::intro` already quoted for the story card's 420 retraces. The engine's
       tick is now 14,268,123 ns.
+- [x] 84. **The day is a distance, and nothing on the road is rolled.** The map loop
+      from `PlayerKnight` (0xa355) to `DistanceDONE` (0xa4b2) calls nothing that rolls.
+      `MapMovement` (0xa35d) does `inc word [0xcc98]` on every frame a direction is held,
+      before it reads `SlowFLAG` and before `FOLLOW` (0xa29f) calls `HawkBorders`, so a
+      refused step and a step into the edge both count; `GoTheDistance` (0xa422) compares
+      `[0xcc98]` with `[0xccac]` and goes to `NextWHICH` (0xa434) when it is reached, before
+      the move, so the step that spends the distance is not walked. `[0xccac]` is
+      `DistanceDONE+12` (0xa4be): `mov al, [di+0x3e]; shl ax, 1` four times, once more for
+      haste, so the opening knight's six is ninety six frames. `NextWHICH` clears the three
+      effect flags (0xa962), zeroes `[0xcc98]`, steps `WHICH` and masks it with 3, and when
+      it wraps calls the routine at 0x1148, which has no name in the table: `[0x898b]` up
+      by one, and when it passes three `[0x5b1]` up by one (the computer knight's nerve),
+      `MoonCount` up by one and masked with 7, `GiveBK`, `[0x8989] = Moons[MoonCount]`, then
+      `AdjustTIME` (0x119f) for every knight. Then the between-days screen at 0x8e5b,
+      `WaitFIRE` and `FADEOUTDAY`. Every encounter ends the turn: `Combat+60` (0x38d) and
+      `EncounterAllDone` (0x113e) both do `mov ax, [0xccac]; mov [0xcc98], ax`, and a
+      village, a town, the wizard, the circle, the Valley and the dragon all come back
+      through the second. **There is no ambush.** Every fight the map starts is something
+      the token stands on and fire is pressed over (`ScrollINPUT`, `test ax, 0x10` at
+      0xa3c9, into `DisplayStack` and `StackDecision`, 0xae9f), or a rival who walks into
+      you (`BKCollision`, 0xaab1), or the dragon (`DragonEncounter`, 0xa3e2); `CheckGROOC`
+      (0x653) and the walk at 0x6b5 are the overlap test, not a roll. Removed with this:
+      the one in ninety roll per step, the two hundred and twenty step day, the per-step
+      healing (`AdjustTIME` is the only mending outside a healer and a potion), the
+      cutpurse on the road, the `--peaceful` switch that turned the first two off, and
+      the baker's `AMBUSHES` table of which creature each ground produced, which was
+      design. `MapSLOW` read out of DS:`0xc42a`: 308 cells of mask 1, 165 of 2, 145 of 3,
+      382 open; all but eight forest cells are 1; the wastes are 0, 2 and 3; the swamp is
+      89 open, 57 of 1, 45 of 2, 29 of 3; the top row is 3 and the two side columns 2.
+      **Not built, and recovered:** the three computer knights. `InitGameStart` (0x1c0d)
+      fills all four records at DS:0x6c9e with `Enemy1Name` to `Enemy4Name`, kind 8
+      (`ControlBlackKnight`), `[+0x20] = 4` and the corners (15, 100), (300, 100), (160,
+      20), (160, 180); `ChooseKnight` turns the first `NUM_PLAYERS` of them into people and
+      `InitKnights` (0x157) moves those to their villages. `DisplayOtherKnights` (0xa22c)
+      then draws the other three every frame: frame `[si+0x20]` (4 is the purple token),
+      0x21 for a grave when `[si+0x31]` is gone, `+0x2b` for a toad. They take turns
+      (`MapLOOP+19` to `TrackLair`), fight lairs, heal, level and challenge you. Drawing
+      them where `InitGameStart` left them would be true for one day and false after, so
+      nothing is drawn until their turns are built
       **This mattered because every recovered duration in the tree is a frame count**, so
       sixty ran all of them about fourteen percent slow: every cooldown, every script
       frame, every sixteen-step fade. Two numbers moved with the clock rather than against
@@ -1565,6 +1695,84 @@ Any time. None of it blocks anything.
       that a tick is a retrace, and `intro::TICKS_PER_FRAME` is eight, because the intro's
       own pacer (`INTR.EXE` at `0x021f` reads `0000:046c`, adds two, and `0x022f` spins to
       it) is two BIOS ticks or 9.1033 frames a second, and 70.0863 over that is 7.70.
+- [x] 85. **The town's five gadgets open five routines, and none of them is a menu.**
+      `MOON:HWLOOP` (0xe35) and `WDLOOP` (0xd7a) are a `cmp word ptr es:[si+0xe]` ladder
+      on the gadget fire was over, and each rung is `AddClickSound` and one call:
+      ```text
+      MERC  0e9c / WMERC 0ded   fade; mov ax, 5; call 0bdd3       the status panel, type 5
+      TAV   0e90 / WTAV  0de1   call 0b007; fade                  _TAVERN
+      HEAL  0eba / WHEA  0dfc   fade; call 0ba66; fade            _WIZARD, HEA.PIV
+      HTEM  0eab                fade; mov ax, 6; call 0bdd3       the status panel, type 6
+      MYST  0dd5                call 0b935; fade                  _WIZARD, MYS.PIV
+      CEXIT 0e0b                call 0a4be; jmp EncounterAllDone
+      ```
+      then `jmp HWINIT` (0xe14) or `WDINIT` (0xd5c), which reloads the town and writes the
+      pointer to (0x122, 0x64) or (0x1e, 0x64) before `InitHighWood`. `0xbdd3` is the
+      unnamed entry of the panel: `mov [StatTYPE], ax`, the pointer to (0xa0, 0x64),
+      `SetUpStatus`, `ReDisplay`, `StatLOOP`. So:
+      **The merchant is the panel on type 5.** `DisplayMerchant` (0xc7ad) puts chain mail,
+      plate and battle armour (cels 0x1c to 0x1e at (0x17, 0x91), (0x40, 0x91), (0x6a,
+      0x90), ids 0x0e, 0x10, 0x12, `STRP` 0x1a, 0x2a, 0x4a, `STPL` 0x42), the broad sword
+      and the claymore (0x17 at (0x32, 0x6b) id 0x16, 0x18 at (0x2f, 0x7d) id 0x18, `STPL`
+      0x40) and thirteen daggers (0x15 from (0x20, 0x59) every nine, id 0xa, `STPL` 0x34)
+      in the right arch, and `HotGadget`'s 0xa arm is `BuyGoods` (0xcd33): `BuyArmour`
+      (0xcd4a) takes 0x1e, 0x32 or 0x4b, writes the suit into `+0x42` and adds 0xa, 0x14 or
+      0x1e to the health before the routine at 0x28d, whatever was worn; `BuyWeapon`
+      (0xcdb3) takes 0xa or 0x19 only while `+0x40` is below 0x17 or 0x18; `BuyDagger`
+      (0xcdf7) takes two while `+0x34` is under ten. The left arch is `Identify`, so a
+      potion there is looked at and not drunk. `Run::buy_goods`.
+      **The high temple is the panel on type 6**, `Sell` on the left and `Purchase` on the
+      right, and its right arch is `DisplayMagic` and `DisplayMSword` over DS:0xed96
+      (`ReDisplay` 0xbf66), twenty four zero bytes that only `TTemple` writes: the temple's
+      stock is what knights have sold it. `HGCastMagic` (0xca83) and `HGTakeMagic` (0xcbaa)
+      both go to `TTemple` (0xce11) on type 6 before any permission bit, and `TTemple`
+      divides the screen at `cmp word ptr [PointerX], 0xa0`: right of it a purchase at
+      `MagicPrices[STPL]` (refused silently over the purse, a ring adding 0x14 health, a
+      key or a moonstone moved as a bit by `BuyMoonstone` 0xce5a), left of it a sale by
+      `SellToTemple` (0xce66) and `GoldSell` (0xce77): half the price into a purse capped
+      at 0x96, `+0x40` back to 0x16 for the magic sword. `Run::trade_at_temple`, and the
+      stock is `Run::temple`. The type the code passes for the stone circle is 3
+      (`Henge+74`, 0x109a), which this tree had called the temple; renamed.
+      **The tavern is the hand over `TAV.PIV`, with the six gadgets beside it.** The
+      routine at 0xb007 refuses an empty purse (`cmp word ptr [si+0x32], 0; jg` at
+      0xb00b), loads `dice.cel`, `CLEARGADGETS` (0xb053) and adds five stakes at (0x10c,
+      0x26 / 0x42 / 0x5e / 0x79 / 0x93) 0x2b by 0x18 with `+0xe` 1 and `+0x10` the stake,
+      and the exit at (0x10c, 0xb5) 0x2d by 0x10 with `+0xe` 2. `TavernOpenScene` (0xb0f5)
+      writes `PointerX` 0x118, loads **`tav.piv`** (`Tav1`, DS:0xce0f, through 0xaff3),
+      and `TavernLoop` (0xb137) runs the hand, writes `GOLDASCII` at (0x11a, 0xe) and
+      shows the pointer; the handler at 0xb1a1 reaches `SetBET` (0xb1e8, the stake out of
+      the purse now, refused over it) or sets `XFL` for the exit. **`dice.piv` is loaded
+      by `RollDice+22` (0xb24a) and nowhere else**: it is the result, three faces at
+      (0x73, 0xf), (0x31, 0x26), (0x4b, 0x58) and the `WIN` or `LOST` chain at x 0xae on
+      rows 0x7e, 0x8c, 0x98 (the number writer at 0x7c24 and `GPTEXT` cut each string at
+      ` gp.`), `DiceWait` (0xb31c) waiting twenty retraces and then `WaitFIRE`, and
+      `DiceRND+3` running back into `TavernOpenScene`, which turns an emptied purse out.
+      So the hand shakes on the table while a stake is chosen and the dice picture is
+      what a throw's result is shown on, which is the other way round from the note
+      that stood in section 5 and from the recipe this item was set as. `henge_core::town`
+      and `henge_desktop::town`; the dice room and the tavern menu are deleted.
+      **The healer and the mystic are the greeting, fire, the bowl, the verdict, fire.**
+      0xba66 and 0xb935 load `HEA.PIV` or `MYS.PIV`, `LoadGoldCels`, write `Heal1a`
+      (DS:0xdb69, rows 0xa3, 0xac, 0xb5) or `My1a` (DS:0xdd32, rows 0xa5 to 0xbd), and
+      call `WaitFIRE` (0x8251); then the pointer to (0xa0, 0xaa) and `InitDonation` with
+      `ax` 1 (the healer) or 0 (the mystic), which is `BAG`, the purse cel. The healer
+      tests `cmp ax, 3` and then `DONATION`, the mystic `DONATION` and then `ax`, so an
+      abandoned full bowl is `Heal2a` at one and `Heal3a` at the other. `HealDon` or
+      `MysticUpDown` and the verdict chain (`ExitHealer` 0xbb1b, `MysticJudge` 0xb9fc),
+      `MysticFini` (0xba20): fifty retraces, `WaitFIRE`, fade, return. `DonateLoop`
+      reads `PointerFLAG`, which `MovePointer` clears while fire is down, so a held button
+      pours coins two retraces apart; none of its four arms clicks. **The `Donate` and
+      `Back` menu in front of the bowl is gone**, and `Donation` on the panel is right
+      aligned to `TextRightBorder` (0x140) as `TextPTop` does, not to the 0x106 the call
+      passes.
+      **`TakeSword` (0xccd4) on a lair floor goes through the hand**: `[si+4] = 1`,
+      `[di+4] = 0`, `[StatHAND1+0x40] = 0x19`, and the `0x16` written to `StatHAND2` is
+      skipped on type 2. It used to take the sword as an ordinary item into the pack.
+      **Also found on the way:** the tunes. 0xba66 is the healer, not `MysticUpDown+39`,
+      and 0xb935 the mystic, not `_bestow_done+7`, so the healer plays tune 4 and the
+      mystic tune 5 (the "moment inside the wizard's tower" was the mystic); the baker's
+      table is keyed by door now. And `play.sh` passed `--force` as the baker's second
+      positional, which baked the pack into a folder called `--force`; flags are skipped.
       **The 54.62 Hz timer is a different clock and drives only sound.** `Install_Timer`
       (`0x584f`) sets counter 0 to mode 3 with divisor `0x5555` and hooks int 8 to `0x5934`,
       whose whole body is `mov ah, 1; int 60h` for the music, the same with `int 61h` for

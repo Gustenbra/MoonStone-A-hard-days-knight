@@ -111,6 +111,9 @@ pub struct Sheet {
     /// creatures a fight holds. See `henge_core::wave`.
     pub strength: i32,
     pub experience: i32,
+    /// `[bx+8]` of the magic record, the Talismans of the Wyrm, which
+    /// `TalismanWrym` (0x43f4) halves the dragon's blows by.
+    pub talismans: i32,
 }
 
 pub struct World {
@@ -302,7 +305,7 @@ impl World {
         self.foe = actor.to_string();
         // A new opponent is a new fight, and only a lair hands a head count
         // over. Clearing it here means a raid's fourteen cannot leak into the
-        // next ambush on the road; the raid sets it after naming the guardian.
+        // next fight; the raid sets it after naming the guardian.
         self.heads = None;
         self.reset();
         true
@@ -322,18 +325,6 @@ impl World {
         let next = (((at + delta) % n) + n) % n;
         let id = self.bestiary[next as usize].clone();
         self.set_foe(&id);
-    }
-
-    /// The opponent the road produces on this family's ground: the family's
-    /// own creature list, indexed by its turn counter, or a knight where the
-    /// pack lists nothing.
-    pub fn foe_for(&self, family: &str, pick: usize) -> String {
-        self.families
-            .get(family)
-            .and_then(|f| f.creature(pick))
-            .filter(|c| self.actors.contains_key(*c))
-            .unwrap_or("knight")
-            .to_string()
     }
 
     /// How many people are at the keyboard. The rest of the four are opponents.
@@ -819,14 +810,15 @@ impl World {
                 // Seat zero fights on the run's sheet; every other knight is
                 // fresh off `SetKnightEquipment`, twenty health and one of
                 // strength, because nothing tracks what they have been through.
-                let (max, bonus) = match self.sheet {
-                    Some(s) if i == 0 => (s.max_health, s.bonus),
-                    Some(s) => (ORIGINAL_KNIGHT_HEALTH, s.fresh_bonus),
-                    None => (knight.health, 0),
+                let (max, bonus, talismans) = match self.sheet {
+                    Some(s) if i == 0 => (s.max_health, s.bonus, s.talismans),
+                    Some(s) => (ORIGINAL_KNIGHT_HEALTH, s.fresh_bonus, 0),
+                    None => (knight.health, 0, 0),
                 };
                 f.max_health = max;
                 f.health = max;
                 f.bonus = bonus;
+                f.talismans = talismans;
                 // `SetKnightEquipment`: ten daggers on the belt.
                 f.record.set(field::DAGGERS, 10);
             } else {

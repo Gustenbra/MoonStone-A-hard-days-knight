@@ -10,7 +10,7 @@
 //!
 //! What is left is the harness. A headless run is driven from the command line,
 //! and `--save <path>` with `--load` is how a test poses a run at day nine with a
-//! particular purse and a particular traveller's seed instead of walking the
+//! particular purse and a particular traveller's position instead of walking the
 //! whole way there every time. That is worth keeping and it is worth keeping
 //! honestly labelled, which is why this module is called what it is.
 //!
@@ -28,7 +28,7 @@
 //!              anything else is attempted
 //! format       an integer, bumped whenever the meaning of the rest changes
 //! run          the whole Run: purse, pack, knight, lairs, moon, seeds
-//! travel       where on the map, what day, and the traveller's own seed
+//! travel       where on the map, what day, and how far today has gone
 //! players      the title's settings, so continuing resumes the same game
 //! gore         and not a differently configured one
 //! wait_count   which of the fourteen the Gods say next
@@ -59,7 +59,11 @@ pub const MAGIC: &str = "henge-harness";
 /// The format number. **Bump this whenever the meaning of a stored field
 /// changes**, and older snapshots will be refused with
 /// [`SnapshotError::Version`] instead of being misread.
-pub const FORMAT: u32 = 1;
+///
+/// Two: the run carries the dragon over the map (`Run::dragon`, `wyrm_seed`)
+/// and both go into its fingerprint, so a snapshot from before them would
+/// read as corrupt rather than as old.
+pub const FORMAT: u32 = 2;
 
 /// Why a snapshot could not be loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,7 +215,7 @@ mod tests {
         run.next_arena("forest", 8);
         run.stock_lairs(&["forest".into(), "glade".into()], &Items::default());
         let mut travel = Overworld::new(146, 115);
-        travel.set_seed(0xfeed_1234);
+        travel.steps_per_day = 96;
         for _ in 0..40 {
             travel.travel(1, 0, &Default::default());
         }
@@ -241,9 +245,9 @@ mod tests {
         assert_eq!((back.players, back.gore, back.wait_count), (2, false, 5));
     }
 
-    /// And keeps going the same way. A restored run that mended and was robbed
-    /// on different steps would pass an equality check on the numbers and still
-    /// be a different game.
+    /// And keeps going the same way. A restored run whose days mended it
+    /// differently, or whose casts rolled differently, would pass an equality
+    /// check on the numbers and still be a different game.
     #[test]
     fn a_restored_run_goes_on_exactly_as_the_original_would_have() {
         let (run, travel) = posed();
@@ -253,18 +257,22 @@ mod tests {
 
         let mut kept = run.clone();
         let mut kept_travel = travel.clone();
-        for _ in 0..500 {
-            kept.travelled();
-            kept.waylaid();
-            kept_travel.travel(1, 1, &Default::default());
-            restored.run.travelled();
-            restored.run.waylaid();
-            restored.travel.travel(1, 1, &Default::default());
+        for i in 0..500 {
+            if kept_travel.travel(1, 1, &Default::default()).turn_over {
+                kept.new_day();
+            }
+            if restored.travel.travel(1, 1, &Default::default()).turn_over {
+                restored.run.new_day();
+            }
+            if i % 97 == 0 {
+                kept.roll(128);
+                restored.run.roll(128);
+            }
         }
         assert_eq!(
             restored.run.state_hash(),
             kept.state_hash(),
-            "same road, same losses"
+            "same road, same nights, same rolls"
         );
         assert_eq!(restored.travel.state_hash(), kept_travel.state_hash());
     }

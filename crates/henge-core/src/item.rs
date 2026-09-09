@@ -12,8 +12,8 @@
 //! - **A pack.** It holds a bounded number of things, and, crucially, things
 //!   leave it. The original names a routine `TAKEFROMKNIGHT`, so losing what
 //!   you carry is a first-class operation here rather than an afterthought on a
-//!   list that only ever grows. A potion drunk is a potion gone, and a cutpurse
-//!   on the road takes something real.
+//!   list that only ever grows. A potion drunk is a potion gone, and what the
+//!   druids are given is gone too.
 //!
 //! What an item *is* lives in the pack as data, exactly as places and actors
 //! do, so a new item is a JSON entry and not a line of Rust.
@@ -34,11 +34,11 @@ use std::collections::BTreeMap;
 /// slot 0x02  Gem of seeing          fly the map and come back             Sight
 /// slot 0x04  Sword of Sharpness     held: weapon 0x19, +5 a swing         Weapon
 /// slot 0x06  Ring of protection     worn: +20 health a ring               Ward
-/// slot 0x08  Talisman of the Wyrm   halves the dragon's fire, floor 5     Inert here
+/// slot 0x08  Talisman of the Wyrm   halves the dragon's fire, floor 5     Inert, read in the fight
 /// slot 0x0a  Scroll of Haste        doubles the day's travel              Haste
 /// slot 0x0c  Scroll of the Hawk     fly; 16 in 128 it strands you         Sight
 /// slot 0x0e  Scroll of Aquisition   take a thing off another knight       Seize
-/// slot 0x10  Scroll of the Wyrm     sets the dragon on a rival            Inert here
+/// slot 0x10  Scroll of the Wyrm     sets the dragon on a rival            Wyrm
 /// slot 0x12  Scroll of Protection   turns a challenger away, or backfires Protection
 /// ```
 ///
@@ -48,12 +48,12 @@ use std::collections::BTreeMap;
 /// so all three are properties of the thing and belong beside its price.
 /// Using a worn thing puts it on.
 ///
-/// The two marked inert are recovered and not built: `TalismanWrym` (image
-/// `0x43f4`) shifts the dragon's fire right once per talisman held and floors
-/// it at five, and the Scroll of the Wyrm sets `WyrmFLAG` and opens the
-/// knight picker so `KnightWyrm` can send the dragon after the chosen rival.
-/// Both need a dragon that flies, which is item 36's, so they are carried,
-/// worth coin, and say so when used.
+/// The talisman is worn by being carried: `TalismanWrym` (image `0x43f4`)
+/// reads how many are in the magic record, slot 8, and shifts the dragon's
+/// blow right that many times, floored at five. See
+/// `crate::monster::talisman_wrym`. Nothing is spent by using it, so using it
+/// is [`Cast::Pointless`](crate::run::Cast::Pointless), as the original's
+/// `MagicCast` has no branch for slot 8 either.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "does", rename_all = "kebab-case")]
 pub enum Virtue {
@@ -87,6 +87,11 @@ pub enum Virtue {
     /// yours. There is one knight on this map, so it is carried, understood,
     /// and has nobody to rob.
     Seize,
+    /// Cast. `MagicCast` slot 0x10 (0xcb60) raises `WyrmFLAG`, opens the
+    /// knight picker on `StatTYPE` 0xb, and `StatusDone` (0xbe50) then writes
+    /// the knight picked into the dragon's `+0x46`: the dragon over the map
+    /// is after him from then on. See `crate::dragon`.
+    Wyrm,
     /// Cast. A ward against the next challenge. `MOON:KnightProtection` asks
     /// the challenged knight to cast it and, unless the cast backfired, the
     /// fight is skipped; `MagicCast` slot 0x12 rolls and on 11 of 128
@@ -136,9 +141,11 @@ impl ItemDef {
             Virtue::Weapon { .. } => "Wield",
             Virtue::Armour { .. } | Virtue::Ward { .. } => "Wear",
             Virtue::Sight { returns: true, .. } => "Use",
-            Virtue::Sight { .. } | Virtue::Haste | Virtue::Seize | Virtue::Protection { .. } => {
-                "Cast"
-            }
+            Virtue::Sight { .. }
+            | Virtue::Haste
+            | Virtue::Seize
+            | Virtue::Wyrm
+            | Virtue::Protection { .. } => "Cast",
             Virtue::Inert => "Use",
         };
         let mut name = self.name.clone();
@@ -169,14 +176,6 @@ pub enum Purchase {
     NoRoom,
     /// No such item in the packs. A data error, not a game state.
     Unknown,
-}
-
-/// What a cutpurse got.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Loss {
-    Gold(u32),
-    /// The id of the item taken.
-    Item(String),
 }
 
 /// What you are carrying.
@@ -264,31 +263,6 @@ impl Inventory {
     pub fn clear(&mut self) {
         self.held.clear();
     }
-
-    /// One thing, chosen by a roll, taken off you. Returns what went.
-    ///
-    /// The roll picks across everything held rather than across kinds, so a man
-    /// carrying four potions and one key most often loses a potion. Deterministic
-    /// given the roll, because the simulation's randomness is carried in its
-    /// state and never taken from the system.
-    pub fn take_one(&mut self, roll: u32) -> Option<String> {
-        let total = self.carried();
-        if total == 0 {
-            return None;
-        }
-        let mut nth = roll % total;
-        let mut chosen = None;
-        for (id, n) in self.held.iter() {
-            if nth < *n {
-                chosen = Some(id.clone());
-                break;
-            }
-            nth -= *n;
-        }
-        let id = chosen?;
-        self.lose(&id, 1);
-        Some(id)
-    }
 }
 
 #[cfg(test)]
@@ -345,28 +319,6 @@ mod tests {
         kit.lose("potion", 1);
         assert!(kit.is_empty());
         assert_eq!(kit.iter().count(), 0, "no ghost entry sitting at zero");
-    }
-
-    #[test]
-    fn a_cutpurse_takes_one_thing_and_the_roll_decides_which() {
-        let mut kit = Inventory::default();
-        kit.take("key", 1);
-        kit.take("potion", 3);
-        // Four things held: the key is first in id order, then three potions.
-        let mut a = kit.clone();
-        assert_eq!(a.take_one(0).as_deref(), Some("key"));
-        let mut b = kit.clone();
-        assert_eq!(b.take_one(1).as_deref(), Some("potion"));
-        assert_eq!(b.carried(), 3, "exactly one thing went");
-        // The roll wraps, so any number is a legal roll.
-        let mut c = kit.clone();
-        assert_eq!(c.take_one(4).as_deref(), Some("key"));
-    }
-
-    #[test]
-    fn an_empty_pack_has_nothing_to_take() {
-        let mut kit = Inventory::default();
-        assert_eq!(kit.take_one(7), None);
     }
 
     #[test]

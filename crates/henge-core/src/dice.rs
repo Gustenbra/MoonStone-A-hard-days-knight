@@ -5,7 +5,7 @@
 //! sits in `TavernLoop` (0xb137) until somebody leaves or the dice come down:
 //!
 //! ```text
-//! 0xb10b  call load_TILE2                  ; `dice.piv` is already up
+//! 0xb10b  call 0xaff3                      ; `Tav1`, which is `tav.piv`
 //! 0xb11c  fade in
 //! 0xb12e  mov word ptr [DiceTHROW], 0
 //! 0xb134  call ShakeDice                   ; below
@@ -52,10 +52,18 @@
 //! ```
 //!
 //! and `DiceRND` at 0xb21d is `RollDice` and the payout, which is
-//! [`crate::service`] and already built. So the **whole** of what was missing
+//! [`crate::town`]. So the **whole** of what was missing
 //! is the state machine above: the hand shakes on a loop while a stake is
 //! being chosen, plays the throw once when one is taken, and the three faces
 //! are rolled and drawn on the frame that animation ends.
+//!
+//! **The picture under the hand is `TAV.PIV`, not `DICE.PIV`.** `Tav1` at
+//! DS:0xce0f is `tav.piv`, `Tav2` at DS:0xce17 is `dice.piv` and `Tav3` at
+//! DS:0xce20 is `dice.cel`; the routine at 0xaff3 loads the first and
+//! `TavernOpenScene+22` calls it, the routine at 0xaffd loads the second and
+//! only `RollDice+22` (0xb24a) calls it. So the hand shakes over the table
+//! with the six painted stakes beside it, and the dice picture is what the
+//! throw's result is shown on.
 //!
 //! **Nothing here is ours** but [`TICKS_PER_FRAME`], which is the same note
 //! `crate::stones` carries: `TavernLoop` has no retrace count of its own, so
@@ -64,9 +72,8 @@
 use crate::taskvm::{Frame, ScriptSet, Task, TaskActor};
 use serde::{Deserialize, Serialize};
 
-/// `Tav2` and `Tav3` at `DS:0xce17` and `DS:0xce20`, which `load_DiceBACK`
-/// (0xaffd) loads: `dice.piv` for the picture and `dice.cel` into
-/// `DiceHANDLE`.
+/// `Tav3` at `DS:0xce20`, `dice.cel`, which the routine at 0xb007 loads into
+/// `DiceHANDLE` (0xb045) before anything is drawn.
 pub const BANKS: &str = "dice";
 
 /// The two scripts, `DS:0xce59` and `DS:0xce6d`.
@@ -110,6 +117,13 @@ pub struct Table {
     actor: TaskActor,
     /// Ticks since the last frame, against [`TICKS_PER_FRAME`].
     held: u32,
+    /// `XFL` at DS:0xd167: fire was over the exit gadget, which the handler
+    /// at 0xb1e0 records and `TavernLoop` reads after the frame (0xb176).
+    #[serde(default)]
+    pub xfl: bool,
+    /// Fire over the exit, waiting for the handler the way `pending` does.
+    #[serde(default)]
+    pending_exit: bool,
     /// A stake taken and paid for, waiting for the handler.
     ///
     /// The original has no such flag because it does not need one:
@@ -138,7 +152,18 @@ impl Table {
             task,
             actor: TaskActor::default(),
             held: 0,
+            xfl: false,
+            pending_exit: false,
             pending: false,
+        }
+    }
+
+    /// Fire over the exit. `0xb1d9`: `cmp word ptr es:[si+0xe], 2; jne BBB`
+    /// then `mov word ptr [XFL], 1`, reached from the handler alone, so it
+    /// too waits for the shake's `ff ff`.
+    pub fn exit_taken(&mut self) {
+        if self.throw == Throw::Shaking {
+            self.pending_exit = true;
         }
     }
 
@@ -191,6 +216,14 @@ impl Table {
                     self.pending = false;
                     self.throw = Throw::Throwing;
                     self.task.replace(THROW);
+                }
+                // `mov word ptr [XFL], 1; jmp BBB` at 0xb1e0: the exit is
+                // noted and the shake goes round once more, which is the
+                // frame `TavernLoop` reads `XFL` on.
+                Throw::Shaking if self.pending_exit => {
+                    self.pending_exit = false;
+                    self.xfl = true;
+                    self.task.replace(SHAKE);
                 }
                 // `mov word ptr [0x783a], DD_ShakeDice` at 0xb1bb.
                 Throw::Shaking => self.task.replace(SHAKE),

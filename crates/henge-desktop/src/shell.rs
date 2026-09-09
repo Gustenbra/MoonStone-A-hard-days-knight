@@ -449,11 +449,26 @@ pub const MESSAGE_PLATE: &str = "scene.message";
 /// **Recovered too: the colour an instruction message comes up in.** The six
 /// words `INSTRUCTMESSAGE` writes at `0x8f3b` go to `DS:0x80bb + 2` onwards,
 /// and `DS:0x80bb` is the 32-entry palette the fade routine at the end of the
-/// same call clocks out to the DAC three bytes at a time, ninety six of them.
+/// same call clocks out to the DAC three bytes at a time, ninety six of them:
+///
+/// ```text
+/// 08f38  mov si, 0x80bb
+/// 08f3b  mov word ptr [si + 2], 0x800      ; entry 1
+/// 08f40  mov word ptr [si + 4], 0x600      ; entry 2
+/// 08f45  mov word ptr [si + 6], 0x400      ; entry 3
+/// 08f4a  mov word ptr [si + 8], 0          ; entry 4
+/// 08f4f  mov word ptr [si + 0xa], 0x200    ; entry 5
+/// 08f54  mov word ptr [si + 0xc], 0x100    ; entry 6
+/// 08f59  call 0x5a3e                       ; page flip
+/// 08f5c  mov si, 0x80bb; call 0x5b44       ; fade in from that palette
+/// ```
+///
 /// So the words are palette entries 1 to 6, and an instruction repaints
 /// `MESSAGE.PIV`'s four purples and the font's own black outline as a red ramp.
 /// The picture goes red, which is the difference a player sees; nothing about
-/// the lettering changes but the colour of the ring round it.
+/// the lettering changes but the colour of the ring round it. It lasts one
+/// message: `0x8761`, which every one of the three calls first, reads the
+/// palette back out of the picture's own header.
 pub const INSTRUCT_RAMP: [u32; 6] = [0x880000, 0x660000, 0x440000, 0x000000, 0x220000, 0x110000];
 
 pub fn draw_message(
@@ -754,7 +769,7 @@ pub fn draw_dice_hand(
 }
 
 /// One task's last frame, placed the way `TASKRIGHT` places it.
-fn draw_task(
+pub(crate) fn draw_task(
     reg: &mut Registry,
     fb: &mut Framebuffer,
     task: &henge_core::taskvm::Task,
@@ -903,35 +918,50 @@ const MOON_AT: (i32, i32) = (119, 12);
 
 /// The screen between one day and the next.
 ///
-/// **Recovered:** the backdrop, the moon and its corner, and the heading. The
-/// routine at 0x8e5b draws `NextDayMes`, whose string is `NDM` (`Next Day`) at
-/// y 95, and then blits cel `[0x8989]` of `KI.CEL` at (119, 12) over the night
-/// sky the select screen also uses. `[0x8989]` is `Moons[MoonCount]`, which is
-/// tonight's phase.
+/// **Recovered:** the backdrop, the moon and its corner, and the chain. The
+/// routine at 0x8e5b is:
+///
+/// ```text
+/// 08e5b  call 0x5b65                    ; fade out
+/// 08e5e  call 0x8e3f                    ; CH.PIV back onto the page
+/// 08e61  call 0x5a66                    ; and onto the screen
+/// 08e64  les si, [0x8915]; mov [0x8981], si; mov [0x8983], es   ; BOLD.F
+/// 08e70  mov si, 0x8dea; call 0x7a86    ; NextDayMes, the chain walk
+/// 08e76  les si, [0x891f]               ; KI.CEL
+/// 08e7a  mov ax, [0x8989]               ; Moons[MoonCount], tonight's cel
+/// 08e7d  mov bx, 0x77; mov cx, 0xc      ; at (119, 12)
+/// 08e83  call 0x5d7f                    ; the cel blit
+/// 08e86  call 0x5a3e                    ; page flip
+/// 08e89  mov si, 0x80bb; call 0x5b44    ; fade in
+/// ```
+///
+/// `NextDayMes` (image 0x1b19a) is **two** records: `Next Day` centred at y
+/// 95 and then the shared `Press fire to continue` record at DS:0x5dd, y 182,
+/// which is the same record `HengeInstruct` ends on. `henge_core::message`
+/// holds it as `next.day`, and `NextWHICH+35` is `WaitFIRE`.
 ///
 /// **Nothing else is on it.** A day number, and one of the fourteen `WaitMES`
 /// hints, used to be. The fourteen belong to `WAITMESSAGE`, which is a different
 /// screen: `MESSAGE.PIV` with the chain over it, shown while a disk is read, and
 /// its four callers are `PracticeCombat5`, `InitKnightvsDemon`, `SetUpDKL` and
-/// `LoadWizard`. The routine at 0x8e5b walks `NextDayMes` and blits one cel, and
-/// there is no second chain, no number and no note anywhere in it.
+/// `LoadWizard`.
 ///
-/// The heading is drawn in its own indices rather than flattened to one colour.
-/// `TextP` hands a glyph to the same blitter every other cel goes through, and
-/// `CH.PIV` carries the bold face's five entries: black at 5, then `fed`,
-/// `dc9`, `c95`, `832` at 9 to 12. Flattened, `Next Day` came out as a row of
-/// blobs with its counters closed.
-const HEADING_Y: i32 = 95;
-
+/// The lines are drawn in their own indices, because `TextP` hands a glyph to
+/// the same blitter every other cel goes through, and `CH.PIV` carries the
+/// bold face's five entries: black at 5, then `fed`, `dc9`, `c95`, `832` at 9
+/// to 12.
 pub fn draw_interlude(
     reg: &mut Registry,
     fb: &mut Framebuffer,
     fonts: &Fonts,
     phase: henge_core::moon::Phase,
+    chain: Option<&henge_core::message::Message>,
 ) {
     show(reg, fb, "scene.ch");
-    sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
-    if let Some(bold) = fonts.bold {
-        bold.draw_own_centred(reg, fb, "Next Day", HEADING_Y);
+    if let (Some(bold), Some(chain)) = (fonts.bold, chain) {
+        for line in chain.shown() {
+            bold.draw_own_centred(reg, fb, &line.text, line.y);
+        }
     }
+    sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
 }

@@ -100,11 +100,50 @@ built: the mudmen's prefix is `Mudmen`, not `Mudman`, and their fourteen scripts
       authored frame lists are deleted. Verified against the `tools/taskvm.py` composites
       by eye, and by a traced duel that still resolves
 
-**Still to do here**: the other three attacks (`SwChop`, `SwLunge`, the thrusts) and
-the up and down walks, which wait on 46; `TASKSHADOW`, which no knight script uses;
-playing `Effect::Sound` and the sound gosubs through `henge-audio`, which still derives
-its cues from state changes. `CONTROLTABLE` is uninitialised data and not in the load
-image, so which script a state plays is ours and lives in `actors.json`.
+**Still to do here**: `TASKSHADOW`, which no knight script uses; playing `Effect::Sound`
+and the sound gosubs through `henge-audio`, which still derives its cues from state
+changes.
+
+**Which script a state plays is recovered, and read out of the image at bake time.** The
+tables are `BSS`, filled by `SetKnightAnims` (image 0x1771, which zeroes them and falls
+into `SetUpKnight` at 0x1786) and `SetMonsterAnims` (0x186b); `SetKnightSwTables`
+(0x1f6a) and each creature's `Set*Tables` then point the actor record at them. `henge_
+formats::tables` runs those routines through an interpreter of the dozen instructions
+they use and resolves every word through the symbol table, so `actors.json` carries:
+
+```
++0x10  the stance         scripts["idle"]          Knight_SwStance
++0x12  the recovery       scripts["recover"]       Knight_SwRecover
++0x16  KnightAttSw        attacks[kind].script     2 lunge, 4 swing, 6 knife, 8 block,
++0x1a  KnightDamSw        attacks[kind].damage     0xa rear thrust, 0xc up thrust,
++0x14  KnightHitSw        hurt_by[kind]            0xe evade, 0x10 chop
++0x1e  KnightBloSw        blocks[kind]             4 -> 8, 2/0xa/0x10 -> 0xe
++0x1c  KnightWalSw        scripts["walk"], ["walk_up"], ["walk_down"]  rows +0, +0x10, +0x20
+```
+
+Which attack the joystick picks is `KnightAttack` (0x4098) through `Rjoystick` (DS:0xc32)
+and `Ljoystick` (0xc48), transcribed in `Attack::for_direction`; which walk row a
+direction plays is `ControlKnight`'s `A1$` to `A4$` (0x3fd6 to 0x4012): up sets 0x10,
+down 0x20, left or right 0, in that order, so the last bit set wins, and `MoveU`/`MoveD`/
+`MoveR`/`MoveL` (0x4e39, 0x4e64, 0x4e09, 0x4dd5) do the same for a creature. That is
+`ActorDef::walk_row`, and the fighter now plays `Knight_SwWalkU1..4` walking straight up
+and `Knight_SwWalkD1..4` straight down. The blow taken is `KnightHitSw[attacker's +0x28]`
+(`KnightSAnim`, 0x44b9), and the death is where that script's own `TASKDEAD` goes:
+`Knight_SwDeath` from both `Knight_SwWaistHit` and `Knight_SwShoulderHit`. The one thing
+still chosen is what fire with no direction does: slot 0 of `KnightAttSw` is the stance in
+the original, and it is the swing here so one button fights.
+
+`KnightDamSw[0x10]` is four, the same as the swing; the chop's doubling is `CalcDamage`'s
+own `shl ax, 1` at 0x2d9d, after strength and the sword are added, and `Bout::blow` now
+does exactly that instead of carrying an eight in the table. `CalcDamage` is reached only
+by a knight's blows and by `KnightStruck1`'s, so a creature's chop is not doubled: a
+trogg's is `TroggDamAxe[0x10]`, three (`TroggStruck1+36`, 0x42e7).
+
+Two fights rewrite the knight's hit table before they start and the pack does not carry
+that yet: `InitKnightvsDemon` (0x2765) puts `Knight_SwSlapped` in `KnightHitSw[0x10]`, and
+`InitKnightvsDragon` (0x2448 to 0x2457) puts `Knight_SwShoulderHit` in `[2]`, `Knight_Burn`
+in `[4]` and `[0x10]`, and `Knight_SwSlapped` in `[0xa]`. The dragon's `Knight_Burn` is
+item 36's.
 
 **Unlocked**: all eight creatures, shadows, gore, correct sorting.
 
@@ -251,7 +290,30 @@ All 386 files decode. See `FORMATS.md`.
 
 ## 2.3 Text `done`
 
-`TEXTPRINT`, `TEXT`, `TEXTCONVERT`, `FONTBUFFER`. Glyph order read off the artwork.
+`TEXTPRINT`, `TEXT`, `TEXTCONVERT`, `FONTBUFFER`. Glyph order read off the artwork, and
+since confirmed against `GFX:TextASCII` (8.5).
+
+**A glyph is a cel and nothing translates it.** `GFX:TextP` at 0x7aee looks the cel up
+(`sub al, 0x20; mov di, 0x8006; add di, ax; mov al, [di]`), reads its width and height out
+of the current font bank (`les si, [0x8981]`), takes three off the width when the record's
+flag word carries bit 3, and calls the blit at 0x5d7f that every other cel in the game
+goes through. There is no ink and no colour table in the path, and no code anywhere in
+`MAIN.EXE` writes the bold face's five entries: the only `0xfed`, `0xdc9`, `0xb95` and
+`0x842` immediates in the code are creature colours. So a line means whatever the loaded
+palette says its indices mean, and the original chooses where it writes. The bold face
+(`BOLD.F`, bank slot `DS:0x8915`, drawn in 5 and 9 to 12) goes over `MESSAGE.PIV` and
+`CH.PIV`, which reserve those five; the small face (`SMALL.FON`, slot `DS:0x8905`, drawn
+in index 1 alone) goes over the map, where index 1 is white. Which is current is the far
+pointer at `DS:0x8981`: the place-entry dispatch at 0xc7f sets the small face before it
+jumps to any place, and the three message routines, the title loader and the between-days
+screen set the bold one.
+
+`henge` used to translate each glyph's indices into the nearest colour of whatever palette
+was loaded, off a `palette` field on the sheet in the manifest. Both are gone, and the recipe was stepped so the pack rebakes:
+the original has nothing of the kind, and the translation was wrong where it did
+something, sending the small face's index 1 to the map palette's nearest purple. Over an
+arena, which the original never writes on, a line now reads in the arena's own 5 and 9 to
+12, which is what `--say` shows.
 
 The tail of each bank has now been read the same way. Both fonts run on past the letters
 with `#`, `$`, `%`, a blank, an apostrophe and then one more that differs: a diagonal
@@ -467,14 +529,14 @@ hardware. Nothing to port. Listed so the symbol list is complete.
 | `KnightHitSw`, `KnightDamSw`, `*Hit`, `*Dam`, `KnightSAnim`, `CalcDamage` | blow taken and damage by kind | done, as `hurt_by` and `attacks` on every actor; `CalcDamage`'s strength and sword are item 40 |
 | `CheckBlock`, `blockflag`, `KnightBloSw` | blocking | **done**, recovered; `KnightBloSw` is the block table |
 | `KnightHitNormal`, `KnightHitKnight`, `TroggHit`, actor `+0x12` | the recovery a landed blow cuts a swing into | done as `State::Recover` |
-| `SWORDFLAG`, `TakeSword` (0xccd4), `DisplayMSword` (0xc70c), actor `+0x40` | weapon state, drawn and sheathed | **as far as it goes, and it does not go far.** `SWORDFLAG` is a `PUBLIC` name with no address, sitting between `DRAGON` and `PLAYERPOINTER` in the blob, and nothing in the image has been found that reads or writes it. There is **no sheathed animation set**: every one of the knight's 38 scripts is `Knight_Sw*`, so drawn and sheathed is not something the shipped game can draw. The weapon state the code does keep is `+0x40`, the sword's item id, which `CalcDamage` (0x2d7d, 0x2d86, 0x2d8f) reads for its 2, 3 and 5, and which `TakeSword` writes: 0x19 to the knight who lifts the magic sword and **0x16 to the other one**, which is the only place a sword is taken away. That is `Knight::weapon` and it is built; the temple gadget that calls `TakeSword` belongs to the status screen |
+| `SWORDFLAG`, `TakeSword` (0xccd4), `DisplayMSword` (0xc70c), actor `+0x40` | weapon state, drawn and sheathed | **as far as it goes, and it does not go far.** `SWORDFLAG` is a `PUBLIC` name with no address, sitting between `DRAGON` and `PLAYERPOINTER` in the blob, and nothing in the image has been found that reads or writes it. There is **no sheathed animation set**: every one of the knight's 38 scripts is `Knight_Sw*`, so drawn and sheathed is not something the shipped game can draw. The weapon state the code does keep is `+0x40`, the sword's item id, which `CalcDamage` (0x2d7d, 0x2d86, 0x2d8f) reads for its 2, 3 and 5, and which `TakeSword` writes: 0x19 to the knight who lifts the magic sword and **0x16 to the other one**, skipped on `StatTYPE` 2 (0xcce7) because a lair floor is not a knight. That is `Knight::weapon` and it is built: on a lair page the sword goes into the hand and not into the pack (`Run::take_from_lair`), and `GoldSell` (0xce91) writes 0x16 back when the temple buys it |
 | `ControlBlackKnight` (0x4b79), `BKnightMove` (0x4bd3), `BKnightAttack` (0x4c13), `BKBlock` (0x4c40), `_evadechop` (0x4cad), `BKAttack` (0x4cc3), `BKnightStruck` (0x4d50), `BlackKnightStruck` (0x4d7f), `BKnightHit` (0x4da8), `BKnightHitKnight` (0x4dc6), `Progression` (DS:0x7c01) | the knight the machine plays | **done**, translated block for block; see 3.2 |
 | `KnifeThrow`, `ControlKnife`, `Knife`, `SpeedKnife`, `KnifeDam`, `SetKnightEquipment` | the thrown dagger | **done**, as a `Missile` in the bout |
 | `BLOW` | a landed blow | done as `HitEvent`; a stopped one is a `Parry` |
 | `GORESWITCH` (DS:0x700), `OSWITCHES`, `GOREOPT` | the gore switch | **done**: the title row toggles it, `Bout::bloodless` carries it |
 | `AddBlood`, `Blood1`, `BloodFile`, `BLOODBUFFER` | blood | done: the spray at the strike point on bank table 4, from the three `*Struck` that call it |
 | `DeCapFLAG`, `SetDecapFLAG`, `Knight_SwDeCap`, `Knight_SwCollapse`, `MudmenStruck1`, `KnightKnightStruck1`, `TroggChopHead` | the finisher on a fallen knight | done; the plain opponent comes in for it with the gore on |
-| `Knight_Explode`, `TrollOHead`, `TroggSpear_Toss`, `DrDropHead`, `DrDropClaws` | the creatures' own finishers | mostly done. The trogg comes in for the head with the gore on, and so does the computer knight (`BKnightAttack+0x18`, 0x4c2b, with no gore test and no cooldown of its own). **`TrollOHead` (0x4397) is built**: a troll's overhead chop that takes the last of a knight's hit points plays `Knight_Explode` rather than laying him down, and only the chop does. **`TroggSpear_Toss` is built**: `TroggHit+12` (0x2f59) has the spear, and only the spear, pick a dead player knight up on the point with the gore on, taking his own task away (0x2f86) so the corpse is drawn inside the toss. `DrDropHead` and `DrDropClaws` are the dragon's and are not; Balok's landing is not |
+| `Knight_Explode`, `TrollOHead`, `TroggSpear_Toss`, `DrDropHead`, `DrDropClaws` | the creatures' own finishers | mostly done. The trogg comes in for the head with the gore on, and so does the computer knight (`BKnightAttack+0x18`, 0x4c2b, with no gore test and no cooldown of its own). **`TrollOHead` (0x4397) is built**: a troll's overhead chop that takes the last of a knight's hit points plays `Knight_Explode` rather than laying him down, and only the chop does. **`TroggSpear_Toss` is built**: `TroggHit+12` (0x2f59) has the spear, and only the spear, pick a dead player knight up on the point with the gore on, taking his own task away (0x2f86) so the corpse is drawn inside the toss. **`DrDropHead` and `DrDropClaws` are built**: 3.3. Balok's landing is not |
 | `Order`, `DS:0x783a`, `+0x28` | a creature naming its own script and kind rather than pressing a button | **done**, item 37 |
 | `ALLDEAD` | everyone down | done as `Bout::settled` |
 | `KNIGHTREFRESH`, `KNIGHTLOC`, `KNIGHTBUFFER`, `ENEMYBUFFER` | actor state | done as `Fighter` |
@@ -524,6 +586,7 @@ stat block. These are recovered and in the pack:
 | `KnightDamSw`, `TroggDamAxe`, `TroggDamHammer`, `RatmenDam`, `TrollDam`, `MudmenDam`, `BalokDam`, `DragonDam` | damage by attack kind | done, on each actor as `damage` |
 | actor record `+0x38`, `+0x3c`, `+0x52`, `+0x54`, `+0x56`, `+0x35`, `+0x18` | health, maximum, approach, back-off, plane, kind, bank table | done, and the tracker reads all three ranges |
 | `TroggWALKR`/`U`/`D`, `TrollWALKR`, `MudmenWALK`, `BKnightWALKR`/`U`/`D`, `BeastChargeOffsets` | pixels moved per walk frame | read; speeds set from them |
+| `K_WalkRValue` (DS:0x77fe: 25, 3, 23, 4), `K_WalkUpValue` (0x7808: 2, 9, 2, 9), `K_WalkDownValue` (0x7810: 8, 2, 9, 2) | the player's knight's step per walk frame, indexed by `+0xa` in `KnightWalkRight` (0x4048), `KnightWalkUp` (0x4067) and `KnightWalkDown` (0x4080) | read, **not built**: the fighter walks `speed_x` pixels every tick, two, which is twelve a frame against the table's average of nearly fourteen, and the same every frame where the original strides long and short by turns. Moving once a frame by the table entry is the literal thing and is still ours to do |
 | `MonsterTrack`, `CheckZAxis`, `CheckXAxis`, `FaceKnight`, `MonsterWalk`, `NextWalk` | the tracker: close to `+0x52`, retreat inside `+0x54`, same plane within `+0x56` | **done**, transcribed, as `monster::track` |
 | `FaceKnight` (0x3cf3), the controller tail (0x2d52, `mov dh, [di+8]`), `TASKHANDLE` (0x9741, `mov [di+0x14], dh`), `ADDTASK` (0x968a), `perdone` (0x99d5), `TASK_FLIP` (0x9a6d), `TASKLEFT` (0x9864), `MoveBACK` (0x5783), `ControlKnight` (0x3f77, 0x3f86) | which way a fighter faces, how it reaches the task, and how the blit mirrors | **done**, each link translated with its listing; `BUILD_ORDER.md` item 37 walks the chain. A creature is turned by `FaceKnight` and by nothing it does while walking |
 | `ControlTrogg` (0x2ddf) to `TroggChop` (0x2eff), `TroggStruck+3` (0x2f1c), `TroggHit+8` (0x2f55), `DeCapFLAG` (DS:0x7841) | the trogg, whole | **done**, translated block for block: ten frames of stance after a blow and the next on the eleventh (`sub; jmp` at 0x2eb1, not the demon's `sub; jne`), the count forgotten when struck and restarted at ten when a blow lands, the flag raised on the decision to finish |
@@ -599,8 +662,21 @@ stat block. These are recovered and in the pack:
       `HitDelay` was a per-creature cooldown here and is one word for the whole fight,
       which is what the code says
 
-- [ ] The dragon's own two, `Dragon_BitKnight` and `DrDropHead`, and `DrDropClaws`
-      with them
+- [x] The dragon's own two, `Dragon_BitKnight` and `DrDropHead`, and `DrDropClaws`
+      with them. `DragonHit2` (0x3ad5) is the bite's `+0xc` branch: `cmp word [di+0x28],
+      2`, the knight's task killed and his record freed by the routine at 0x96c9
+      (`Fighter::vanish`), `dragonbodge3` raised, and `Dragon_BitKnight` (0x46f8) put on
+      in the bite's place, which `TASKHANDLE` does on the frame after the touch whether
+      or not the bite has ended, so `Bout::dragon_bites` replaces the script there and
+      then. The chewing calls `KillKnight` (0xab2) at 0x47b6 and `StopCombat` at 0x4880.
+      `Dragon_Dead` (0x3e40) calls `DrDropHead` (0x3bd2) at 0x3e76, which finds the
+      head's task and does `add word [di+6], 0x26`, thirty eight rows down the screen
+      (`brain.height += 0x26`), `StopCombat` at 0x4030, and `DrDropClaws` (0x3be1) at
+      0x4088, which writes `0xffff` into `DEAD_CLAWS`; `ControlClaw` (0x3b24) reads it
+      on its next pass and leaves `[0x783a]` at nought, the task killed
+      (`Act::Vanish`). `KillKnight` itself is `mov si, [0x8979]; mov word [si+0x38],
+      0xffff`, the player's own record whoever called it; it used to name the caller's
+      nearest foe, which had `Knight_BurnDeath`'s call kill the dragon
 - [x] **Waves (item 38).** All of it reads and all of it is transcribed in
       `henge_core::wave`. Four words of BSS carry it: `TotalMonsters` (DS:0x96a),
       `MaxMonsters` (0x96c), `NumberInCombat` (0x96e) and `SIDE` (0x970), with `INITMO`
@@ -664,25 +740,36 @@ stat block. These are recovered and in the pack:
       than the table says. The rows and the counts are carried on each creature's own
       definition, so a pack decides; nothing in the engine matches on an id
 
-## 3.3 The dragon `done, but for the map flight`
+## 3.3 The dragon `done`
 
 `BATTLEDRAGON`, `DRAGON`, `DRAGONOVER`, `DRAGONFLAG`, `DRAGONDEADFLAG`, `LOADDRAGON`.
 
 A distinct set-piece encounter with its own state machine, not an ordinary bout, and
-all of it reads. `InitKnightvsDragon` (0x2438) places the head at x 80 and z 100 and
-then builds two more actors through `FindTABLE`, `Claw1TABLE` and `Claw2TABLE`, at
-x 5 and ten rows either side of the head; `DragonMoveClaw1` keeps them there.
+all of it reads. `InitKnightvsDragon` (0x2438) places the head at x 80, forty rows up
+and z 100 on the fixed record at DS:`0x6e26`, and then builds two more actors through
+`FindTABLE`, `Claw1TABLE` and `Claw2TABLE`, at x 5 and ten rows either side of the
+head; `DragonMoveClaw1` (0x3bb4) keeps them there. **The dragon is not an opponent
+that walks up to you: it comes down on you.** From the second moon on, `MapEffects`
+(0xa545) puts it in the air at the start of every turn, `DragonWander` flies it across
+the map at the row of a knight it rolled for, and `DragonEncounter` starts the fight
+the frame its shadow covers him. The whole of it is transcribed, the fight in
+`monster.rs` and `bout.rs` and the flight in `dragon.rs`, and the two magic items that
+act on it are wired.
 
 | Original | What it is | Status |
 |---|---|---|
-| `ControlDragon`, `DragonMove`, `DragonMoveLow`, `DragonHeadMove` | the head lifts inside 140 and lowers outside it, over the 13 and 9 frames `[di+0x4a]` counts, walking the `DragonWal` rows at +0x10 and +0x20 | **done** |
-| `DragonFLAGS` | 0x10 a head move running, 0x20 the head is up, 0x40 breathing, 0x80 the knight has landed a blow | **done**, as `monster::flag` |
-| `Dragon_LiftHead1`, `Dragon_LowerHead1` | swap the stance itself by writing `Dragon_HighStance` or `Dragon_Stance` into `+0x10` | **done**, as `Act::Stand` |
-| `DragonAttack`, `DragonLowAttack`, `AddDragonFIRE`, `Dragon_Fire` | breath high past seventy or once struck, bite closer, breath low with the head down; the fire is a task of its own on `DRAGON5.CEL` | **done** |
-| `TrackKnight` | the head inside a corridor 30 to 100 wide, following him in depth, and tracking to two pixels while it breathes | **done** |
-| `ControlClaw`, `ClawHit`, `ClawStruck`, `DEAD_CLAWS`, `DrDropClaws` | the claws slap inside x 100, take no damage at all, and die with the dragon | **done** |
-| `DragonStruck`, `DragonHit2`, `DragonDam`, `Knight_Burn`, `Knight_SwSlapped` | what a blow does either way, with the rows `InitKnightvsDragon` overwrites for this fight | **done**; `Dragon_BitKnight`, the chewing, is not |
-| `Dragon_Flight1`..`8`, `DrBuffer`, `DrAnim`, `_MAP:InitDragon`, `ContinueDragon`, `DragonWander`, `DragonTRACK` | the dragon over the map | bank **recovered**, flight not flown |
+| `ControlDragon` (0x3843), `DragonMove` (0x386c), `DragonMoveLow` (0x38ff), `DragonHeadMove` (0x3979) | inside 140 the head lifts and outside it lowers, and each is a **jump**: `DragonMove+68` (0x38af) fills `JUMPD` with the head's position, x1 100, the knight's own row and a height of -70 over 13 frames (rise 0x50), `DragonMoveLow+43` (0x3929) -30 over 9 (rise 0x78), and `ADDJUMP` starts it. `DragonHeadMove` counts `+0x4a` down, clears bit 0x10 on the pass it reaches nought, steps the row five toward him (`cmp; jl` with no band, so on his row it rocks), calls `ControlJump` and stores `bx` and `dx` (the arc's own z is not stored), and walks the `DragonWal` row at +0x10 or +0x20 capped at seven | **done**, on `jump.rs`, translated block for block with the listings beside the code |
+| `DragonFLAGS` (DS:0x7786) | 0x10 a head move running, 0x20 the head is up, 0x40 the high breath is playing, 0x80 the knight has landed a blow | **done**, as `Shared::dragon` and `monster::dragon_flag`, the global it is |
+| `DDIS` (0x778a), `dragonbodge1`..`3` (0x77ec, 0x77ee, 0x77f0), `DEAD_CLAWS` (0x77f4) | the distance `DragonMove+13` (0x387a) measured, the two frames of nothing between breaths (0x3a10, 0x3a51), the bite's mark for `ControlKnight+21` (0x3ed7), and the claws' end | **done**, on `Shared` |
+| `Dragon_LiftHead1`, `Dragon_LowerHead1` | swap the stance itself by writing `Dragon_HighStance` or `Dragon_Stance` into `+0x10` (`TASKSAVE`, 0x4200 and 0x433c) | **done**: `monster::dragon_stance` reads the bit the same pass raises, which names the same script |
+| `DragonAttack` (0x39da), `DragonLowAttack` (0x3a51), `AddDragonFIRE` (0x3afc), `Dragon_Fire` | nothing for a fallen knight (0x39e3) or off his plane (0x39ec). Head up and `DDIS` over seventy, or bit 0x80 up whatever the distance: `Dragon_HighBreath`, kind 0x10, bit 0x40, and the fire as a task of kind 0x14 fifty five along, five rows deeper, at no height, facing right (0x3b0d..0x3b20); inside seventy, `Dragon_HighBite`, kind 2. Head down: `Dragon_LowBreath`, kind 4, whose own weapon parts cross the arena, and no fire task | **done**. The low breath used to start a fire task too; it does not |
+| `TrackKnight` (0x3be8) | `MonsterTrack` on the head's record, then `+8` forced to 1, five right if that stays under a hundred (0x3c31), five left if that stays over thirty (0x3c44), five up or down a row; and with bit 0x40 up the ranges are two and one for the call and put back after. **The restore is wrong in the original**: `DRN` and `DCL` (0x3c02, 0x3c08) both take `+0x52`, so `+0x54` comes back as sixty and stays there | **done**, as `monster::track_knight`, the spoiled back-off included (`Shared::dragon_ranges`). Also run by `TASKGOSUB` from inside both breaths, five times each (0x4448, 0x4130), which `Bout::track_knight` does |
+| `ControlClaw` (0x3b24), `DragonAlive` (0x3b6a), `ClawStruck` (0x3b8d), `ClawHit` (0x3b96), `CLAWS_DEAD` (0x3b61) | `Dragon_ClawSlap`, kind 0xa, at a standing knight on its plane at x 100 or under; the stance when struck, with no damage; `Dragon_ClawDead` once the head's hit points are gone (0x3b51); and its task killed once `DEAD_CLAWS` is `0xffff` | **done**, as `Act::Vanish` for the last. `ClawHit`'s `SLAP` words feed `KnightSLAP`, which is not built |
+| `DragonStruck` (0x3a73), `DragonHit2` (0x3ad5) | a knight's blow: bit 0x80, `CalcDamage`, `Dragon_Hit`, `AddBlood`; a knife: bit 0x80, `Dragon_Hit`, a flat three (0x3acf); anything else, nothing. The bite that touches him: see the repertoire above | **done**, `Bout::dragon_struck`, `dragon_blow`, `dragon_bites` |
+| `DragonStruck1` (0x43ad), `DragonFire1` (0x43c2), `ClawStruck1` (0x43d3), `TalismanWrym` (0x43f4), the rows `InitKnightvsDragon+9` (0x2441) writes | what the knight takes: twenty for the bite, thirty for either breath and the fire, ten for a claw, each through the talisman; the head's own blows put him on the head's row less one (0x43b3); the rows are `Knight_SwShoulderHit` for kind 2, `Knight_Burn` for 4 and 0x10 (whose `TASKDEAD` is `Knight_BurnDeath`), `Knight_SwSlapped` for 0xa. `DragonDam` is never read for a knight | **done**, `Bout::dragon_struck_knight`; the numbers are the dragon's `attacks` rows in the pack, and `Knight_Burn` and `Knight_SwSlapped` are in the knight's script set now |
+| `Dragon_Flight1`..`8`, `DrBuffer`, `DrAnim`, `DR_XADD`..`DR_WALK` (DS:0xcd50..0xcd5b), `TrackCNT` (0xccae), the flags at 0xccb0 and 0xccb2, `_MAP:InitDragon` (0xa571), `ContinueDragon` (0xa5b3), `DragonWander` (0xa66b), `DragonTRACK` (0xa691), `DragonDONE` (0xa6b1), `CheckEncounterDone+128` (0x816), `DragonEncounter` (0xa3e2), the routine at 0xcf6 and `_dragon_won` (0xd23) | the dragon over the map: see `henge_core::dragon` | **done**. `DR_YADD` is one in the load image and nothing writes it, so it tracks its target's row a pixel a frame; `DragonEncounter`'s first test, `cmp word [0xccb2], -1; js`, is never taken |
+| `KnightWyrm` (0xabe8), `MagicCast` slot 0x10 (0xcb60), `StatusDone` (0xbe50), `WyrmFLAG` | the Scroll of the Wyrm | **done**, as `Virtue::Wyrm` and `Cast::Wyrm`. The knight picker's page (`StatTYPE` 0xb) is not built, so the seat the cast takes is the first `NextKnight` (0xc913) offers |
+| `DisplayDragon` (0xc6ea), `WhoLived+57` (0xaf7) for a dragon | the dragon's hoard: what it takes off a knight it kills and shows on `StatTYPE` 0xa to the one who kills it | **not built**: the page is laid out (`status::display_dragon`) and nothing reaches it |
 
 **The flight's loader is found, and the record was wrong about which bank it is.**
 `_MAP:ContinueDragon` builds `DrBuffer` at DS:`0xccbc` by writing the far pointer at
@@ -704,9 +791,9 @@ in the pack as the dragon's table 5; `tools/taskvm.py --actor dragon_flight` dra
 |---|---|---|
 | `LOADMAP`, `MAKEMAP`, `MAP_CMP`, `MAP_CHANDLE` | the map | done |
 | `MAPLOCATE`, `POX`, `POY` | position | done, and the token's top-left as the original stores it |
-| `CHECKENCOUNTERS`, `ENCOUNTERAREA` | ambushes | ours, not theirs |
+| `CHECKENCOUNTERS`, `ENCOUNTERAREA` | what the token stands on | **done**: no address for either name, but the only encounter test the map has is `CheckGROOC` (0x653) and the walk at 0x6b5, and it is an overlap, not a roll. There are no ambushes |
 | `CHECKY`, `CHECKY2` | movement validity | done as `MapSLOW` and `HawkBorders` |
-| `FINDWHICH`, `WHICH`, `DISTAN`, `MAX_DISTAN` | proximity | partial |
+| `FINDWHICH`, `WHICH`, `DISTAN`, `MAX_DISTAN` | whose turn, and how far | **done**: `[0xcc96]`, `[0xcc98]`, `[0xccac]`, `GoTheDistance` (0xa422), `NextWHICH` (0xa434), `DistanceDONE` (0xa4b2) |
 | `LANDSCAPE`, `LANDTYPE`, `LANDFILE` | terrain type | **done, from the real table** |
 | `SCROLL`, `PAN` | scrolling | **settled: the map does not scroll** |
 
@@ -723,10 +810,70 @@ guess behind it was a second answer to a question that has one.
 
 **`CHECKY`/`CHECKY2` are answered, and the answer is that nothing is impassable.**
 `_MAP:MapSLOW` is a second grid on the same index holding a two-bit mask, and
-`_MAP:CheckSLOW` refuses a step when `SlowDELAY & mask` is not zero. The step is still
-charged to the day before it is thrown away, so hard ground costs time rather than
-blocking. Forest and marsh are half speed, the mountain spine a quarter, and the only hard
-edge is the rectangle `_MAP:HawkBorders` clamps the token into.
+`_MAP:CheckSLOW` (0xa728) refuses a step when `SlowDELAY & mask` is not zero:
+
+```
+0a73c  call GetIndex                 ; CalcKnGrid, row * 40 + col
+0a73f  mov  si, MapSLOW / mov al, [bx+si]
+0a744  or   al, al / je ret          ; open going: the counter does not move
+0a749  inc  word [SlowDELAY]
+0a74d  mov  dx, [SlowDELAY] / and dx, ax / je ret
+0a755  mov  word [SlowFLAG], 1
+```
+
+The step is still charged to the day before it is thrown away (`MapMovement`, 0xa37e,
+`inc word [0xcc98]` and only then `cmp word [SlowFLAG], 0`), so hard ground costs time
+rather than blocking. What the table holds, read out of DS:`0xc42a`: 382 open cells, 308
+of mask 1, 165 of 2, 145 of 3. Mask 1 refuses every other frame, 2 two frames in four, 3
+three in four. Every forest cell but eight is 1, so the forest is half speed; the wastes
+are 0, 2 and 3 in roughly equal measure, so the spine is a quarter in places and half or
+open in others; the swamp is 89 open, 57 of 1, 45 of 2 and 29 of 3, so "marsh is half
+speed", which this file used to say, was not true of most of it. The top row is 3 and the
+two side columns 2 whatever the ground. The only hard edge is the rectangle
+`_MAP:HawkBorders` (0xa9a9) clamps the token into, and **a step into it is charged as
+well**: `MapMovement` has counted before `FOLLOW` (0xa29f) calls `HawkBorders`, which
+clears the direction bit rather than the step.
+
+**The day is a distance, and nothing on the road is rolled.** `[0xcc98]` counts held
+frames, `[0xccac]` is how many the turn gets, and `GoTheDistance` (0xa422) ends the turn
+when the first reaches the second, before `FOLLOW` walks that frame, so the step that
+spends the distance is not walked. `DistanceDONE+12` (0xa4be) fills `[0xccac]` at every
+turn's start and every return to the map: `mov al, [di+0x3e]; shl ax, 1` four times, and
+once more when the haste flag `[0xcca2]` is set, so the opening knight's stride of six is
+ninety six frames. `NextWHICH` (0xa434) clears the three effect flags through 0xa962,
+zeroes `[0xcc98]`, steps `WHICH` and masks it with 3; when it wraps it calls the routine
+at 0x1148, which has no name in the symbol table:
+
+```
+0115b  add  word [0x898b], 1          ; the day of the moon
+01160  cmp  word [0x898b], 3 / jle AdjustTIME
+01167  add  word [0x5b1], 1           ; the computer knight's nerve, read in BKnightMove
+0116c  mov  word [0x898b], 0
+01172  add  word [MoonCount], 1 / and word [MoonCount], 7
+01183  call GiveBK                    ; the ratman's bite takes its life point
+0118d  mov  ax, [MoonCount] / mov di, Moons / mov al, [di+ax]
+0119a  mov  word [0x8989], ax         ; tonight's moon cel, for the screen at 0x8e5b
+AdjustTIME:                           ; five records: grudge down ten, toad down one,
+                                      ; health up (missing >> 2) | 1
+```
+
+then the between-days screen at 0x8e5b (`NextDayMes`, the moon cel at (0x77, 0xc)),
+`WaitFIRE` and `FADEOUTDAY`. henge's one knight is the whole of `WHICH`, so every turn's
+end is a day's end. **Every encounter ends the turn**: `Combat+60` (0x38d) and
+`EncounterAllDone` (0x113e) both do `mov ax, [0xccac]; mov [0xcc98], ax`, and a village
+(`EncounterDone`, 0x1138), a town (`CEXIT+6`), the wizard (`Wizard+9`), the circle
+(`Henge+122`), the Valley (`FightDemon+47`, `+108`) and the dragon (`_dragon_won`) all
+come back through the second, so the next frame's `GoTheDistance` turns the day.
+
+**There is no ambush.** Nothing between `PlayerKnight` (0xa355) and `DistanceDONE` rolls.
+Every fight the map starts is something the token is standing on with fire pressed over
+it: `ScrollINPUT` tests `JOYS & 0x10` (0xa3c9) and calls `DisplayStack` (0xae27), whose
+`StackDecision` (0xae9f) hands kind 1 or 0x21 (a rival, or his grave) to `Combat+102`,
+kind 2 (a lair) to `ClearCombat+22` (0x574) and every other icon to `TakingMoon+45`
+(0xc7f). The two things that come to you are other tokens: a rival's challenge
+(`BKCollision`, 0xaab1) and the dragon (`DragonEncounter`, 0xa3e2). The one in ninety roll
+per step, the two hundred and twenty step day, the healing per step, the cutpurse and the
+baker's table of which creature each ground produced were all ours, and all are gone.
 
 **The location graph is half recovered.** `_MAP:KnightGoesToTown` carries Highwood at map
 (94, 47) and Waterdeep at (297, 157), and cross-checks them against grid cells (12, 7) and
@@ -774,10 +921,13 @@ and which `TakingMoon` sends all four frames to (0xc99 to 0xcb6):
 0112e  cmp  byte [si+0x31], 3      ; his life points
 01132  jge  EncounterDone
 01134  add  byte [si+0x31], 1
-01138  mov  ax, 9 / call ColourStatus   ; and straight back out to the map
+01138  mov  ax, 9 / call ColourStatus   ; EncounterDone
+0113e  mov  ax, [0xccac] / mov [0xcc98], ax   ; EncounterAllDone: the day's distance, spent
 ```
 
-One life point, three is the ceiling, nothing is paid and no day passes. No backdrop is
+One life point, three is the ceiling, nothing is paid, and the rest of the day's walk is
+the price: `EncounterDone` runs straight on into `EncounterAllDone`, and the map's next
+frame turns the day. This file used to say no day passed, which was wrong. No backdrop is
 loaded anywhere on that path, so a village is a line on the paper and not a screen, and
 henge opens it where the traveller stands.
 
@@ -789,8 +939,24 @@ henge opens it where the traveller stands.
       one of them at the original's own coordinates. Nothing is ours
 - [x] The four home villages, one per knight, `MapIconsTABLE` frames 0x15 to 0x18 at
       (18, 11), (286, 11), (0, 187) and (303, 192), gated on `[di+0x20]` by `CheckGROOC`
-      (0x732) and worth one life point up to three (`ForestVillage`, 0x112a). The
-      between-days screen's `Visit your home village to restore lost lives` is now true
+      (0x732) and worth one life point up to three (`ForestVillage`, 0x112a), at the
+      cost of the rest of the day (`EncounterAllDone`, 0x113e). The between-days
+      screen's `Visit your home village to restore lost lives` is now true
+- [x] The day as the original measures it: `[0xcc98]` against `[0xccac]`, the stride
+      byte times sixteen, every held frame counted whether the ground or the edge took it,
+      the spending step not walked, every encounter spending the rest. The ambush roll and
+      the fixed-length day that stood here were ours and are gone
+- [ ] The three computer knights. **Recovered and not built.** `InitGameStart` (0x1c0d)
+      fills all four records at DS:0x6c9e as kind 8 (`ControlBlackKnight`), `[+0x20] = 4`,
+      named `Enemy1Name` to `Enemy4Name`, at (15, 100), (300, 100), (160, 20) and (160,
+      180); `ChooseKnight` makes the first `NUM_PLAYERS` of them people and `InitKnights`
+      (0x157) moves those to their villages. `_MAP:DisplayOtherKnights` (0xa22c) draws the
+      other three every frame, frame `[si+0x20]` (the purple fifth token for a computer
+      knight), 0x21 for a grave, `+0x2b` for a toad; `MapLOOP+19` gives each a turn through
+      `KnightXP`, `KnightHeal`, `FindKnight`, `KnightAquire`, `KnightWyrm`, `KnightHaste`,
+      `KnightSupplies`, `KnightGoesToTown`, `BKCollision` and `TrackLair`. Drawing them
+      where `InitGameStart` left them would be right for one day and wrong after, so they
+      wait for their turns to be built, and the grave with them
 - [ ] Pillaging a dead rival's grave (`kngrave`, `StackMessages[0x21 - 0x15]`,
       `Pillage knight's grave`). **Recovered and not built, because there is nobody to
       pillage.** It is not a place: `MOON:CheckEncounterDone` (0x798) walks the other three
@@ -1048,8 +1214,13 @@ moonstone whose night it is; `MOON:Henge` ends the game for a knight standing in
 circle with it. The first is live. The other two are built and cannot fire until something
 hands out a moonstone, which is 7's. It does now.
 
-**What is ours**: the eight bytes of `MOON:Moons`, which are in the stale part of DGROUP,
-so the cycle is five pictures over eight steps waning and waxing back. **Nothing else.** A
+**The eight bytes of `MOON:Moons` are read**: DS:0x5a9, image 0x12959, `2d 2f 2e 30 31 30
+2e 2f`, indexed by `MoonCount & 7` at `EncounterFini+0x49` (0x118d: `mov ax, [MoonCount];
+mov di, Moons; add di, ax; mov al, [di]; cbw; mov [0x8989], ax`). Drawn in the select
+screen's palette, cel 0x2e is the gibbous and 0x2f the half, so the original's cycle is
+full, half, gibbous, crescent, sliver, crescent, gibbous, half: the two middle pictures
+are out of order and the code is what runs. `henge_core::moon::MOONS` is that table and
+the invented monotone `CYCLE` is gone. **Nothing is ours here now.** A
 day number and one of the fourteen `_LOADER:WaitMES` hints used to be drawn under the
 heading; the fourteen belong to `WAITMESSAGE`, which is a different screen shown while a
 disk loads, and the routine at 0x8e5b draws one chain and one cel and nothing besides.
@@ -1153,16 +1324,17 @@ goes on the map picture, and this is the fourth.
 **What was removed with it**: a status bar across the bottom of the map, a purse plate in
 the top corner, a cutpurse notice beside it, and flat one-colour silhouettes of `MI.C`
 frames 0x15 and up, which are one-pixel outlines the original blits nowhere. `MAP.CMP` is
-one 320x200 picture and nothing else is on it. What a cutpurse took is said in the box the
-original says things in, `OCCURMESSAGE`, since the map has no line to put it on.
+one 320x200 picture and nothing else is on it. The cutpurse whose notice that was has
+since gone too (4.1).
 
 | Original | What it is | Status |
 |---|---|---|
-| `TAVERN`, `TavernOpenScene`, `TavernLoop`, `LeaveTavern`, `SetBET` | the tavern | done: the five painted stakes, and an empty purse turned out at the door |
-| `DICE`, `RollDice`, `DiceSort`, `DiceWinner`, `DiceODDS`, `DDICE`, `BET` | a dice game | done, and **recovered, not designed** |
-| `HEALER`, `HealDon`, `ExitHealer`, `InitDonation` | restore health | done: the town healer takes a donation and spends it down. There is no other healer; a hermit in the woods who took days was ours and has been removed |
-| `TEMPLE`, `TTemple`, `SellToTemple`, `GoldSell` | temple services | done for selling; the moonstone counter is a two-knight trade, see 7 |
-| `MYSTIC`, `MysticUpDown`, `MysticAbility`, `MysticJudge`, `DonationTAB` | mystic services | done |
+| `TAVERN`, `TavernOpenScene`, `TavernLoop`, `LeaveTavern`, `SetBET` | the tavern | done: the routine at 0xb007's six gadgets on `TAV.PIV`'s parchment, the hand shaking beside them, `SetBET` at the handler, and an empty purse turned out at the door (0xb00b) and at the way back from the dice (`TavernOpenScene`, 0xb103). The menu that stood over the parchment is gone |
+| `DICE`, `RollDice`, `DiceSort`, `DiceWinner`, `DiceODDS`, `DDICE`, `BET` | a dice game | done, and **recovered, not designed**; `dice.piv` is the result's picture, loaded by `RollDice+22` and nothing else |
+| `HEALER`, `HealDon`, `ExitHealer`, `InitDonation` | restore health | done: 0xba66 is the healer (not `MysticUpDown+39`): `HEA.PIV`, `Heal1a`, `WaitFIRE`, the bowl, `HealDon`, the verdict. No menu in front of the bowl. There is no other healer; a hermit in the woods who took days was ours and has been removed |
+| `TEMPLE`, `TTemple`, `SellToTemple`, `GoldSell`, `BuyMoonstone`, `SellMoonstone` | the high temple | done: the status panel on type 6 (`HTEM+9`, 0xeb1), buying on the right of `PointerX` 0xa0 and selling on the left (`TTemple`, 0xce11), against the temple's own stock at DS:0xed96, moonstones and keys included. The list of `Sell` lines that stood for it is gone |
+| `MYSTIC`, `MysticUpDown`, `MysticAbility`, `MysticJudge`, `DonationTAB` | mystic services | done: 0xb935 is the mystic (not `_bestow_done+7`), the same shape as the healer over `MYS.PIV` |
+| `MERC`, `DisplayMerchant`, `BuyGoods`, `BuyArmour`, `BuyWeapon`, `BuyDagger` | the merchant | done: the status panel on type 5 (`MERC+9`, 0xea2), six gadgets in the right arch and `HotGadget`'s 0xa arm. The stall with a list of lines is gone |
 | `STONEHENGE`, `MOON:Henge`, `HengeControl`, `HengeWait` | the stone circle | done, and the winning branch fires now that section 7 hands out a moonstone |
 | `CONTROLWIZARD`, `WIZBESTOW`, `GETABILITY`, `BESTOWGOLD`, `BESTOWMAGIC`, `WIZBestowGold`, `WIZBestowMagic`, `WIZBestowAbility`, `MagicRND` | the wizard grants gold, magic, abilities | done, all four outcomes and the grudge |
 | `LOADHIGHWOOD`, `LOADHW`, `LOADWATERDEEP`, `LOADWD`, `LOADCITY`, `LOADREGION` | town loading | done as scenes |
@@ -1203,10 +1375,18 @@ slot twice running. The fourteen `WizardText` lines are cycled by `WIZGOLD_CNT` 
       calls `DiceRND` (0xb21d) on the frame `DiceTHROW` reaches 2, which is why the faces
       are not on the screen before then. `henge_core::dice`, and the two scripts and
       `dice.cel` are baked (recipe 21).
-      **One difference, and it is this pack's place graph rather than the routine:** the
-      five stake gadgets belong on `dice.piv` where `load_DiceBACK` adds them, and here
-      they are still the tavern screen's menu, so the shake shows its last frame on the
-      way into the throw rather than looping while a stake is chosen
+      **The picture under the hand is `TAV.PIV`, and the stake gadgets are on it.** The
+      note that stood here had them on `dice.piv`, and the shake showed its tail into the
+      throw rather than looping while a stake was chosen; that was the menu's doing.
+      `Tav1` (DS:0xce0f) is `tav.piv`, loaded by 0xaff3 from `TavernOpenScene+22`; `Tav2`
+      (DS:0xce17) is `dice.piv`, loaded by 0xaffd from `RollDice+22` (0xb24a) and nowhere
+      else; the six gadgets are added at 0xb053 to 0xb0e5, before `TavernOpenScene`, and
+      never cleared while the tavern is up. So the hand loops on the table beside the
+      painted stakes, and the dice picture is where the faces and the `WIN` or `LOST`
+      chain go, with `DiceWait` (0xb31c) holding it twenty retraces and then `WaitFIRE`
+      before `DiceRND+3` runs back into `TavernOpenScene`. Built that way: `henge_core::
+      town::Tavern`, `henge_desktop::town`; the tavern menu and the dice room are deleted.
+      Build order item 85
 - [x] `HengeControl` and `HengeLOOP`, the circle's own set piece: `ColourEn4Knight`,
       the thunder, and `Knight_LiftMagic`. `henge_core::stones`, `--stones`
 - [x] The donation bowl the healer and the mystic both take their fee through.
@@ -1220,7 +1400,13 @@ slot twice running. The fourteen `WizardText` lines are cycled by `WIZGOLD_CNT` 
       in their own boxes, `YGOL` `Your Gold` at (2, 0xbe) and `Don` `Donation` right
       aligned at (0x106, 0xbe), with `GOLDP` at (0x14, 0xaf) and `DONATION` at (0x120,
       0xaf). Three fixed amounts stood here and the comment beside them admitted they were
-      ours; they are gone
+      ours; they are gone. `BAG` is the `ax` `InitDonation` is called with, 1 from the
+      healer (0xbaba) and 0 from the mystic (0xb989), and `Don` is drawn with `cx` 4,
+      which `TextPTop` (0x7ad0) takes as right against `TextRightBorder` (0x140) and not
+      against the 0x106 in `ax`. Both are so now. The `Donate` and `Back` menu that stood
+      in front of the bowl is gone: 0xba66 and 0xb935 write the greeting, `WaitFIRE`, and
+      go straight to `InitDonation`, and a held fire pours coins two retraces apart
+      (`AddDonation+15`, `mov ax, 2; call 0xafeb`)
 - [x] The two town front doors, which are five gadgets over the painted parchment.
       `MOON:InitHighWood` (0xec9) and `InitWaterDeep` (0xf4a) each clear the table and add
       five 64-wide boxes with `+8` zero, so they say nothing, and `+0xe` 1 to 5;
@@ -1230,8 +1416,12 @@ slot twice running. The fourteen `WizardText` lines are cycled by `WIZGOLD_CNT` 
       0x86, 0xb6, heights 0x10, 0x10, 0x10, 0x1f, 0xc. `HIGHWOOD.PIV` already has `Visit /
       Merchant / Tavern / Healer / High Temple / Exit` painted down that strip, so henge's
       own panel and its own words are off it now
-- [ ] The mouse gadgets the merchant, the tavern and the temple are really made of, which
-      is item 53. The merchant and the temple are `_STATUS` panels, not rooms: see 8.3
+- [x] The mouse gadgets the merchant, the tavern and the temple are really made of, which
+      is item 85. `MERC+9` (0xea2) is `mov ax, 5; call 0xbdd3` and `HTEM+9` (0xeb1) is
+      `mov ax, 6; call 0xbdd3`, so the merchant and the high temple are two pages of the
+      status panel, reached from the town and coming back to it through `HWINIT`; the
+      tavern is the six gadgets at 0xb053. See 8.3 for the two pages and item 85 for all
+      five doors
 
 ---
 
@@ -1249,7 +1439,7 @@ gem. What is left here is the quest's own tokens, which are section 7's.
 | `CAST_MAGIC`, `MagicCast`, `MagicName`, `MagicPrices` | casting | done, from the character sheet as the original does it from the status screen |
 | `DRINKPOTIONHEAL` | potions | done, as an item virtue in the data |
 | `BESTOWGOLD`, `BESTOWMAGIC`, `GETABILITY` | acquisition | done: off the fallen, out of a lair, and over the wizard's balcony |
-| `TAKEFROMKNIGHT` | losing items | done: spent when used, taken by a cutpurse, and given to the druids |
+| `TAKEFROMKNIGHT` | losing items | done: spent when used and given to the druids. The cutpurse was ours and is gone; the routine's own callers are `TakeGold`, `TakeArmour` and `TakeALL` (0xb8e to 0xbc5), a rival's pillage, which waits on the rivals |
 | `AdjustLevel`, `XPlevels` | levelling | done: three `Increase` gadgets on the sheet, lit as `0xd3a7` lights them |
 
 **The ten magic slots are the seam between the engine and the pack**, and they have to
@@ -1272,10 +1462,13 @@ and a test in the baker asserts it.
 - [x] Curses: the backfired scroll, and the wizard's toad, which costs the three turns
       `NextWHICH` refuses it
 - [x] The hawk and the gem
-- [ ] Two of the ten are still inert, and honestly so: `TalismanWrym` shifts the dragon's
-      fire right once per talisman and floors it at five, and the Scroll of the Wyrm sets
-      `WyrmFLAG` so `KnightWyrm` can send the dragon after a rival. Both act on the
-      dragon, and the dragon's set piece is 3.3
+- [x] The two that act on the dragon: `TalismanWrym` (0x43f4) shifts the dragon's blow
+      right once per talisman in the magic record's slot 8 and floors it at five, which
+      `monster::talisman_wrym` is and `Bout::dragon_blow` applies off `Fighter::talismans`,
+      the count the world reads out of the kit; the Scroll of the Wyrm is `MagicCast`
+      slot 0x10 (0xcb60), `WyrmFLAG` up and the knight picker, and `StatusDone` (0xbe57)
+      writing the seat picked into the dragon's `+0x46`, which `Virtue::Wyrm` does on
+      the run's own `dragon`. See 3.3
 - [x] `INITCURSEHAWK` (0xa98a), the hawk that drops you somewhere you did not choose:
       `call RND; and ax, 0xff; [si+0x5c] = ax + 0x20` across and
       `call RND; and ax, 0x7f; [si+0x5e] = ax + 0x24` down. `MagicCast` at 0xcb42 makes
@@ -1283,8 +1476,10 @@ and a test in the baker asserts it.
       and twenty eight, 0xa975 otherwise. `Run::lost_and_found`
 - [x] The moonstones, which the Valley of the Gods hands out for four keys. Section 7.
       The prices every counter knows (`Buy Moonstone for 20 GP`, `Sell Moonstone for 10
-      GP`, `Buy Key for 12 GP`, `Sell Key for 6 GP`) are on the items, and no counter in
-      a one-knight run will take them, because that page is a trade between two knights
+      GP`, `Buy Key for 12 GP`, `Sell Key for 6 GP`) are `MagicPrices[0x16]` and `[0x14]`,
+      and the high temple takes them: `TTemple` at 0xce3a and 0xce66 sends `STPL` 0x16
+      and 0x14 to `BuyMoonstone` and `SellMoonstone`, which move the bit between the
+      knight's record and the temple's stock
 
 ---
 
@@ -1399,7 +1594,7 @@ is `Tally`, which holds the ending and the seat, and `Tally::code`.
 | `MOON:Henge`, `KnightWonGame`, `VICTORY` | winning | done: `OCCURMESSAGE`, `WaitFIRE`, and the exit byte |
 | `MOON:WhoLived`, `_MAP:CheckEncounterDone`, `GameOverMes` | losing | done: five life points, `INSTRUCTMESSAGE`, `WaitFIRE`, then the title |
 | `_STATUS:StatCheckKeys` | the keys on the sheet | done, its own cels and x spacing |
-| `_STATUS:BuyMoonstone`, `SellMoonstone`, `pu18`, `se18` | the moonstone counter | **not built**: it is a trade between two knights' records, and a run has one knight |
+| `_STATUS:BuyMoonstone`, `SellMoonstone`, `pu18`, `se18` | the moonstone counter | done: it is `TTemple`'s bit-field arm (0xce5a, 0xce60), a trade between the knight's record and the temple's own stock at DS:0xed96, not between two knights. `Run::trade_at_temple` |
 | `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`, `PINDEX` | scoring | no addresses anywhere, so there is nothing to build and nothing is built |
 
 - [x] The four keys, one per lair, and the door they open
@@ -1429,10 +1624,10 @@ is `Tally`, which holds the ending and the seat, and `Tally::code`.
 |---|---|---|
 | `LOADTITLE`, `DoOptions`, `Selection`, `Adjplayers`, `TitleMes` | title screen and its option list | done |
 | `LOADCHOOSE`, `ChooseKnight`, `ChooseRefresh`, `FindChosen`, `ChooseFIRE`, `Chosen`, `choose_knight` | character select | done |
-| `TypeName`, `NameDone`, `GNAME`, `BNAME`, `ENAME`, `RNAME` | typing your own name over the knight's | **todo** |
+| `TypeName`, `NameDone`, `GNAME`, `BNAME`, `ENAME`, `RNAME` | typing your own name over the knight's | done, transcribed: `henge_core::shell` (`TypeName` at 0x13f0, `ScanKEYS` 0x142e, `NameDone` 0x14bb) |
 | `STATUSDISPLAY`, `V_STATUS`, `STATFLAG`, `DisplayKnight`, `SetUpStatus` | the status panel | done |
 | `DisplayMagic` (0xc38e), `StatCheckKeys` (0xc44e), `StatPlaceScroll` (0xc633) | the magic, the keys and the moonstones on every knight's own sheet | done; `DisplayKnight` falls through into the first of them |
-| `DisplayLair` (0xc67f), `DisplayDragon` (0xc6ea), `DisplayMerchant` (0xc7ad), `DisplayMSword` (0xc70c), `DisplayGold` (0xc743), `DisplayAquire` (0xc8ce) | the panel's other pages | built as routines and laid out by `status::lay_out`; **no screen reaches them yet**, because they want a second party and henge has one traveller |
+| `DisplayLair` (0xc67f), `DisplayDragon` (0xc6ea), `DisplayMerchant` (0xc7ad), `DisplayMSword` (0xc70c), `DisplayGold` (0xc743), `DisplayAquire` (0xc8ce) | the panel's other pages | built as routines and laid out by `status::lay_out`. The lair's page, the merchant's (type 5, from `MERC`) and the temple's (type 6, from `HTEM`, `DisplayMagic` and `DisplayMSword` over the temple's own stock) are reached; the dragon's and the acquisition's want a second party |
 | `MovePointer`, `SHOWPOINTER`, `POINTERBUFFER` | mouse pointer | done |
 | `ADDGADGET`, `CLEARGADGETS`, `CHECKGADGET`, `GadgetSlot`, `AddIconGadget`, `HotGadget`, `AddClickSound` | clickable UI widgets | done |
 | `LOADICONS`, `ICONBUFFER`, `ICONMEMORY` | UI icons | done for the panel's own |
@@ -1692,9 +1887,23 @@ same shape and it is the row labels, cels 38, 39, 40 at x 41 and 41, 42, 43 at x
 `OffsetValues` is `{9, 3}`, and for those two `DisplayPillars` sets `StatsOffset` to `0x4a`
 *and* starts the walk at `SingleData`, so it draws two pillars and one arch, shifted 74 to
 the right: pillars at x 74 and 222 with the knight centred between them. Type 9 is the
-plain character sheet and type 3 is the temple. Every other type takes both tables at
+plain character sheet and type 3 is the stone circle's offering (`Henge+74`, 0x109a, is
+`mov ax, 3` and the panel; nothing in a town passes 3, and this doc used to call it the
+temple). Every other type takes both tables at
 offset 0, which is three pillars at 0, 148 and 296 and two arches, one party in each; the
 right hand one is then drawn at `StatsOffset` `0x96`.
+
+**Every caller of the panel's entry at 0xbdd3, and the type each passes**, from a scan
+of every `call` in the image: `Knight1Won+9` 1, `LairGEM+3` 2, `Henge+74` 3,
+`MERC+9` and `WMERC+9` 5, `HTEM+9` 6, `_dragon_won+36` 0xa, and 9 from `BothKnightsDied`,
+`KnightProtection`, `ClearCombat`, `Wizard`, `WDLOOP+86`, `HWLOOP+86`, `EncounterDone`
+and `ScrollINPUT+24`. So **the merchant and the high temple are pages of this panel**:
+type 5 puts `DisplayMerchant`'s six goods in the right arch with `Purchase` lines and
+`Identify` on the left, and type 6 puts the temple's own stock (DS:0xed96, `ReDisplay`
+0xbf66) there with `Purchase` lines and `Sell` on the left. Fire on the first is
+`BuyGoods` (0xcd33); on the second every magic gadget, either side, is `TTemple` (0xce11),
+which reads the pointer's x against 0xa0 to tell a sale from a purchase. Both come back to
+the town through `HWINIT`. Build order item 85.
 
 henge drew the two-arch furniture on the plain sheet, which left an empty arch on the right
 of every character sheet, and put a menu of its own in it: eleven rows of nine pixels
@@ -1900,7 +2109,29 @@ to `BOLD.F`, walk the chain and fade. They differ by one thing each:
 |---|---|---|---|
 | `WAITMESSAGE` | 36524 | nothing | reads `WaitMES[WaitCOUNT]`, steps it, wraps at fourteen |
 | `OCCURMESSAGE` | 36587 | a chain | the standard fade |
-| `INSTRUCTMESSAGE` | 36631 | a chain | installs its own six-word palette ramp (0x800, 0x600, 0x400, 0, 0x200, 0x100) first, so it arrives in another colour |
+| `INSTRUCTMESSAGE` | 36631 | a chain | writes six words into the picture's palette first, so it arrives in another colour |
+
+**The instruction ramp is recovered, and it is palette entries 1 to 6.** `INSTRUCTMESSAGE`
+at 0x8f17 is `OCCURMESSAGE` with six stores between the chain walk and the fade in:
+
+```text
+08f38  mov si, 0x80bb                 ; the loaded picture's own palette, 32 words
+08f3b  mov word ptr [si + 2], 0x800   ; entry 1
+08f40  mov word ptr [si + 4], 0x600   ; entry 2
+08f45  mov word ptr [si + 6], 0x400   ; entry 3
+08f4a  mov word ptr [si + 8], 0       ; entry 4
+08f4f  mov word ptr [si + 0xa], 0x200 ; entry 5
+08f54  mov word ptr [si + 0xc], 0x100 ; entry 6
+08f59  call 0x5a3e                    ; page flip
+08f5c  mov si, 0x80bb; call 0x5b44    ; the sixteen-step fade in, from that palette
+```
+
+`DS:0x80bb` is where `0x8761` leaves a picture's palette after reading its header, and
+`MESSAGE.PIV` keeps its four purples at 1 to 4 and black at 5, so an instruction comes up
+with the stone circle in red and the ring round each letter a very dark red. It lasts one
+message: the next `OCCURMESSAGE` or `WAITMESSAGE` calls `0x8e90`, which calls `0x8761`,
+which reads the palette out of the picture again. `henge-desktop/src/shell.rs` writes the
+same six entries (`INSTRUCT_RAMP`) into the framebuffer's palette before the fade in.
 
 **Which door shows which was recovered rather than assigned.** Scanning the code for calls
 to each of the three gives every caller: `WAITMESSAGE` from `PracticeCombat5`,
@@ -1913,14 +2144,58 @@ pile, the two cities greet you, and the circle instructs you, and that is what `
 `MESSAGE.PIV` turned out to be the stone circle in silhouette against a purple night sky
 with black under it, which is exactly a box to write in.
 
-**The text that survived, and the text that did not.** The fourteen wait chains, the city
-welcome (`WelHigh1a`..`e`, one chain with the city's name swapped into its last record by
-each caller), `_TAVERN:HengeWait` and `TitleMes` all read cleanly and are quoted verbatim
-with their own coordinates. `HengeInstruct`, `GameOverMes`, `NoKeysMessage` and
-`SHMES1`..`SHMES8` sit below `DS:0b5a`, inside the 2,906 bytes of DGROUP the unpacked image
-held as a stale copy of another region, so **their words were not readable and none of
-them is guessed at**. That span reads now (`REVERSING.md`) and these four have not been
-re-read out of it.
+**Every chain is quoted from the image now.** The fourteen wait chains, the city welcome
+(`WelHigh1a`..`e`, one chain with the city's name swapped into its last record by each
+caller), `_TAVERN:HengeWait` (image 0x1f10c) and `TitleMes` (0x1b17c) read cleanly from
+the start. `HengeInstruct`, `GameOverMes`, `NoKeysMessage`, `ValleyEnter`, `VICTORY` and
+`SCR_PRO` sit below `DS:0b5a`, in the span the unpacked image used to hold as a stale
+copy, and have been walked out of it since it was recovered:
+
+```text
+HengeInstruct  0x129f9  To be granted a / longer life you must / offer an item of  /
+                        magical nature to Danu     y 75, 95, 115, 135, all centred
+               0x1298d  Press fire to continue     y 182, the record at DS:0x5dd
+SCR_PRO        0x12965  <the knight's name> / may use their / Scroll of protection /
+                        to avoid this battle       y 55, 75, 95, 115, then DS:0x5dd
+VICTORY        0x12a21  You have completed / the quest       y 75, 95
+NextDayMes     0x1b19a  Next Day                   y 95, then DS:0x5dd at y 182
+```
+
+`SHMES1`..`SHMES8` (0x12a35, 0x12a45, 0x12a5a, 0x12a6c, `_TAVERN`'s 0x1f1e7 and
+0x1f1fa, 0x12a83, 0x12a96) are not records: they are the strings `HengeInstruct`,
+`HengeWait` and `VICTORY` point at. `SCR_PRO`'s first record points at `promes0`, an
+eighteen-space buffer `KnightProtection` copies the knight's name into (0x502 to 0x510)
+before the call. `NextDayMes` is two records, not one, and the second was missing from
+the between-days screen here until it was walked. The three worded outcomes the druids
+used to have in `henge_core::service` are gone: `Henge` says nothing after the offering
+page, `noswap` puts `HengeWait` up and loads the ceremony over it, and a win is
+`KnightWonGame`'s `VICTORY`.
+
+**What takes a box down is the caller's, and there are two shapes.** None of the three
+routines waits: each returns after the fade in. Scanning the image for every call:
+
+```text
+0x0518 KnightProtection+48   INSTRUCTMESSAGE   0x051b call 0x8251  WaitFIRE
+0x061a 0x617 (game over)     INSTRUCTMESSAGE   0x061d call 0x8251
+0x0fdb Valley+16             OCCURMESSAGE      0x0fde call 0x8251
+0x1028 FightDemon+68         INSTRUCTMESSAGE   0x102b call 0x8251
+0x108b Henge+56              INSTRUCTMESSAGE   0x108e call 0x8251, 0x1091 call 0x5b65
+0x1111 KnightWonGame+66      OCCURMESSAGE      0x111a call 0x8251
+0x8fbb bac+54                INSTRUCTMESSAGE   0x8fc0 call 0x8251   (the disk prompt)
+
+0x8e18 LoadWasteBack+143     OCCURMESSAGE      0x8e35 load the city, 0x8e3b fade out
+0x8e2f LoadWasteBack+166     OCCURMESSAGE      the same
+0xb375 noswap+31             INSTRUCTMESSAGE   0xb37d load Hen1.p, 0xb3d2 fade out
+0x0133, 0x2743, 0x291f, 0xb531   WAITMESSAGE   a load, every time
+```
+
+`WaitFIRE` at 0x8251 is `call 0x81ec; test bx, 0x10; je` until fire is down and then
+the same until it is up, and every caller of the first shape fades out after it (0x5b65
+directly, or through `0xa554`, which ends on it). So `henge_core::message::Until` is
+carried on every chain: `Fire` waits, with no timer, and goes out on the sixteen-step
+fade when fire is pressed; `Loaded` covers a disk read, which nothing here does, so it
+holds for `henge-desktop`'s `LOAD_TICKS` and fire does nothing to it. A timer used to
+clear every box after 260 ticks, and nothing in the original does.
 
 Every one of the fourteen ends on `Loading...` at y 182 in the bold face, because in the
 original the box is up while a disk is read. The table keeps that line and the drawing

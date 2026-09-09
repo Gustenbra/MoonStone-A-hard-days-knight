@@ -1,4 +1,4 @@
-//! The overworld: travel, the day cycle, and where a fight comes from.
+//! The overworld: travel, the day's distance, and the ground under your feet.
 //!
 //! **Recovered.** The original keeps the world in two byte grids inside
 //! `MAIN.EXE`, both 40 columns wide over the 320x200 map picture, one cell to
@@ -22,9 +22,15 @@
 //! With `y` bounded at 190 the row index reaches 25, which is why the terrain
 //! grid is 26 rows and not 25.
 //!
-//! The colour classifier below it is what this used before the tables were
-//! recovered. It is kept only as a fallback for a pack that has no grid in it,
-//! and it is never used when one is present.
+//! What `MapSLOW` holds, read out of the image at DS:`0xc42a`: every forest
+//! cell but eight is mask 1, which refuses every other frame; the wastes are
+//! 0, 2 and 3 (2 refuses two frames in four, 3 three in four); the swamp is
+//! mostly open with patches of all three; and the map's own border, the top
+//! row and the two side columns, is 3 and 2. There is no impassable ground.
+//! The row past the table's end, which `CalcKnGrid` can index, is the first
+//! row of `MapType`, and it reads 0 and 6.
+//!
+//! The day is a distance, not a clock: see [`Overworld::travel`].
 
 use serde::{Deserialize, Serialize};
 
@@ -164,14 +170,33 @@ pub struct Step {
     pub moved: bool,
     /// The ground refused the step this tick. The clock still moved.
     pub bogged: bool,
-    /// Something jumped out.
-    pub encounter: bool,
+    /// The step spent the last of the turn's distance, and the day turned.
+    /// `_MAP:GoTheDistance` (0xa422) into `NextWHICH` (0xa434): the step is
+    /// counted and the day is over before `FOLLOW` would have walked it, so
+    /// the token did not move on this tick.
+    pub turn_over: bool,
 }
 
-/// Serializable because a save is a serialization of the simulation, and where
-/// the traveller stands and what day it is are as much of it as the purse:
-/// `seed` included, so a reloaded run is robbed on the same step a continued
-/// one would have been.
+/// Where the traveller stands, how far he has walked today and how far he
+/// may. Serializable because a save is a serialization of the simulation,
+/// and where the traveller stands and what day it is are as much of it as
+/// the purse.
+///
+/// **Recovered, and nothing here is rolled.** The original has no ambush on
+/// the road. The map loop (`_MAP:MapLOOP`, 0xa306, to `DistanceDONE`, 0xa4b2)
+/// calls nothing that rolls, and every fight the map can start is a thing the
+/// token is standing on: `_MAP:StackDecision` (0xae9f) hands a rival knight
+/// or his grave to `Combat+102` (0x3b7), a lair to `ClearCombat+22` (0x574)
+/// and every other icon to `TakingMoon+45` (0xc7f), and it is only reached
+/// from `ScrollINPUT` with fire held (`test ax, 0x10` at 0xa3c9). The dragon
+/// (`DragonEncounter`, 0xa3e2) and a rival's challenge (`BKCollision`,
+/// 0xaab1) are the two things that come to you, and both are other tokens.
+/// `CHECKENCOUNTERS` and `ENCOUNTERAREA` in the public list carry no
+/// address; the only encounter test the map has is `MOON:CheckGROOC` (0x653)
+/// and the walk at 0x6b5 that `FOLLOW` calls, which overlap the token with
+/// the icons and push what it stands on, and neither rolls. The one in
+/// ninety roll per step and the two hundred and twenty step day that stood
+/// here were ours, and are gone.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Overworld {
     /// The traveller's token, by its top-left corner on the map picture. This
@@ -179,17 +204,28 @@ pub struct Overworld {
     /// what `_MAP:SHOW` passes straight to the sprite blitter.
     pub x: i32,
     pub y: i32,
+    /// Which day of the quest it is. The original keeps no such number; it
+    /// keeps `[0x898b]`, the day of the moon, and `MoonCount`, both of which
+    /// the run's [`crate::moon::Moon`] carries. This is the count of times
+    /// the routine at 0x1148 has run, for the trace and the save to read.
     pub day: u32,
-    /// Steps taken today. The original ties encounters and the moon to a day
-    /// cycle; this keeps the same shape without guessing at its numbers.
+    /// `[0xcc98]`: the distance walked this turn. `_MAP:MapMovement` (0xa37e)
+    /// does `inc word [0xcc98]` on every frame a direction is held, and it
+    /// does so *before* it looks at `SlowFLAG` and before `FOLLOW` looks at
+    /// the border, so a refused step and a step into the edge both count.
     pub steps: u32,
+    /// `[0xccac]`: how far this turn may go. `DistanceDONE+12` (0xa4be)
+    /// writes it at the start of every turn and on every return to the map:
+    /// `mov al, [di+0x3e]; shl ax, 1` four times, then `shl` once more when
+    /// `[0xcca2]` (haste) is set. So it is the knight's stride byte times
+    /// sixteen, which [`crate::run::Run::day_steps`] computes; the caller
+    /// writes it here the way `DistanceDONE+12` does, and it is zero until
+    /// that has happened, which in the original is before the first frame.
     pub steps_per_day: u32,
-    /// One in this many steps triggers an encounter.
-    pub encounter_odds: u32,
-    /// `_MAP:SlowDELAY`. Advances only while standing on ground that is not
-    /// open, which is what makes the mask a rhythm rather than a probability.
+    /// `_MAP:SlowDELAY` (DS:`0xcd4a`). Advances only while standing on ground
+    /// that is not open, which is what makes the mask a rhythm rather than a
+    /// probability.
     pub going_counter: u32,
-    seed: u32,
 }
 
 impl Overworld {
@@ -199,31 +235,13 @@ impl Overworld {
             y,
             day: 1,
             steps: 0,
-            steps_per_day: 220,
-            encounter_odds: 90,
+            steps_per_day: 0,
             going_counter: 0,
-            seed: 0x1a2b_3c4d,
         }
     }
 
-    /// Small xorshift. Deterministic, seedable, and enough for encounter rolls.
-    fn next_random(&mut self) -> u32 {
-        let mut s = self.seed;
-        s ^= s << 13;
-        s ^= s >> 17;
-        s ^= s << 5;
-        self.seed = s;
-        s
-    }
-
-    pub fn set_seed(&mut self, seed: u32) {
-        self.seed = seed | 1;
-    }
-
     /// A fingerprint of where the traveller is and when, for a save to check
-    /// itself against. The seed goes in with the rest, because two travellers
-    /// standing on the same square with different seeds are not in the same
-    /// place in the same game.
+    /// itself against.
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for v in [
@@ -232,9 +250,7 @@ impl Overworld {
             self.day as i64,
             self.steps as i64,
             self.steps_per_day as i64,
-            self.encounter_odds as i64,
             self.going_counter as i64,
-            self.seed as i64,
         ] {
             h ^= v as u64;
             h = h.wrapping_mul(0x1000_0000_01b3);
@@ -242,11 +258,26 @@ impl Overworld {
         h
     }
 
-    /// Days spent standing still: under a healer, or waiting somewhere out of
-    /// the rain. Travel is not the only thing that moves the calendar.
+    /// Days that pass without a step: the turn a toad does not get.
+    /// `_MAP:NextWHICH+89` (0xa48d) is `cmp byte [si+0x3a], 0; jg NextWHICH`,
+    /// so a knight under the wizard's curse is passed over and the day turns
+    /// without him.
     pub fn pass_days(&mut self, days: u32) {
         self.day += days;
         self.steps = 0;
+    }
+
+    /// `MOON:EncounterAllDone` (0x113e): `mov ax, [0xccac]; mov [0xcc98], ax`.
+    ///
+    /// Everything the map can send you into comes back through it: the end of
+    /// `Combat` (0x38d, the same two moves), a village (`EncounterDone`,
+    /// 0x1138, falls into it), a town (`CEXIT+6`, 0xe11), the wizard
+    /// (`Wizard+9`, 0xcf0), the circle (`Henge+122`, 0x10cd), the Valley
+    /// (`FightDemon+47` and `+108`) and the dragon (`_dragon_won`, 0xd32 and
+    /// 0xd56). So whatever you did, the rest of the day's distance is spent,
+    /// and the next frame's `GoTheDistance` turns the day.
+    pub fn end_turn(&mut self) {
+        self.steps = self.steps_per_day;
     }
 
     /// The terrain the traveller is standing on.
@@ -254,51 +285,125 @@ impl Overworld {
         land.terrain_at(self.x, self.y)
     }
 
-    /// Move, advance the clock, and report what happened.
+    /// One frame of the map loop for the player's knight, in the original's
+    /// order, which is `MapLOOP` (0xa306) from `PlayerKnight` (0xa355) round
+    /// to `DistanceDONE` (0xa4b2).
     ///
-    /// The order is the original's. `_MAP:CheckSLOW` runs every tick, whether
-    /// or not a direction is held, so the delay counter keeps its rhythm while
-    /// you stand still in a bog. `_MAP:HawkBorders` cancels a direction that
-    /// would leave the map *before* the step is counted, which is why walking
-    /// into the edge costs nothing at all. A step that the ground refuses still
-    /// costs the day: `_MAP:MapMovement` increments its step counter and only
-    /// then throws the direction away.
+    /// ```text
+    /// PlayerKnight:
+    /// 0a355  call CheckSLOW             ; every frame, held or not
+    /// 0a358  sub bx, bx
+    /// 0a35a  call 0x81ec                ; the stick, into bx
+    /// MapMovement:
+    /// 0a35d  mov [JOYS], bx
+    /// 0a361  cmp word [0xcc9e], 0; jne  ; aloft: no step is counted
+    /// 0a368  cmp word [0xcca0], 0; jne
+    /// 0a36f  and bx, 0xf; je            ; no direction held: no step
+    /// 0a374  mov si, [0x77e8]; cmp word [si+0x20], 4; je   ; not for a rival
+    /// 0a37e  inc word [0xcc98]          ; the step is counted here...
+    /// 0a382  cmp word [SlowFLAG], 0; je
+    /// 0a389  mov word [JOYS], 0         ; ...and only then thrown away
+    /// GoTheDistance:
+    /// 0a422  mov ax, [0xcc98]
+    /// 0a425  cmp ax, [0xccac]
+    /// 0a429  jge NextWHICH              ; the day is over; nothing is walked
+    /// DistanceDONE:
+    /// 0a4b2  call FOLLOW                ; HawkBorders, then the move
+    /// 0a4b5  call SHOW
+    /// ```
+    ///
+    /// and `FOLLOW` (0xa29f) is `call HawkBorders` and then one `inc` or `dec`
+    /// of `[si+0x5c]` and `[si+0x5e]` per direction bit still set, so a step
+    /// into the edge is counted by `MapMovement` and then not walked.
+    ///
+    /// `CheckSLOW` (0xa728):
+    ///
+    /// ```text
+    /// 0a728  mov word [SlowFLAG], 0
+    /// 0a72e  cmp word [0xcca0], 0; jne ret     ; aloft: no slow ground
+    /// 0a735  cmp word [0xcc9e], 0; jne ret
+    /// 0a73c  call GetIndex                    ; CalcKnGrid, row * 40 + col
+    /// 0a73f  mov si, MapSLOW; mov al, [bx+si]
+    /// 0a744  or al, al; je ret                ; open going
+    /// 0a749  inc word [SlowDELAY]
+    /// 0a74d  mov dx, [SlowDELAY]; and dx, ax
+    /// 0a753  je ret
+    /// 0a755  mov word [SlowFLAG], 1
+    /// ```
+    ///
+    /// Aloft is the caller's: both flags live with the flight, and a flight
+    /// does not come through here.
     pub fn travel(&mut self, dx: i32, dy: i32, land: &Landscape) -> Step {
+        // CheckSLOW, 0xa728.
         let mask = land.going_at(self.x, self.y);
-        let bogged = if mask != 0 {
+        let slow = if mask != 0 {
             self.going_counter = self.going_counter.wrapping_add(1);
             self.going_counter & mask != 0
         } else {
             false
         };
 
-        if dx == 0 && dy == 0 {
-            return Step::default();
-        }
-        let (x, y) = ((self.x + dx).clamp(0, MAX_X), (self.y + dy).clamp(0, MAX_Y));
-        if x == self.x && y == self.y {
-            return Step::default();
+        // MapMovement, 0xa36f: `and bx, 0xf; je`, then `inc word [0xcc98]`.
+        let held = dx != 0 || dy != 0;
+        if held {
+            self.steps += 1;
         }
 
-        self.steps += 1;
+        // GoTheDistance, 0xa422: `cmp ax, [0xccac]; jge NextWHICH`.
         if self.steps >= self.steps_per_day {
-            self.steps = 0;
-            self.day += 1;
+            self.next_turn();
+            return Step {
+                moved: false,
+                bogged: held && slow,
+                turn_over: true,
+            };
         }
-        if bogged {
+
+        // 0a382: the held direction is dropped when SlowFLAG is up.
+        if !held {
+            return Step::default();
+        }
+        if slow {
             return Step {
                 moved: false,
                 bogged: true,
-                encounter: false,
+                turn_over: false,
             };
         }
+
+        // FOLLOW, 0xa29f: HawkBorders clears the bit that would leave the
+        // rectangle, and what is left moves the token one pixel.
+        let (x, y) = ((self.x + dx).clamp(0, MAX_X), (self.y + dy).clamp(0, MAX_Y));
+        let moved = x != self.x || y != self.y;
         self.x = x;
         self.y = y;
         Step {
-            moved: true,
+            moved,
             bogged: false,
-            encounter: self.next_random().is_multiple_of(self.encounter_odds),
+            turn_over: false,
         }
+    }
+
+    /// `_MAP:NextWHICH` (0xa434) for a board with one knight on it.
+    ///
+    /// ```text
+    /// 0a434  call 0xa962                ; the three effect flags off
+    /// 0a437  inc word [WHICH]
+    /// 0a43b  mov word [NextFLAG], 0
+    /// 0a441  mov word [0xcc98], 0       ; the distance walked
+    /// 0a447  and word [WHICH], 3
+    /// 0a44c  jne 0a463                  ; another knight's turn
+    /// 0a44e  call 0x1148                ; the day turns
+    /// ```
+    ///
+    /// With one seat the `and` always lands on zero, so every turn's end is
+    /// a day's end. The routine at 0x1148 is the run's: `[0x898b]` and
+    /// `MoonCount`, `GiveBK` and `AdjustTIME` are [`crate::run::Run::new_day`]
+    /// and [`crate::moon::Moon::new_day`]; the haste flag `0xa962` clears is
+    /// there too. Here only the count of days and the distance change.
+    fn next_turn(&mut self) {
+        self.steps = 0;
+        self.day += 1;
     }
 }
 
@@ -374,23 +479,36 @@ mod tests {
         }
     }
 
+    /// A turn long enough that no test below runs into its end by accident.
+    fn walker(x: i32, y: i32) -> Overworld {
+        let mut w = Overworld::new(x, y);
+        w.steps_per_day = 10_000;
+        w
+    }
+
     #[test]
     fn standing_still_costs_nothing() {
-        let mut w = Overworld::new(10, 10);
+        let mut w = walker(10, 10);
         assert!(!w.travel(0, 0, &glade()).moved);
         assert_eq!(w.steps, 0);
     }
 
+    /// `MapMovement` counts the step at 0xa37e and `FOLLOW` only then calls
+    /// `HawkBorders`, so a step into the edge is paid for and not walked. This
+    /// replaces a test that said the edge was free, which was ours.
     #[test]
-    fn walking_into_the_edge_costs_nothing_either() {
-        let mut w = Overworld::new(0, 10);
-        assert!(!w.travel(-1, 0, &glade()).moved);
-        assert_eq!(w.steps, 0, "a blocked step must not advance the clock");
+    fn walking_into_the_edge_costs_a_step_and_goes_nowhere() {
+        let mut w = walker(0, 10);
+        let step = w.travel(-1, 0, &glade());
+        assert!(!step.moved);
+        assert!(!step.bogged);
+        assert_eq!((w.x, w.y), (0, 10));
+        assert_eq!(w.steps, 1, "inc word [0xcc98] comes before HawkBorders");
     }
 
     #[test]
     fn the_map_is_one_screen_and_the_token_stays_on_it() {
-        let mut w = Overworld::new(0, 0);
+        let mut w = walker(0, 0);
         for _ in 0..500 {
             w.travel(1, 1, &glade());
         }
@@ -409,9 +527,64 @@ mod tests {
         assert_eq!(w.steps, 0);
     }
 
+    /// `GoTheDistance` (0xa422) compares after `MapMovement` has counted and
+    /// before `FOLLOW` has moved, so the step that reaches `[0xccac]` ends
+    /// the day with the token where it was: a budget of five walks four.
+    #[test]
+    fn the_step_that_spends_the_distance_is_not_walked() {
+        let mut w = Overworld::new(0, 100);
+        w.steps_per_day = 5;
+        let mut steps = Vec::new();
+        for _ in 0..5 {
+            steps.push(w.travel(1, 0, &glade()));
+        }
+        assert!(steps[..4].iter().all(|s| s.moved && !s.turn_over));
+        assert!(!steps[4].moved && steps[4].turn_over);
+        assert_eq!(w.x, 4);
+        assert_eq!(w.day, 2);
+    }
+
+    /// `DistanceDONE+12` makes the budget `[di+0x3e] << 4`, so the opening
+    /// knight's six is ninety six frames of held stick, and every refused or
+    /// edge step is one of them.
+    #[test]
+    fn a_refused_step_and_an_edge_step_both_spend_the_distance() {
+        let mut land = Landscape::open();
+        for cell in land.going.iter_mut() {
+            *cell = 1;
+        }
+        let mut w = Overworld::new(0, 100);
+        w.steps_per_day = 96;
+        let mut days = 0;
+        for _ in 0..96 {
+            if w.travel(-1, 0, &land).turn_over {
+                days += 1;
+            }
+        }
+        assert_eq!(days, 1, "ninety six held frames are one day");
+        assert_eq!(w.x, 0, "and none of them went anywhere");
+    }
+
+    /// `EncounterAllDone` (0x113e) writes `[0xccac]` into `[0xcc98]`, and
+    /// `GoTheDistance` runs on the next frame whether or not the stick is
+    /// held, so coming back from anywhere ends the day on the spot.
+    #[test]
+    fn coming_back_from_an_encounter_ends_the_day() {
+        let mut w = Overworld::new(50, 100);
+        w.steps_per_day = 96;
+        w.travel(1, 0, &glade());
+        w.end_turn();
+        assert_eq!(w.steps, 96);
+        let step = w.travel(0, 0, &glade());
+        assert!(step.turn_over);
+        assert!(!step.moved);
+        assert_eq!((w.day, w.steps), (2, 0));
+        assert_eq!(w.x, 51, "the encounter cost the day, not the ground");
+    }
+
     #[test]
     fn time_can_pass_without_walking() {
-        let mut w = Overworld::new(10, 10);
+        let mut w = walker(10, 10);
         w.travel(1, 0, &glade());
         w.pass_days(3);
         assert_eq!(w.day, 4);
@@ -427,8 +600,7 @@ mod tests {
             for cell in land.going.iter_mut() {
                 *cell = mask;
             }
-            let mut w = Overworld::new(0, 100);
-            w.steps_per_day = 10_000;
+            let mut w = walker(0, 100);
             let mut moved = 0;
             for _ in 0..40 {
                 if w.travel(1, 0, &land).moved {
@@ -442,41 +614,24 @@ mod tests {
 
     #[test]
     fn open_ground_never_bogs_and_never_ticks_the_counter() {
-        let mut w = Overworld::new(0, 100);
+        let mut w = walker(0, 100);
         for _ in 0..50 {
             assert!(!w.travel(1, 0, &glade()).bogged);
         }
         assert_eq!(w.going_counter, 0);
     }
 
+    /// Nothing on the map is rolled, so two walks are the same walk. This
+    /// replaces two tests of a seeded roll the original does not make.
     #[test]
-    fn encounters_happen_but_not_constantly() {
-        let mut w = Overworld::new(0, 100);
-        w.encounter_odds = 20;
-        let mut hits = 0;
-        for i in 0..2000 {
-            let dx = if (i / 100) % 2 == 0 { 1 } else { -1 };
-            if w.travel(dx, 0, &glade()).encounter {
-                hits += 1;
-            }
-        }
-        assert!(
-            hits > 40 && hits < 160,
-            "expected roughly 1 in 20, got {hits} in 2000"
-        );
-    }
-
-    #[test]
-    fn the_same_seed_gives_the_same_journey() {
+    fn the_same_walk_is_the_same_journey() {
         let run = || {
             let mut w = Overworld::new(0, 100);
-            w.set_seed(7);
-            (0..500)
-                .filter(|i| {
-                    w.travel(if (i / 50) % 2 == 0 { 1 } else { -1 }, 0, &glade())
-                        .encounter
-                })
-                .count()
+            w.steps_per_day = 96;
+            for i in 0..500 {
+                w.travel(if (i / 50) % 2 == 0 { 1 } else { -1 }, 0, &glade());
+            }
+            (w.x, w.y, w.day, w.steps, w.state_hash())
         };
         assert_eq!(run(), run());
     }

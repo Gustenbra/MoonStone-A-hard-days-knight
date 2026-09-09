@@ -66,13 +66,19 @@ pub enum Screen {
     Trade = 1,
     /// A lair's floor in the right arch. `DisplayLair`.
     Lair = 2,
-    /// The temple, which takes an offering. `SetUpID` 0xd324 picks `Offer`.
-    Temple = 3,
-    /// The merchant's stall. `DisplayMerchant`.
+    /// The stone circle's offering: `MOON:Henge+74` (0x109a) is `mov ax, 3`
+    /// and the panel, and `SetUpID` 0xd324 picks `Offer` for it. This was
+    /// called the temple here once; nothing in a town passes 3.
+    Henge = 3,
+    /// The merchant's stall: `MOON:MERC+9` (0xea2) and `WMERC+9` (0xdf3) are
+    /// `mov ax, 5` and the panel. `DisplayMerchant` fills the right arch.
     Merchant = 5,
-    /// The mystic's counter, which buys and sells magic. `DisplayMagic` over
-    /// `SaveTYPE+2` plus `DisplayMSword`.
-    Mystic = 6,
+    /// The high temple, which buys and sells magic: `MOON:HTEM+9` (0xeb1) is
+    /// `mov ax, 6` and the panel. `ReDisplay` 0xbf66 draws its own stock at
+    /// `SaveTYPE+2` through `DisplayMagic` and `DisplayMSword`, and every
+    /// magic gadget on the page goes to `TTemple`. The Waterdeep mystic is
+    /// not a panel at all: it is `_WIZARD`'s routine at 0xb935.
+    Temple = 6,
     /// One thing picked up, with the `NEXT` gadget beside it. `DisplayAquire`.
     Acquire = 8,
     /// The plain character sheet. `SetUpID` 0xd365 picks `Use`.
@@ -89,14 +95,14 @@ impl Screen {
     /// Every other screen walks `TradingData` first, which has no terminator of
     /// its own, so it draws both tables: three pillars and two arches.
     pub fn single_arch(self) -> bool {
-        matches!(self, Screen::Sheet | Screen::Temple)
+        matches!(self, Screen::Sheet | Screen::Henge)
     }
 
     /// `SetUpID` 0xd317 to 0xd367, in the order the routine tests.
     pub fn left_table(self) -> Table {
         match self {
-            Screen::Mystic => Table::Sell,
-            Screen::Temple => Table::Offer,
+            Screen::Temple => Table::Sell,
+            Screen::Henge => Table::Offer,
             Screen::Sheet => Table::Use,
             _ => Table::Identify,
         }
@@ -108,7 +114,7 @@ impl Screen {
         match self {
             Screen::Dragon | Screen::Trade | Screen::Acquire => Table::Take,
             Screen::Lair if !scouted => Table::Take,
-            Screen::Merchant | Screen::Mystic => Table::Purchase,
+            Screen::Merchant | Screen::Temple => Table::Purchase,
             _ => Table::Identify,
         }
     }
@@ -563,12 +569,12 @@ pub fn price_of(slot: usize) -> Option<u32> {
         .map(|(_, p)| *p)
 }
 
-/// The magic record a knight, a lair, a hoard and the mystic's stock all are.
+/// The magic record a knight, a lair, a hoard and the temple's stock all are.
 ///
 /// **Recovered, field for field**, out of what reads it. `DisplayKnight` ends
 /// on `push word ptr [si + 0x44]; pop word ptr [Address]` and falls straight
 /// into `DisplayMagic` at `0xc38e`, so `knight[0x44]` is a pointer to one of
-/// these; `ReDisplay` hands `DisplayMagic` `SaveTYPE+2` for the mystic's stock
+/// these; `ReDisplay` hands `DisplayMagic` `SaveTYPE+2` for the temple's stock
 /// and `DisplayLair` hands it `StatMAGIC2`. The offsets are the ones those two
 /// routines and `DisplayMSword` read:
 ///
@@ -963,14 +969,14 @@ mod tests {
     /// `DisplayPillars` picks `SingleData` alone for the two types in
     /// `OffsetValues` and both tables for everything else.
     #[test]
-    fn only_the_sheet_and_the_temple_are_one_arch() {
+    fn only_the_sheet_and_the_stones_are_one_arch() {
         assert!(Screen::Sheet.single_arch());
-        assert!(Screen::Temple.single_arch());
+        assert!(Screen::Henge.single_arch());
         for s in [
             Screen::Trade,
             Screen::Lair,
             Screen::Merchant,
-            Screen::Mystic,
+            Screen::Temple,
             Screen::Acquire,
             Screen::Dragon,
         ] {
@@ -982,11 +988,12 @@ mod tests {
     #[test]
     fn each_screen_reads_the_arrays_setupid_gives_it() {
         assert_eq!(Screen::Sheet.left_table(), Table::Use);
-        assert_eq!(Screen::Temple.left_table(), Table::Offer);
-        assert_eq!(Screen::Mystic.left_table(), Table::Sell);
+        assert_eq!(Screen::Henge.left_table(), Table::Offer);
+        assert_eq!(Screen::Temple.left_table(), Table::Sell);
         assert_eq!(Screen::Lair.left_table(), Table::Identify);
+        assert_eq!(Screen::Merchant.left_table(), Table::Identify);
         assert_eq!(Screen::Merchant.right_table(false), Table::Purchase);
-        assert_eq!(Screen::Mystic.right_table(false), Table::Purchase);
+        assert_eq!(Screen::Temple.right_table(false), Table::Purchase);
         assert_eq!(Screen::Trade.right_table(false), Table::Take);
         assert_eq!(Screen::Lair.right_table(false), Table::Take);
         assert_eq!(

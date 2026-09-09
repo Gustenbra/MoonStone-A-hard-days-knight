@@ -35,23 +35,60 @@
 //!   things that happen: arriving at Highwood or Waterdeep (`LoadWasteBack`
 //!   twice, once per city), `Valley` with `NoKeysMessage`, and
 //!   `KnightWonGame`.
-//! - `INSTRUCTMESSAGE` at 36631 takes a chain, shows it, and then writes its
-//!   **own six-word palette ramp** (0x800, 0x600, 0x400, 0, 0x200, 0x100) over
-//!   the fade table before fading, so it comes up in a different colour from
-//!   the other two. Its callers are `KnightProtection`, `CheckLairClear`,
-//!   `FightDemon`, `Henge`, `bac` and the stone circle's own `noswap`.
+//! - `INSTRUCTMESSAGE` at 36631 takes a chain, shows it, and then writes
+//!   **six words into the picture's own palette** before fading it in:
+//!
+//!   ```text
+//!   0x8f38  mov si, 0x80bb                 ; the loaded picture's palette
+//!   0x8f3b  mov word ptr [si + 2], 0x800   ; entry 1
+//!   0x8f40  mov word ptr [si + 4], 0x600   ; entry 2
+//!   0x8f45  mov word ptr [si + 6], 0x400   ; entry 3
+//!   0x8f4a  mov word ptr [si + 8], 0       ; entry 4
+//!   0x8f4f  mov word ptr [si + 0xa], 0x200 ; entry 5
+//!   0x8f54  mov word ptr [si + 0xc], 0x100 ; entry 6
+//!   0x8f59  call 0x5a3e                    ; the page flip
+//!   0x8f5c  mov si, 0x80bb; call 0x5b44    ; the fade in, from that palette
+//!   ```
+//!
+//!   so it comes up in a different colour from the other two: `MESSAGE.PIV`'s
+//!   four purples at 1 to 4 and the two entries after them go red. Its callers
+//!   are `KnightProtection`, `CheckLairClear`, `FightDemon`, `Henge`, `bac` and
+//!   the stone circle's own `noswap`. `0x8761`, which every one of the three
+//!   calls first through `0x8e90`, reads the palette back out of the picture's
+//!   header, so the ramp lasts one message.
 //!
 //! So the three are not three formats; they are one format shown three ways,
 //! and that is what is built here.
 //!
-//! **What is verbatim and what is not.** The fourteen wait chains, the two city
-//! welcomes and the stone circle's line are quoted from the image with their
-//! own x, y and flags. `HengeInstruct`, `GameOverMes`, `NoKeysMessage` and
-//! `SHMES1`..`SHMES8` all sit below `DS:0b5a`, inside the 2,906 bytes of
-//! `DGROUP` the unpacked image used to carry as a stale copy of another region,
-//! so their text was not readable and none of it is guessed at here. **That
-//! span is readable now** (`docs/REVERSING.md`) and these four chains have not
-//! been re-read out of it yet.
+//! **What takes the box down is the caller's business, not the routine's.**
+//! None of the three waits: each blits the picture, walks the chain, flips the
+//! page and fades in, and returns. Scanning the image for every call gives two
+//! shapes of caller and no third:
+//!
+//! ```text
+//! 0x108b  Henge+56          call INSTRUCTMESSAGE   ; HengeInstruct
+//! 0x108e  Henge+59          call 0x8251            ; WaitFIRE: fire down, then up
+//! 0x1091  Henge+62          call 0x5b65            ; the sixteen-step fade out
+//!
+//! 0x8e2f  LoadWasteBack+166 call OCCURMESSAGE      ; WelHigh1a, `Waterdeep`
+//! 0x8e35                    call 0x875e            ; load the city's picture
+//! 0x8e3b                    call 0x5b65            ; the fade out
+//! ```
+//!
+//! `KnightProtection+51`, `CheckLairClear+64` (the game over at 0x617),
+//! `Valley+19`, `FightDemon+71` and `KnightWonGame+75` are the first shape:
+//! the box stays until fire. `WAITMESSAGE`'s four callers, the two city
+//! welcomes and `noswap+31` (`HengeWait`, straight into loading `Hen1.p`) are
+//! the second: the box covers a disk read and goes out when the read is done,
+//! and fire does nothing to it. [`Until`] is that difference, carried on the
+//! message because the routine that shows it cannot tell.
+//!
+//! **Every chain here is quoted from the image** with its own x, y and flags:
+//! the fourteen wait chains, the two city welcomes, `HengeInstruct` (image
+//! 0x129f9), `HengeWait` (0x1f10c), `SCR_PRO` (0x12965), `NextDayMes` (0x1b19a)
+//! and `TitleMes` (0x1b17c). `SHMES1`..`SHMES8` (0x12a35 onwards) are not
+//! records but the strings `HengeInstruct` and `VICTORY` point at; `VICTORY`,
+//! `GameOverMes`, `NoKeysMessage` and `ValleyEnter` are in [`crate::quest`].
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -65,6 +102,20 @@ pub enum Kind {
     Occurrence,
     /// `INSTRUCTMESSAGE`. The same box in its own colour.
     Instruction,
+}
+
+/// What takes the box down again.
+///
+/// The routine that shows a chain does not wait, so this is read off what the
+/// caller does next (see the module note): `call 0x8251` or a load.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Until {
+    /// `WaitFIRE` at image 0x8251: `call 0x81ec; test bx, 0x10; je` until fire
+    /// is down, then the same until it is up again. Then the fade out.
+    Fire,
+    /// A disk read, which nothing here does. The box goes out on the fade
+    /// the loader ends on, and fire does nothing to it.
+    Loaded,
 }
 
 /// `TextPTop`'s three alignments.
@@ -113,10 +164,11 @@ impl Line {
     }
 }
 
-/// A chain, and which routine shows it.
+/// A chain, which routine shows it, and what takes it down.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     pub kind: Kind,
+    pub until: Until,
     pub lines: Vec<Line>,
 }
 
@@ -141,6 +193,14 @@ impl Message {
 /// The recovered `Loading...` line, kept so the tables below are the bytes.
 fn loading() -> Line {
     Line::new("Loading...", 0, 182, FLAG_CENTRE | FLAG_BOLD)
+}
+
+/// The record at DS:0x5dd (image 0x1298d), `Press fire to continue` centred,
+/// which `SCR_PRO`, `HengeInstruct` and `NextDayMes` all end on at y 182, and
+/// `Vee7` (0x12b10) repeats at y 180 for `ValleyEnter`, `NoKeysMessage` and
+/// `GameOverMes`. The string itself is `promes4`, DS:0x632.
+pub fn press_fire(y: i32) -> Line {
+    Line::new("Press fire to continue", 0, y, FLAG_CENTRE)
 }
 
 /// Every message the executable gives up, and the counter the wait messages
@@ -176,6 +236,7 @@ impl Messages {
                 lines.push(loading());
                 Message {
                     kind: Kind::Wait,
+                    until: Until::Loaded,
                     lines,
                 }
             })
@@ -193,6 +254,9 @@ impl Messages {
                 key.to_string(),
                 Message {
                     kind: Kind::Occurrence,
+                    // `0x8e35 call 0x875e` loads the city's picture straight
+                    // after, and `0x8e3b` fades out.
+                    until: Until::Loaded,
                     lines: vec![
                         Line::new("Welcome", 0, 60, FLAG_CENTRE),
                         Line::new("to the", 0, 80, FLAG_CENTRE),
@@ -203,16 +267,62 @@ impl Messages {
                 },
             );
         }
-        // `_TAVERN:HengeWait`, which `noswap` hands to `INSTRUCTMESSAGE` on the
-        // way into the stone circle.
+        // `MOON:HengeInstruct`, image 0x129f9: what `Henge+56` (0x1088) hands
+        // to `INSTRUCTMESSAGE` when the moon is not yours, before the offering
+        // page. Four records of its own, then the shared `Press fire to
+        // continue` record at DS:0x5dd (image 0x1298d), and `Henge+59` is
+        // `WaitFIRE`.
+        //
+        // ```text
+        // 129f9  text 0685 x 0 y  75 flags 1 next 0653   To be granted a
+        // 12a03  text 0695 x 0 y  95 flags 1 next 065d   longer life you must
+        // 12a0d  text 06aa x 0 y 115 flags 1 next 0667   offer an item of
+        // 12a17  text 06bc x 0 y 135 flags 1 next 05dd   magical nature to Danu
+        // 1298d  text 0632 x 0 y 182 flags 1 next 0000   Press fire to continue
+        // ```
+        //
+        // The four strings are `SHMES1`..`SHMES4` at image 0x12a35, 0x12a45,
+        // 0x12a5a and 0x12a6c. `offer an item of ` carries a trailing space in
+        // the image and keeps it here.
+        named.insert(
+            "henge.instruct".to_string(),
+            Message {
+                kind: Kind::Instruction,
+                until: Until::Fire,
+                lines: vec![
+                    Line::new("To be granted a", 0, 75, FLAG_CENTRE),
+                    Line::new("longer life you must", 0, 95, FLAG_CENTRE),
+                    Line::new("offer an item of ", 0, 115, FLAG_CENTRE),
+                    Line::new("magical nature to Danu", 0, 135, FLAG_CENTRE),
+                    press_fire(182),
+                ],
+            },
+        );
+        // `_TAVERN:HengeWait`, image 0x1f10c, which `noswap+31` (0xb375)
+        // hands to `INSTRUCTMESSAGE` once something has been offered, and
+        // then loads `Hen1.p` straight over: `0xb37d mov dx, HengeFILE1; call
+        // 0x875e`. The strings are `SHMES5` and `SHMES6`, in `_TAVERN`.
         named.insert(
             "henge.ritual".to_string(),
             Message {
                 kind: Kind::Instruction,
+                until: Until::Loaded,
                 lines: vec![
                     Line::new("The druids prepare", 0, 75, FLAG_CENTRE),
                     Line::new("for the ritual", 0, 95, FLAG_CENTRE),
                 ],
+            },
+        );
+        // `_LOADER:NextDayMes`, image 0x1b19a: `Next Day` at y 95 and then the
+        // same shared `Press fire to continue` record at y 182 that
+        // `HengeInstruct` ends on. The routine at 0x8e5b walks it over `CH.PIV`
+        // rather than over `MESSAGE.PIV`, and `NextWHICH+35` is `WaitFIRE`.
+        named.insert(
+            "next.day".to_string(),
+            Message {
+                kind: Kind::Occurrence,
+                until: Until::Fire,
+                lines: vec![Line::new("Next Day", 0, 95, FLAG_CENTRE), press_fire(182)],
             },
         );
         // `_LOADER:TitleMes`, drawn with the plain `MESSAGE` rather than by one
@@ -223,6 +333,7 @@ impl Messages {
             "title.credit".to_string(),
             Message {
                 kind: Kind::Occurrence,
+                until: Until::Loaded,
                 lines: vec![
                     Line::new("created by", 0, 90, FLAG_CENTRE | FLAG_BOLD),
                     Line::new("Rob Anderson", 0, 105, FLAG_CENTRE | FLAG_BOLD),
@@ -259,12 +370,48 @@ impl Messages {
         let key = match place {
             "highwood" => "welcome.highwood",
             "waterdeep" => "welcome.waterdeep",
-            // The pack's id for the stone circle. `_TAVERN:noswap` is the
-            // routine, inside the module that also holds `Henge`.
-            "stones" => "henge.ritual",
+            // The pack's id for the stone circle. `Henge+56` (0x1088) puts
+            // `HengeInstruct` up before the offering page; `HengeWait` comes
+            // later, from `noswap`, and only for an offering the druids took.
+            "stones" => "henge.instruct",
             _ => return None,
         };
         self.named(key)
+    }
+
+    /// `MOON:SCR_PRO`, image 0x12965: what `KnightProtection+48` (0x518)
+    /// hands to `INSTRUCTMESSAGE` when a challenged knight has a scroll of
+    /// protection, and `+51` is `WaitFIRE`.
+    ///
+    /// ```text
+    /// 00502  mov si, 0x5e7            ; promes0, an eighteen-space buffer
+    /// 00505  mov bx, [di+0x4c]        ; the knight's name
+    /// 00508  mov al, [bx]; mov [si], al; inc si; inc bx; or al, al; jne 00508
+    /// 00515  mov si, 0x5b5            ; SCR_PRO
+    /// 00518  call INSTRUCTMESSAGE
+    /// 0051b  call WaitFIRE
+    ///
+    /// 12965  text 05e7 x 0 y  55 flags 1 next 05bf   promes0, the name copied in
+    /// 1296f  text 05fa x 0 y  75 flags 1 next 05c9   may use their
+    /// 12979  text 0608 x 0 y  95 flags 1 next 05d3   Scroll of protection
+    /// 12983  text 061d x 0 y 115 flags 1 next 05dd   to avoid this battle
+    /// 1298d  text 0632 x 0 y 182 flags 1 next 0000   Press fire to continue
+    /// ```
+    ///
+    /// So the first line is the knight's own name, copied NUL and all into
+    /// `promes0`, which is why it takes the name here.
+    pub fn scroll_of_protection(name: &str) -> Message {
+        Message {
+            kind: Kind::Instruction,
+            until: Until::Fire,
+            lines: vec![
+                Line::new(name, 0, 55, FLAG_CENTRE),
+                Line::new("may use their", 0, 75, FLAG_CENTRE),
+                Line::new("Scroll of protection", 0, 95, FLAG_CENTRE),
+                Line::new("to avoid this battle", 0, 115, FLAG_CENTRE),
+                press_fire(182),
+            ],
+        }
     }
 
     /// Whether arriving here takes one off the wait pile instead.
@@ -379,7 +526,11 @@ mod tests {
             Kind::Instruction,
             "INSTRUCTMESSAGE, in its own colour"
         );
-        assert_eq!(henge.lines[0].text, "The druids prepare");
+        assert_eq!(
+            henge.lines[0].text, "To be granted a",
+            "HengeInstruct, SHMES1"
+        );
+        assert_eq!(henge.until, Until::Fire, "Henge+59 is WaitFIRE");
 
         assert!(
             m.on_entering("highwood.tavern").is_none(),
@@ -404,6 +555,99 @@ mod tests {
         assert_eq!(Line::new("x", 0, 0, 0).align, Align::Left);
         assert!(Line::new("x", 0, 0, FLAG_CENTRE | FLAG_BOLD).bold);
         assert!(!Line::new("x", 0, 0, FLAG_CENTRE).bold);
+    }
+
+    /// `HengeInstruct` as the walker at 0x7a86 reads it out of image 0x129f9:
+    /// four records twenty apart from y 75, then the shared record at
+    /// DS:0x5dd, every one of them with flags 1.
+    #[test]
+    fn henge_instruct_is_the_five_records_at_0x129f9() {
+        let m = Messages::recovered();
+        let h = m.named("henge.instruct").expect("HengeInstruct");
+        let texts: Vec<&str> = h.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "To be granted a",
+                "longer life you must",
+                "offer an item of ",
+                "magical nature to Danu",
+                "Press fire to continue",
+            ]
+        );
+        let ys: Vec<i32> = h.lines.iter().map(|l| l.y).collect();
+        assert_eq!(ys, [75, 95, 115, 135, 182]);
+        assert!(h.lines.iter().all(|l| l.align == Align::Centre && !l.bold));
+        assert_eq!(h.kind, Kind::Instruction, "0x108b calls 0x8f17");
+        assert_eq!(h.until, Until::Fire, "0x108e calls 0x8251");
+        assert!(h.shown().count() == 5, "no Loading... line to drop");
+    }
+
+    /// `HengeWait` is the only chain the circle shows twice over: it belongs
+    /// to `noswap`, goes up when something has been offered, and is covered
+    /// by the load of `Hen1.p` rather than waited on.
+    #[test]
+    fn henge_wait_covers_a_load_and_is_not_the_arrival_message() {
+        let m = Messages::recovered();
+        let w = m.named("henge.ritual").expect("HengeWait");
+        assert_eq!(w.lines[0].text, "The druids prepare", "SHMES5");
+        assert_eq!(w.lines[1].text, "for the ritual", "SHMES6");
+        assert_eq!((w.lines[0].y, w.lines[1].y), (75, 95));
+        assert_eq!(w.kind, Kind::Instruction, "0xb375 calls 0x8f17");
+        assert_eq!(
+            w.until,
+            Until::Loaded,
+            "0xb37d loads HengeFILE1 straight after"
+        );
+        assert_ne!(m.on_entering("stones"), Some(w));
+    }
+
+    /// `SCR_PRO` with the name `KnightProtection` copies into `promes0`.
+    #[test]
+    fn the_scroll_of_protection_chain_starts_with_the_knights_name() {
+        let s = Messages::scroll_of_protection("SIR_GODBER");
+        let texts: Vec<&str> = s.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "SIR_GODBER",
+                "may use their",
+                "Scroll of protection",
+                "to avoid this battle",
+                "Press fire to continue",
+            ]
+        );
+        let ys: Vec<i32> = s.lines.iter().map(|l| l.y).collect();
+        assert_eq!(ys, [55, 75, 95, 115, 182]);
+        assert_eq!((s.kind, s.until), (Kind::Instruction, Until::Fire));
+    }
+
+    /// `NextDayMes` is two records, not one: the heading and the same `Press
+    /// fire to continue` record `HengeInstruct` ends on.
+    #[test]
+    fn next_day_is_two_records_and_waits_for_fire() {
+        let m = Messages::recovered();
+        let n = m.named("next.day").expect("NextDayMes");
+        assert_eq!(n.lines.len(), 2);
+        assert_eq!((n.lines[0].text.as_str(), n.lines[0].y), ("Next Day", 95));
+        assert_eq!(
+            (n.lines[1].text.as_str(), n.lines[1].y),
+            ("Press fire to continue", 182)
+        );
+        assert_eq!(n.until, Until::Fire, "NextWHICH+35 is WaitFIRE");
+    }
+
+    /// The fourteen and the welcomes cover a load; nothing waits on fire
+    /// there, because nothing in the original does.
+    #[test]
+    fn load_messages_are_not_waited_on() {
+        let m = Messages::recovered();
+        for n in 0..m.wait_len() {
+            assert_eq!(m.wait(n).until, Until::Loaded);
+        }
+        assert_eq!(m.named("welcome.highwood").unwrap().until, Until::Loaded);
+        assert_eq!(m.named("welcome.waterdeep").unwrap().until, Until::Loaded);
+        assert_eq!(m.named("title.credit").unwrap().until, Until::Loaded);
     }
 
     #[test]

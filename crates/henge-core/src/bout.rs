@@ -213,6 +213,10 @@ pub struct Bout {
     /// first leap at.
     #[serde(default)]
     pub perch: Option<crate::monster::Perch>,
+    /// `StopCombat` (0x231) has run: DS:0x897d is down and the fight is over
+    /// but for the thirty five frames DS:0x8987 counts out.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 /// Any non-zero start; the original seeds its register off the BIOS tick,
@@ -239,6 +243,7 @@ impl Bout {
             progression: 0,
             shared: crate::monster::Shared::default(),
             perch: None,
+            stopped: false,
         }
     }
 
@@ -276,6 +281,13 @@ impl Bout {
     /// A bout with no wave at all, which is every knight against a knight, is
     /// over when one is left, as it always was.
     pub fn settled(&self) -> bool {
+        // `StopCombat` itself, from whichever script called it: the dragon's
+        // fight has no wave and two claws that never take a hit point, so
+        // its two endings, `Dragon_Dead` (0x4030) and the knight's own
+        // death scripts, are the only things that can end it.
+        if self.stopped {
+            return true;
+        }
         if self.wave.max > 0 {
             let player_down = self.fighters.first().is_some_and(|f| !f.alive());
             // The count is `NumberInCombat`'s, and the arena is asked as well,
@@ -369,14 +381,26 @@ impl Bout {
         self.step_with(|_| def, intents)
     }
 
-    /// What one fighter's blow of one kind takes off: `CalcDamage`.
+    /// What one fighter's blow of one kind takes off.
     ///
     /// The `*Dam` entry for the kind, which is the fighter's own figure, or
     /// the bout's where the actor leaves it at zero, scaled by the attack's
-    /// entry against the default attack's; then the sheet's bonus, strength
-    /// and the sword, which `CalcDamage` adds before it doubles a chop. The
-    /// table already carries the chop doubled, so here the doubling is
-    /// applied to the bonus: `(4 + 1) * 2` comes out as `8 + 1 * 2`.
+    /// entry against the default attack's. For a blow that goes through
+    /// `CalcDamage` (0x2d67) the sheet's strength and sword are then added
+    /// and a chop is doubled after the addition:
+    ///
+    /// ```text
+    /// 02d75  mov ax, [di]              ; *Dam[kind]
+    /// 02d78  mov cl, [si+0x2e]; add ax, cx   ; strength
+    /// 02d7d  cmp word [si+0x40], 0x17 ... add ax, 2 / 3 / 5   ; the sword
+    /// 02d98  cmp dx, 0x10; jne; shl ax, 1    ; a chop, doubled last
+    /// ```
+    ///
+    /// Only two strikers reach it: a knight, through every creature's
+    /// `*Struck` and through `KnightStruck1` (0x44b3), and a mudman, whose
+    /// `MudmenStruck1` is `KnightStruck1`. Every other creature's `*Struck1`
+    /// subtracts its own number and never calls it, so a trogg's chop is the
+    /// table's three and not six.
     fn blow(&self, attacker: usize, def: &ActorDef, attack: Attack) -> i32 {
         let f = &self.fighters[attacker];
         let base = match f.damage {
@@ -384,12 +408,19 @@ impl Bout {
             d => d,
         };
         let (num, den) = def.blow_ratio(attack);
-        let bonus = if attack == Attack::Chop {
-            f.bonus * 2
-        } else {
-            f.bonus
+        let table = base * num / den;
+        let dealt = match def.controller() {
+            Controller::Knight | Controller::Mudman => {
+                let added = table + f.bonus;
+                if attack == Attack::Chop {
+                    added * 2
+                } else {
+                    added
+                }
+            }
+            _ => table,
         };
-        (base * num / den + bonus).max(1)
+        dealt.max(1)
     }
 
     /// Put a task in the arena and show its first frame at once, so it is on
@@ -475,19 +506,40 @@ impl Bout {
         self.launch(m, &def.animation);
     }
 
-    /// `AddDragonFIRE`: a task on `Dragon_Fire` at the dragon's own position
-    /// plus 0x37 across and five deeper, which burns whatever it touches.
+    /// `AddDragonFIRE`, image 0x3afc: the high breath's fire, a task of its
+    /// own.
+    ///
+    /// ```text
+    /// 03afc  mov si, 0x6964; mov word [si+0x14], ControlMisc  ; kind 0x14's controller
+    /// 03b04  mov di, 0x6e26                    ; the head
+    /// 03b07  mov si, Dragon_Fire               ; the script
+    /// 03b0a  mov bp, 0x8949                    ; the creature bank table
+    /// 03b0d  mov ax, [di+2]                    ; x
+    /// 03b10  mov bx, 0                         ; height 0
+    /// 03b13  mov cx, [di+6]; add cx, 5         ; z, five rows deeper
+    /// 03b19  mov dh, 1                         ; facing right
+    /// 03b1b  add ax, 0x37                      ; fifty five pixels along
+    /// 03b1e  mov dl, 0x14                      ; kind 0x14
+    /// 03b20  call 0x3e7d                       ; FindTABLE and ADDTASK
+    /// ```
+    ///
+    /// Kind 0x14 is `DragonFire1` in `StruckTable` (0x43ce), so what it
+    /// touches is burned for thirty: see [`Bout::dragon_blow`]. `ControlMisc`
+    /// (0x3ead) clears the task's `+0xc` and `+0xe` and carries on, so the
+    /// fire is not put out by touching him; here a missile that connects is
+    /// spent, and the knight it burned has no `BODY` parts to be found by
+    /// while `Knight_Burn` plays, which comes to one burn per breath either
+    /// way.
     fn breathe(&mut self, owner: usize, script: &str, def: &ActorDef) {
         if !def.animation.contains_key(script) {
             return;
         }
         let f = &self.fighters[owner];
         let Some(t) = f.task.as_ref() else { return };
-        let facing = t.facing;
-        let dir = if f.facing < 0 { -1 } else { 1 };
-        let mut task = Task::new(script, t.x + 0x37 * dir, t.y, facing);
+        // 03b1b  add ax, 0x37; 03b16 add cx, 5; 03b19 mov dh, 1; 03b10 mov bx, 0
+        let mut task = Task::new(script, t.x + 0x37, t.y + 5, FACING_RIGHT);
         task.table = def.bank_table;
-        task.z = t.z;
+        task.z = 0;
         let m = Missile {
             owner,
             actor: f.actor.clone(),
@@ -1000,6 +1052,263 @@ impl Bout {
         true
     }
 
+    /// What a blow in the dragon's fight takes off, on either side of it.
+    ///
+    /// The knight's side is `StruckTable` (DS:0x7843) at the three kinds
+    /// `SetKnightStruckTable` (0x4172) fills for this fight, and none of the
+    /// three calls `CalcDamage`:
+    ///
+    /// ```text
+    /// DragonStruck1:                          ; kind 0xa, the head
+    /// 043ad  mov ax, [si+6]; mov [di+6], ax
+    /// 043b3  sub word [di+6], 1              ; see dragon_struck_knight
+    /// 043b7  cmp word [si+0x28], 2
+    /// 043bb  jne DragonFire1
+    /// 043bd  mov ax, 0x14                     ; the bite is twenty
+    /// 043c0  jmp DragonDamage
+    /// DragonFire1:                            ; kind 0x14, the fire task
+    /// 043c2  mov ax, 0x1e                     ; the fire is thirty
+    /// 043c5  mov word [si+0x28], 0x10
+    /// DragonDamage:
+    /// 043ca  call TalismanWrym
+    /// 043cd  sub word [di+0x38], ax
+    /// 043d0  jmp KnightSAnim
+    /// ClawStruck1:                            ; kind 0x16, a claw
+    /// 043d3  mov ax, 0xa                      ; the claw is ten
+    /// 043d6  call TalismanWrym
+    /// 043d9  sub word [di+0x38], ax
+    /// ```
+    ///
+    /// The twenty, the thirty and the ten are the `attacks` rows the pack
+    /// carries for the dragon and the claw, so what comes in as `damage` is
+    /// already that number; `DragonDam` (DS:0x6aac), which
+    /// `InitKnightvsDragon+37` (0x245c) also fills, is never read for a
+    /// knight, because his `StruckTable` entries do not go through
+    /// `CalcDamage`. [`crate::monster::talisman_wrym`] is the one thing left
+    /// to do to it.
+    ///
+    /// The dragon's side is `DragonStruck` (0x3a73), which takes `CalcDamage`
+    /// for a knight's blow (0x3aa2) and a flat three for a knife (0x3acf:
+    /// `sub word [di+0x38], 3`).
+    fn dragon_blow(
+        &self,
+        target: usize,
+        damage: i32,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) -> i32 {
+        // 043ca / 043d6  call TalismanWrym
+        if matches!(a_def.controller(), Controller::Dragon | Controller::Claw) {
+            return crate::monster::talisman_wrym(damage, self.fighters[target].talismans);
+        }
+        // 03a7c  cmp byte [si+0x35], 0x1a; 03acf sub word [di+0x38], 3
+        if t_def.controller() == Controller::Dragon && kind == Some(Attack::Knife) {
+            return 3;
+        }
+        damage
+    }
+
+    /// `DragonStruck`, image 0x3a73: the dragon's own `+0xe` branch.
+    ///
+    /// ```text
+    /// 03a73  mov si, [di+0xe]                 ; whoever struck it
+    /// 03a76  cmp byte [si+0x35], 6; je 03a9c  ; a knight
+    /// 03a7c  cmp byte [si+0x35], 0x1a; je 03ac0   ; a knife
+    /// 03a82  mov ax, 0x6e26; call 0x96a2      ; anything else: its own task
+    /// 03a8a  cmp byte [di+1], 0; jne 03a93
+    /// 03a90  jmp DragonMove                   ; idle: as if nothing happened
+    /// 03a93  mov word [0x783a], 0xffff        ; busy: carry on
+    /// 03a99  jmp NOTEND+3
+    /// 03a9c  or  word [DragonFLAGS], 0x80     ; a knight: struck
+    /// 03aa2  call CalcDamage; sub [di+0x38], ax
+    /// 03aa8  mov ax, [si+0x28]; mov di, [di+0x14]; ... mov ax, [di+ax]
+    /// 03ab3  mov [0x783a], ax                 ; the `DragonHit` row: Dragon_Hit
+    /// 03ab7  mov si, 0x6e26; call AddBlood
+    /// 03abd  jmp NOTEND+3
+    /// 03ac0  or  word [DragonFLAGS], 0x80     ; a knife: struck
+    /// 03ac6  mov si, [di+0x14]; mov ax, [si+6]; mov [0x783a], ax   ; Dragon_Hit
+    /// 03acf  sub word [di+0x38], 3
+    /// 03ad3  jmp 03ab7                        ; and the blood
+    /// ```
+    ///
+    /// The damage, the `*Hit` row and the blood are [`Fighter::struck`] and
+    /// [`Bout::add_blood`] with the dragon's `bleeds`; the bit is the one
+    /// thing left, and it is raised for a knight's blow or a knife's and for
+    /// nothing else.
+    fn dragon_struck(
+        &mut self,
+        missile: bool,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Dragon {
+            return;
+        }
+        // 03a76  cmp byte ptr [si + 0x35], 6
+        // 03a7c  cmp byte ptr [si + 0x35], 0x1a
+        let knight = !missile && a_def.controller() == Controller::Knight;
+        let knife = missile && kind == Some(Attack::Knife);
+        if knight || knife {
+            // 03a9c / 03ac0  or word ptr [DragonFLAGS], 0x80
+            self.shared.dragon |= crate::monster::dragon_flag::STRUCK;
+        }
+    }
+
+    /// The rows `InitKnightvsDragon` (0x2441) writes over the knight's own
+    /// `*Hit` table (`+0x14`) for this fight, which `KnightSAnim` (0x44b9)
+    /// then indexes with the striker's `+0x28`:
+    ///
+    /// ```text
+    /// 02441  mov di, [0x77e8]; mov si, [di+0x14]
+    /// 02448  mov word [si+2], Knight_SwShoulderHit   ; kind 2, the bite
+    /// 0244d  mov word [si+4], Knight_Burn            ; kind 4, the low breath
+    /// 02452  mov word [si+0x10], Knight_Burn         ; kind 0x10, the high
+    /// 02457  mov word [si+0xa], Knight_SwSlapped     ; kind 0xa, a claw
+    /// ```
+    ///
+    /// `DragonFire1` (0x43c5) writes 0x10 into the fire task's `+0x28`
+    /// before `KnightSAnim` reads it, so the fire is the burn too. And
+    /// `DragonStruck1` (0x43ad) first moves him: `mov ax, [si+6]; mov
+    /// [di+6], ax; sub word [di+6], 1`, the head's own row less one, which
+    /// is why a knight the head reaches is on its row from then on. The fire
+    /// task's entry starts past that write, so the fire does not move him.
+    fn dragon_struck_knight(
+        &mut self,
+        attacker: usize,
+        target: usize,
+        body: bool,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Knight
+            || !matches!(a_def.controller(), Controller::Dragon | Controller::Claw)
+        {
+            return;
+        }
+        // 043ad  mov ax, [si+6]; mov [di+6], ax; 043b3 sub word [di+6], 1
+        if body && a_def.controller() == Controller::Dragon {
+            let row = self.fighters[attacker].y - 1;
+            let (_, ny) = GLOBAL.clamp(self.fighters[target].x, row);
+            self.fighters[target].y = ny;
+        }
+        let script = match (a_def.controller(), kind) {
+            // 02448  kind 2
+            (Controller::Dragon, Some(Attack::Lunge)) => "Knight_SwShoulderHit",
+            // 0244d, 02452  kinds 4 and 0x10, and the fire's 0x10
+            (Controller::Dragon, Some(Attack::Swing) | Some(Attack::Chop)) => "Knight_Burn",
+            // 02457  kind 0xa
+            (Controller::Claw, Some(Attack::RThrust)) => "Knight_SwSlapped",
+            _ => return,
+        };
+        if !t_def.animation.contains_key(script) {
+            return;
+        }
+        // `KnightSAnim` 0x44c5: `mov [0x783a], ax`, over whatever
+        // `Fighter::struck` chose off the knight's ordinary row.
+        let f = &mut self.fighters[target];
+        if f.state == State::Hurt && f.script != script {
+            f.state = State::Idle;
+            f.enter_on(State::Hurt, script.to_string());
+        }
+    }
+
+    /// `TrackKnight` (0x3be8) as a script calls it: `Dragon_HighBreath`
+    /// (0x4448) and `Dragon_LowBreath` (0x4130) run it by `TASKGOSUB` on
+    /// every one of their five loops, on the head's fixed record against
+    /// `KnightTable`, and it writes `+2`, `+6` and `+8` where it stands and
+    /// copies the first two into the task (0x3c6a, 0x3c70).
+    fn track_knight<'a, F>(&mut self, me: usize, def_of: &F)
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        let def = def_of(&self.fighters[me].actor);
+        if def.controller() != Controller::Dragon {
+            return;
+        }
+        // 03bf4  mov ax, [KnightTable]; mov [Opponent], ax
+        let Some(foe) = self
+            .fighters
+            .iter()
+            .position(|f| def_of(&f.actor).controller() == Controller::Knight)
+        else {
+            return;
+        };
+        let mut facing = self.fighters[me].facing;
+        let mut at = (self.fighters[me].x, self.fighters[me].y);
+        let mut shared = self.shared;
+        crate::monster::track_knight(&self.fighters[foe], def, &mut shared, &mut facing, &mut at);
+        self.shared = shared;
+        let (nx, ny) = GLOBAL.clamp(at.0, at.1);
+        let f = &mut self.fighters[me];
+        f.facing = facing;
+        f.x = nx;
+        f.y = ny;
+        // 03c6a  mov ax, [di+2]; mov [si+4], ax; 03c70 mov ax, [di+6]; mov [si+8], ax
+        if let Some(t) = f.task.as_mut() {
+            t.x = nx + def.origin[0] as i32;
+            t.y = ny + def.origin[1] as i32;
+        }
+    }
+
+    /// `DragonHit2`, image 0x3ad5: the dragon's own `+0xc` branch.
+    ///
+    /// ```text
+    /// 03ad5  mov si, [di+0xc]                 ; what it hit
+    /// 03ad8  cmp word [di+0x28], 2
+    /// 03adc  je  03ae7
+    /// 03ade  mov word [0x783a], 0xffff        ; a breath: carry on
+    /// 03ae4  jmp NOTEND+3
+    /// 03ae7  mov ax, [di+0xc]; call 0x96c9    ; the bite: his task killed
+    /// 03aed  mov word [dragonbodge3], 1       ; and his record freed
+    /// 03af3  mov word [0x783a], Dragon_BitKnight
+    /// 03af9  jmp NOTEND+3
+    /// ```
+    ///
+    /// `Dragon_BitKnight` (0x46f8) is the chewing: six loops of the head with
+    /// him in its jaws and `DragonKnightSound`, then `KillKnight`, six of
+    /// `DragonChewSound`, and `StopCombat`. He is drawn inside it out of the
+    /// fire bank's cels 31 to 35, so his own task is gone: [`Fighter::vanish`].
+    /// Answers whether it took the frame over, which for a bite that lands
+    /// is always.
+    fn dragon_bites(
+        &mut self,
+        attacker: usize,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+    ) -> bool {
+        if a_def.controller() != Controller::Dragon {
+            return false;
+        }
+        // 03ad8  cmp word ptr [di + 0x28], 2; jne
+        if kind != Some(Attack::Lunge) {
+            return false;
+        }
+        if !a_def.animation.contains_key("Dragon_BitKnight") {
+            return false;
+        }
+        // 03aea  call 0x96c9: the task killed, the record freed.
+        self.fighters[target].vanish();
+        self.fighters[target].holder = Some(attacker);
+        // 03aed  mov word ptr [dragonbodge3], 1
+        self.shared.dragon_bodge[2] = 1;
+        // 03af3  mov word ptr [0x783a], Dragon_BitKnight. `DragonHit2` is
+        // the controller's own answer on the frame after the touch, which
+        // `TASKHANDLE` runs it for because `+0xc` is set whether or not the
+        // bite has ended, and `REPLACEANIM` puts the chewing on in the
+        // bite's place there and then. So it goes on here and then, and not
+        // as an order the next controller pass could talk it out of.
+        let f = &mut self.fighters[attacker];
+        f.state = State::Idle;
+        f.enter_on(State::Attack, "Dragon_BitKnight".to_string());
+        f.attack = None;
+        f.ordered = None;
+        true
+    }
+
     /// `TrollStruck1` (0x438a) and `TrollOHead` (0x4397): the troll's own
     /// finisher, which is not a blow on a corpse but the blow that makes one.
     ///
@@ -1147,31 +1456,26 @@ impl Bout {
         F: Fn(&str) -> &'a ActorDef,
     {
         use crate::monster::{decide, Act, Sight};
-        // `DragonMoveClaw1` and `ControlClaw`: the two forelimbs sit ten rows
-        // either side of the head's own depth and follow it, and when the
-        // dragon is down they play `Dragon_ClawDead` and go.
+        // `DragonMoveClaw1` (0x3bb4): every path out of the head's controller
+        // pins the two forelimbs to its depth, `mov ax, [si+6]; add ax, 0xa;
+        // mov [bx+6], ax` for claw one and `sub ax, 0x1e; mov [bp+6], ax` for
+        // claw two. Done on the claw's own pass, off the head's record as it
+        // stands, which is the same two numbers on the same frame. The head
+        // is the fixed record at DS:0x6e26, dead or alive: `ControlClaw+43`
+        // (0x3b4e) reads its hit points off that address, and that is what
+        // [`Sight::head_health`] carries.
+        let head = self
+            .fighters
+            .iter()
+            .position(|f| def_of(&f.actor).controller() == Controller::Dragon);
         if def_of(&self.fighters[me].actor).controller() == Controller::Claw {
-            let head = self
-                .fighters
-                .iter()
-                .position(|f| def_of(&f.actor).controller() == Controller::Dragon && f.alive());
-            match head {
-                Some(h) => {
-                    let (y, off) = (self.fighters[h].y, self.fighters[me].brain.timer);
-                    let (_, ny) = GLOBAL.clamp(self.fighters[me].x, y + off);
-                    self.fighters[me].y = ny;
-                }
-                None if self.fighters[me].alive() => {
-                    let t_def = def_of(&self.fighters[me].actor);
-                    let left = self.fighters[me].health.max(1);
-                    self.fighters[me].health = left;
-                    self.fighters[me].take_hit(left);
-                    let _ = t_def;
-                    return Intent::default();
-                }
-                None => return Intent::default(),
+            if let Some(h) = head {
+                let (y, off) = (self.fighters[h].y, self.fighters[me].brain.timer);
+                let (_, ny) = GLOBAL.clamp(self.fighters[me].x, y + off);
+                self.fighters[me].y = ny;
             }
         }
+        let head_health = head.map(|h| self.fighters[h].health);
         self.fighters[me].brain.flags |= crate::monster::flag::DRIVEN;
         let free = {
             let f = &self.fighters[me];
@@ -1209,6 +1513,7 @@ impl Bout {
                 // `CalcDamage` with the opponent in `si`: what his own blow
                 // takes off, which `RatHangKnight` is the one caller of.
                 foe_blow,
+                head_health,
             };
             let mut brain = self.fighters[me].brain;
             let mut seed = self.rng;
@@ -1219,7 +1524,17 @@ impl Bout {
             // out. A creature's facing is set here and nowhere else.
             let mut facing = self.fighters[me].facing;
             let mut shared = self.shared;
-            let act = decide(&sight, &mut brain, &mut seed, &mut facing, &mut shared);
+            // And `+2` and `+6` the same way, for `TrackKnight` (0x3c36,
+            // 0x3c49, 0x3c51, 0x3c5a), which writes them where it stands.
+            let mut at = (self.fighters[me].x, self.fighters[me].y);
+            let act = decide(
+                &sight,
+                &mut brain,
+                &mut seed,
+                &mut facing,
+                &mut shared,
+                &mut at,
+            );
             // TroggAttack+0x3b (0x2e9f): `mov word ptr [DeCapFLAG], 1`, on
             // the one path that orders an attack on a knight with no hit
             // points left. The controller cannot reach the bout's word, so
@@ -1232,6 +1547,9 @@ impl Bout {
             }
             self.fighters[me].brain = brain;
             self.fighters[me].facing = facing;
+            let (nx, ny) = GLOBAL.clamp(at.0, at.1);
+            self.fighters[me].x = nx;
+            self.fighters[me].y = ny;
             self.rng = seed;
             self.shared = shared;
             (act, Intent::default())
@@ -1270,6 +1588,12 @@ impl Bout {
                 }
             }
             Act::Stand(script) => order(State::Idle, script, None),
+            // `CLAWS_DEAD` (0x3b61): `[0x783a]` left at zero, which
+            // `TASKHANDLE` takes as the task killed and the record freed.
+            Act::Vanish => {
+                self.fighters[me].vanish();
+                None
+            }
             Act::Play(script) => order(State::Attack, script, None),
             Act::Appear { x, facing, script } => {
                 let b = GLOBAL;
@@ -1508,6 +1832,34 @@ impl Bout {
                     Effect::Gosub { routine, .. } if routine == "SetDecapFLAG" => {
                         self.decap = true;
                     }
+                    // `TrackKnight` (0x3be8), which `Dragon_HighBreath`
+                    // (0x4448) and `Dragon_LowBreath` (0x4130) call on each
+                    // of their five loops: the head keeps after him while the
+                    // fire is out, on the ranges of two and one the breath
+                    // bit puts in. See `crate::monster::track_knight`.
+                    Effect::Gosub { routine, .. } if routine == "TrackKnight" => {
+                        self.track_knight(i, &def_of);
+                    }
+                    // `DrDropHead` (0x3bd2): `mov ax, 0x6e26; call 0x96a2;
+                    // add word ptr [di + 6], 0x26` on the head's own task,
+                    // whose `+6` is the height. The dead head drops thirty
+                    // eight rows down the screen, and stays there.
+                    Effect::Gosub { routine, .. } if routine == "DrDropHead" => {
+                        self.fighters[i].brain.height += 0x26;
+                    }
+                    // `DrDropClaws` (0x3be1): `mov word ptr [DEAD_CLAWS],
+                    // 0xffff`, which `ControlClaw` reads on its next pass.
+                    Effect::Gosub { routine, .. } if routine == "DrDropClaws" => {
+                        self.shared.dead_claws = -1;
+                    }
+                    // `StopCombat` (0x231): the combat flag at DS:0x897d down
+                    // and thirty five more frames on DS:0x8987. Every one of
+                    // the knight's deaths calls it at its end, `Dragon_Dead`
+                    // (0x4030) and `Dragon_BitKnight` (0x4880) call it, and
+                    // `CountTheDead` falls into it. See [`Bout::settled`].
+                    Effect::Gosub { routine, .. } if routine == "StopCombat" => {
+                        self.stopped = true;
+                    }
                     // `CountTheDead` (0x213), which every one of the eighteen
                     // death scripts in the bestiary calls through `TASKGOSUB`,
                     // and which is the whole of the wave logic: one off
@@ -1522,14 +1874,23 @@ impl Bout {
                             self.field_creature(&actor, def, seat);
                         }
                     }
-                    // `KillKnight` (0xab2), which the dragon's own chewing
-                    // calls, and Balok's bite and squeeze with it. Whoever this
-                    // fighter has hold of is the one it means, since a held
-                    // fighter is off the board and `nearest_foe` will not name
-                    // him.
+                    // `KillKnight` (0xab2): `mov si, [0x8979]; mov word
+                    // [si+0x38], 0xffff`, the player's own record and no
+                    // other, whoever called it. The dragon's chewing calls
+                    // it, Balok's bite and squeeze do, and so does
+                    // `Knight_BurnDeath` (0x198c) from the knight's own task.
+                    // Whoever this fighter has hold of is that knight when
+                    // there is one, since a held fighter is off the board;
+                    // otherwise it is the first knight in the fight, which is
+                    // seat zero. A creature it happens to be facing is never
+                    // the one it means.
                     Effect::Gosub { routine, .. } if routine == "KillKnight" => {
                         let held = self.fighters.iter().position(|f| f.holder == Some(i));
-                        if let Some(t) = held.or_else(|| self.nearest_foe(i)) {
+                        let player = self
+                            .fighters
+                            .iter()
+                            .position(|f| def_of(&f.actor).controller() == Controller::Knight);
+                        if let Some(t) = held.or(player) {
                             let t_def = def_of(&self.fighters[t].actor);
                             let left = self.fighters[t].health.max(1);
                             self.fighters[t].holder = None;
@@ -1746,6 +2107,10 @@ impl Bout {
                         }
                     }
                     let evading = self.fighters[target].guarding() == Some(Attack::Evade);
+                    // `StruckTable` (DS:0x7843) for the dragon's three kinds
+                    // and the dragon's own `DragonStruck`: what each side of
+                    // a blow in this fight costs, before it is dealt.
+                    let damage = self.dragon_blow(target, damage, blow.attack, a_def, t_def);
                     self.fighters[target].struck(t_def, damage, blow.attack);
                     self.got_struck(target, t_def, blow.attack);
                     if blow.missile.is_none() {
@@ -1759,10 +2124,20 @@ impl Bout {
                     if blow.missile.is_none() {
                         self.turn_struck(attacker, target, a_def);
                     }
-                    // `DragonStruck` sets `DragonFLAGS` bit 7 the moment a
-                    // knight lands anything, and from then on the dragon
-                    // breathes rather than bites. Nothing else reads the bit.
-                    self.fighters[target].brain.flags |= crate::monster::flag::STRUCK;
+                    // `DragonStruck1`, `DragonFire1` and `ClawStruck1`: the
+                    // rows `InitKnightvsDragon` wrote over the knight's own
+                    // `*Hit` table for this fight, and the row the bite drags
+                    // him onto. And `DragonStruck`: what a blow on the head
+                    // leaves behind.
+                    self.dragon_struck_knight(
+                        attacker,
+                        target,
+                        blow.missile.is_none(),
+                        blow.attack,
+                        a_def,
+                        t_def,
+                    );
+                    self.dragon_struck(blow.missile.is_some(), blow.attack, a_def, t_def);
                     let fatal = !self.fighters[target].alive();
                     events.push(HitEvent {
                         attacker,
@@ -1818,7 +2193,8 @@ impl Bout {
                         let rat = self.ratman_hit(attacker, target, a_def);
                         let balok = self.balok_hit(attacker, target, a_def);
                         let beast = self.beast_tosses(attacker, target, a_def, t_def);
-                        rat || balok || beast
+                        let dragon = self.dragon_bites(attacker, target, blow.attack, a_def);
+                        rat || balok || beast || dragon
                     } else {
                         false
                     };
@@ -1921,6 +2297,7 @@ impl Bout {
             }
             mix(f.holder.map_or(-1, |h| h as i64));
             mix(f.hidden as i64);
+            mix(f.talismans as i64);
             mix(f.drive.dx as i64);
             mix(f.drive.dy as i64);
             match &f.ordered {
@@ -1955,6 +2332,17 @@ impl Bout {
         }
         mix(self.settled_for as i64);
         mix(self.rng as i64);
+        mix(self.stopped as i64);
+        mix(self.shared.dragon as i64);
+        mix(self.shared.ddis as i64);
+        for v in self.shared.dragon_bodge {
+            mix(v as i64);
+        }
+        mix(self.shared.dead_claws as i64);
+        if let Some((a, b)) = self.shared.dragon_ranges {
+            mix(a as i64);
+            mix(b as i64);
+        }
         h
     }
 }
@@ -2295,6 +2683,430 @@ mod tests {
         assert_eq!(b.fighters[0].ordered, None);
     }
 
+    /// The dragon's set piece in miniature: a scripted dragon whose `*Hit`
+    /// row dies into a death that calls what `Dragon_Dead` (0x3e40) calls,
+    /// two claws on `ControlClaw`, and a knight with the rows
+    /// `InitKnightvsDragon` writes over his table.
+    fn dragon_set_piece() -> (ActorDef, ActorDef, ActorDef) {
+        use crate::combat::tests::depth_def;
+        use crate::content::AttackDef;
+        use crate::taskvm::{End, Instr, Part, Script};
+        let stop = Instr::EndFrame { end: End::Stop };
+        let next = Instr::EndFrame { end: End::Next };
+        let gosub = |r: &str| Instr::Gosub { routine: r.into() };
+        let head = |cel: u8, flags: u8| {
+            Instr::Part(Part {
+                table: 1,
+                bank: 0,
+                cel,
+                x: 0,
+                y: 0,
+                flags,
+            })
+        };
+        let mut dragon = depth_def();
+        dragon.controller = "dragon".into();
+        dragon.health = 200;
+        dragon.damage = 20;
+        dragon.approach = 60;
+        dragon.back_off = 20;
+        dragon.depth_tolerance = 5;
+        dragon.bleeds = false;
+        dragon.attacks.clear();
+        for (kind, script, damage) in [
+            ("lunge", "Dragon_HighBite", 20),
+            ("swing", "Dragon_LowBreath", 30),
+            ("chop", "Dragon_HighBreath", 30),
+        ] {
+            dragon.attacks.insert(
+                kind.into(),
+                AttackDef {
+                    script: script.into(),
+                    damage,
+                },
+            );
+        }
+        dragon.attack = "lunge".into();
+        for name in ["Dragon_HighBite", "Dragon_LowBreath", "Dragon_HighBreath"] {
+            // One frame with a weapon part at the head and the bite's tooth.
+            dragon.animation.insert(
+                name.into(),
+                Script::new(vec![
+                    head(
+                        8,
+                        crate::taskvm::part_flags::BODY | crate::taskvm::part_flags::WEAPON,
+                    ),
+                    next.clone(),
+                    head(0, crate::taskvm::part_flags::BODY),
+                    stop.clone(),
+                ]),
+            );
+        }
+        // `Dragon_Fire` (0x48ca): a weapon part and a `TASKKILLTASK`.
+        dragon.animation.insert(
+            "Dragon_Fire".into(),
+            Script::new(vec![
+                gosub("DrFireSnd"),
+                head(8, crate::taskvm::part_flags::WEAPON),
+                next.clone(),
+                Instr::KillTask,
+                stop.clone(),
+            ]),
+        );
+        // `Dragon_BitKnight` (0x46f8): the chewing, `KillKnight` and
+        // `StopCombat`.
+        dragon.animation.insert(
+            "Dragon_BitKnight".into(),
+            Script::new(vec![
+                gosub("DragonKnightSound"),
+                head(0, 0),
+                next.clone(),
+                gosub("KillKnight"),
+                head(0, 0),
+                next.clone(),
+                gosub("StopCombat"),
+                head(0, 0),
+                stop.clone(),
+            ]),
+        );
+        // `Dragon_Dead` (0x3e40): `DrDropHead`, then `StopCombat`, then
+        // `DrDropClaws`, then the task killed.
+        dragon.animation.insert(
+            "Dragon_Dead".into(),
+            Script::new(vec![
+                gosub("DrDropHead"),
+                head(0, 0),
+                next.clone(),
+                gosub("StopCombat"),
+                head(0, 0),
+                next.clone(),
+                gosub("DrDropClaws"),
+                head(0, 0),
+                next.clone(),
+                Instr::KillTask,
+                stop.clone(),
+            ]),
+        );
+        // `Dragon_Hit` (0x4542): `TASKDEAD Dragon_Dead`.
+        dragon.animation.insert(
+            "Dragon_Hit".into(),
+            Script::new(vec![
+                Instr::Dead {
+                    target: "Dragon_Dead".into(),
+                },
+                head(0, 0),
+                stop.clone(),
+            ]),
+        );
+        dragon.hurt_by.clear();
+        dragon
+            .scripts
+            .insert("hurt".into(), vec!["Dragon_Hit".into()]);
+        dragon
+            .scripts
+            .insert("death".into(), vec!["Dragon_Dead".into()]);
+        dragon
+            .scripts
+            .insert("recover".into(), vec!["stance".into()]);
+        dragon.scripts.insert("lift".into(), vec!["stance".into()]);
+        dragon.scripts.insert("lower".into(), vec!["stance".into()]);
+        for name in ["Dragon_Stance", "Dragon_HighStance"] {
+            dragon.animation.insert(
+                name.into(),
+                Script::new(vec![head(0, crate::taskvm::part_flags::BODY), stop.clone()]),
+            );
+        }
+        let mut claw = dragon.clone();
+        claw.controller = "claw".into();
+        claw.depth_tolerance = 10;
+        claw.attacks.clear();
+        claw.attacks.insert(
+            "rthrust".into(),
+            AttackDef {
+                script: "Dragon_ClawSlap".into(),
+                damage: 10,
+            },
+        );
+        claw.attack = "rthrust".into();
+        claw.damage = 10;
+        for name in ["Dragon_Claw", "Dragon_ClawSlap", "Dragon_ClawDead"] {
+            claw.animation.insert(
+                name.into(),
+                Script::new(vec![head(0, crate::taskvm::part_flags::BODY), stop.clone()]),
+            );
+        }
+        let mut knight = depth_def();
+        for name in ["Knight_SwShoulderHit", "Knight_Burn", "Knight_SwSlapped"] {
+            knight.animation.insert(
+                name.into(),
+                Script::new(vec![Instr::Hold { count: 4 }, head(9, 0), stop.clone()]),
+            );
+        }
+        (dragon, claw, knight)
+    }
+
+    /// The set piece stood up as `InitKnightvsDragon` stands it: the head at
+    /// x 80 and the two claws at x 5, ten rows either side, with a knight in
+    /// front of it.
+    fn dragon_bout(knight_x: i32) -> Bout {
+        let (dragon, claw, knight) = dragon_set_piece();
+        let mut k = Fighter::new("k", &knight, knight_x, 100, -1);
+        k.health = 20;
+        k.max_health = 20;
+        let mut d = Fighter::new("d", &dragon, 80, 100, 1);
+        d.brain.height = -40;
+        let mut c1 = Fighter::new("c", &claw, 5, 110, 1);
+        c1.brain.timer = 10;
+        let mut c2 = Fighter::new("c", &claw, 5, 80, 1);
+        c2.brain.timer = -20;
+        Bout::new(arena_field(), vec![k, d, c1, c2])
+    }
+
+    fn dragon_defs() -> std::collections::BTreeMap<String, ActorDef> {
+        let (dragon, claw, knight) = dragon_set_piece();
+        [("k", knight), ("d", dragon), ("c", claw)]
+            .into_iter()
+            .map(|(n, d)| (n.to_string(), d))
+            .collect()
+    }
+
+    /// `DragonStruck1` (0x43ad), `ClawStruck1` (0x43d3) and `DragonFire1`
+    /// (0x43c2): what the dragon's three kinds do to a knight, through
+    /// `TalismanWrym`, onto the rows `InitKnightvsDragon` wrote, and where
+    /// the head's own blows leave him.
+    #[test]
+    fn the_dragons_blows_burn_bite_and_slap_through_the_talisman() {
+        let defs = dragon_defs();
+        let (dragon, claw, knight) = (&defs["d"], &defs["c"], &defs["k"]);
+        // 043bd: the bite is twenty, and 043ad: he is on the head's row less one.
+        let mut b = dragon_bout(150);
+        b.fighters[0].y = 108;
+        b.fighters[1].y = 104;
+        assert_eq!(
+            b.dragon_blow(0, 20, Some(Attack::Lunge), dragon, knight),
+            20
+        );
+        b.fighters[0].struck(knight, 20, Some(Attack::Lunge));
+        b.dragon_struck_knight(1, 0, true, Some(Attack::Lunge), dragon, knight);
+        assert_eq!(b.fighters[0].y, 103, "043b3: the head's row, less one");
+        assert_eq!(
+            b.fighters[0].script, "Knight_SwShoulderHit",
+            "02448: kind 2"
+        );
+        // 043c2: the fire task is thirty, and it does not move him.
+        let mut b = dragon_bout(150);
+        b.fighters[0].health = 20;
+        assert_eq!(b.dragon_blow(0, 30, Some(Attack::Chop), dragon, knight), 30);
+        b.fighters[0].struck(knight, 30, Some(Attack::Chop));
+        b.dragon_struck_knight(1, 0, false, Some(Attack::Chop), dragon, knight);
+        assert_eq!(
+            b.fighters[0].y, 100,
+            "DragonFire1 enters past the row write"
+        );
+        assert_eq!(b.fighters[0].script, "Knight_Burn", "02452: kind 0x10");
+        // 0244d: the low breath is the burn as well, off the head's own parts.
+        let mut b = dragon_bout(150);
+        b.fighters[0].struck(knight, 30, Some(Attack::Swing));
+        b.dragon_struck_knight(1, 0, true, Some(Attack::Swing), dragon, knight);
+        assert_eq!(b.fighters[0].script, "Knight_Burn", "0244d: kind 4");
+        assert_eq!(b.fighters[0].y, 99, "and the head's row less one");
+        // 043d3: a claw is ten, and 02457 the slap.
+        let mut b = dragon_bout(60);
+        assert_eq!(
+            b.dragon_blow(0, 10, Some(Attack::RThrust), claw, knight),
+            10
+        );
+        b.fighters[0].struck(knight, 10, Some(Attack::RThrust));
+        b.dragon_struck_knight(2, 0, true, Some(Attack::RThrust), claw, knight);
+        assert_eq!(b.fighters[0].script, "Knight_SwSlapped", "02457: kind 0xa");
+        assert_eq!(b.fighters[0].y, 100, "a claw's blow leaves his row alone");
+        // 043ca / 043d6: TalismanWrym on every one of them.
+        let mut b = dragon_bout(150);
+        b.fighters[0].talismans = 1;
+        assert_eq!(b.dragon_blow(0, 30, Some(Attack::Chop), dragon, knight), 15);
+        assert_eq!(
+            b.dragon_blow(0, 20, Some(Attack::Lunge), dragon, knight),
+            10
+        );
+        assert_eq!(b.dragon_blow(0, 10, Some(Attack::RThrust), claw, knight), 5);
+        b.fighters[0].talismans = 3;
+        assert_eq!(
+            b.dragon_blow(0, 30, Some(Attack::Chop), dragon, knight),
+            5,
+            "04403: the floor"
+        );
+        // 03acf: a knife takes three off the dragon, whatever it is worth.
+        assert_eq!(b.dragon_blow(1, 9, Some(Attack::Knife), knight, dragon), 3);
+        assert_eq!(
+            b.dragon_blow(1, 9, Some(Attack::Swing), knight, dragon),
+            9,
+            "03aa2: CalcDamage"
+        );
+        // 03a9c / 03ac0: a knight's blow or a knife raises bit 7; a claw's
+        // touch or the fire's does not.
+        b.dragon_struck(false, Some(Attack::Swing), knight, dragon);
+        assert_eq!(b.shared.dragon & crate::monster::dragon_flag::STRUCK, 0x80);
+        b.shared.dragon = 0;
+        b.dragon_struck(true, Some(Attack::Knife), knight, dragon);
+        assert_eq!(b.shared.dragon & crate::monster::dragon_flag::STRUCK, 0x80);
+        b.shared.dragon = 0;
+        b.dragon_struck(false, Some(Attack::RThrust), claw, dragon);
+        b.dragon_struck(true, Some(Attack::Chop), dragon, dragon);
+        assert_eq!(
+            b.shared.dragon, 0,
+            "03a82: anything else is not a blow it marks"
+        );
+    }
+
+    /// `DragonHit2` (0x3ad5): the bite that closes takes the knight's task
+    /// away and puts the chewing on in the bite's place, and `KillKnight`
+    /// inside it kills him and nobody else.
+    #[test]
+    fn the_bite_that_closes_is_the_chewing_and_the_chewing_is_the_end() {
+        let defs = dragon_defs();
+        let dragon = &defs["d"];
+        let mut b = dragon_bout(150);
+        b.fighters[1].enter_on(State::Attack, "Dragon_HighBite".into());
+        b.fighters[1].attack = Some(Attack::Lunge);
+        // 03ade: a breath that touches him carries on.
+        assert!(!b.dragon_bites(1, 0, Some(Attack::Chop), dragon));
+        assert!(!b.fighters[0].hidden);
+        // 03ae7: the bite.
+        assert!(b.dragon_bites(1, 0, Some(Attack::Lunge), dragon));
+        assert!(b.fighters[0].hidden, "03aea: his task is killed");
+        assert_eq!(b.fighters[0].holder, Some(1));
+        assert!(!b.fighters[0].alive(), "and his record freed");
+        assert_eq!(b.shared.dragon_bodge[2], 1, "03aed: dragonbodge3");
+        assert_eq!(b.fighters[1].script, "Dragon_BitKnight", "03af3");
+        assert_eq!(b.fighters[1].state, State::Attack);
+        // The chewing runs: `KillKnight` on him and `StopCombat` at the end,
+        // and the claws stay where the head is.
+        let mut ticks = 0;
+        while !b.settled() {
+            b.step_with(|n| &defs[n], &[Intent::default(); 4]);
+            ticks += 1;
+            assert!(ticks < 100, "the chewing never ended");
+        }
+        assert!(b.stopped, "04880: StopCombat");
+        assert!(
+            b.fighters[1].alive(),
+            "KillKnight (0xab2) is [0x8979], the knight, and not the caller's foe"
+        );
+        assert_eq!(
+            b.fighters[2].y,
+            b.fighters[1].y + 10,
+            "03bc5: claw one ten deeper"
+        );
+        assert_eq!(
+            b.fighters[3].y,
+            b.fighters[1].y - 20,
+            "03bcb: claw two twenty nearer"
+        );
+    }
+
+    /// `Dragon_Dead` (0x3e40) as the bout runs it: `DrDropHead` (0x3bd2)
+    /// puts the head thirty eight rows down the screen, `StopCombat` ends
+    /// the fight, and `DrDropClaws` (0x3be1) has both claws kill their own
+    /// tasks on their next pass, having held `Dragon_ClawDead` since the
+    /// head's hit points went.
+    #[test]
+    fn the_dead_dragon_drops_its_head_and_then_its_claws() {
+        let defs = dragon_defs();
+        let mut b = dragon_bout(150);
+        // The last blow: the head onto `Dragon_Hit`, whose `TASKDEAD` is the
+        // death.
+        b.fighters[1].struck(&defs["d"], 200, Some(Attack::Swing));
+        assert!(!b.fighters[1].alive());
+        let height = b.fighters[1].brain.height;
+        // Two claw passes with the head down: `Dragon_ClawDead`, and no slap
+        // however close he stands.
+        b.fighters[0].x = 60;
+        for claw in [2, 3] {
+            b.monster_intent(claw, 0, |n| &defs[n], true);
+            assert_eq!(
+                b.fighters[claw].ordered.as_ref().map(|o| o.script.as_str()),
+                Some("Dragon_ClawDead"),
+                "03b58"
+            );
+        }
+        let mut ticks = 0;
+        let mut dropped_at = None;
+        while b.fighters[1].task.as_ref().is_some_and(|t| t.active) {
+            b.step_with(|n| &defs[n], &[Intent::default(); 4]);
+            ticks += 1;
+            if dropped_at.is_none() && b.fighters[1].brain.height != height {
+                dropped_at = Some(ticks);
+            }
+            assert!(ticks < 100, "Dragon_Dead never ended");
+        }
+        assert_eq!(
+            b.fighters[1].brain.height,
+            height + 0x26,
+            "03bdb: add word [di+6], 0x26"
+        );
+        assert!(dropped_at.is_some());
+        assert!(b.stopped, "04030: StopCombat");
+        assert_eq!(b.shared.dead_claws, -1, "03be3: DEAD_CLAWS");
+        // And the claws, on their next pass, are gone: no task, no body, not
+        // among the standing.
+        for claw in [2, 3] {
+            b.fighters[claw].brain.rest = 0;
+            b.monster_intent(claw, 0, |n| &defs[n], true);
+            assert!(!b.fighters[claw].alive(), "03b61: CLAWS_DEAD");
+            assert!(b.fighters[claw].task.as_ref().is_some_and(|t| !t.active));
+        }
+        assert!(b.settled());
+        assert_eq!(b.winner(), Some(0));
+    }
+
+    /// `AddDragonFIRE` (0x3afc): the fire is a task of its own fifty five
+    /// pixels along and five rows deeper than the head, at no height, facing
+    /// right, on the creature's banks, and it lands as thirty.
+    #[test]
+    fn the_high_breaths_fire_is_a_task_of_its_own_beside_the_head() {
+        let defs = dragon_defs();
+        let mut b = dragon_bout(150);
+        b.breathe(1, "Dragon_Fire", &defs["d"]);
+        assert_eq!(b.missiles.len(), 1);
+        let m = &b.missiles[0];
+        let head = b.fighters[1].task.as_ref().unwrap();
+        assert_eq!(m.task.x, head.x + 0x37, "03b1b: add ax, 0x37");
+        assert_eq!(m.task.y, head.y + 5, "03b16: add cx, 5");
+        assert_eq!(m.task.z, 0, "03b10: mov bx, 0");
+        assert_eq!(m.task.facing, FACING_RIGHT, "03b19: mov dh, 1");
+        assert_eq!(m.depth, b.fighters[1].y + 5);
+        assert_eq!(
+            m.attack,
+            Some(Attack::Chop),
+            "kind 0x14 is DragonFire1: thirty"
+        );
+        assert_eq!(m.owner, 1);
+    }
+
+    /// `TrackKnight` by `TASKGOSUB` (0x4448): the head moves while its own
+    /// breath plays, on the ranges of two and one the breath bit puts in.
+    #[test]
+    fn the_breath_scripts_track_the_knight_mid_frame() {
+        let defs = dragon_defs();
+        let mut b = dragon_bout(300);
+        b.fighters[1].x = 90;
+        b.shared.dragon = crate::monster::dragon_flag::BREATHING;
+        b.track_knight(1, &|n| &defs[n]);
+        assert_eq!(b.fighters[1].x, 95, "03c36: five to the right");
+        assert_eq!(b.fighters[1].facing, 1, "03c1f");
+        assert_eq!(
+            b.shared.dragon_ranges,
+            Some((60, 60)),
+            "03c84: DCL was +0x52"
+        );
+        let t = b.fighters[1].task.as_ref().unwrap();
+        assert_eq!(t.x, 95 + defs["d"].origin[0] as i32, "03c6a: the task's x");
+        // Nobody but the dragon runs it.
+        b.fighters[0].x = 200;
+        b.track_knight(0, &|n| &defs[n]);
+        assert_eq!(b.fighters[0].x, 200);
+    }
+
     /// `BalokHit` (0x377a) and `BalokGrabbed` (0x379b): the grab takes hold of
     /// the knight, and `ControlBalok`'s own flag word carries the three frames
     /// after it.
@@ -2347,25 +3159,47 @@ mod tests {
             progression: 0,
             perch: None,
             foe_blow: 0,
+            head_health: None,
         };
         let grip = |a: &crate::monster::Act| match a {
             crate::monster::Act::Grip { script, hold, .. } => Some((script.clone(), *hold)),
             _ => None,
         };
-        let first = crate::monster::decide(&held, &mut brain, &mut seed, &mut facing, &mut shared);
+        let first = crate::monster::decide(
+            &held,
+            &mut brain,
+            &mut seed,
+            &mut facing,
+            &mut shared,
+            &mut (0, 0),
+        );
         assert_eq!(
             grip(&first),
             Some(("Balok_GrabKnight".to_string(), true)),
             "0x37a0"
         );
-        let second = crate::monster::decide(&held, &mut brain, &mut seed, &mut facing, &mut shared);
+        let second = crate::monster::decide(
+            &held,
+            &mut brain,
+            &mut seed,
+            &mut facing,
+            &mut shared,
+            &mut (0, 0),
+        );
         assert_eq!(
             grip(&second),
             Some(("Balok_ShakeKnight".to_string(), true)),
             "ControlBalokGrab, 0x37ae"
         );
         assert_eq!(shared.balok & balok_flag::RELEASING, balok_flag::RELEASING);
-        let third = crate::monster::decide(&held, &mut brain, &mut seed, &mut facing, &mut shared);
+        let third = crate::monster::decide(
+            &held,
+            &mut brain,
+            &mut seed,
+            &mut facing,
+            &mut shared,
+            &mut (0, 0),
+        );
         assert_eq!(
             grip(&third),
             Some(("Balok_Recover".to_string(), false)),
@@ -2379,7 +3213,14 @@ mod tests {
             balok: balok_flag::RELEASING,
             ..Default::default()
         };
-        let bite = crate::monster::decide(&done, &mut brain, &mut seed, &mut facing, &mut shared);
+        let bite = crate::monster::decide(
+            &done,
+            &mut brain,
+            &mut seed,
+            &mut facing,
+            &mut shared,
+            &mut (0, 0),
+        );
         assert_eq!(
             grip(&bite),
             Some(("Balok_BiteKnight".to_string(), true)),
@@ -2390,8 +3231,14 @@ mod tests {
             balok_bite: 1,
             ..Default::default()
         };
-        let squeeze =
-            crate::monster::decide(&done, &mut brain, &mut seed, &mut facing, &mut shared);
+        let squeeze = crate::monster::decide(
+            &done,
+            &mut brain,
+            &mut seed,
+            &mut facing,
+            &mut shared,
+            &mut (0, 0),
+        );
         assert_eq!(
             grip(&squeeze),
             Some(("Balok_SqueezeKnight".to_string(), true)),
@@ -3157,7 +4004,8 @@ mod depth {
     /// strength and sword, and a chop doubled after the additions. At the
     /// original's scale a starting knight's swing is `4 + 1`, his chop
     /// `(4 + 1) * 2`; here the same with a bonus of three: seven, and
-    /// fourteen, against the chop table's `8 + 3 * 2`.
+    /// fourteen. `KnightDamSw[0x10]` is four, the same as the swing, and the
+    /// doubling is `CalcDamage`'s own `shl ax, 1` (0x2d9d).
     #[test]
     fn strength_and_the_sword_are_added_to_every_blow_and_a_chop_doubles_them() {
         let d = depth_def();
@@ -3194,6 +4042,44 @@ mod depth {
             "(4 + 1) * 2, as CalcDamage doubles after adding"
         );
         assert_eq!(land(3, chop), 14);
+    }
+
+    /// `TroggStruck1+36` (0x42e7): `mov ax, [bx]; sub [di+0x38], ax` with
+    /// `bx` the trogg's own `*Dam` table at the kind. No `CalcDamage`, so no
+    /// strength and no doubling: a creature's chop is its table entry as it
+    /// stands, where a knight's is doubled after his sheet is added.
+    #[test]
+    fn a_creatures_chop_is_its_table_entry_and_is_not_doubled() {
+        let mut d = depth_def();
+        d.controller = "trogg".into();
+        // Six for the chop against four for the swing, so the answer tells
+        // the chop's own entry from the swing's, from the sheet, and from a
+        // doubling.
+        d.attacks.get_mut("chop").unwrap().damage = 6;
+        let mut b = pair(&d);
+        b.damage = 4;
+        b.fighters[0].bonus = 3;
+        // The plain controller is bypassed by driving the intent directly,
+        // so the fighter is a knight-shaped actor filed as a trogg.
+        b.fighters[0].brain.flags &= !crate::monster::flag::DRIVEN;
+        let chop = Intent {
+            dx: 0,
+            dy: -1,
+            attack: true,
+        };
+        let mut dealt = None;
+        for _ in 0..8 {
+            let hits = b.step(&d, &[chop, Intent::default()]);
+            if let Some(h) = hits.first() {
+                dealt = Some(h.damage);
+                break;
+            }
+        }
+        assert_eq!(
+            dealt,
+            Some(6),
+            "the table's six, neither added to nor doubled"
+        );
     }
 
     /// Two bouts that differ only in a sheet's strength differ in their

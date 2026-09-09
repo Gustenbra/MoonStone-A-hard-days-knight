@@ -13,6 +13,7 @@ mod shell;
 mod sprite;
 mod status;
 mod text;
+mod town;
 mod world;
 
 use framebuffer::Framebuffer;
@@ -22,12 +23,12 @@ use henge_core::combat::{Intent, State};
 use henge_core::ending::Ending;
 use henge_core::harness::Snapshot;
 use henge_core::intro::Intro;
-use henge_core::item::{Items, Loss};
+use henge_core::item::Items;
 use henge_core::knight::{Ability, Knight, Knights};
 use henge_core::message::{Message, Messages};
 use henge_core::place::{Answer, Overlaps, Places};
 use henge_core::pointer::{Gadgets, Pointer};
-use henge_core::run::{Cast, Challenge, Run};
+use henge_core::run::{Cast, Run};
 use henge_core::shell::Start;
 use henge_core::status::{Op, Screen as SheetScreen};
 use henge_core::stones::Stones;
@@ -248,10 +249,6 @@ struct Script {
     goto: Option<(i32, i32)>,
     keys: Vec<char>,
     at: Option<String>,
-    /// Suppress ambushes. Checking how the map draws anywhere but the starting
-    /// corner was otherwise impossible: the traveller is killed en route long
-    /// before arriving, so half the map could never be looked at.
-    peaceful: bool,
 }
 
 impl Script {
@@ -271,7 +268,6 @@ impl Script {
                 .map(|s| s.chars().collect())
                 .unwrap_or_default(),
             at: after("--at"),
-            peaceful: a.iter().any(|s| s == "--peaceful"),
         }
     }
 
@@ -292,8 +288,8 @@ impl Script {
         }
         if let Some((gx, gy)) = self.goto {
             match app.mode {
-                // Ambushes happen on the way, and a traveller who never swings
-                // dies to the first one, so swing while walking.
+                // A fight on the way, which only a lair or the dragon can
+                // start, is swung at rather than stood in.
                 Mode::Combat => {
                     app.keys = [false; 256];
                     app.keys[6] = app.tick % 23 < 4;
@@ -440,7 +436,6 @@ fn main() -> anyhow::Result<()> {
         }
         let script = Script::from_args(&a);
         let scripts = a.iter().any(|s| s == "--scripts");
-        app.peaceful = script.peaceful;
         prepare(&mut app, &a);
         if let Some(id) = script.at.as_deref() {
             app.enter(id);
@@ -501,7 +496,20 @@ fn main() -> anyhow::Result<()> {
                             Some(Flight { returns: false, .. }) => " hawk",
                             None => "",
                         };
-                        format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} {} s{}c{}e{} xp{}{}{}",
+                        // And the dragon, when it is in the air: where it is
+                        // and whom it is after, since the swoop is only
+                        // checkable if its shadow can be watched.
+                        let dragon = if r.dragon.aloft {
+                            format!(
+                                " dragon@{},{} after {}",
+                                r.dragon.x,
+                                r.dragon.z,
+                                r.dragon.target.map_or("-".to_string(), |t| t.to_string())
+                            )
+                        } else {
+                            String::new()
+                        };
+                        format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} {} s{}c{}e{} xp{}{}{}{}",
                         t, m.state.day, m.state.x, m.state.y, r.health, r.gold, carrying(r),
                         r.victories, r.fights,
                         if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name(),
@@ -509,7 +517,7 @@ fn main() -> anyhow::Result<()> {
                         // an arena moves with it: a calendar is only checkable
                         // if it is on the line.
                         r.moon.phase().key(),
-                        k.strength, k.constitution, k.endurance, r.experience, aloft,
+                        k.strength, k.constitution, k.endurance, r.experience, aloft, dragon,
                         if app.sheet { format!(" SHEET > {}", app.sheet_said.as_deref().unwrap_or("-")) } else { String::new() })
                     }
                     Mode::Place => {
@@ -527,15 +535,24 @@ fn main() -> anyhow::Result<()> {
                             Some(id) => format!("  [{id}]"),
                             None => String::new(),
                         };
+                        let what = match app.door.as_ref() {
+                            Some(open) => town::describe(open, &app.run),
+                            None => place::describe(def, &s.visit),
+                        };
                         format!(
-                            "{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}{}",
+                            "{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}{}{}",
                             t,
                             app.run.day,
                             app.run.health,
                             app.run.gold,
                             carrying(&app.run),
-                            place::describe(def, &s.visit, &app.items),
+                            what,
                             s.visit.said,
+                            if app.sheet_said.is_some() {
+                                format!(" > {}", app.sheet_said.as_deref().unwrap_or(""))
+                            } else {
+                                String::new()
+                            },
                             tune
                         )
                     }
@@ -641,7 +658,6 @@ fn main() -> anyhow::Result<()> {
         app.keys[3] = args.iter().any(|a| a == "--walk");
         app.keys[6] = args.iter().any(|a| a == "--fight");
         let script = Script::from_args(&args);
-        app.peaceful = script.peaceful;
         prepare(&mut app, &args);
         if let Some(id) = script.at.as_deref() {
             app.enter(id);
@@ -911,8 +927,6 @@ struct App {
     /// asked, since a sound cannot be checked by looking at a screenshot.
     trace_sounds: bool,
     fonts: std::collections::BTreeMap<String, Font>,
-    /// Suppress ambushes, so map rendering can be checked anywhere.
-    peaceful: bool,
     /// Which key and which stick raise which action. Ours, and data: item 76.
     bindings: input::Bindings,
     /// Where the bindings and the calibration are kept.
@@ -941,13 +955,16 @@ struct App {
     /// like the map position it belongs with: `GemXY` in the original is
     /// beside the token, not on the knight record.
     flight: Option<Flight>,
-    /// The donation bowl, when it is open over a healer's or a mystic's screen,
-    /// and which of the two is taking it. `_WIZARD:DonateLoop` is a loop of its
-    /// own with two ways out, so it is modal here too.
-    bowl: Option<(henge_core::status::Donation, bool)>,
+    /// One of a town's five doors standing open: `HWLOOP`'s rung is running
+    /// and the town is what it comes back to through `HWINIT`. Each is a loop
+    /// of its own in the original and modal here for the same reason.
+    door: Option<town::Open>,
     /// Which of the bowl's four gadgets the keys have stepped to. The original
     /// has only the pointer; a keyboard needs a way to reach four boxes.
-    bowl_cursor: usize,
+    door_cursor: usize,
+    /// `AddDonation`'s and `SubDonation`'s two retraces, counted down before
+    /// a held fire takes the next coin.
+    door_wait: u32,
     /// What the gadget under the pointer says on the character sheet, which is
     /// `GadgetHit` drawing `Response1[STID >> 1]` across the top of it. The
     /// sheet has no cursor and no rows: see [`status`].
@@ -994,6 +1011,8 @@ struct App {
     /// A message box up over everything, and how many ticks it has left. Modal,
     /// which is what all three of `WAITMESSAGE`, `OCCURMESSAGE` and
     /// `INSTRUCTMESSAGE` are: they draw, they fade, and nothing else runs.
+    /// Zero is "waiting on fire" for a chain whose caller waits, which is
+    /// `WaitFIRE` at 0x8251 and has no timer in it; see `show_message`.
     showing: Option<Message>,
     showing_for: u32,
     /// The intro sequence.
@@ -1018,14 +1037,12 @@ struct App {
     stones: Option<Stones>,
     /// The circle's own one-bank table, `DiceHANDLE` with `Hen1.c` in it.
     stones_banks: Option<henge_core::taskvm::BankTables>,
-    /// The hand over the dice table, while `TavernLoop` is running it, and the
-    /// throw it is holding back until `DiceDone`.
-    dice_table: Option<henge_core::dice::Table>,
-    /// What `DiceRND` would draw when the animation lands: the three faces and
-    /// the line the payout is said in. `RollDice` is called *after* the throw
-    /// in the original and there is nothing to draw before it, so nothing is
-    /// drawn before it here either.
-    dice_held: Option<([u8; 3], String)>,
+    /// `DrBuffer`, the five slots `ContinueDragon` (0xa5cd) points at `MI.C`:
+    /// the dragon's bank table 5, which its eight flight scripts draw from.
+    dragon_banks: Option<henge_core::taskvm::BankTables>,
+    /// The fight on is the dragon's, which the routine at 0xcf6 answers for
+    /// on its way out: `_dragon_won` or the `0xffff` into the dragon's `+0x31`.
+    dragon_fight: bool,
     /// The dice table's own one-bank table, `dice.cel` in `DiceHANDLE`.
     dice_banks: Option<henge_core::taskvm::BankTables>,
     /// Every animation script, which the circle's two tasks run on. The bout
@@ -1377,6 +1394,12 @@ impl App {
             )
             .ok()
             .and_then(|mut b| b.remove(henge_core::stones::BANKS));
+        let dragon_banks = reg
+            .read_data::<std::collections::BTreeMap<String, henge_core::taskvm::BankTables>>(
+                "data.banks",
+            )
+            .ok()
+            .and_then(|mut b| b.remove("dragon"));
         Ok(App {
             fb,
             fx: henge_assets::Effects::new(),
@@ -1407,7 +1430,6 @@ impl App {
             audio,
             trace_sounds: args_of().iter().any(|a| a == "--sounds"),
             fonts,
-            peaceful: false,
             bindings,
             controls_path,
             kb: [false; 256],
@@ -1419,8 +1441,9 @@ impl App {
             typed: None,
             named: Vec::new(),
             flight: None,
-            bowl: None,
-            bowl_cursor: 0,
+            door: None,
+            door_cursor: 0,
+            door_wait: 0,
             sheet_said: None,
             raiding: None,
             questing: false,
@@ -1446,8 +1469,8 @@ impl App {
             lair_page: None,
             stones: None,
             stones_banks,
-            dice_table: None,
-            dice_held: None,
+            dragon_banks,
+            dragon_fight: false,
             dice_banks,
             scripts,
             snapshot_path: snapshot_path_arg(&args_of()),
@@ -1722,7 +1745,9 @@ impl App {
             // Zero while it is still waiting, which leaves the screen fully lit.
             (self.interlude_out > 0).then_some(self.interlude_out)
         } else if self.showing.is_some() {
-            Some(self.showing_for)
+            // Zero while a chain is still waiting on fire, which leaves the
+            // box fully lit; the fade begins when fire sets it to sixteen.
+            (self.showing_for > 0).then_some(self.showing_for)
         } else {
             None
         };
@@ -1751,9 +1776,13 @@ impl App {
             // music plays that the table did not decide.
             self.music_places.get("intro").cloned()
         } else if self.mode == Mode::Place {
-            self.visiting
+            // A door's tune first: the tavern, the healer and the mystic each
+            // load one on the way in and stop it on the way out.
+            self.door
                 .as_ref()
-                .and_then(|s| self.music_places.get(&s.visit.place))
+                .and_then(|d| d.music_key())
+                .or_else(|| self.visiting.as_ref().map(|s| s.visit.place.as_str()))
+                .and_then(|key| self.music_places.get(key))
                 .cloned()
         } else {
             None
@@ -1881,11 +1910,31 @@ impl App {
 
         // A message box is modal, the way all three of the original's are:
         // `MESSAGE.PIV` goes up, the chain is drawn over it, and nothing else
-        // runs until it fades. Fire clears it, as `WaitFIRE` does.
-        if self.showing.is_some() {
-            self.showing_for = self.showing_for.saturating_sub(1);
-            if self.showing_for == 0 || self.pressed.iter().any(|p| *p) {
-                self.showing = None;
+        // runs until it fades. What takes it down is the caller's, not the
+        // routine's (`henge_core::message`): a chain followed by `WaitFIRE`
+        // at 0x8251 stays until fire is pressed and then goes out on the
+        // sixteen-step fade at 0x5b65, exactly as the between-days screen
+        // does below; a chain that covers a disk read goes out when the read
+        // is done and fire does nothing to it. No timer ever clears the
+        // first kind: one used to, and nothing in the original does.
+        if let Some(msg) = self.showing.as_ref() {
+            match msg.until {
+                henge_core::message::Until::Fire => {
+                    if self.showing_for > 0 {
+                        self.showing_for -= 1;
+                        if self.showing_for == 0 {
+                            self.showing = None;
+                        }
+                    } else if self.takes() {
+                        self.showing_for = henge_assets::palette::FADE_STEPS as u32;
+                    }
+                }
+                henge_core::message::Until::Loaded => {
+                    self.showing_for = self.showing_for.saturating_sub(1);
+                    if self.showing_for == 0 {
+                        self.showing = None;
+                    }
+                }
             }
             return;
         }
@@ -1911,7 +1960,8 @@ impl App {
                 if self.interlude_out == 0 {
                     self.interlude = 0;
                 }
-            } else if self.pressed.iter().any(|p| *p) {
+            } else if self.takes() {
+                // `test bx, 0x10`: fire, and nothing else, is what it reads.
                 self.interlude_out = henge_assets::palette::FADE_STEPS as u32;
             }
             return;
@@ -1995,12 +2045,13 @@ impl App {
                         m.state.pass_days(1);
                     }
                     self.run.new_day();
+                    self.run.dragon_turn_begins();
                     self.begin_interlude();
                     return;
                 }
-                // Aloft, the map is crossed without steps, ambushes or slow
-                // ground: `MapMovement` skips its step count and `CheckSLOW`
-                // its grid while either flag is up.
+                // Aloft, the map is crossed without steps or slow ground:
+                // `MapMovement` skips its step count and `CheckSLOW` its grid
+                // while either flag is up.
                 if self.flight.is_some() {
                     self.fly(dx, dy);
                     // `FOLLOW` still calls the walk while a map effect flag is
@@ -2015,22 +2066,28 @@ impl App {
                         self.overlaps
                             .gather(&self.places, x, y, self.run.knight.seat);
                     }
+                    // The dragon flies on while the gem or the hawk is up:
+                    // `DragonWander` is a task the loop steps whatever the
+                    // flags say. It is the swoop that `DragonEncounter+26`
+                    // (0xa3fc, 0xa403) keeps back.
+                    self.dragon_frame();
                     return;
                 }
-                let mut start: Option<String> = None;
                 let mut day_before = 0;
                 let mut at: Option<(i32, i32)> = None;
                 if let Some(m) = self.map.as_mut() {
                     day_before = m.state.day;
-                    // `DistanceDONE`: the day is as long as the stride says,
-                    // sixteen steps to the point, doubled by haste.
-                    if self.run.knight.named() {
-                        m.state.steps_per_day = self.run.day_steps(&self.items);
-                    }
-                    let step = m.update(dx, dy);
-                    if step.encounter && !self.peaceful {
-                        start = Some(m.last_terrain.family().to_string());
-                    }
+                    // `DistanceDONE+12` (0xa4be): the turn is as long as the
+                    // stride byte says, `[di+0x3e] << 4`, doubled by haste.
+                    // The original writes it on every return to the map and
+                    // nothing changes the stride mid-walk, so every frame is
+                    // the same as that.
+                    m.state.steps_per_day = self.run.day_steps(&self.items);
+                    // `PlayerKnight` (0xa355) round to `DistanceDONE`: the
+                    // slow ground, the step, the distance, the move. Nothing
+                    // on that path rolls; the original has no ambush on the
+                    // road, and the one that stood here was ours.
+                    m.update(dx, dy);
                     at = Some((m.state.x, m.state.y));
                 }
                 // `_MAP:FOLLOW` walks the whole overlap table once a frame and
@@ -2039,92 +2096,45 @@ impl App {
                     self.overlaps
                         .gather(&self.places, x, y, self.run.knight.seat);
                 }
-                // Walking is how you mend, and also how you meet trouble. The
-                // same action both repairs and risks you.
-                if dx != 0 || dy != 0 {
-                    self.run.travelled();
-                    // And trouble is not only the kind you can swing at. A
-                    // cutpurse on the road is the world's half of
-                    // `TAKEFROMKNIGHT`: what you carry can leave you.
-                    if !self.peaceful {
-                        match self.run.waylaid() {
-                            Some(Loss::Gold(n)) => {
-                                self.notice(format!("{n} gold taken"));
-                            }
-                            Some(Loss::Item(id)) => {
-                                let what =
-                                    self.items.get(&id).map_or(id.clone(), |d| d.name.clone());
-                                self.notice(format!("{what} taken"));
-                                // A ring taken is twenty health gone with it.
-                                self.run.refresh(&self.items);
-                            }
-                            None => {}
-                        }
-                    }
-                }
+                // `NextWHICH+26` (0xa44e): the day turns when the distance is
+                // spent, and the routine at 0x1148 and the between-days screen
+                // at 0x8e5b follow.
                 if let Some(m) = self.map.as_ref() {
                     if m.state.day != day_before {
                         self.run.new_day();
+                        // `MapEffects+63` (0xa545), at the top of the turn
+                        // `FOLLOW+100` (0xa303) begins: the dragon into the
+                        // air from the second moon on, or on its way.
+                        self.run.dragon_turn_begins();
                         self.begin_interlude();
+                        return;
                     }
+                }
+                // The dragon over the map, in the frame's own order: `FOLLOW`
+                // has moved the token, `CheckEncounterDone+128` (0x816) notes
+                // whom the shadow is over, and `ScrollINPUT` reaches
+                // `DragonEncounter` (0xa3e2) before `GoTheDistance`. A fight
+                // ends with `EncounterAllDone` spending the day, so the frame
+                // after one turns the day above and never gets here.
+                self.dragon_frame();
+                if self.run.dragon_comes_down(false) {
+                    self.begin_dragon_fight();
+                    return;
                 }
                 // `_MAP:ScrollINPUT`, image 0xa3c6: `mov ax, [JOYS];
                 // test ax, 0x10; je` and, with fire down, `call DisplayStack`.
                 // So nothing is ever walked into. A town is somewhere you stand
-                // on and then ask to enter, and asking beats the ambush roll
-                // taken on the same step.
-                if self.takes() && self.display_stack() {
-                    return;
-                }
-                // A scroll of protection hanging over the run answers the
-                // ambush first, the way `KnightProtection` is asked before
-                // `InitKnightBattle`.
-                let start = match start {
-                    Some(family) => match self.run.challenged() {
-                        Challenge::Averted => {
-                            self.notice("The scroll turns it away");
-                            None
-                        }
-                        Challenge::Backfired => {
-                            self.notice("The scroll turns on you");
-                            Some(family)
-                        }
-                        Challenge::Fight => Some(family),
-                    },
-                    None => None,
-                };
-                if start.is_some() {
-                    // The sheet as it stands now: constitution bought since
-                    // the last fight, a sword picked up, a curse to carry in.
-                    self.sync_sheet();
-                }
-                if let (Some(family), Some(w)) = (start, self.world.as_mut()) {
-                    // Which arena of that family comes next is the family's own
-                    // turn counter, carried on the run: the original rotates
-                    // through its eight in order rather than rolling for one.
-                    let pick = self.run.next_arena(&family, w.rotation_len(&family));
-                    w.set_player_health(self.run.health_for_fight());
-                    w.set_player_daggers(self.run.knight.daggers);
-                    // Who waits on this ground is the family's own list,
-                    // brought round by the same counter as its arenas.
-                    let foe = w.foe_for(&family, pick);
-                    w.set_foe(&foe);
-                    w.set_family(&family, pick);
-                    self.mode = Mode::Combat;
+                // on and then ask to enter.
+                if self.takes() {
+                    self.display_stack();
                 }
             }
             Mode::Place => {
-                // `DonateLoop` is its own loop and nothing behind it runs while
-                // it is up.
-                if self.bowl.is_some() {
-                    self.bowl_tick();
-                    return;
-                }
-                // `TavernLoop` at 0xb137 is a loop of its own too: the hand
-                // over the table runs and nothing else on the dice screen
-                // happens until `DiceTHROW` reaches 2.
-                if self.dice_table.is_some() {
-                    self.dice_tick();
+                // A door's routine is a loop of its own (`TavernLoop`,
+                // `DonateLoop`, `StatLOOP`) and nothing in the town runs
+                // while it is up.
+                if self.door.is_some() {
+                    self.door_tick();
                     return;
                 }
                 // A run that ended while you were indoors, which is what a
@@ -2139,10 +2149,9 @@ impl App {
                 let (up, down, take) = (self.pressed[0], self.pressed[1], self.takes());
                 let mut leave = false;
                 let mut days = 0;
-                let mut door: Option<String> = None;
+                let mut door: Option<henge_core::town::Door> = None;
                 let mut raid: Option<(usize, String, String, String, u32)> = None;
                 let mut quest: Option<(String, String, String, u32)> = None;
-                let mut bowl: Option<bool> = None;
                 let mut floor: Option<usize> = None;
                 if let Some(s) = self.visiting.as_mut() {
                     if let Some(def) = self.places.get(&s.visit.place) {
@@ -2156,7 +2165,7 @@ impl App {
                             match s.visit.choose(def, &self.items, &mut self.run) {
                                 Answer::Left => leave = true,
                                 Answer::Stayed { days: d } => days = d,
-                                Answer::Went { place } => door = Some(place),
+                                Answer::Door(d) => door = Some(d),
                                 Answer::Fight {
                                     lair,
                                     arena,
@@ -2178,7 +2187,6 @@ impl App {
                                 // straight on into `LairGEM`, which is the
                                 // panel on `StatTYPE` 2 over the map.
                                 Answer::Floor { lair } => floor = Some(lair),
-                                Answer::Bowl { consult } => bowl = Some(consult),
                             }
                             // `MOON:Henge` does not hand a line back and stop:
                             // an offering the druids took runs the circle's own
@@ -2187,6 +2195,14 @@ impl App {
                             if s.visit.rite {
                                 s.visit.rite = false;
                                 self.stones = Some(Stones::new(self.run.knight.seat as u8));
+                                // `noswap+31` (0xb375): `HengeWait` through
+                                // `INSTRUCTMESSAGE`, and then `Hen1.p` is
+                                // loaded straight over it. The box is modal
+                                // ahead of the set piece, so it is what is
+                                // seen first.
+                                if let Some(m) = self.messages.named("henge.ritual").cloned() {
+                                    self.show_message(m);
+                                }
                             }
                         }
                     } else {
@@ -2200,11 +2216,6 @@ impl App {
                 if let Some(lair) = floor {
                     self.open_lair_page(lair, false);
                     return;
-                }
-                // `InitDonation`: the purse moves into `GOLDP` and the bowl
-                // opens empty.
-                if let Some(consult) = bowl {
-                    self.bowl = Some((henge_core::status::Donation::open(self.run.gold), consult));
                 }
                 // Taking something off a lair's floor can be the thing that
                 // empties it, and an empty beaten lair is off the map.
@@ -2248,27 +2259,24 @@ impl App {
                         return;
                     }
                 }
-                // A door inside a place opens another place rather than putting
-                // you back on the map: the merchant's stall is a room in the
-                // town, not a walk away from it.
-                if let Some(id) = door {
-                    // What the room you came from was saying goes with you,
-                    // which is how the tavern's throw reaches the dice table.
-                    // Where it was saying nothing, the new room's own greeting
-                    // stands instead.
-                    let carried = self
-                        .visiting
-                        .as_ref()
-                        .map(|s| s.visit.through(&id))
-                        .filter(|v| !v.said.is_empty() || v.dice.is_some());
-                    if !self.enter(&id) {
-                        leave = true;
-                    } else if let (Some(s), Some(v)) = (self.visiting.as_mut(), carried) {
-                        s.visit = v;
+                // One of a town's five: `HWLOOP`'s rung, `AddClickSound` and
+                // the routine, over the town rather than in place of it.
+                if let Some(d) = door {
+                    self.audio.play(CLICK_SOUND);
+                    self.door = town::Open::through(&mut self.reg, d, &self.run);
+                    if let Some(open) = self.door.as_ref() {
+                        // `0xbdd3` puts the pointer at (0xa0, 0x64) before
+                        // `StatLOOP`; `TavernOpenScene` writes x 0x118 and
+                        // leaves y; the two counters wait on fire first and
+                        // put it at (0xa0, 0xaa) before the bowl.
+                        match open {
+                            town::Open::Panel(_) => self.point_at(0xa0, 0x64),
+                            town::Open::Tavern { .. } => {
+                                self.pointer.x = henge_core::town::TAVERN_POINTER_X;
+                            }
+                            town::Open::Counter { .. } => {}
+                        }
                     }
-                    // `TavernOpenScene`: the dice screen opens on the hand, not
-                    // on the faces.
-                    self.open_dice_table();
                 }
                 // Time spent indoors has to move the map's calendar too, or the
                 // day on the status bar would disagree with the day of the run.
@@ -2280,6 +2288,11 @@ impl App {
                 if leave {
                     self.visiting = None;
                     self.mode = Mode::Map;
+                    // Every way out of a place is `EncounterAllDone` (0x113e):
+                    // `CEXIT+6` for a town, `Wizard+9`, `Henge+122`, the
+                    // Valley's `FightDemon+47` and `+108`. The rest of the
+                    // day's distance goes with it.
+                    self.spend_day();
                 }
             }
             Mode::Combat => {
@@ -2347,10 +2360,26 @@ impl App {
                         if duel && won {
                             self.run.duel_won(&self.items);
                         }
+                        // The routine at 0xcf6 on its way out: `_dragon_won`
+                        // (0xd23) leaves it flying; 0xd38 to 0xd50 ground it
+                        // for good. `add word [si+0x36], 2` at 0xd40 is the
+                        // two points `w.experience()` has just paid.
+                        if self.dragon_fight {
+                            self.dragon_fight = false;
+                            self.run.dragon.fight_over(won);
+                        }
                         w.set_player_cursed(false);
                         // And what was thrown is gone: the sheet's daggers are
                         // whatever is left on the belt.
                         self.run.knight.daggers = w.daggers_left(0);
+                        // `Combat+60` (0x38d): `mov dx, [0xccac]; mov [0xcc98],
+                        // dx` the moment `WhoLived` has been asked, so a fight
+                        // is the last thing the day holds.
+                        let budget = self.run.day_steps(&self.items);
+                        if let Some(m) = self.map.as_mut() {
+                            m.state.steps_per_day = budget;
+                            m.state.end_turn();
+                        }
                     }
                     // A finisher on a fallen knight is allowed to play out, as
                     // the original's `StopCombat` is at the end of that script
@@ -2463,90 +2492,137 @@ impl App {
         }
     }
 
-    /// `HengeLOOP`. One frame every three vertical retraces until the lift's
-    /// animation ends, and there is no way to cut it short: the loop tests
-    /// nothing but `HengeFLAG`.
-    /// `TavernOpenScene` 0xb12e: `DiceTHROW = 0` and `ShakeDice`.
+    /// One pass of the loop behind an open door.
     ///
-    /// The stake was taken on the way in, because in this pack the five stake
-    /// gadgets sit on the tavern's own screen rather than on `dice.piv` where
-    /// `load_DiceBACK` puts them; `SetBET` at 0xb1e8 has already been through
-    /// the purse by the time the room opens, so the table is told the stake is
-    /// pending and the handler at 0xb1a1 takes it on the next `ff ff`,
-    /// exactly as it takes one from `ThrowDice`.
+    /// * The tavern: `TavernLoop` at 0xb137 steps the hand and, on the frame
+    ///   `DiceTHROW` reaches 2, `DiceRND`; the dice picture then sits in
+    ///   `DiceWait` until fire (0x8251). Fire over one of the six gadgets on
+    ///   the table is `ThrowDice` as the handler reaches it.
+    /// * The healer and the mystic: the greeting waits on fire, the bowl is
+    ///   `DonateLoop` at 0xbbe6 (`MovePointer`, `CHECKGADGET`, and the op in
+    ///   `es:[si+0x10]` when `PointerFLAG` is clear), the verdict waits its
+    ///   fifty retraces and then on fire.
+    /// * The merchant and the temple: `StatLOOP`, which is [`App::sheet_tick`].
     ///
-    /// `DiceRND` at 0xb21d is what rolls and draws, and it does not run until
-    /// `DiceTHROW` is 2, so the faces and the payout line are held back until
-    /// the animation lands rather than being on the screen before it.
-    fn open_dice_table(&mut self) {
-        let showing_dice = self
-            .visiting
-            .as_ref()
-            .and_then(|s| self.places.get(&s.visit.place))
-            .is_some_and(|d| d.dice);
-        if !showing_dice || self.dice_banks.is_none() {
+    /// When the routine returns, `HWINIT`: the town picture again and the
+    /// pointer back where the town keeps it.
+    ///
+    /// Direction keys step between the bowl's four boxes as well, because the
+    /// original's pointer is a stick and a keyboard has to reach four gadgets
+    /// somehow; the pointer itself is `MovePointer` unchanged.
+    fn door_tick(&mut self) {
+        let fire = self.takes() || self.pressed[11];
+        let hit = self
+            .gadgets
+            .hit(self.pointer.x, self.pointer.y)
+            .filter(|_| self.pointer.woken)
+            .cloned();
+        if matches!(self.door, Some(town::Open::Panel(_))) {
+            self.sheet_tick();
             return;
         }
-        let Some(scene) = self.visiting.as_mut() else {
-            return;
-        };
-        let Some(dice) = scene.visit.dice.take() else {
-            return;
-        };
-        let said = std::mem::take(&mut scene.visit.said);
-        self.dice_held = Some((dice, said));
-        let mut table = henge_core::dice::Table::new();
-        table.stake_taken();
-        self.dice_table = Some(table);
+        if let Some(open) = self.door.as_mut() {
+            match open {
+                town::Open::Panel(_) => {}
+                town::Open::Tavern { state, .. } => {
+                    if state.screen == henge_core::town::TavernScreen::Table {
+                        if let (true, Some(g)) = (fire, hit.as_ref()) {
+                            state.press(g.id, g.payload.strp, &mut self.run);
+                        }
+                        // `ShakeDiceSnd` (0xb32f), which `DD_ThrowDice` calls
+                        // six times through `TASKGOSUB` and nothing else in
+                        // the game calls at all: the rattle of the cup.
+                        let frame = state.tick(&self.scripts, &mut self.run);
+                        let rattled = frame.is_some_and(|f| {
+                            f.effects.iter().any(|e| {
+                                matches!(e, henge_core::taskvm::Effect::Gosub { routine, .. }
+                                    if routine == "ShakeDiceSnd")
+                            })
+                        });
+                        if rattled {
+                            self.audio.play(&sfx::asset(henge_core::sound::DICE_SHAKE));
+                        }
+                    } else {
+                        state.tick(&self.scripts, &mut self.run);
+                        if fire {
+                            state.fire(&self.run);
+                        }
+                    }
+                }
+                town::Open::Counter { state, .. } => {
+                    match &state.stage {
+                        henge_core::town::Stage::Bowl(_) => {
+                            // Which of the four: whatever the pointer is over,
+                            // or the one the keys have stepped to.
+                            if self.pressed[2] || self.pressed[0] {
+                                self.door_cursor = self.door_cursor.saturating_sub(1);
+                            }
+                            if self.pressed[3] || self.pressed[1] {
+                                self.door_cursor = (self.door_cursor + 1)
+                                    .min(henge_core::status::DONATE_GADGETS.len() - 1);
+                            }
+                            if let Some(g) = hit.as_ref() {
+                                self.door_cursor = g.id;
+                            }
+                            // `DonateLoop` reads `PointerFLAG`, which
+                            // `MovePointer` clears while fire is *down*, so a
+                            // held button keeps taking: `AddDonation` and
+                            // `SubDonation` move a coin, wait two retraces
+                            // (`mov ax, 2; call 0xafeb`) and go round again,
+                            // which is how a bowl is filled by holding fire
+                            // over the coin. None of the four calls
+                            // `AddClickSound`.
+                            self.door_wait = self.door_wait.saturating_sub(1);
+                            let held = self.keys[6] || self.keys[11];
+                            if held && self.door_wait == 0 {
+                                use henge_core::status::DonateOp;
+                                let op = henge_core::status::DONATE_GADGETS[self.door_cursor].4;
+                                if matches!(op, DonateOp::Less | DonateOp::More) {
+                                    self.door_wait = 2;
+                                }
+                                state.press(op, &mut self.run, &self.items);
+                            }
+                        }
+                        _ => {
+                            state.tick();
+                            if fire {
+                                state.fire(&self.run);
+                                if let henge_core::town::Stage::Bowl(_) = state.stage {
+                                    // `mov word ptr [PointerX], 0xa0; mov word
+                                    // ptr [PointerY], 0xaa` before `InitDonation`.
+                                    let (x, y) = henge_core::town::BOWL_POINTER;
+                                    self.pointer.x = x;
+                                    self.pointer.y = y;
+                                    self.door_cursor = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if self.door.as_ref().is_some_and(|d| d.closed()) {
+            self.close_door();
+        }
     }
 
-    /// One tick of `TavernLoop`, and `DiceRND` on the tick it lands.
-    fn dice_tick(&mut self) {
-        // The loop belongs to the dice screen. Anything that takes the screen
-        // away takes the loop with it, and whatever `DiceRND` was going to
-        // draw goes back onto the visit rather than being lost.
-        let here = self
+    /// `HWINIT` (0xe14) or `WDINIT` (0xd5c): the door's routine has returned,
+    /// the town's picture is drawn again and the pointer is put back where the
+    /// town keeps it. The music the door started stops with it
+    /// (`LeaveTavern` and `MysticFini` both end on `mov ah, 2; int 60h`).
+    fn close_door(&mut self) {
+        self.door = None;
+        self.door_cursor = 0;
+        self.door_wait = 0;
+        self.sheet_said = None;
+        let home = self
             .visiting
             .as_ref()
             .and_then(|s| self.places.get(&s.visit.place))
-            .is_some_and(|d| d.dice);
-        if !here {
-            self.dice_table = None;
-            if let (Some((dice, said)), Some(scene)) =
-                (self.dice_held.take(), self.visiting.as_mut())
-            {
-                scene.visit.dice = Some(dice);
-                scene.visit.said = said;
-            }
-            return;
-        }
-        let Some(table) = self.dice_table.as_mut() else {
-            return;
-        };
-        // `ShakeDiceSnd` (0xb32f), which `DD_ThrowDice` calls six times
-        // through `TASKGOSUB` (DS:0xce91, 0xcecd, 0xceed, 0xceff, 0xcf1f and
-        // one more) and nothing else in the game calls at all: the rattle of
-        // the cup, on the frames the hand shakes it. The routine is silent on
-        // a Roland (`cmp word ptr [MUSICTYPE], 2; je ret`), which this engine
-        // is not.
-        let frame = table.tick(&self.scripts);
-        let rattled = frame.is_some_and(|f| {
-            f.effects.iter().any(|e| {
-                matches!(e, henge_core::taskvm::Effect::Gosub { routine, .. }
-                    if routine == "ShakeDiceSnd")
-            })
-        });
-        if rattled {
-            self.audio.play(&sfx::asset(henge_core::sound::DICE_SHAKE));
-        }
-        if !table.landed() {
-            return;
-        }
-        self.dice_table = None;
-        // `DiceRND`: the faces go down and the payout is said.
-        if let (Some((dice, said)), Some(scene)) = (self.dice_held.take(), self.visiting.as_mut()) {
-            scene.visit.dice = Some(dice);
-            scene.visit.said = said;
+            .and_then(|d| d.pointer);
+        if let Some([x, y]) = home {
+            self.pointer.x = x;
+            self.pointer.y = y;
         }
     }
 
@@ -2758,10 +2834,8 @@ impl App {
             // before anything else runs, and the ratmen are already fielded
             // by it: the phase goes in with everything else the run decides.
             w.set_moon(phase);
-            // One opponent on the road. Ambushes are creatures in the original,
-            // and until the bestiary lands they are knights standing in; three
-            // knights of equal strength on twenty health is not an ambush, it
-            // is an execution.
+            // One opponent's seat to begin with; a lair's raid sets its own
+            // head count when the door opens.
             w.set_gore(gore);
             w.set_seats(humans, 1);
             w.set_roster(roster);
@@ -2787,6 +2861,7 @@ impl App {
             // before it decides how many creatures a fight holds.
             strength: self.run.knight.strength,
             experience: self.run.experience as i32,
+            talismans: self.run.kit.count("talisman_of_the_wyrm") as i32,
         }
     }
 
@@ -2919,18 +2994,28 @@ impl App {
     }
 
     /// Put a message box up. Modal, as all three of the original's are.
+    ///
+    /// `showing_for` is the ticks left before it goes: for a chain the
+    /// original waits on it starts at zero, which is "waiting", and fire sets
+    /// it to the fade's sixteen; for a chain that covers a load it starts at
+    /// [`Self::LOAD_TICKS`] and counts down, the last sixteen of them the fade.
     fn show_message(&mut self, msg: Message) {
         if msg.is_empty() {
             return;
         }
+        self.showing_for = match msg.until {
+            henge_core::message::Until::Fire => 0,
+            henge_core::message::Until::Loaded => Self::LOAD_TICKS,
+        };
         self.showing = Some(msg);
-        self.showing_for = Self::MESSAGE_TICKS;
     }
 
-    /// Ticks a message box holds before it goes on its own. The original waits
-    /// for fire; this does too, and gives up after a while so an unattended
-    /// game is never stuck behind one.
-    const MESSAGE_TICKS: u32 = 260;
+    /// **Ours.** How long a box that covers a disk read stays up. The original
+    /// holds it for exactly as long as the read takes, and nothing here reads
+    /// a disk, so some length has to stand in for it; the fourteen `WaitMES`
+    /// chains, the two city welcomes and `HengeWait` are the ones it covers.
+    /// A chain the original follows with `WaitFIRE` never uses this.
+    const LOAD_TICKS: u32 = 260;
 
     /// What arriving somewhere says, and which of the three routines says it.
     ///
@@ -2967,7 +3052,8 @@ impl App {
         // Modal on the map, which is where `ReDisplay` and `StatLOOP` sit; over
         // an arena or a doorway the sheet is a card held up, and whatever is
         // behind it keeps its own gadgets.
-        if let Some((screen, other)) = self.panel_now().filter(|_| self.mode == Mode::Map) {
+        let panel_up = self.mode == Mode::Map || self.door_panel().is_some();
+        if let Some((screen, other)) = self.panel_now().filter(|_| panel_up) {
             let panel = status::lay_out(&self.run, screen, other.as_ref());
             for g in panel.gadgets(&mut self.reg) {
                 self.gadgets.add(g);
@@ -2984,23 +3070,17 @@ impl App {
             }
             return;
         }
-        // `InitDonation`'s four, which `DonateLoop` reads by their payload word
-        // rather than by an id.
-        if let Some((_, _)) = self.bowl.as_ref() {
-            for (n, (x, y, w, h, op)) in henge_core::status::DONATE_GADGETS.into_iter().enumerate()
-            {
-                self.gadgets.add(henge_core::pointer::Gadget {
-                    id: n,
-                    x,
-                    y,
-                    w,
-                    h,
-                    label: String::new(),
-                    payload: henge_core::status::Payload::new(op as u16, 0x32),
-                    lit: true,
-                });
-            }
-            self.pointer.steer(dx, dy, self.keys[11]);
+        // A door's own loop: the tavern's six on the table (0xb053) and
+        // `InitDonation`'s four (0xbb48), which `DonateLoop` reads by their
+        // payload word rather than by an id.
+        // `TavernLoop+0` and `DonateLoop+0` both call 0xcea5, which is
+        // `push [0x77e8]; pop [StatHAND1]` and then `MovePointer`: the
+        // knight's own stick, which is seat one's keys here as on the panel.
+        if let Some(open) = self.door.as_ref() {
+            open.gadgets(&mut self.gadgets);
+            let dx = self.keys[3] as i32 - self.keys[2] as i32;
+            let dy = self.keys[1] as i32 - self.keys[0] as i32;
+            self.pointer.steer(dx, dy, self.keys[6]);
             return;
         }
         let rows: Vec<(usize, i32, i32, i32, i32)> = match self.mode {
@@ -3063,79 +3143,12 @@ impl App {
     /// does have is `OCCURMESSAGE`, a chain over `MESSAGE.PIV` that is modal
     /// until fire clears it, so a one-line chain at y 95 is where a line goes.
     fn notice(&mut self, line: impl Into<String>) {
-        use henge_core::message::{Kind, Line, Message, FLAG_CENTRE};
+        use henge_core::message::{Kind, Line, Message, Until, FLAG_CENTRE};
         self.show_message(Message {
             kind: Kind::Occurrence,
+            until: Until::Fire,
             lines: vec![Line::new(&line.into(), 0, 95, FLAG_CENTRE)],
         });
-    }
-
-    /// One tick of `_WIZARD:DonateLoop` at image `0xbbe6`.
-    ///
-    /// The loop draws `GOLDP` and `DONATION`, moves the pointer, checks the
-    /// gadgets and, when fire goes down on one, switches on its `[si+0x10]`:
-    /// 2 `ExitDonation` throws the bowl away, 3 `OkDonation` writes `GOLDP`
-    /// back into `[si+0x32]`, 4 `SubDonation` and 5 `AddDonation` move one coin.
-    /// Only the first two return.
-    ///
-    /// Direction keys move the highlight from box to box as well, because the
-    /// original's pointer is a stick and a keyboard has to reach four gadgets
-    /// somehow; the pointer itself is `MovePointer` unchanged.
-    fn bowl_tick(&mut self) {
-        use henge_core::status::{DonateOp, DONATE_GADGETS};
-        let Some((mut bowl, consult)) = self.bowl else {
-            return;
-        };
-        // Which of the four is chosen: whatever the pointer is over, or the
-        // one the keys have stepped to.
-        if self.pressed[2] || self.pressed[0] {
-            self.bowl_cursor = self.bowl_cursor.saturating_sub(1);
-        }
-        if self.pressed[3] || self.pressed[1] {
-            self.bowl_cursor = (self.bowl_cursor + 1).min(DONATE_GADGETS.len() - 1);
-        }
-        let over = self
-            .gadgets
-            .hit(self.pointer.x, self.pointer.y)
-            .filter(|_| self.pointer.woken)
-            .map(|g| g.id);
-        if let Some(n) = over {
-            self.bowl_cursor = n;
-        }
-        if !self.takes() && !self.pressed[11] {
-            self.bowl = Some((bowl, consult));
-            return;
-        }
-        let op = DONATE_GADGETS[self.bowl_cursor].4;
-        self.audio.play(CLICK_SOUND);
-        if !bowl.act(op) {
-            self.bowl = Some((bowl, consult));
-            return;
-        }
-        // Both ways out leave the purse where it was: `ExitDonation` because it
-        // writes nothing, and `OkDonation` because what it writes is exactly
-        // what `HealDon` and `MysticJudge` are then handed and spend. Those two
-        // are `Run::donate_to_healer` and `Run::consult_the_mystic`, which take
-        // the coin themselves, so nothing is deducted twice here.
-        let given = if op == DonateOp::Ok { bowl.given } else { 0 };
-        self.bowl = None;
-        self.bowl_cursor = 0;
-        if given == 0 {
-            return;
-        }
-        let said = if consult {
-            self.run
-                .consult_the_mystic(given, &self.items)
-                .describe()
-                .to_string()
-        } else {
-            self.run
-                .donate_to_healer(given)
-                .map_or_else(String::new, |h| h.describe().to_string())
-        };
-        if let Some(s) = self.visiting.as_mut() {
-            s.visit.said = said;
-        }
     }
 
     /// One tick of the status screen, which is `StatLOOP` at `0xbe13`:
@@ -3156,7 +3169,11 @@ impl App {
     ///   `test ax, 0x20`, the right arch's permission bit. One traveller on this
     ///   map means there is no other record, so both do nothing, which is also
     ///   what they do in the original with one knight in the game.
-    /// * 0xa `BuyGoods`: the merchant's, and no merchant panel is reachable yet.
+    /// * 0xa `BuyGoods`: the merchant's page, `Run::buy_goods`.
+    /// * On `StatTYPE` 6, `HGCastMagic` (0xca83) and `HGTakeMagic` (0xcbaa)
+    ///   both `cmp word ptr [StatTYPE], 6; je TTemple` before any permission
+    ///   bit is read, so every magic gadget on the temple's page is a trade:
+    ///   `Run::trade_at_temple`, which divides the screen at the pointer's x.
     fn sheet_tick(&mut self) {
         if !self.takes() {
             return;
@@ -3173,7 +3190,10 @@ impl App {
         // `AddClickSound` and `ExitFLAG = 1`, which ends `StatLOOP`.
         if hit.id == henge_core::status::EXIT_ID {
             self.audio.play(CLICK_SOUND);
-            if self.lair_page.is_some() {
+            if self.door_panel().is_some() {
+                // `StatusDone`, and the rung's `jmp HWINIT`.
+                self.close_door();
+            } else if self.lair_page.is_some() {
                 self.close_lair_page();
             } else {
                 self.sheet = false;
@@ -3181,6 +3201,33 @@ impl App {
             return;
         }
         let Some(op) = hit.op() else { return };
+        // `TTemple`: `cmp word ptr [PointerX], 0xa0; jl SellToTemple`.
+        if self.door_panel() == Some(SheetScreen::Temple) && matches!(op, Op::Cast | Op::TakeMagic)
+        {
+            let moved = self.run.trade_at_temple(
+                hit.payload.field,
+                hit.mask(),
+                self.pointer.x,
+                &self.items,
+            );
+            if moved {
+                self.audio.play(CLICK_SOUND);
+                self.sync_sheet();
+            }
+            return;
+        }
+        // `BuyGoods` at 0xcd33, on whichever page carries a 0xa gadget,
+        // which is the merchant's alone.
+        if op == Op::Buy {
+            if self
+                .run
+                .buy_goods(hit.payload.field, hit.mask(), &self.items)
+            {
+                self.audio.play(CLICK_SOUND);
+                self.sync_sheet();
+            }
+            return;
+        }
         // The lair's page. `HotGadget` reaches `HGTakeMagic` for `STRP` 1 and
         // `TakeGold` for the rest through `test ax, 0x20`, and `HGCastMagic`
         // at 0xca8d falls into `HGTakeMagic` itself when the array carries no
@@ -3229,6 +3276,13 @@ impl App {
                 }
             }
             Op::Cast => {
+                // `HGCastMagic` 0xca8d: `test ax, 0x10; jne` and otherwise
+                // into `HGTakeMagic`, which wants `0x20` and has no other
+                // record to take from. `Identify` carries neither bit, so a
+                // potion on the merchant's page is looked at and not drunk.
+                if !hit.lit {
+                    return;
+                }
                 let Some(id) = henge_core::status::SLOT_TABLE[slot].item else {
                     return;
                 };
@@ -3239,6 +3293,12 @@ impl App {
             // Nothing on one knight's own sheet: see above.
             Op::TakeMagic | Op::Take | Op::Buy => {}
         }
+    }
+
+    /// The page of the panel an open door is, if the door is one of the two
+    /// that are pages: `MERC` and `HTEM`.
+    fn door_panel(&self) -> Option<SheetScreen> {
+        self.door.as_ref().and_then(|d| d.panel())
     }
 
     /// What a cast did, made visible: a flight begun, a landing, a notice.
@@ -3274,6 +3334,15 @@ impl App {
                 }
                 self.sheet = false;
                 self.notice("The hawk drops you");
+            }
+            // `StatusDone` (0xbe57): the dragon's `+0x46` is the knight
+            // picked, and it flies at his row from its next frame.
+            Cast::Wyrm { seat } => {
+                let name = self
+                    .knights
+                    .get(seat)
+                    .map_or_else(|| "a knight".to_string(), |k| k.name.clone());
+                self.notice(format!("The dragon is after {name}"));
             }
             Cast::Pointless => self.notice("Nothing comes of it"),
             Cast::HaveNone | Cast::Unknown => {}
@@ -3345,6 +3414,70 @@ impl App {
     /// the token's frame plus five with the gem flag up and plus ten with the
     /// hawk's, which in `MI.C` is the crystal row and the hawk row, one per
     /// knight's colour.
+    /// `[si+0x5c]` and `[si+0x5e]` of the four knight records: this one's
+    /// token where it stands, the other three at the corners `InitKnights`
+    /// put them in, since nothing on this map moves them.
+    fn knight_homes(&self) -> [(i32, i32); 4] {
+        let mut homes = [(0, 0); 4];
+        for (i, h) in homes.iter_mut().enumerate() {
+            if let Some(k) = self.knights.get(i) {
+                *h = (k.home[0], k.home[1]);
+            }
+        }
+        homes
+    }
+
+    /// One frame of `DragonWander` (0xa66b) and the shadow table
+    /// `CheckEncounterDone+128` (0x816) rebuilds, for the token where it
+    /// stands now.
+    fn dragon_frame(&mut self) {
+        if let Some(m) = self.map.as_ref() {
+            let at = (m.state.x, m.state.y);
+            let homes = self.knight_homes();
+            self.run.dragon_frame(at, homes);
+        }
+    }
+
+    /// The routine at 0xcf6, which `DragonEncounter+54` (0xa41b) calls: the
+    /// glows taken down, `InitKnightvsDragon`, `InitCombat`. The ground is
+    /// the map square's, as `SetUpDKL` loads it for every fight.
+    fn begin_dragon_fight(&mut self) {
+        self.sync_sheet();
+        let family = self.map.as_ref().map_or_else(
+            || "forest".to_string(),
+            |m| m.last_terrain.family().to_string(),
+        );
+        if let Some(w) = self.world.as_mut() {
+            let pick = self.run.next_arena(&family, w.rotation_len(&family));
+            w.set_player_health(self.run.health_for_fight());
+            w.set_player_daggers(self.run.knight.daggers);
+            if !w.set_foe("dragon") {
+                return;
+            }
+            w.set_family(&family, pick);
+            self.dragon_fight = true;
+            self.mode = Mode::Combat;
+        }
+    }
+
+    /// The dragon over the map, drawn after the tokens the way its task is
+    /// stepped after `SHOW`: `DrAnim[DR_WALK]` on `DrBuffer`, at `DR_X`,
+    /// `DR_Z`, facing `DR_DIR`.
+    fn draw_map_dragon(&mut self) {
+        if !self.run.dragon.aloft {
+            return;
+        }
+        let Some(banks) = self.dragon_banks.as_ref() else {
+            return;
+        };
+        let d = &self.run.dragon;
+        let mut task = henge_core::taskvm::Task::new(d.script(), d.x, d.z, d.dir);
+        task.table = 5;
+        let mut record = henge_core::taskvm::TaskActor::default();
+        task.step(&self.scripts, &mut record, false);
+        shell::draw_task(&mut self.reg, &mut self.fb, &task, banks);
+    }
+
     fn draw_flight(&mut self) {
         let Some(fl) = self.flight else { return };
         let Some(m) = self.map.as_ref() else { return };
@@ -3374,16 +3507,15 @@ impl App {
         self.fb.blit(&px, w, h, x, y - 4, false);
     }
 
-    /// A day has turned over. Put the moon up, and take a hint off the pile.
+    /// A day has turned over. Put the moon up.
     ///
-    /// The moon's own numbers move here rather than in the drawing, because
-    /// `_LOADER:WaitCOUNT` is a counter the original steps each time it shows
-    /// one of the fourteen and wraps at fourteen, and a counter stepped by a
-    /// renderer would step again on every frame.
+    /// `WaitCOUNT` is not stepped here. The only `inc word ptr [WaitCOUNT]` in
+    /// the image is at 0x8ecf, inside `WAITMESSAGE`, and the between-days
+    /// routine at 0x8e5b walks `NextDayMes` and never calls it; a step here
+    /// was left over from when the screen showed one of the fourteen.
     fn begin_interlude(&mut self) {
         self.interlude = 1;
         self.interlude_out = 0;
-        self.hint = (self.hint + 1) % self.messages.wait_len();
         // What waits in an arena depends on the night the fight starts, so the
         // phase is pushed the moment it can change.
         if let Some(w) = self.world.as_mut() {
@@ -3457,6 +3589,19 @@ impl App {
     /// (`cmp ax, 1; je`, 0xae40) and enters it with nothing drawn; more and it
     /// draws `CreatePaper` and sits in its key loop. Returns whether the map
     /// gave way to something, which is the `or ax, ax` `ScrollINPUT` tests.
+    /// `EncounterAllDone` (0x113e): `mov ax, [0xccac]; mov [0xcc98], ax`, the
+    /// rest of the day's distance spent. `[0xccac]` is refreshed first, as
+    /// `TakingMoon+64` (0xc92) calls `DistanceDONE+12` before it dispatches
+    /// an icon and the map entry at 0xa2d7 calls it before every frame, so
+    /// the budget a visit spends is the one the knight's stride gives today.
+    fn spend_day(&mut self) {
+        let budget = self.run.day_steps(&self.items);
+        if let Some(m) = self.map.as_mut() {
+            m.state.steps_per_day = budget;
+            m.state.end_turn();
+        }
+    }
+
     fn display_stack(&mut self) -> bool {
         if self.overlaps.is_empty() {
             return false;
@@ -3512,12 +3657,22 @@ impl App {
                 refused
             };
             self.notice(line);
+            // `EncounterDone` (0x1138) runs on into `EncounterAllDone`
+            // (0x113e), which spends the rest of the day's distance.
+            self.spend_day();
             return true;
         }
+        let home = def.pointer;
         match place::PlaceScene::open(&mut self.reg, def, id) {
             Ok(scene) => {
                 self.visiting = Some(scene);
                 self.mode = Mode::Place;
+                self.door = None;
+                // `HWINIT` and `WDINIT` write the pointer before the gadgets.
+                if let Some([x, y]) = home {
+                    self.pointer.x = x;
+                    self.pointer.y = y;
+                }
                 // What arriving here says, if the original says anything.
                 self.announce(id);
                 true
@@ -3747,6 +3902,9 @@ impl App {
     /// wins because `LairGEM` puts it up over whatever the map was doing, the
     /// way every other modal loop in the original does.
     fn panel_now(&self) -> Option<(SheetScreen, Option<status::Other>)> {
+        if let Some(screen) = self.door_panel() {
+            return Some((screen, None));
+        }
         if let Some(page) = self.lair_page {
             let (hoard, gold) = self.run.lair_floor(page.lair);
             return Some((
@@ -3789,10 +3947,16 @@ impl App {
             );
         }
         // The pointer goes on last, over whatever it is pointing at, and only
-        // on a screen that has boxes for it to be over.
+        // on a screen that has boxes for it to be over. Behind a town's door
+        // it is the only cursor there is, so it is drawn whether or not
+        // anyone has steered it yet, which is what `SHOWPOINTER` does.
         if !self.gadgets.is_empty() {
             let p = self.pointer;
-            shell::draw_pointer(&mut self.reg, &mut self.fb, &p);
+            if self.door.is_some() {
+                shell::draw_pointer_at(&mut self.reg, &mut self.fb, &p);
+            } else {
+                shell::draw_pointer(&mut self.reg, &mut self.fb, &p);
+            }
         }
     }
 
@@ -3809,18 +3973,20 @@ impl App {
                 bold: self.fonts.get("bold"),
                 small: self.fonts.get("small"),
             };
-            shell::draw_interlude(&mut self.reg, &mut self.fb, &fonts, self.run.moon.phase());
-            return;
-        }
-        // The stone circle's set piece sits over everything, because
-        // `HengeLOOP` is a loop of its own with the whole screen to itself.
-        if let Some(stones) = self.stones.clone() {
-            let banks = self.stones_banks.clone();
-            shell::draw_stones(&mut self.reg, &mut self.fb, &stones, banks.as_ref());
+            let chain = self.messages.named("next.day").cloned();
+            shell::draw_interlude(
+                &mut self.reg,
+                &mut self.fb,
+                &fonts,
+                self.run.moon.phase(),
+                chain.as_ref(),
+            );
             return;
         }
         // A message box sits over everything else for the same reason: it is
-        // what `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` do.
+        // what `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` do. Ahead
+        // of the circle's set piece, because `noswap+31` puts `HengeWait` up
+        // before it loads `Hen1.p`.
         if let Some(msg) = self.showing.as_ref() {
             let fonts = shell::Fonts {
                 bold: self.fonts.get("bold"),
@@ -3828,6 +3994,13 @@ impl App {
             };
             let msg = msg.clone();
             shell::draw_message(&mut self.reg, &mut self.fb, &fonts, &msg);
+            return;
+        }
+        // The stone circle's set piece sits over everything, because
+        // `HengeLOOP` is a loop of its own with the whole screen to itself.
+        if let Some(stones) = self.stones.clone() {
+            let banks = self.stones_banks.clone();
+            shell::draw_stones(&mut self.reg, &mut self.fb, &stones, banks.as_ref());
             return;
         }
         if self.mode == Mode::Intro {
@@ -3880,35 +4053,32 @@ impl App {
             }
         }
         if self.mode == Mode::Place {
-            if let Some(scene) = self.visiting.as_ref() {
-                if let Some(def) = self.places.get(&scene.visit.place) {
-                    // Places are drawn in the small font: their menus sit in
-                    // panels the original painted only a few pixels wide.
-                    let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
-                    if scene
-                        .render(
-                            &mut self.reg,
-                            &mut self.fb,
-                            def,
-                            font,
-                            &self.run,
-                            &self.items,
-                            &self.pointer,
-                            self.bowl.as_ref().map(|(d, _)| d),
-                        )
-                        .is_ok()
-                    {
+            // Places are drawn in the small font: their menus sit in panels
+            // the original painted only a few pixels wide, and the chains the
+            // town's counters write carry no bold bit.
+            let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
+            // A door's own screen, over the town. The panel pages are drawn
+            // by `render` like every other page of the panel.
+            if let Some(open) = self.door.as_ref() {
+                if open.panel().is_none() {
+                    let banks = self.dice_banks.clone();
+                    let hand = |reg: &mut henge_assets::Registry, fb: &mut Framebuffer| {
                         // `TavernLoop` draws the tasks over the picture every
                         // frame, and the hand is the only one on this screen.
-                        if let Some(table) = self.dice_table.clone() {
-                            let banks = self.dice_banks.clone();
-                            shell::draw_dice_hand(
-                                &mut self.reg,
-                                &mut self.fb,
-                                &table,
-                                banks.as_ref(),
-                            );
+                        if let town::Open::Tavern { state, .. } = open {
+                            shell::draw_dice_hand(reg, fb, &state.table, banks.as_ref());
                         }
+                    };
+                    open.render(&mut self.reg, &mut self.fb, font, &self.run, hand);
+                    return;
+                }
+            }
+            if let Some(scene) = self.visiting.as_ref() {
+                if let Some(def) = self.places.get(&scene.visit.place) {
+                    if scene
+                        .render(&mut self.reg, &mut self.fb, def, font, &self.pointer)
+                        .is_ok()
+                    {
                         return;
                     }
                 }
@@ -3935,6 +4105,7 @@ impl App {
                     .is_ok();
                 self.map = Some(m);
                 if ok {
+                    self.draw_map_dragon();
                     self.draw_flight();
                     self.draw_run_over();
                     return;

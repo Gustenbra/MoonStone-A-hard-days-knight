@@ -22,6 +22,12 @@
 //! are their own pictures, and what is drawn over one is what that screen's own
 //! routine draws. `DonateLoop` writes `Your Gold` and the number at (2, 190) and
 //! (20, 175) because `_WIZARD` says so; nothing writes a purse over a town.
+//!
+//! **A town draws nothing over its picture at all**, and what its five boxes
+//! open is not a place: see [`crate::town`]. The stall, the tavern menu, the
+//! dice room, the healer's and the mystic's menus and the temple's list that
+//! this file used to draw over the town's own art are gone with the effects
+//! that opened them.
 
 use crate::framebuffer::Framebuffer;
 use crate::text::Font;
@@ -29,15 +35,7 @@ use henge_assets::Registry;
 use henge_core::item::Items;
 use henge_core::place::{Effect, PlaceDef, Places, Visit};
 use henge_core::pointer::Pointer;
-use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
-
-/// `DICE.CEL`, whose first six cels are the six faces.
-const DICE_SHEET: &str = "bank.dice";
-
-/// `mys.cel`, which `_WIZARD:LoadGoldCels` at image `0xbd2a` loads into the
-/// bank the donation panel is blitted from: `mov dx, MysGol; call the loader`.
-const GOLD_SHEET: &str = "bank.mys";
 
 /// Loads whatever places the packs declare. A pack without them is not an
 /// error: the map simply has nowhere to go, exactly as it did before.
@@ -94,70 +92,18 @@ impl PlaceScene {
         })
     }
 
-    /// `_WIZARD:DonationRefresh` at image `0xbc9e`, blit for blit.
-    ///
-    /// ```text
-    /// cel BAG   at (2, 0xa2) and (0x10e, 0xa2)   the two purses
-    /// cel 4     at (0x90, 0xa9)                  one coin off
-    /// cel 5     at (0xa2, 0xa9)                  one coin on
-    /// cel 3     at (0x83, 0xb9)                  take it
-    /// cel 2     at (0xad, 0xb9)                  leave
-    /// YGOL      at (2, 0xbe)     `Your Gold`
-    /// Don       at (0x106, 0xbe) `Donation`, cx 4, which is right aligned
-    /// ```
-    ///
-    /// and `DonateLoop` itself writes `GOLDP` at (0x14, 0xaf) and `DONATION` at
-    /// (0x120, 0xaf) every time round. `BAG` is a word the caller fills, so the
-    /// healer and the mystic each name their own purse cel; cels 0 and 1 are the
-    /// two and 0 is used here.
-    fn draw_bowl(
-        &self,
-        reg: &mut Registry,
-        fb: &mut Framebuffer,
-        font: &Font,
-        bowl: &henge_core::status::Donation,
-    ) {
-        use henge_core::status::{DONATE_CELS, DONATE_GADGETS};
-        const BAG: usize = 0;
-        for x in [2, 0x10e] {
-            crate::sprite::draw(reg, fb, GOLD_SHEET, BAG, x, 0xa2, false);
-        }
-        for (cel, (x, y, _, _, _)) in DONATE_CELS.into_iter().zip(DONATE_GADGETS) {
-            crate::sprite::draw(reg, fb, GOLD_SHEET, cel, x, y, false);
-        }
-        font.draw_own(reg, fb, "Your Gold", 2, 0xbe);
-        let don = "Donation";
-        let w = font.width(reg, don);
-        font.draw_own(reg, fb, don, 0x106 - w, 0xbe);
-        font.draw_own(reg, fb, &bowl.purse.to_string(), 0x14, 0xaf);
-        font.draw_own(reg, fb, &bowl.given.to_string(), 0x120, 0xaf);
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         reg: &mut Registry,
         fb: &mut Framebuffer,
         def: &PlaceDef,
         font: Option<&Font>,
-        run: &Run,
-        items: &Items,
         pointer: &Pointer,
-        bowl: Option<&henge_core::status::Donation>,
     ) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
-        if def.dice {
-            self.draw_dice(reg, fb);
-        }
         let Some(font) = font else { return Ok(()) };
-        // `DonateLoop` redraws the screen and then the panel, and nothing else
-        // is on it while the bowl is open.
-        if let Some(bowl) = bowl {
-            self.draw_bowl(reg, fb, font, bowl);
-            return Ok(());
-        }
-        self.draw_menu(reg, fb, def, font, run, items);
+        self.draw_menu(reg, fb, def, font);
         if let Some(box_) = def.text {
             self.draw_text(reg, fb, box_, font);
         }
@@ -179,25 +125,6 @@ impl PlaceScene {
         Ok(())
     }
 
-    /// The three faces of the last throw, over `DICE.PIV`'s own picture of
-    /// three dice on the wood.
-    ///
-    /// **Recovered.** `_TAVERN:RollDice` rolls the three bytes of `DDICE` and
-    /// then blits `DICE.CEL` cel `DDICE[n]` three times, with the same
-    /// `bx`, `cx` pair the moon is drawn with: (115, 15), (49, 38) and
-    /// (75, 88). The faces are the cel numbers themselves, which is why a die
-    /// is zero based everywhere in the simulation.
-    fn draw_dice(&self, reg: &mut Registry, fb: &mut Framebuffer) {
-        const AT: [(i32, i32); 3] = [(115, 15), (49, 38), (75, 88)];
-        let Some(dice) = self.visit.dice else { return };
-        for (n, (x, y)) in AT.iter().enumerate() {
-            let Some(face) = dice.get(n).copied() else {
-                continue;
-            };
-            crate::sprite::draw(reg, fb, DICE_SHEET, face as usize, *x, *y, false);
-        }
-    }
-
     /// What the place said, in its own panel rather than under the menu.
     ///
     /// Several of the original's screens paint a slate or a plank for words
@@ -209,10 +136,8 @@ impl PlaceScene {
         }
         let [x, y, w, h] = box_;
         // No plate. A place names this box precisely because the picture
-        // already has furniture there for words: the dice table's plank, where
-        // `_TAVERN` writes `BETLOSER`, `PLAYERPOT` and `CONT`; the healer's
-        // slate; the mystic's parchment. The original writes on those and
-        // paints nothing under what it writes.
+        // already has furniture there for words. The original writes on it
+        // and paints nothing under what it writes.
         const PAD: i32 = 5;
         let mut cy = y + PAD;
         for line in wrap(reg, font, &self.visit.said, w - PAD * 2) {
@@ -224,15 +149,7 @@ impl PlaceScene {
         }
     }
 
-    fn draw_menu(
-        &self,
-        reg: &mut Registry,
-        fb: &mut Framebuffer,
-        def: &PlaceDef,
-        font: &Font,
-        run: &Run,
-        items: &Items,
-    ) {
+    fn draw_menu(&self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef, font: &Font) {
         // A screen whose options are boxes over painted words draws nothing at
         // all: `InitHighWood` adds five gadgets with no text record and
         // `HWLOOP` writes nothing over the picture. See `PlaceDef::boxes`.
@@ -251,36 +168,21 @@ impl PlaceScene {
         cy += 4;
 
         for (i, choice) in def.options.iter().enumerate() {
-            // Two different kinds of "no". A shut door is dim because it is not
-            // built; a potion you cannot afford is dim because of what is in
-            // your purse, and it brightens the moment you can pay for it.
-            let open = choice.effect.offered(items, run);
-            // A price belongs to the goods, so the label never repeats it and
-            // the two can never drift apart. It is written hard against the
-            // right edge of the box, which is where a bill goes.
-            let price = choice.effect.cost(items).map(|c| c.to_string());
-            let pw = price.as_deref().map_or(0, |p| font.width(reg, p));
+            // A shut door is dim because it is not built.
+            let open = choice.effect.available();
             if i == self.visit.cursor {
                 // The highlight is a bar rather than a marker: the fonts have no
                 // arrow glyph, and inverting a line reads at this size anyway.
                 // A shut door highlights faintly, so the highlight never makes
                 // an option look live that is not.
                 fb.rect(x + 2, cy - 2, w - 4, STEP, if open { BAR } else { SHUT });
-                font.draw_own(reg, fb, &choice.label, x + PAD, cy);
-                if let Some(p) = &price {
-                    font.draw_own(reg, fb, p, x + w - PAD - pw, cy);
-                }
-            } else {
-                // Every line goes down in the glyphs' own five indices, lit or
-                // shut: `GFX:TextP` has no ink in it and the bar behind the
-                // cursor is what says which line is which. Painting a shut line
-                // in one colour flattened it to a silhouette, which is exactly
-                // what `blit_mask` was for and why it is gone.
-                font.draw_own(reg, fb, &choice.label, x + PAD, cy);
-                if let Some(p) = &price {
-                    font.draw_own(reg, fb, p, x + w - PAD - pw, cy);
-                }
             }
+            // Every line goes down in the glyphs' own five indices, lit or
+            // shut: `GFX:TextP` has no ink in it and the bar behind the
+            // cursor is what says which line is which. Painting a shut line
+            // in one colour flattened it to a silhouette, which is exactly
+            // what `blit_mask` was for and why it is gone.
+            font.draw_own(reg, fb, &choice.label, x + PAD, cy);
             cy += STEP;
         }
 
@@ -348,20 +250,15 @@ fn wrap(reg: &Registry, font: &Font, text: &str, width: i32) -> Vec<String> {
 }
 
 /// A one-line summary for the headless trace.
-pub fn describe(def: &PlaceDef, visit: &Visit, items: &Items) -> String {
+pub fn describe(def: &PlaceDef, visit: &Visit) -> String {
     let label = visit.selected(def).map_or("-", |c| c.label.as_str());
     let shut = visit
         .selected(def)
         .is_some_and(|c| matches!(c.effect, Effect::Closed { .. }));
-    let price = visit
-        .selected(def)
-        .and_then(|c| c.effect.cost(items))
-        .map_or(String::new(), |p| format!(" [{p}]"));
     format!(
-        "{:<12} > {}{}{}",
+        "{:<12} > {}{}",
         def.name,
         label,
-        price,
         if shut { " (shut)" } else { "" }
     )
 }
