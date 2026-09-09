@@ -156,9 +156,6 @@ pub mod flag {
     pub const ENTANGLING: u32 = 0x0020;
     /// `DemonFLAGS & 0x40`: the whip has caught the knight.
     pub const CAUGHT: u32 = 0x0040;
-    /// The beast is facing left. `+8` in the original; kept here because the
-    /// beast turns round on the arena edge rather than on the knight.
-    pub const LEFTWARD: u32 = 0x0080;
     /// `BeastFLAGS & 1`: alternate charges are dead on the knight's line.
     pub const ONLINE: u32 = 0x0100;
     /// This fighter has a controller of its own driving it, so it never falls
@@ -204,50 +201,259 @@ pub enum Act {
 }
 
 // --------------------------------------------------------------- the tracker
+//
+// Everything in this section is a literal translation of the routines at the
+// addresses quoted, read off `research/main.final.bin` with the symbol table.
+// The actor record fields they touch, as the code itself uses them:
+//
+//   +2   x            +6   z (the depth row)        +8   facing byte, 1 right,
+//   +0x26 direction bits, 1 right 2 left 4 down 8 up      3 left (bit 1 mirrors)
+//   +0x52 approach range   +0x54 back-off range   +0x56 plane tolerance
+//
+// `[0x77e8]` is the record the controller is running (`me`), `[0x77ea]` is
+// `Opponent`. A facing of 1 is `+1` here and 3 is `-1`; the task VM turns it
+// back into the byte the blit reads.
 
-/// What `MonsterTrack` answers.
+/// `FaceKnight`, image 0x3cf3.
+///
+/// ```text
+/// 03cf5  mov di, [0x77e8]          ; me
+/// 03cf9  mov si, [0x77ea]          ; Opponent
+/// 03cfd  mov ax, [di+2]            ; me.x
+/// 03d00  cmp ax, [si+2]            ; against foe.x
+/// 03d03  jl  03d0c
+/// 03d05  mov byte [di+8], 3        ; me.x >= foe.x: face left
+/// 03d0c  mov byte [di+8], 1        ; me.x <  foe.x: face right
+/// ```
+///
+/// Returns what it writes into `+8`. Equal x faces left: the branch is `jl`.
+pub fn face_knight(me: &Fighter, foe: &Fighter) -> i32 {
+    if me.x < foe.x {
+        // 03d0c  mov byte ptr [di + 8], 1
+        1
+    } else {
+        // 03d05  mov byte ptr [di + 8], 3
+        -1
+    }
+}
+
+/// `FindSide`, image 0x3d3c: the same comparison as `FaceKnight`, answered in
+/// `ax` (3 or 1) rather than written into the record.
+///
+/// ```text
+/// 03d46  mov ax, [di+2]
+/// 03d49  cmp ax, [si+2]
+/// 03d4c  jl  03d54
+/// 03d4e  mov ax, 3
+/// 03d54  mov ax, 1
+/// ```
+fn find_side(me: &Fighter, foe: &Fighter) -> i32 {
+    if me.x < foe.x { 1 } else { 3 }
+}
+
+/// `CheckZ`, image 0x3c9b, as `CheckZAxis` (0x3c8b) calls it with `di` the
+/// record and `si` the opponent.
+///
+/// ```text
+/// 03c9b  mov ax, 0
+/// 03c9e  mov bx, [si+6]            ; foe.z
+/// 03ca1  mov cx, [di+6]            ; me.z
+/// 03ca4  sub bx, cx
+/// 03ca6  jns 03caa
+/// 03ca8  neg bx                    ; |foe.z - me.z|
+/// 03caa  cmp bx, [di+0x56]
+/// 03cad  jg  CheckZDone            ; further than the tolerance: ax stays 0
+/// 03caf  mov ax, 1
+/// ```
+///
+/// This engine keeps the depth row in `Fighter::y`, which is the original's
+/// `+6`.
+fn check_z(me: &Fighter, foe: &Fighter, def: &ActorDef) -> bool {
+    let mut bx = foe.y - me.y;
+    if bx < 0 {
+        bx = -bx;
+    }
+    !(bx > def.depth_tolerance)
+}
+
+/// `CheckXAxis`, image 0x3cb3, with `bp` the range to test against. Answers
+/// `ax`, and leaves `bx` holding the distance, which the callers rely on.
+///
+/// ```text
+/// 03cbd  mov ax, 0
+/// 03cc0  mov bx, [si+2]            ; foe.x
+/// 03cc3  mov cx, [di+2]            ; me.x
+/// 03cc6  sub bx, cx
+/// 03cc8  jns 03ccc
+/// 03cca  neg bx                    ; |foe.x - me.x|
+/// 03ccc  cmp bx, bp
+/// 03cce  jg  CheckXDone            ; further than bp: ax stays 0
+/// 03cd0  mov ax, 1
+/// ```
+fn check_x_axis(me: &Fighter, foe: &Fighter, bp: i32) -> (bool, i32) {
+    let mut bx = foe.x - me.x;
+    if bx < 0 {
+        bx = -bx;
+    }
+    (!(bx > bp), bx)
+}
+
+/// `FindDistance`, image 0x3cd6.
+///
+/// ```text
+/// 03ce3  mov ax, [si+2]            ; me.x
+/// 03ce6  sub ax, [di+2]            ; minus foe.x
+/// 03ce9  jns 03cf0
+/// 03ceb  neg ax
+/// ```
+pub fn find_distance(me: &Fighter, foe: &Fighter) -> i32 {
+    let mut ax = me.x - foe.x;
+    if ax < 0 {
+        ax = -ax;
+    }
+    ax
+}
+
+/// What `MonsterTrack` answers, and what it wrote while answering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Track {
-    /// Which way the creature wants to walk, if at all.
+    /// The direction bits it set in `+0x26`: bit 1 is `dx = 1`, bit 2 is
+    /// `dx = -1`, bit 8 (`MoveU`) is `dy = -1`, bit 4 (`MoveD`) is `dy = 1`.
     pub dx: i32,
     pub dy: i32,
     /// `ZPLANE`: the two are within the creature's `+0x56` of each other.
     pub plane: bool,
-    /// The tracker's own return value: false when the creature is on the same
-    /// plane and inside `+0x52` but outside `+0x54`, which is when its own
-    /// controller gets to choose an attack.
+    /// Its return value in `ax`: 1 when the creature should walk, 0 when it
+    /// is on the same plane, inside `+0x52` and outside `+0x54`, which is
+    /// when its own controller gets to choose an attack.
     pub walking: bool,
-    /// `FindDistance`: how far apart the two are across.
+    /// `bx` on the way out, which is `|foe.x - me.x|` from `CheckXAxis`.
     pub distance: i32,
 }
 
-/// `MonsterTrack`, transcribed.
+/// `MonsterTrack`, image 0x56d9, translated line for line.
 ///
-/// `CheckZAxis` puts them on the same plane when the depth difference is
-/// within `+0x56`; otherwise the creature walks in depth and the tracker
-/// answers "still walking". `CheckXAxis` against `+0x54` sends it to
-/// `TrackBack`, which walks *away*; against `+0x52` it answers "in range";
-/// beyond that `TrackOpponent` walks towards.
-pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef) -> Track {
-    let dx = foe.x - me.x;
-    let dy = foe.y - me.y;
-    let distance = dx.abs();
-    let plane = dy.abs() <= def.depth_tolerance;
-    let mut walking = false;
-    let mut step_y = 0;
-    if !plane {
-        // `me.z > foe.z` sets bit 3, which `MoveU` reads: towards the horizon.
-        step_y = if dy < 0 { -1 } else { 1 };
-        walking = true;
+/// `facing` is the record's `+8`, which `FaceKnight` writes before anything
+/// else is looked at. That is why a creature that walks away from the knight
+/// still faces him, and why one that has stopped to swing has already turned.
+///
+/// ```text
+/// 056d9  mov [TrackX], 0
+/// 056df  mov [TrackZ], 0
+/// 056e5  mov [ZPLANE], 0
+/// 056eb  mov [DiagnolZ], 0
+/// 056f1  mov si, [0x77e8]          ; me
+/// 056f5  mov di, [0x77ea]          ; Opponent
+/// 056f9  call FaceKnight
+/// 056fc  mov [TrackFLAG], 0
+/// 05702  call CheckZAxis
+/// 05705  or  ax, ax
+/// 05707  je  05711
+/// 05709  mov [ZPLANE], 1
+/// 0570f  jmp SameZPlane
+/// 05711  mov bx, [si+6]            ; me.z
+/// 05714  cmp bx, [di+6]            ; foe.z
+/// 05717  jle 05725
+/// 05719  or  byte [si+0x26], 8     ; deeper than him: up
+/// 0571d  mov [TrackFLAG], 1
+/// 05723  jmp SameZPlane
+/// 05725  or  byte [si+0x26], 4     ; nearer than him: down
+/// 05729  mov [TrackFLAG], 1
+/// SameZPlane:
+/// 0572f  mov bp, [si+0x54]
+/// 05732  call CheckXAxis
+/// 05735  or  ax, ax
+/// 05737  jne TrackBack
+/// 05739  mov bp, [si+0x52]
+/// 0573c  call CheckXAxis
+/// 0573f  or  ax, ax
+/// 05741  je  TrackOpponent
+/// 05743  mov ax, 0
+/// 05746  mov ax, [TrackFLAG]
+/// 05749  ret
+/// TrackOpponent:
+/// 0574a  call FindSide
+/// 0574d  mov bx, [si+0x52]
+/// 05750  cmp ax, 1
+/// 05753  je  TrackRight
+/// 05755  or  byte [si+0x26], 2     ; left
+/// 05759  jmp TrackCollide
+/// TrackRight:
+/// 0575b  or  byte [si+0x26], 1     ; right
+/// TrackCollide:
+/// 0575f  mov ax, 1
+/// 05762  ret
+/// TrackBack:
+/// 0576b  mov ax, [si+2]            ; me.x
+/// 0576e  mov bx, [di+2]            ; foe.x
+/// 05771  sub bx, ax
+/// 05773  jns T1$
+/// 05775  or  byte [si+0x26], 1     ; he is to the left: walk right
+/// 05779  jmp T2$
+/// T1$:
+/// 0577b  or  byte [si+0x26], 2     ; he is to the right: walk left
+/// T2$:
+/// 0577f  mov ax, 1
+/// 05782  ret
+/// ```
+pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> Track {
+    let mut dx = 0;
+    let mut dy = 0;
+    // 056eb..056f5: the globals are cleared and the two records picked up.
+    // 056f9  call FaceKnight
+    *facing = face_knight(me, foe);
+    // 056fc  mov [TrackFLAG], 0
+    let mut track_flag = false;
+    let mut plane = false;
+    // 05702  call CheckZAxis
+    if check_z(me, foe, def) {
+        // 05709  mov [ZPLANE], 1
+        plane = true;
+    } else if me.y > foe.y {
+        // 05711..05717: me.z > foe.z
+        // 05719  or byte ptr [si + 0x26], 8    (MoveU)
+        dy = -1;
+        // 0571d  mov [TrackFLAG], 1
+        track_flag = true;
+    } else {
+        // 05725  or byte ptr [si + 0x26], 4    (MoveD)
+        dy = 1;
+        // 05729  mov [TrackFLAG], 1
+        track_flag = true;
     }
-    if distance <= def.back_off {
-        // `TrackBack`: give ground, whichever side he is on.
-        return Track { dx: if dx >= 0 { -1 } else { 1 }, dy: step_y, plane, walking: true, distance };
+    // SameZPlane:
+    // 0572f  mov bp, [si+0x54]; 05732 call CheckXAxis; 05737 jne TrackBack
+    let (inside_back_off, distance) = check_x_axis(me, foe, def.back_off);
+    if inside_back_off {
+        // TrackBack:
+        // 0576b..05773: bx = foe.x - me.x; jns T1$
+        if foe.x - me.x < 0 {
+            // 05775  or byte ptr [si + 0x26], 1
+            dx = 1;
+        } else {
+            // 0577b  or byte ptr [si + 0x26], 2
+            dx = -1;
+        }
+        // 0577f  mov ax, 1
+        return Track { dx, dy, plane, walking: true, distance };
     }
-    if distance <= def.approach {
-        return Track { dx: 0, dy: step_y, plane, walking, distance };
+    // 05739  mov bp, [si+0x52]; 0573c call CheckXAxis; 05741 je TrackOpponent
+    let (inside_approach, distance) = check_x_axis(me, foe, def.approach);
+    if inside_approach {
+        // 05746  mov ax, [TrackFLAG]; 05749 ret
+        return Track { dx, dy, plane, walking: track_flag, distance };
     }
-    Track { dx: dx.signum(), dy: step_y, plane, walking: true, distance }
+    // TrackOpponent:
+    // 0574a  call FindSide; 05750 cmp ax, 1; 05753 je TrackRight
+    if find_side(me, foe) == 1 {
+        // 0575b  or byte ptr [si + 0x26], 1
+        dx = 1;
+    } else {
+        // 05755  or byte ptr [si + 0x26], 2
+        dx = -1;
+    }
+    // 0575f  mov ax, 1
+    Track { dx, dy, plane, walking: true, distance }
 }
 
 // ------------------------------------------------------------------- the roll
@@ -296,19 +502,27 @@ pub struct Sight<'a> {
 ///
 /// `seed` is the bout's roll register; only `TroggAttacks` spends it, which is
 /// why it is threaded rather than stored.
-pub fn decide(s: &Sight, brain: &mut Brain, seed: &mut u16) -> Act {
+///
+/// `facing` is the record's `+8`, handed in as it stands and handed back as
+/// the controller leaves it. The controllers write it directly in the
+/// original (`FaceKnight` from `MonsterTrack` and `ControlRatCollide`,
+/// `ControlBalok+101`, `BeastCharge`, `TrackKnight+55`), and the task loop
+/// copies it into the task on the way out (`NOTEND+20`, `mov dh, [di+8]`, to
+/// `TASKHANDLE` 0x9741, `mov [di+0x14], dh`). A controller that never
+/// touches it leaves the creature facing the way it was.
+pub fn decide(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act {
     match s.def.controller() {
-        Controller::Trogg => trogg(s, brain, seed, false),
-        Controller::TroggSpear => trogg(s, brain, seed, true),
-        Controller::Troll => troll(s, brain),
-        Controller::Ratman => ratman(s, brain),
-        Controller::Mudman => mudman(s, brain),
-        Controller::Balok => balok(s, brain),
-        Controller::Beast => beast(s, brain, seed),
-        Controller::Demon => demon(s, brain),
-        Controller::Dragon => dragon(s, brain),
+        Controller::Trogg => trogg(s, brain, seed, false, facing),
+        Controller::TroggSpear => trogg(s, brain, seed, true, facing),
+        Controller::Troll => troll(s, brain, facing),
+        Controller::Ratman => ratman(s, brain, facing),
+        Controller::Mudman => mudman(s, brain, facing),
+        Controller::Balok => balok(s, brain, facing),
+        Controller::Beast => beast(s, brain, seed, facing),
+        Controller::Demon => demon(s, brain, facing),
+        Controller::Dragon => dragon(s, brain, facing),
         Controller::Claw => claw(s, brain),
-        Controller::Knight => knight(s, brain),
+        Controller::Knight => knight(s, brain, facing),
     }
 }
 
@@ -321,8 +535,20 @@ fn walk(t: Track) -> Act {
     }
 }
 
-/// Tick the cooldown the way `DemonAttack` and `TroggAttacks` do: down by one,
-/// and the creature is free on the tick it reaches zero, not the one after.
+/// Tick the cooldown the way `DemonAttack` (0x5029) does: down by one, and
+/// the demon is free on the frame it reaches zero.
+///
+/// ```text
+/// 05029  cmp byte [si+0x4a], 0
+/// 0502d  je  05035                 ; zero: attack
+/// 0502f  sub byte [si+0x4a], 1
+/// 05033  jne DemonMove             ; still counting: move
+/// 05035  ...                       ; reached zero this frame: attack
+/// ```
+///
+/// `TroggAttacks` does **not** share this shape: its decrement is followed by
+/// an unconditional `jmp` to the tail (0x2eb1), so the trogg waits one frame
+/// longer. It has its own test in [`trogg`] and must not use this.
 fn cooling(brain: &mut Brain) -> bool {
     if brain.cooldown > 0 {
         brain.cooldown -= 1;
@@ -331,69 +557,320 @@ fn cooling(brain: &mut Brain) -> bool {
     false
 }
 
-/// `ControlTrogg`, `TroggAttack`, `TroggAttacks`, `TroggSwing`, `TroggChop`.
-fn trogg(s: &Sight, brain: &mut Brain, seed: &mut u16, spear: bool) -> Act {
-    let t = track(s.me, s.foe, s.def);
-    if t.walking && !t.plane {
-        return walk(t);
+/// `MoveBACK`, image 0x5783: which way the walk cycle is stepped. Returns the
+/// `bp` it leaves, 1 forwards and -1 backwards.
+///
+/// ```text
+/// 05783  mov si, [0x77e8]          ; me
+/// 05787  mov al, [si+8]            ; facing
+/// 0578a  cmp al, 1
+/// 0578c  je  MoveBACKR
+/// 0578e  mov bp, 1                 ; not facing right (3)...
+/// 05791  test byte [si+0x26], 2
+/// 05795  jne m1$                   ; ...and walking left: forwards
+/// 05797  mov bp, -1                ; walking right: backwards
+/// 0579a  ret
+/// MoveBACKR:
+/// 0579b  mov bp, 1                 ; facing right...
+/// 0579e  test byte [si+0x26], 1
+/// 057a2  jne mm1$                  ; ...and walking right: forwards
+/// 057a4  mov bp, -1                ; walking left: backwards
+/// 057a7  ret
+/// ```
+///
+/// `MoveU` (0x4e39) and `MoveD` (0x4e64) set `bp` to 1 themselves and are
+/// called before `MoveR` and `MoveL`, which call this, so a step with any
+/// sideways part takes its sign from here and a purely vertical one goes
+/// forwards. `NextWalk` (0x4ef7) then does `add byte ptr [si+0xa], al` with
+/// `al = bp`. Nothing in any of this writes `+8`: walking away from the
+/// knight plays the walk backwards and leaves the creature facing him.
+///
+/// `facing` is the record's `+8` as this module carries it (1 right, -1
+/// left); `dx` is the walk bit, 1 right, -1 left, 0 neither.
+pub fn move_back(facing: i32, dx: i32) -> i32 {
+    if dx == 0 {
+        // MoveU / MoveD: `mov bp, 1`, and no call to MoveBACK.
+        return 1;
     }
-    let d = t.distance;
-    // `TroggAttack`: inside the back-off range it gives ground rather than
-    // striking, whatever the tracker said.
-    if d <= s.def.back_off {
-        return walk(t);
+    if facing == 1 {
+        // 0579b  mov bp, 1; 0579e test byte [si+0x26], 1; 057a2 jne mm1$
+        if dx > 0 { 1 } else { -1 }
+    } else {
+        // 0578e  mov bp, 1; 05791 test byte [si+0x26], 2; 05795 jne m1$
+        if dx < 0 { 1 } else { -1 }
     }
-    if !s.foe.alive() {
-        // The finisher, and only with the gore on: `TroggAttack` tests
-        // DS:0x700 before it does anything to a fallen knight.
-        if !s.gore || !s.body || s.decapped {
-            return Act::Idle;
-        }
-        if d > 100 {
-            return walk(t);
-        }
-        if cooling(brain) {
-            return Act::Idle;
-        }
-        brain.cooldown = 10;
-        return Act::Attack { kind: Attack::Swing, spawn: None };
+}
+
+/// `ControlTrogg` (0x2ddf) and everything it jumps to: `TroggStart` (0x2e03),
+/// `TroggMove` (0x2e22), `TroggAttack` (0x2e64), `TroggAttacks` (0x2ea7),
+/// `TroggSwing` (0x2eed), `TroggChop` (0x2eff). Translated block for block,
+/// with the same comparisons in the same order; every block quotes the
+/// address it came from.
+///
+/// The two entry branches this does not take are handled where their
+/// condition is raised. `TroggStruck` (0x2f19, on `+0xe`) picks the
+/// blow-taken script and zeroes `+0x4a`; `TroggHit` (0x2f4d, on `+0xc`) plays
+/// the recovery and sets `+0x4a` to ten. Both happen in the bout the moment a
+/// blow lands, through [`trogg_struck`] and [`trogg_hit`], because that is
+/// when the original sets `+0xe` and `+0xc`. Neither calls `FaceKnight`, so
+/// neither turns the creature.
+///
+/// `DS:0x783a` is answered with an [`Act`]: `Act::Idle` is the stance
+/// `ControlTrogg` writes there first (`mov ax, [di+0x10]; mov [0x783a], ax`
+/// at 0x2de5), which every `jmp 0x2d52` that writes nothing else hands back.
+///
+/// ```text
+/// ControlTrogg:
+/// 02ddf  mov [0x77e8], si          ; me
+/// 02de5  mov ax, [di+0x10]         ; the stance...
+/// 02de8  mov [0x783a], ax          ; ...is the answer unless something else is
+/// 02deb  mov ax, [KnightTable]
+/// 02dee  mov [Opponent], ax        ; the opponent is the knight
+/// 02df1  cmp word [si+0xe], 0
+/// 02df5  je  02dfa
+/// 02df7  jmp TroggStruck
+/// 02dfa  cmp word [si+0xc], 0
+/// 02dfe  je  TroggStart
+/// 02e00  jmp TroggHit
+/// TroggStart:
+/// 02e03  mov word [si+0x26], 0     ; no walk bits
+/// 02e08  mov word [si+0x28], 0     ; no attack kind
+/// 02e0d  call MonsterTrack         ; FaceKnight is its first act
+/// 02e10  or  ax, ax
+/// 02e12  je  TroggAttack           ; in range on the plane: bx is the distance
+/// 02e14  cmp word [ZPLANE], 0
+/// 02e19  je  TroggMove             ; off the plane: walk
+/// 02e1b  call FindDistance         ; on the plane, out of range
+/// 02e1e  mov bx, ax
+/// 02e20  jmp TroggAttack
+/// TroggMove:
+/// 02e22  cmp byte [si+0x26], 0
+/// 02e26  jne 02e2b
+/// 02e28  jmp 02d52                 ; no bits: the stance
+/// 02e2b  ...                       ; MoveU / MoveD / MoveR / MoveL, then MonsterWalk
+/// TroggAttack:
+/// 02e64  mov si, [0x77e8]
+/// 02e68  cmp bx, [si+0x54]
+/// 02e6b  jle TroggMove             ; inside the back-off: give ground
+/// 02e6d  mov di, [si+0x16]         ; the *Att table
+/// 02e71  mov bx, [Opponent]
+/// 02e75  cmp word [bx+0x38], 0
+/// 02e7a  jg  TroggAttacks          ; he is alive
+/// 02e7c  cmp word [0x700], 0
+/// 02e81  je  02e86
+/// 02e83  jmp 02d52                 ; gore off: nothing
+/// 02e86  cmp bx, 0x64
+/// 02e89  jg  TroggMove             ; the body is past a hundred
+/// 02e8b  cmp word [DeCapFLAG], 0
+/// 02e90  jne 02e9c                 ; someone already has
+/// 02e92  cmp byte [si+0x4a], 0
+/// 02e96  je  02e9f
+/// 02e98  sub byte [si+0x4a], 1
+/// 02e9c  jmp 02d52
+/// 02e9f  mov word [DeCapFLAG], 1
+/// 02ea5  jmp TroggSwing
+/// TroggAttacks:
+/// 02ea7  cmp byte [si+0x4a], 0
+/// 02eab  je  02eb4
+/// 02ead  sub byte [si+0x4a], 1
+/// 02eb1  jmp 02d52                 ; counting down: the stance, whatever it reached
+/// 02eb4  cmp byte [si+0x35], 0x10
+/// 02eb8  jne 02ed4                 ; not the spear
+/// 02eba  cmp bx, [si+0x52]
+/// 02ebd  jle 02ec2
+/// 02ebf  jmp TroggMove             ; the spear walks unless inside +0x52
+/// 02ec2  mov byte [si+0x4a], 0x14
+/// 02ec6  mov word [si+0x28], 2
+/// 02ecb  mov ax, TroggSpear_Lunge
+/// 02ece  mov [0x783a], ax
+/// 02ed1  jmp 02d52
+/// 02ed4  cmp bx, 0x64
+/// 02ed7  jg  TroggChop             ; past a hundred: the overhead
+/// 02ed9  call GETPERCENT
+/// 02edc  cmp ax, 0x1e
+/// 02edf  jg  TroggSwing            ; over thirty: the swing
+/// 02ee1  mov bx, [KnightTable]
+/// 02ee6  cmp word [bx+0x28], 8
+/// 02eeb  je  TroggChop             ; he is holding the block: the overhead
+/// TroggSwing:
+/// 02eed  mov byte [si+0x4a], 0xa
+/// 02ef1  mov word [si+0x28], 4
+/// 02ef6  mov ax, [di+4]            ; Att[4]
+/// 02ef9  mov [0x783a], ax
+/// 02efc  jmp 02d52
+/// TroggChop:
+/// 02eff  cmp bx, 0x78
+/// 02f02  jle 02f07
+/// 02f04  jmp TroggMove             ; past a hundred and twenty: walk
+/// 02f07  mov byte [si+0x4a], 0xa
+/// 02f0b  mov word [si+0x28], 0x10
+/// 02f10  mov ax, [di+0x10]         ; Att[0x10]
+/// 02f13  mov [0x783a], ax
+/// 02f16  jmp 02d52
+/// ```
+///
+/// And the tail every branch ends on, which is how the facing reaches the
+/// task: `dh` is `+8` as `FaceKnight` left it, and `TASKHANDLE` stores it
+/// into `task+0x14` with the new script (0x9741).
+///
+/// ```text
+/// 02d52  mov di, [0x77e8]
+/// 02d56  mov si, [0x783a]          ; the script
+/// 02d5a  mov ax, [di+2]            ; x
+/// 02d5d  mov bx, [di+4]            ; y
+/// 02d60  mov cx, [di+6]            ; z
+/// 02d63  mov dh, [di+8]            ; facing
+/// 02d66  ret
+/// ```
+fn trogg(s: &Sight, brain: &mut Brain, seed: &mut u16, spear: bool, facing: &mut i32) -> Act {
+    // TroggStart:
+    // 02e03  mov word [si+0x26], 0
+    // 02e08  mov word [si+0x28], 0
+    // 02e0d  call MonsterTrack
+    let t = track(s.me, s.foe, s.def, facing);
+    let bx = if !t.walking {
+        // 02e10  or ax, ax; 02e12 je TroggAttack: bx as CheckXAxis left it.
+        t.distance
+    } else if !t.plane {
+        // 02e14  cmp word [ZPLANE], 0; 02e19 je TroggMove
+        return trogg_move(t);
+    } else {
+        // 02e1b  call FindDistance; 02e1e mov bx, ax; 02e20 jmp TroggAttack
+        find_distance(s.me, s.foe)
+    };
+    // TroggAttack:
+    // 02e68  cmp bx, [si+0x54]; 02e6b jle TroggMove
+    if bx <= s.def.back_off {
+        return trogg_move(t);
     }
-    if cooling(brain) {
+    // 02e6d  mov di, [si+0x16]     (the *Att table: Act::Attack indexes it)
+    // 02e75  cmp word [bx+0x38], 0; 02e7a jg TroggAttacks
+    if s.foe.health > 0 {
+        return trogg_attacks(s, brain, seed, spear, bx, t);
+    }
+    // 02e7c  cmp word [0x700], 0; 02e81 je 02e86; 02e83 jmp 02d52
+    if !s.gore {
         return Act::Idle;
     }
+    // 02e86  cmp bx, 0x64; 02e89 jg TroggMove
+    if bx > 0x64 {
+        return trogg_move(t);
+    }
+    // 02e8b  cmp word [DeCapFLAG], 0; 02e90 jne 02e9c
+    if s.decapped {
+        return Act::Idle;
+    }
+    // 02e92  cmp byte [si+0x4a], 0; 02e96 je 02e9f
+    if brain.cooldown != 0 {
+        // 02e98  sub byte [si+0x4a], 1; 02e9c jmp 02d52
+        brain.cooldown -= 1;
+        return Act::Idle;
+    }
+    // 02e9f  mov word [DeCapFLAG], 1: the bout raises its flag on seeing this
+    // attack ordered against a knight with no hit points (`Bout::decap`).
+    // 02ea5  jmp TroggSwing
+    trogg_swing(brain)
+}
+
+/// `TroggAttacks`, 0x2ea7. `bx` is the distance, `t` what `MonsterTrack` set
+/// in `+0x26`, for the `TroggMove` exits.
+fn trogg_attacks(
+    s: &Sight, brain: &mut Brain, seed: &mut u16, spear: bool, bx: i32, t: Track,
+) -> Act {
+    // 02ea7  cmp byte [si+0x4a], 0; 02eab je 02eb4
+    if brain.cooldown != 0 {
+        // 02ead  sub byte [si+0x4a], 1; 02eb1 jmp 02d52
+        brain.cooldown -= 1;
+        return Act::Idle;
+    }
+    // 02eb4  cmp byte [si+0x35], 0x10; 02eb8 jne 02ed4
     if spear {
-        // The kind 0x10 branch of `TroggAttacks`: one lunge, and only inside
-        // the approach range.
-        if d > s.def.approach {
-            return walk(t);
+        // 02eba  cmp bx, [si+0x52]; 02ebd jle 02ec2; 02ebf jmp TroggMove
+        if bx > s.def.approach {
+            return trogg_move(t);
         }
-        brain.cooldown = 20;
+        // 02ec2  mov byte [si+0x4a], 0x14
+        brain.cooldown = 0x14;
+        // 02ec6  mov word [si+0x28], 2; 02ecb mov ax, TroggSpear_Lunge; 02ed1 jmp 02d52
         return Act::Attack { kind: Attack::Lunge, spawn: None };
     }
-    if d > 100 {
-        // `TroggChop` refuses beyond 120 and walks instead.
-        if d > 120 {
-            return walk(t);
-        }
-        brain.cooldown = 10;
-        return Act::Attack { kind: Attack::Chop, spawn: None };
+    // 02ed4  cmp bx, 0x64; 02ed7 jg TroggChop
+    if bx > 0x64 {
+        return trogg_chop(brain, bx, t);
     }
-    // Inside a hundred: a swing, unless the roll comes up short *and* the
-    // knight is holding a block, which the swing cannot get through and the
-    // chop can.
-    let roll = percent(seed);
-    if roll <= 30 && s.foe.guarding() == Some(Attack::Block) {
-        brain.cooldown = 10;
-        return Act::Attack { kind: Attack::Chop, spawn: None };
+    // 02ed9  call GETPERCENT; 02edc cmp ax, 0x1e; 02edf jg TroggSwing
+    let ax = percent(seed);
+    if ax > 0x1e {
+        return trogg_swing(brain);
     }
-    brain.cooldown = 10;
+    // 02ee2  mov bx, [KnightTable]; 02ee6 cmp word [bx+0x28], 8; 02eeb je TroggChop
+    if s.foe.attack == Some(Attack::Block) {
+        return trogg_chop(brain, bx, t);
+    }
+    trogg_swing(brain)
+}
+
+/// `TroggSwing`, 0x2eed.
+fn trogg_swing(brain: &mut Brain) -> Act {
+    // 02eed  mov byte [si+0x4a], 0xa
+    brain.cooldown = 0xa;
+    // 02ef1  mov word [si+0x28], 4; 02ef6 mov ax, [di+4]; 02ef9 mov [0x783a], ax
     Act::Attack { kind: Attack::Swing, spawn: None }
+}
+
+/// `TroggChop`, 0x2eff.
+fn trogg_chop(brain: &mut Brain, bx: i32, t: Track) -> Act {
+    // 02eff  cmp bx, 0x78; 02f02 jle 02f07; 02f04 jmp TroggMove
+    if bx > 0x78 {
+        return trogg_move(t);
+    }
+    // 02f07  mov byte [si+0x4a], 0xa
+    brain.cooldown = 0xa;
+    // 02f0b  mov word [si+0x28], 0x10; 02f10 mov ax, [di+0x10]; 02f13 mov [0x783a], ax
+    Act::Attack { kind: Attack::Chop, spawn: None }
+}
+
+/// `TroggMove`, 0x2e22: `cmp byte [si+0x26], 0; jne 02e2b; jmp 02d52`. No
+/// walk bit means the stance; otherwise `MoveU`, `MoveD`, `MoveR`, `MoveL`
+/// and `MonsterWalk`, which is what an `Act::Walk` carrying those bits is.
+fn trogg_move(t: Track) -> Act {
+    walk(t)
+}
+
+/// `TroggStruck`, 0x2f19, the `+0xe` branch of `ControlTrogg`: the part of
+/// it that touches the controller's own state. The blow-taken script and the
+/// damage are the bout's business; this is the one line beside them.
+///
+/// ```text
+/// 02f19  mov si, [di+0xe]          ; who struck it
+/// 02f1c  mov byte [di+0x4a], 0     ; the cooldown is forgotten
+/// ```
+///
+/// No `FaceKnight` here: a struck trogg keeps the facing it had.
+pub fn trogg_struck(brain: &mut Brain) {
+    brain.cooldown = 0;
+}
+
+/// `TroggHit`, 0x2f4d, the `+0xc` branch of `ControlTrogg`: the recovery
+/// script (`+0x12`) and ten frames before the next blow.
+///
+/// ```text
+/// 02f4e  mov ax, [di+0x12]
+/// 02f51  mov [0x783a], ax          ; the recovery
+/// 02f55  mov byte [di+0x4a], 0xa
+/// ```
+///
+/// What follows (0x2f59 on) only matters for the spear's toss of a corpse.
+/// No `FaceKnight` here either.
+pub fn trogg_hit(brain: &mut Brain) {
+    brain.cooldown = 0xa;
 }
 
 /// `ControlTroll` and `TrollAttack`: the club inside a hundred, the overhead
 /// chop from further out, and never two chops running.
-fn troll(s: &Sight, brain: &mut Brain) -> Act {
-    let t = track(s.me, s.foe, s.def);
+fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
+    // ControlTroll+53 (0x55f9): `call MonsterTrack`.
+    let t = track(s.me, s.foe, s.def, facing);
     if t.walking {
         return walk(t);
     }
@@ -408,28 +885,35 @@ fn troll(s: &Sight, brain: &mut Brain) -> Act {
 
 /// `ControlRatCollide`: it does not use the tracker at all. It slashes inside
 /// forty, bites out to fifty, and leaps at anything further.
-fn ratman(s: &Sight, brain: &mut Brain) -> Act {
+fn ratman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     let dy = s.foe.y - s.me.y;
-    let plane = dy.abs() <= s.def.depth_tolerance;
-    let d = (s.foe.x - s.me.x).abs();
     let toward = (s.foe.x - s.me.x).signum();
-    // `RatmanHit` sets a fifteen frame delay every time a blow of its own
-    // lands, which is what keeps the slash from being a blur.
-    if brain.cooldown > 0 {
-        brain.cooldown -= 1;
-        return Act::Idle;
-    }
-    if !s.foe.alive() {
-        return Act::Idle;
-    }
     let leap = |dy: i32| Act::Walk {
         dx: toward,
         dy,
         script: s.def.scripts_for("leap").first().cloned(),
     };
-    if !plane {
+    // ControlRatCollide+72 (0x3144): `call FaceKnight`, once the in-tree,
+    // on-head and hanging branches have been passed over.
+    *facing = face_knight(s.me, s.foe);
+    // 03147  call CheckZAxis; 0314c je RatmanLeap
+    if !check_z(s.me, s.foe, s.def) {
         return leap(dy.signum());
     }
+    // 03168  cmp word ptr [si + 0x38], 0; 0316c jg; else the exit
+    if !s.foe.alive() {
+        return Act::Idle;
+    }
+    // 03171  cmp [HitDelay], 0; 03178 sub [HitDelay], 1; then the exit.
+    // `RatmanHit` sets the fifteen frame delay every time a blow of its own
+    // lands, which is what keeps the slash from being a blur.
+    if brain.cooldown > 0 {
+        brain.cooldown -= 1;
+        return Act::Idle;
+    }
+    // 03180  call FindDistance
+    let d = find_distance(s.me, s.foe);
+    // 03183  cmp ax, 0x28; 03186 jg
     if d <= 40 {
         brain.cooldown = 15;
         return Act::Attack { kind: Attack::Swing, spawn: None };
@@ -443,7 +927,7 @@ fn ratman(s: &Sight, brain: &mut Brain) -> Act {
 
 /// `ControlMudmen`: it reaches for you between seventy five and a hundred,
 /// and inside that it goes under the ground and comes up beside you.
-fn mudman(s: &Sight, brain: &mut Brain) -> Act {
+fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     // Holding the knight: `MudmenEntangle` counts down, and the choke at the
     // end of it is `KillKnight`.
     if brain.flags & flag::ENTANGLING != 0 {
@@ -478,7 +962,9 @@ fn mudman(s: &Sight, brain: &mut Brain) -> Act {
             script: "Mudmen_Appear".into(),
         };
     }
-    let t = track(s.me, s.foe, s.def);
+    // ControlMudmen+105 (0x5357): `call MonsterTrack`, after the entangle,
+    // choke, surface and bury branches.
+    let t = track(s.me, s.foe, s.def, facing);
     if t.walking && !t.plane {
         return walk(t);
     }
@@ -502,16 +988,23 @@ fn mudman(s: &Sight, brain: &mut Brain) -> Act {
 /// `ControlBalok`: it closes in hops, uppercuts at arm's length, grabs from
 /// further out, and stands off between a hundred and twenty and a hundred and
 /// eighty unless you are throwing daggers at it.
-fn balok(s: &Sight, brain: &mut Brain) -> Act {
+fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     let dy = s.foe.y - s.me.y;
-    let plane = dy.abs() <= s.def.depth_tolerance;
     let d = (s.foe.x - s.me.x).abs();
     let toward = (s.foe.x - s.me.x).signum();
     let hop = |dy: i32| Act::Walk { dx: toward, dy, script: None };
+    // 035e0  cmp word ptr [di + 0x38], 0; 035e4 jg; else the exit
     if !s.foe.alive() {
         return Act::Idle;
     }
-    if !plane {
+    // ControlBalok+80..107: its own `FaceKnight`, against `balok_seek_x`.
+    //   035e9  mov ax, [di+2]; 035ec mov [balok_seek_x], ax
+    //   035f5  mov ax, [si+2]; 035f8 cmp ax, [balok_seek_x]; 035fc jl 03604
+    //   035fe  mov byte ptr [si + 8], 3
+    //   03604  mov byte ptr [si + 8], 1
+    *facing = if s.me.x < s.foe.x { 1 } else { -1 };
+    // 03608  call CheckZAxis; 0360d je BalokJump
+    if !check_z(s.me, s.foe, s.def) {
         return hop(dy.signum());
     }
     if d <= 70 {
@@ -539,12 +1032,32 @@ fn balok(s: &Sight, brain: &mut Brain) -> Act {
 /// `ControlBeast`, `BeastCharge`, `SetBEASTZ` and `SetBeastTimer`: it does not
 /// track at all. It runs from one side of the arena to the other, turns round
 /// off the edge, waits, picks a depth and comes back.
-fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16) -> Act {
-    let leftward = brain.flags & flag::LEFTWARD != 0;
+fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act {
+    // `BeastCharge`, 0x2fe6: the facing is the record's own `+8`, read to
+    // choose which edge to test and written when the edge is reached.
+    //
+    //   02fe6  cmp byte ptr [di + 8], 3
+    //   02fea  je  BeastChargeLeft
+    //   02fec  cmp word ptr [di + 2], 0x154 ; facing right: past 340?
+    //   02ff1  jl  BeastMove
+    //   02ff3  mov word ptr [di + 2], 0x17c ; set down at 380
+    //   02ff8  mov byte ptr [di + 8], 3     ; and turned to face left
+    //   02ffc  jmp SetBEASTZ
+    //   BeastChargeLeft:
+    //   02ffe  cmp word ptr [di + 2], 0
+    //   03002  jns BeastMove                ; facing left: past 0?
+    //   03004  mov word ptr [di + 2], 0xffce ; set down at -50
+    //   03009  mov byte ptr [di + 8], 1     ; and turned to face right
+    //
+    // The edges here are the arena's own bounds rather than 340 and 0, and
+    // the beast is not set down beyond them, because this engine's walk gate
+    // keeps every fighter inside the field; see `Fighter::walk`.
+    let leftward = *facing < 0;
     let (l, r) = (s.bounds.left, s.bounds.right);
     let turning = if leftward { s.me.x <= l } else { s.me.x >= r };
     if turning {
-        brain.flags ^= flag::LEFTWARD;
+        // 02ff8 / 03009: the turn is a write to `+8`.
+        *facing = if leftward { 1 } else { -1 };
         // `SetBEASTZ`: every other pass is dead on his line, and the one
         // between it is up to twenty eight rows off.
         brain.flags ^= flag::ONLINE;
@@ -563,7 +1076,9 @@ fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16) -> Act {
         brain.timer -= 1;
         return Act::Idle;
     }
-    let dir = if brain.flags & flag::LEFTWARD != 0 { -1 } else { 1 };
+    // `BeastMove`, 0x307c: `test byte ptr [di + 8], 2; je; neg bx`, so the
+    // charge goes the way the record faces.
+    let dir = if *facing < 0 { -1 } else { 1 };
     let want = s.foe.y + brain.walk as i32;
     let dy = (want - s.me.y).signum();
     Act::Walk { dx: dir, dy, script: None }
@@ -572,18 +1087,18 @@ fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16) -> Act {
 /// `ControlDemon` and `DemonAttack`: the slap inside a hundred, the zap out to
 /// a hundred and thirty, the whip out to a hundred and forty, and the whip's
 /// own four phase follow-through.
-fn demon(s: &Sight, brain: &mut Brain) -> Act {
+fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     if brain.flags & flag::UNBORN != 0 {
         // `[di+0x10]` is `Demon_Evolve`, so the demon's first script is its
         // own materialisation, and its last frame calls `AddDemonWhirl`.
         brain.flags &= !flag::UNBORN;
         return Act::Play("Demon_Evolve".into());
     }
-    let t = track(s.me, s.foe, s.def);
-    let d = t.distance;
     // The whip chain, which the original keeps as `DemonFLAGS` bits 1, 8,
-    // 0x10 and 0x20 and follows through whatever the distance now is.
+    // 0x10 and 0x20 (ControlDemon+67..+122) and takes before `MonsterTrack`
+    // is reached, so a demon following its whip through does not turn.
     if brain.phase > 0 {
+        let d = find_distance(s.me, s.foe);
         if cooling(brain) {
             return Act::Idle;
         }
@@ -616,11 +1131,16 @@ fn demon(s: &Sight, brain: &mut Brain) -> Act {
         }
         return Act::Play(script.into());
     }
-    if cooling(brain) {
-        return walk(t);
-    }
+    // 04fb1  cmp word ptr [si + 0x38], 0; 04fb5 jg; else the exit
     if !s.foe.alive() {
         return Act::Idle;
+    }
+    // ControlDemon+135 (0x4fba): `call MonsterTrack`.
+    let t = track(s.me, s.foe, s.def, facing);
+    let d = t.distance;
+    // `DemonAttack`, 0x5029: the cooldown, and `DemonMove` while it runs.
+    if cooling(brain) {
+        return walk(t);
     }
     // `ControlDemon` only reaches `DemonAttack` on the same plane: off it,
     // `ZPLANE` is zero and the tracker's walk bits carry it across instead.
@@ -652,7 +1172,7 @@ fn demon(s: &Sight, brain: &mut Brain) -> Act {
 /// `ControlDragon`: the set piece. The head lifts when you come inside a
 /// hundred and forty and lowers when you go back out, and what it does to you
 /// depends on which it is doing.
-fn dragon(s: &Sight, brain: &mut Brain) -> Act {
+fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     let d = (s.foe.x - s.me.x).abs();
     let up = brain.flags & flag::HEAD_UP != 0;
     if brain.flags & flag::HEAD_MOVING != 0 {
@@ -669,9 +1189,16 @@ fn dragon(s: &Sight, brain: &mut Brain) -> Act {
         brain.walk += 1;
         return Act::Walk { dx: 0, dy, script: s.def.scripts_for(row).get(frame).cloned() };
     }
+    // DragonMove+0xb (0x3877): `call TrackKnight`, before the range at
+    // 0x3880 is looked at, so the head has faced right (`TrackKnight+0x37`,
+    // 0x3c1f: `mov byte ptr [si + 8], 1`, whatever `FaceKnight` wrote) on
+    // every frame a head move is not already running.
+    let t = track(s.me, s.foe, s.def, facing);
+    *facing = 1;
     if !s.foe.alive() && brain.flags & flag::HEAD_MOVING == 0 {
         return Act::Stand(if up { "Dragon_HighStance".into() } else { "Dragon_Stance".into() });
     }
+    // 0387a  call FindDistance; 03880 cmp ax, 0x8c; 03883 jge DragonMoveLow
     if d >= 140 && up {
         brain.flags &= !flag::HEAD_UP;
         brain.flags |= flag::HEAD_MOVING;
@@ -693,7 +1220,9 @@ fn dragon(s: &Sight, brain: &mut Brain) -> Act {
     // hundred, and follows him in depth. `MonsterTrack` does the choosing; the
     // clamp is the original's own, and it is why the dragon never leaves its
     // corner of the arena.
-    let t = track(s.me, s.foe, s.def);
+    // `TrackKnight`, 0x3be8: `MonsterTrack` on the head's record (0x3c18),
+    // and then, whatever `FaceKnight` wrote, `mov byte ptr [si + 8], 1` at
+    // 0x3c1f. The head always faces right. `t` is what it answered above.
     let dx = if s.me.x + t.dx * 5 < 30 || s.me.x + t.dx * 5 > 100 { 0 } else { t.dx };
     if t.dy != 0 || dx != 0 {
         return Act::Walk { dx, dy: t.dy, script: None };
@@ -741,11 +1270,12 @@ fn claw(s: &Sight, _brain: &mut Brain) -> Act {
 /// it closes and swings, and it struggles out of a hold the way a person
 /// would, which is fire and down together (`MudmenEntangle` reads exactly
 /// those two bits).
-fn knight(s: &Sight, brain: &mut Brain) -> Act {
+fn knight(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     if s.me.held() {
         return Act::Struggle;
     }
-    let t = track(s.me, s.foe, s.def);
+    // ControlBlackKnight+69 (0x4bbe): `call MonsterTrack`.
+    let t = track(s.me, s.foe, s.def, facing);
     if !s.foe.alive() {
         if !s.gore || !s.body || s.decapped || t.distance > 100 {
             return Act::Idle;
@@ -806,17 +1336,89 @@ mod tests {
     fn the_tracker_closes_holds_and_gives_ground() {
         let d = ranged(100, 80);
         let me = at(0, 50);
+        let mut facing = -1;
         // Beyond the approach range: walk in.
-        assert_eq!(track(&me, &at(200, 50), &d).dx, 1);
+        assert_eq!(track(&me, &at(200, 50), &d, &mut facing).dx, 1);
         // Inside it but outside the back-off: hold, and answer "in range".
-        let t = track(&me, &at(90, 50), &d);
+        let t = track(&me, &at(90, 50), &d, &mut facing);
         assert_eq!((t.dx, t.walking), (0, false));
         // Inside the back-off: give ground.
-        let t = track(&me, &at(40, 50), &d);
+        let t = track(&me, &at(40, 50), &d, &mut facing);
         assert_eq!((t.dx, t.walking), (-1, true));
         // Off the plane: walk in depth, and never answer "in range".
-        let t = track(&me, &at(90, 90), &d);
+        let t = track(&me, &at(90, 90), &d, &mut facing);
         assert!(t.walking && !t.plane && t.dy == 1);
+    }
+
+    /// `MonsterTrack+32` is `call FaceKnight` before a single range is
+    /// looked at, so every answer above turned the creature towards him,
+    /// including the one that walks it away.
+    #[test]
+    fn the_tracker_faces_the_knight_before_it_decides_anything() {
+        let d = ranged(100, 80);
+        // He is to the right, at every range and on either plane: `+8` is 1.
+        for (fx, fy) in [(200, 50), (90, 50), (40, 50), (90, 90)] {
+            let mut facing = -1;
+            track(&at(0, 50), &at(fx, fy), &d, &mut facing);
+            assert_eq!(facing, 1, "foe at {fx},{fy}");
+        }
+        // He is to the left: 3. Giving ground walks right while facing left.
+        let mut facing = 1;
+        let t = track(&at(100, 50), &at(60, 50), &d, &mut facing);
+        assert_eq!((facing, t.dx), (-1, 1), "backs away rightward, facing him");
+        // `FaceKnight+16` is `jl`: the same column faces left.
+        let mut facing = 1;
+        track(&at(100, 50), &at(100, 50), &d, &mut facing);
+        assert_eq!(facing, -1);
+    }
+
+    /// The trogg re-faces on every run of its controller, which is what the
+    /// video the owner sent showed it failing to do: standing to the
+    /// knight's right, swinging away from him.
+    #[test]
+    fn a_trogg_to_the_right_of_the_knight_turns_to_face_him_before_it_swings() {
+        let def = creature("trogg", 100, 90);
+        let mut b = Brain::default();
+        // It was facing right, from wherever it last walked. The knight is
+        // ninety five to its left, which is the swing.
+        let mut facing = 1;
+        let act = ask_facing(&def, &mut b, 200, 105, 0, &mut facing);
+        assert_eq!(kind(&act), Some(Attack::Swing));
+        assert_eq!(facing, -1, "`TroggStart+10` runs `MonsterTrack`, which faces him first");
+        // And inside the back-off it gives ground to the right, still facing
+        // left at him.
+        let mut b = Brain::default();
+        let mut facing = 1;
+        let act = ask_facing(&def, &mut b, 200, 150, 0, &mut facing);
+        assert!(matches!(act, Act::Walk { dx: 1, .. }), "{act:?}");
+        assert_eq!(facing, -1);
+    }
+
+    /// Every controller that tracks turns towards him; the ones that keep a
+    /// facing of their own keep it.
+    #[test]
+    fn who_faces_the_knight_and_who_does_not() {
+        for name in ["trogg", "trogg_spear", "troll", "ratman", "mudman", "balok", "demon", "knight"] {
+            let def = creature(name, 100, 90);
+            let mut b = Brain::default();
+            let mut facing = 1;
+            ask_facing(&def, &mut b, 200, 100, 0, &mut facing);
+            assert_eq!(facing, -1, "{name} to the knight's right faces left");
+            let mut facing = -1;
+            ask_facing(&def, &mut b, 0, 100, 0, &mut facing);
+            assert_eq!(facing, 1, "{name} to the knight's left faces right");
+        }
+        // `TrackKnight+55`: the dragon's head faces right whatever side he is.
+        let def = creature("dragon", 60, 20);
+        let mut b = Brain::default();
+        let mut facing = -1;
+        ask_facing(&def, &mut b, 100, 40, 0, &mut facing);
+        assert_eq!(facing, 1);
+        // `ControlClaw` never writes `+8`.
+        let def = creature("claw", 0, 0);
+        let mut facing = -1;
+        ask_facing(&def, &mut b, 5, 90, 0, &mut facing);
+        assert_eq!(facing, -1);
     }
 
     /// A definition with one creature's controller and its recovered ranges.
@@ -832,8 +1434,12 @@ mod tests {
         }
     }
 
-    /// One tick of one controller against a knight standing at `foe_x`.
-    fn ask(def: &ActorDef, brain: &mut Brain, me_x: i32, foe_x: i32, dy: i32) -> Act {
+    /// One tick of one controller against a knight standing at `foe_x`,
+    /// with the creature facing `facing` on the way in; what `+8` holds on
+    /// the way out is handed back through it.
+    fn ask_facing(
+        def: &ActorDef, brain: &mut Brain, me_x: i32, foe_x: i32, dy: i32, facing: &mut i32,
+    ) -> Act {
         let me = at(me_x, 50);
         let foe = at(foe_x, 50 + dy);
         let s = Sight {
@@ -846,7 +1452,13 @@ mod tests {
             decapped: false,
         };
         let mut seed = 0x2f1du16;
-        decide(&s, brain, &mut seed)
+        decide(&s, brain, &mut seed, facing)
+    }
+
+    /// One tick of one controller against a knight standing at `foe_x`.
+    fn ask(def: &ActorDef, brain: &mut Brain, me_x: i32, foe_x: i32, dy: i32) -> Act {
+        let mut facing = 1;
+        ask_facing(def, brain, me_x, foe_x, dy, &mut facing)
     }
 
     fn kind(a: &Act) -> Option<Attack> {
@@ -923,6 +1535,143 @@ mod tests {
         ask(&def, &mut b, 0, 95, 0);
         assert_eq!(b.cooldown, 10);
         assert!(matches!(ask(&def, &mut b, 0, 95, 0), Act::Idle));
+    }
+
+    /// `TroggAttacks+0` to `+0xa` (0x2ea7..0x2eb1): `cmp byte [si+0x4a], 0;
+    /// je attack; sub byte [si+0x4a], 1; jmp 0x2d52`. The decrement is
+    /// followed by an unconditional jump to the stance, so ten frames of
+    /// cooldown are ten frames of standing and the blow comes on the
+    /// eleventh. `DemonAttack` (0x502f) is `sub; jne`, which frees the demon
+    /// on the tenth; the trogg must not share it.
+    #[test]
+    fn the_trogg_stands_for_every_frame_of_its_cooldown_and_strikes_on_the_next() {
+        let def = creature("trogg", 100, 90);
+        let mut b = Brain::default();
+        assert_eq!(kind(&ask(&def, &mut b, 0, 110, 0)), Some(Attack::Chop));
+        assert_eq!(b.cooldown, 10, "TroggChop+8: mov byte [si+0x4a], 0xa");
+        for frame in 1..=10 {
+            assert!(
+                matches!(ask(&def, &mut b, 0, 110, 0), Act::Idle),
+                "frame {frame} of the cooldown is the stance"
+            );
+            assert_eq!(b.cooldown, 10 - frame, "one off per controller run");
+        }
+        assert_eq!(kind(&ask(&def, &mut b, 0, 110, 0)), Some(Attack::Chop), "the eleventh strikes");
+        // The finisher's count at TroggAttack+0x2e (0x2e92) has the same
+        // shape: `je 02e9f; sub; jmp 02d52`.
+        let mut b = Brain { cooldown: 2, ..Brain::default() };
+        // Ninety five away: past the back-off at 0x2e68, inside the hundred
+        // at 0x2e86.
+        let me = at(0, 50);
+        let foe = Fighter { health: 0, ..at(95, 50) };
+        let sight = |body| Sight {
+            me: &me,
+            foe: &foe,
+            def: &def,
+            bounds: Bounds { left: 0, right: 319, top: 10, bottom: 114 },
+            gore: true,
+            body,
+            decapped: false,
+        };
+        let mut seed = 0x2f1du16;
+        let mut facing = 1;
+        assert!(matches!(decide(&sight(true), &mut b, &mut seed, &mut facing), Act::Idle));
+        assert!(matches!(decide(&sight(true), &mut b, &mut seed, &mut facing), Act::Idle));
+        assert_eq!(b.cooldown, 0);
+        // And `TroggAttack` never asks whether the corpse still shows a body:
+        // 0x2e86 is the distance, 0x2e8b the flag, 0x2e92 the count, and
+        // then the swing. `Sight::body` is the black knight's concern.
+        assert_eq!(
+            kind(&decide(&sight(false), &mut b, &mut seed, &mut facing)),
+            Some(Attack::Swing),
+            "TroggAttack+0x41: jmp TroggSwing"
+        );
+        assert_eq!(b.cooldown, 10);
+    }
+
+    /// `TroggStruck+3` (0x2f1c) is `mov byte ptr [di+0x4a], 0` and
+    /// `TroggHit+8` (0x2f55) is `mov byte ptr [di+0x4a], 0xa`; neither runs
+    /// `FaceKnight`.
+    #[test]
+    fn a_blow_taken_forgets_the_cooldown_and_a_blow_landed_restarts_it() {
+        let mut b = Brain { cooldown: 7, ..Brain::default() };
+        trogg_struck(&mut b);
+        assert_eq!(b.cooldown, 0);
+        trogg_hit(&mut b);
+        assert_eq!(b.cooldown, 10);
+    }
+
+    /// `MoveBACK` (0x5783), all four corners and the vertical case.
+    #[test]
+    fn the_walk_runs_backwards_when_the_step_goes_against_the_facing() {
+        // 0579b..057a4: facing right, walking right forwards, left backwards.
+        assert_eq!(move_back(1, 1), 1);
+        assert_eq!(move_back(1, -1), -1);
+        // 0578e..05797: facing left, walking left forwards, right backwards.
+        assert_eq!(move_back(-1, -1), 1);
+        assert_eq!(move_back(-1, 1), -1);
+        // MoveU (0x4e39) and MoveD (0x4e64): `mov bp, 1`, no MoveBACK.
+        assert_eq!(move_back(1, 0), 1);
+        assert_eq!(move_back(-1, 0), 1);
+    }
+
+    /// `TroggAttacks+0x2d` (0x2ed4) to `+0x44` (0x2eeb): past a hundred the
+    /// overhead, and inside it the roll against thirty, with the knight's
+    /// `+0x28` compared to 8 only when the roll comes up at thirty or under.
+    #[test]
+    fn the_trogg_chops_through_a_held_block_when_the_roll_is_low() {
+        let def = creature("trogg", 100, 90);
+        let me = at(0, 50);
+        let blocking = Fighter { attack: Some(Attack::Block), state: State::Guard, ..at(95, 50) };
+        let open = at(95, 50);
+        fn sight<'a>(me: &'a Fighter, foe: &'a Fighter, def: &'a ActorDef) -> Sight<'a> {
+            Sight {
+                me,
+                foe,
+                def,
+                bounds: Bounds { left: 0, right: 319, top: 10, bottom: 114 },
+                gore: true,
+                body: false,
+                decapped: false,
+            }
+        }
+        // Walk the register until it hands out a roll at thirty or under,
+        // and one over thirty, and check the branch each takes.
+        let mut seed = 0x2f1du16;
+        let mut low = None;
+        let mut high = None;
+        for _ in 0..200 {
+            let probe = seed;
+            let mut s2 = probe;
+            let roll = percent(&mut s2);
+            if roll <= 30 && low.is_none() {
+                low = Some(probe);
+            }
+            if roll > 30 && high.is_none() {
+                high = Some(probe);
+            }
+            seed = rnd(seed);
+        }
+        let (low, high) = (low.expect("a low roll"), high.expect("a high roll"));
+        let mut facing = 1;
+        // 02edc  cmp ax, 0x1e; 02edf jg TroggSwing: over thirty never reads +0x28.
+        let mut s = high;
+        assert_eq!(
+            kind(&decide(&sight(&me, &blocking, &def), &mut Brain::default(), &mut s, &mut facing)),
+            Some(Attack::Swing)
+        );
+        // 02ee6  cmp word [bx+0x28], 8; 02eeb je TroggChop.
+        let mut s = low;
+        assert_eq!(
+            kind(&decide(&sight(&me, &blocking, &def), &mut Brain::default(), &mut s, &mut facing)),
+            Some(Attack::Chop)
+        );
+        let mut s = low;
+        assert_eq!(
+            kind(&decide(&sight(&me, &open, &def), &mut Brain::default(), &mut s, &mut facing)),
+            Some(Attack::Swing),
+            "a low roll on an open knight is still the swing"
+        );
     }
 
     /// The spear takes `TroggAttacks`' kind 0x10 branch: one lunge, only
@@ -1019,10 +1768,12 @@ mod tests {
         };
         let mut seed = 1u16;
         let mut brain = Brain::default();
+        let mut facing = -1;
         assert!(
-            matches!(decide(&s, &mut brain, &mut seed), Act::Walk { dx: 1, .. }),
+            matches!(decide(&s, &mut brain, &mut seed, &mut facing), Act::Walk { dx: 1, .. }),
             "a thrown dagger brings it in"
         );
+        assert_eq!(facing, 1, "ControlBalok+107: me.x < foe.x writes 1 into +8");
         // The uppercut at arm's length, the grab from further out.
         let mut b = Brain::default();
         assert_eq!(kind(&ask(&def, &mut b, 0, 75, 0)), Some(Attack::Swing));
@@ -1036,16 +1787,24 @@ mod tests {
     fn the_beast_charges_turns_and_waits() {
         let def = creature("beast", 2, 1);
         let mut b = Brain::default();
-        assert!(matches!(ask(&def, &mut b, 100, 40, 0), Act::Walk { dx: 1, .. }),
+        let mut facing = 1;
+        assert!(matches!(ask_facing(&def, &mut b, 100, 40, 0, &mut facing), Act::Walk { dx: 1, .. }),
                 "it charges away from him as readily as at him");
-        // At the right edge it turns and waits.
+        assert_eq!(facing, 1, "and `BeastCharge` leaves +8 alone short of the edge");
+        // At the right edge it turns and waits: `BeastCharge+18` writes 3
+        // into `+8`, and nothing else about it changes.
         let mut b = Brain::default();
-        assert_eq!(ask(&def, &mut b, 319, 40, 0), Act::Idle);
-        assert!(b.flags & flag::LEFTWARD != 0, "it turned round");
+        let mut facing = 1;
+        assert_eq!(ask_facing(&def, &mut b, 319, 40, 0, &mut facing), Act::Idle);
+        assert_eq!(facing, -1, "it turned round: +8 is 3");
         assert!((5..=20).contains(&b.timer), "and waits {} frames", b.timer);
         let before = b.timer;
-        assert_eq!(ask(&def, &mut b, 319, 40, 0), Act::Idle);
+        assert_eq!(ask_facing(&def, &mut b, 319, 40, 0, &mut facing), Act::Idle);
         assert_eq!(b.timer, before - 1);
+        assert_eq!(facing, -1, "and keeps facing left while it waits");
+        // Off the edge and facing left, it charges left: `BeastMove+41`.
+        b.timer = 0;
+        assert!(matches!(ask_facing(&def, &mut b, 319, 40, 0, &mut facing), Act::Walk { dx: -1, .. }));
     }
 
     /// `DemonAttack`: the slap inside a hundred, the zap out to a hundred and

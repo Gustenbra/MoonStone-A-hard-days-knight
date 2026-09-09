@@ -466,7 +466,7 @@ impl Fighter {
         let dying = self.state == State::Hurt && self.health <= 0 && def.scripted();
         if self.state == State::Dead || dying {
             if def.scripted() {
-                self.run_task(def, bloodless);
+                self.run_task(def, bloodless, false);
                 if dying {
                     let (branched, ended) = self
                         .task
@@ -498,7 +498,7 @@ impl Fighter {
                 self.hidden = false;
             } else {
                 if def.scripted() {
-                    return self.run_task(def, bloodless);
+                    return self.run_task(def, bloodless, false);
                 }
                 return Vec::new();
             }
@@ -530,10 +530,17 @@ impl Fighter {
             // outright, the way the original writes `DS:0x783a` and `+0x28`,
             // rather than pressing a button and letting `KnightAttack`
             // choose. Everything else about the state is the same.
+            //
+            // A walk does not turn a creature. `MoveL` and `MoveR` (0x4dd5,
+            // 0x4e09) never touch `+8`; the only thing they ask of the facing
+            // is `MoveBACK` (0x5783), which runs the walk cycle backwards
+            // when the step goes against it. The facing itself is whatever
+            // the controller wrote, which for everything that tracks is
+            // `FaceKnight`. Turning to the step here is what had the trogg
+            // give ground rightward and then swing to the right, away from
+            // the knight it had just backed away from.
             if order.state == State::Walk {
-                if intent.dx != 0 {
-                    self.facing = intent.dx.signum();
-                }
+                // `M0$` (0x4bdc): `and byte ptr [si + 0x48], 0x7f`.
                 self.evaded = false;
             }
             if order.script.is_empty() {
@@ -575,8 +582,27 @@ impl Fighter {
                 }
             }
         } else if intent.dx != 0 || intent.dy != 0 {
-            if intent.dx != 0 {
-                self.facing = intent.dx.signum();
+            // `ControlKnight`, the only place the knight's own facing is
+            // decided, and it is decided by the direction held, before the
+            // borders get to refuse the step:
+            //
+            //   03f71  test byte ptr [di+0x26], 1
+            //   03f75  je  03f80
+            //   03f77  mov byte ptr [di+8], 1     ; right held: face right
+            //   03f7b  call KnightWalkRight
+            //   03f7e  jmp 03f8d
+            //   03f80  test byte ptr [di+0x26], 2
+            //   03f84  je  03f8d
+            //   03f86  mov byte ptr [di+8], 3     ; left held: face left
+            //   03f8a  call KnightWalkRight
+            //
+            // Up and down alone (0x3f5d, 0x3f68) leave `+8` as it is. The
+            // task takes the new value on the same frame, through `dh` at
+            // the tail (0x2d63) and `TASKHANDLE` (0x9741).
+            if intent.dx > 0 {
+                self.facing = 1;
+            } else if intent.dx < 0 {
+                self.facing = -1;
             }
             self.enter(State::Walk);
             // Walking is what gives the evade its one use back.
@@ -609,7 +635,16 @@ impl Fighter {
         }
 
         if def.scripted() {
-            return self.run_task(def, bloodless);
+            // `MoveBACK` (0x5783), for a creature `MonsterWalk` moves: the
+            // walk cycle runs backwards when the step goes against the
+            // facing, and the facing itself is not touched. Translated as
+            // `monster::move_back`, with the listing beside it. The knight's
+            // own controller has no such thing: `ControlKnight+0x91`
+            // (0x3f55) is `add byte ptr [di+0xa], 1` whichever way he goes.
+            let back = self.brain.flags & crate::monster::flag::DRIVEN != 0
+                && self.state == State::Walk
+                && crate::monster::move_back(if self.facing < 0 { -1 } else { 1 }, intent.dx) < 0;
+            return self.run_task(def, bloodless, back);
         }
 
         let Some(seq) = def.sequence(self.state.sequence_name()) else {
@@ -696,7 +731,11 @@ impl Fighter {
     /// figure and this engine positions everything by the feet. Anything the
     /// script does to that position with `TASKMOVE` is carried back out, so a
     /// script that walks itself walks the fighter.
-    fn run_task(&mut self, def: &ActorDef, bloodless: bool) -> Vec<(i32, i32)> {
+    ///
+    /// `back` is `MoveBACK`'s `bp = -1`: the walk cycle is stepped backwards,
+    /// which is `NextWalk` (0x4ef7) doing `add byte ptr [si+0xa], al` with
+    /// `al` negative.
+    fn run_task(&mut self, def: &ActorDef, bloodless: bool, back: bool) -> Vec<(i32, i32)> {
         // The state's own list, or the one script the state was entered on.
         let names: Vec<String> = if self.script.is_empty() {
             def.scripts_for(self.state.sequence_name()).to_vec()
@@ -709,6 +748,31 @@ impl Fighter {
         let facing = if self.facing < 0 { FACING_LEFT } else { FACING_RIGHT };
         let (ox, oy) = (def.origin[0] as i32, def.origin[1] as i32);
 
+        // When the task's own facing (`task+0x14`) is taken from the record's
+        // `+8`, and only then:
+        //
+        //   ADDTASK      0968a  mov al, [di+8]; 0968d mov [bx+0x14], al
+        //   TASKHANDLE   09741  mov [di+0x14], dh   (dh from NOTEND+20)
+        //
+        // that is, when the task is made and each time a controller has run
+        // and handed over a script. In between, the task keeps what it has,
+        // which is what lets `TASK_FLIP` inside `Knight_SwDeath` or
+        // `Beast_TurnAround` stay turned: the handler at 0x9a6d writes
+        // `task+0x14` and copies it to `[actor+8]` (0x9a85), and nothing
+        // writes it back the other way until the controller next runs.
+        // Copying the record in on every tick undid the flip a tick later.
+        //
+        // The other direction runs every frame. `perdone` (0x99bd), the end
+        // of `PerformCOMMAND`, writes the task back into the record:
+        //
+        //   099c0  mov ax, [di+4]; mov [bx+2], ax     ; x
+        //   099c6  mov ax, [di+6]; mov [bx+4], ax     ; y
+        //   099cc  mov ax, [di+8]; mov [bx+6], ax     ; z
+        //   099d2  mov al, [di+0x14]; mov [bx+8], al  ; facing
+        //
+        // so `[actor+8]` always reads as the task's facing by the time a
+        // controller looks at it. That is `self.facing` following `flipped`
+        // below, and the position being carried back out.
         let mut step_now = false;
         match &mut self.task {
             Some(t) if self.restart => {
@@ -716,6 +780,7 @@ impl Fighter {
                 // zeroed and the first frame is stepped now.
                 t.replace(names[0].clone());
                 t.table = def.bank_table;
+                t.facing = facing;
                 self.restart = false;
                 self.script_tick = 0;
                 step_now = true;
@@ -740,21 +805,36 @@ impl Fighter {
                     // ended, and a corpse that replays its fall is a corpse
                     // that will not lie still.
                     if !t.running && self.state != State::Dead {
-                        self.cycle = (self.cycle + 1) % names.len();
+                        // `NextWalk` 0x4ef7: `add byte ptr [si+0xa], al`
+                        // with `al` the `bp` `MoveBACK` chose, then
+                        // `and byte ptr [si+0xa], 7`, which is the wrap.
+                        self.cycle = if back {
+                            (self.cycle + names.len() - 1) % names.len()
+                        } else {
+                            (self.cycle + 1) % names.len()
+                        };
                         let next = names[self.cycle].clone();
                         t.replace(next);
+                        t.facing = facing;
                     }
                 }
             }
         }
 
         let Some(task) = self.task.as_mut() else { return Vec::new() };
-        task.facing = facing;
         task.x = self.x + ox;
         task.y = self.y + oy;
         if step_now {
             self.record.set_health(self.health);
+            // `[actor+8]` as the script sees it. A `TASK_FLIP` writes it
+            // (0x9a85), and what it wrote is the fighter's facing from then
+            // on, exactly as the next controller run would read it.
+            self.record.set(taskvm::field::FACING, facing as i32);
             let frame = task.step(&def.animation, &mut self.record, bloodless);
+            let flipped = self.record.get(taskvm::field::FACING);
+            if flipped != facing as i32 {
+                self.facing = if flipped & 2 != 0 { -1 } else { 1 };
+            }
             self.effects = frame.effects;
             // Whatever the script moved, the fighter moved.
             let (nx, ny) = GLOBAL.clamp(task.x - ox, task.y - oy);
@@ -1572,7 +1652,8 @@ pub(crate) mod tests {
                 decapped: false,
             };
             let mut seed = 1u16;
-            decide(&s, brain, &mut seed)
+            let mut facing = 1;
+            decide(&s, brain, &mut seed, &mut facing)
         };
         let mut brain = Brain::default();
         let far = Fighter::new("b", &d, 200, 100, -1);

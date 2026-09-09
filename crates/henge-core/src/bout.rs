@@ -12,6 +12,7 @@
 use crate::arena::{Border, Field, GLOBAL};
 use crate::combat::{line_hits_body, Attack, Fighter, Intent, Order, State};
 use crate::content::ActorDef;
+use crate::monster::Controller;
 use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
 use serde::{Deserialize, Serialize};
 
@@ -134,6 +135,13 @@ pub struct Bout {
     /// here it belongs to the bout, so a fight replays and two machines agree.
     #[serde(default = "default_rng")]
     pub rng: u16,
+    /// `DeCapFLAG`, DS:`0x7841`: somebody has gone for the fallen knight's
+    /// head, so nobody else does. `InitCombat` (0x307) zeroes it; `TroggAttack`
+    /// sets it on the way to its swing (0x2e9f), `SetDecapFLAG` (0x3e76) sets
+    /// it from a script's `TASKGOSUB`, and `TroggAttack` (0x2e8b) and
+    /// `BKnightAttack` (0x4c2b) read it.
+    #[serde(default)]
+    pub decap: bool,
 }
 
 /// Any non-zero start; the original seeds its register off the BIOS tick,
@@ -153,6 +161,7 @@ impl Bout {
             missiles: Vec::new(),
             parries: Vec::new(),
             rng: default_rng(),
+            decap: false,
         }
     }
 
@@ -391,15 +400,40 @@ impl Bout {
         }
     }
 
+    /// The task loop's `+0xc` branch for a creature whose controller has one:
+    /// `TroggHit` (0x2f4d) plays the recovery, which [`Fighter::recover`]
+    /// already did, and writes ten into `+0x4a` (0x2f55). It does not call
+    /// `FaceKnight`, so the facing is left alone here as well.
+    fn hit_something(&mut self, attacker: usize, def: &ActorDef) {
+        if matches!(def.controller(), Controller::Trogg | Controller::TroggSpear) {
+            crate::monster::trogg_hit(&mut self.fighters[attacker].brain);
+        }
+    }
+
+    /// The task loop's `+0xe` branch: `TroggStruck` (0x2f19) zeroes `+0x4a`
+    /// (0x2f1c) beside picking the blow-taken script, which
+    /// [`Fighter::struck`] already did. No `FaceKnight` on this path either.
+    fn got_struck(&mut self, target: usize, def: &ActorDef) {
+        if matches!(def.controller(), Controller::Trogg | Controller::TroggSpear) {
+            crate::monster::trogg_struck(&mut self.fighters[target].brain);
+        }
+    }
+
     /// Whether anyone is being finished off: the original's `DeCapFLAG`, which
     /// `TroggAttack` tests so that only one creature comes in for the head.
+    ///
+    /// The flag itself is [`Bout::decap`]. A corpse already on a finishing
+    /// script counts too, which covers a finisher that reached it by a route
+    /// that never raised the flag.
     fn decapping<'a, F>(&self, def_of: &F) -> bool
     where
         F: Fn(&str) -> &'a ActorDef,
     {
-        self.fighters
-            .iter()
-            .any(|f| def_of(&f.actor).finishes.values().any(|s| *s == f.script))
+        self.decap
+            || self
+                .fighters
+                .iter()
+                .any(|f| def_of(&f.actor).finishes.values().any(|s| *s == f.script))
     }
 
     /// One tick of one fighter's own controller, for a seat the machine plays.
@@ -414,7 +448,7 @@ impl Bout {
     where
         F: Fn(&str) -> &'a ActorDef,
     {
-        use crate::monster::{decide, Act, Controller, Sight};
+        use crate::monster::{decide, Act, Sight};
         // `DragonMoveClaw1` and `ControlClaw`: the two forelimbs sit ten rows
         // either side of the head's own depth and follow it, and when the
         // dragon is down they play `Dragon_ClawDead` and go.
@@ -468,8 +502,25 @@ impl Bout {
             };
             let mut brain = self.fighters[me].brain;
             let mut seed = self.rng;
-            let act = decide(&sight, &mut brain, &mut seed);
+            // The record's `+8` goes in as it stands and comes back as the
+            // controller left it: `FaceKnight` and its kin write it inside
+            // the controller, and `TASKHANDLE` (0x9741) takes `dh`, which
+            // `NOTEND+20` loaded from `[di+8]`, into the task on the way
+            // out. A creature's facing is set here and nowhere else.
+            let mut facing = self.fighters[me].facing;
+            let act = decide(&sight, &mut brain, &mut seed, &mut facing);
+            // TroggAttack+0x3b (0x2e9f): `mov word ptr [DeCapFLAG], 1`, on
+            // the one path that orders an attack on a knight with no hit
+            // points left. The controller cannot reach the bout's word, so
+            // the bout reads the decision off the order.
+            let finishing = matches!(act, Act::Attack { .. })
+                && foe.health <= 0
+                && matches!(def.controller(), Controller::Trogg | Controller::TroggSpear);
+            if finishing {
+                self.decap = true;
+            }
             self.fighters[me].brain = brain;
+            self.fighters[me].facing = facing;
             self.rng = seed;
             (act, Intent::default())
         };
@@ -621,6 +672,10 @@ impl Bout {
                             f.hidden = false;
                         }
                     }
+                    // `SetDecapFLAG` (0x3e76): `mov word ptr [DeCapFLAG], 1`.
+                    Effect::Gosub { routine, .. } if routine == "SetDecapFLAG" => {
+                        self.decap = true;
+                    }
                     // `KillKnight`, which the dragon's own chewing calls.
                     Effect::Gosub { routine, .. } if routine == "KillKnight" => {
                         if let Some(t) = self.nearest_foe(i) {
@@ -763,11 +818,13 @@ impl Bout {
                             let with = self.fighters[target].guarding().unwrap_or(a);
                             self.parries.push(Parry { attacker, target, with });
                             self.fighters[attacker].recover(a_def);
+                            self.hit_something(attacker, a_def);
                             break;
                         }
                     }
                     let evading = self.fighters[target].guarding() == Some(Attack::Evade);
                     self.fighters[target].struck(t_def, damage, blow.attack);
+                    self.got_struck(target, t_def);
                     // `DragonStruck` sets `DragonFLAGS` bit 7 the moment a
                     // knight lands anything, and from then on the dragon
                     // breathes rather than bites. Nothing else reads the bit.
@@ -807,6 +864,9 @@ impl Bout {
                     if blow.missile.is_none() && blow.attack != Some(Attack::UThrust) && !evading {
                         self.fighters[attacker].recover(a_def);
                     }
+                    if blow.missile.is_none() {
+                        self.hit_something(attacker, a_def);
+                    }
                     break;
                 }
                 // Down, but still a body while the kneel lasts.
@@ -820,6 +880,9 @@ impl Bout {
                     let decapitating = blow.attack == Some(Attack::Swing) && !bloodless;
                     if blow.missile.is_none() && !decapitating {
                         self.fighters[attacker].recover(a_def);
+                    }
+                    if blow.missile.is_none() {
+                        self.hit_something(attacker, a_def);
                     }
                     break;
                 }
@@ -1121,6 +1184,111 @@ mod tests {
         assert_eq!(other.state_hash(), b.state_hash());
         other.fighters[1].brain.cooldown = 3;
         assert_ne!(other.state_hash(), b.state_hash(), "a brain is state");
+    }
+
+    /// The two branches of `ControlTrogg` the controller itself does not take,
+    /// because they are raised by a blow rather than by an animation ending:
+    /// `TroggStruck+3` (0x2f1c) zeroes `+0x4a` and `TroggHit+8` (0x2f55)
+    /// writes ten into it. Neither calls `FaceKnight`.
+    #[test]
+    fn a_trogg_forgets_its_cooldown_when_struck_and_restarts_it_when_it_lands() {
+        use crate::combat::tests::depth_def;
+        let mut trogg = depth_def();
+        trogg.controller = "trogg".into();
+        trogg.approach = 100;
+        trogg.back_off = 90;
+        trogg.depth_tolerance = 5;
+        let knight = depth_def();
+        let pick = |name: &str| -> &ActorDef {
+            match name {
+                "trogg" => Box::leak(Box::new(trogg.clone())),
+                _ => Box::leak(Box::new(knight.clone())),
+            }
+        };
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &knight, 100, 100, 1),
+                Fighter::new("trogg", &trogg, 130, 100, -1),
+            ],
+        );
+        b.fighters[1].brain.cooldown = 7;
+        b.fighters[1].facing = -1;
+        // The knight swings and connects: the trogg is struck.
+        let mut hits = 0;
+        for _ in 0..40 {
+            let ev = b.step_with(pick, &[Intent { dx: 0, dy: 0, attack: true }, Intent::default()]);
+            hits += ev.len();
+            if hits > 0 {
+                break;
+            }
+        }
+        assert!(hits > 0, "the swing landed");
+        assert_eq!(b.fighters[1].brain.cooldown, 0, "TroggStruck+3: mov byte [di+0x4a], 0");
+        assert_eq!(b.fighters[1].facing, -1, "TroggStruck never turns it");
+
+        // And the other way round: the trogg's blow lands on the knight.
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &knight, 100, 100, 1),
+                Fighter::new("trogg", &trogg, 130, 100, -1),
+            ],
+        );
+        b.fighters[1].brain.cooldown = 3;
+        let mut hits = 0;
+        for _ in 0..40 {
+            let ev = b.step_with(pick, &[Intent::default(), Intent { dx: 0, dy: 0, attack: true }]);
+            hits += ev.len();
+            if hits > 0 {
+                break;
+            }
+        }
+        assert!(hits > 0, "the trogg's swing landed");
+        assert_eq!(b.fighters[1].brain.cooldown, 10, "TroggHit+8: mov byte [di+0x4a], 0xa");
+    }
+
+    /// `DeCapFLAG` is a word of the bout's, not a reading off the corpse.
+    /// `TroggAttack+0x3b` (0x2e9f) sets it the moment the trogg decides to
+    /// go for a fallen knight's head, before anything has landed, and
+    /// `TroggAttack+0x27` (0x2e8b) refuses a second try while it is set.
+    #[test]
+    fn the_decap_flag_is_raised_on_the_decision_and_stops_a_second_finisher() {
+        use crate::combat::tests::depth_def;
+        let mut trogg = depth_def();
+        trogg.controller = "trogg".into();
+        trogg.approach = 100;
+        trogg.back_off = 90;
+        trogg.depth_tolerance = 5;
+        let knight = depth_def();
+        let pick = |name: &str| -> &ActorDef {
+            match name {
+                "trogg" => Box::leak(Box::new(trogg.clone())),
+                _ => Box::leak(Box::new(knight.clone())),
+            }
+        };
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &knight, 100, 100, 1),
+                Fighter::new("trogg", &trogg, 195, 100, -1),
+                Fighter::new("trogg", &trogg, 5, 100, 1),
+            ],
+        );
+        b.fighters[0].health = 0;
+        b.fighters[0].state = State::Dead;
+        assert!(!b.decap, "InitCombat (0x307) zeroes it");
+        b.monster_intent(1, 0, pick, true);
+        let first = b.fighters[1].ordered.clone().expect("an order");
+        assert_eq!(first.attack, Some(Attack::Swing), "TroggAttack+0x41: jmp TroggSwing");
+        assert!(b.decap, "TroggAttack+0x3b: mov word ptr [DeCapFLAG], 1");
+        // The second trogg, inside a hundred with its count at zero, is
+        // refused by the flag alone.
+        b.fighters[2].brain.cooldown = 0;
+        b.monster_intent(2, 0, pick, true);
+        let second = b.fighters[2].ordered.clone().expect("an order");
+        assert_eq!(second.state, State::Idle, "TroggAttack+0x2c: jne 02e9c");
+        assert_eq!(second.attack, None);
     }
 
     /// `ControlClaw` never calls `CalcDamage`: the dragon's forelimbs take a

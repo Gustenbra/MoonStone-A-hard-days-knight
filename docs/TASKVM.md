@@ -652,7 +652,7 @@ does not take its own claws for an enemy.
 
 | creature | what its own routine does |
 |---|---|
-| trogg, axe or hammer | `TroggAttacks`: the overhead from 100 to 120, the swing inside 100, ten frames between blows. A `GETPERCENT` roll of 30 or under chops instead when the knight is holding a block, which is the guard the chop gets through. `TroggAttack` gives ground inside `+0x54`, and comes in for a fallen knight's head inside 100 with the gore on |
+| trogg, axe or hammer | `TroggAttacks`: the overhead from 100 to 120, the swing inside 100, ten frames of the stance between blows and the next on the eleventh (0x2ea7 is `cmp; je; sub; jmp tail`). A `GETPERCENT` roll of 30 or under chops instead when the knight's `+0x28` is 8, the block, which is the guard the chop gets through. `TroggAttack` gives ground inside `+0x54`, and comes in for a fallen knight's head inside 100 with the gore on, raising `DeCapFLAG` as it decides (0x2e9f). `TroggStruck` zeroes the count (0x2f1c), `TroggHit` sets it to ten (0x2f55); neither re-faces. `FaceKnight` runs on every other pass, through `MonsterTrack`, and it is the only thing that turns a trogg; walking away plays the cycle backwards through `MoveBACK` (0x5783) and leaves it facing him |
 | trogg, spear | the same routine's kind 0x10 branch: one lunge, only inside `+0x52`, and twenty frames |
 | troll | `TrollAttack`: `Troll_Bunt` inside 100, `Troll_Chop` from 100 to 150, and never two chops running, because it compares `+0x28` before it picks |
 | ratman | `ControlRatCollide` does not use the tracker at all. Slash inside 40, bite from 40 to 50, leap beyond, and `RatmanHit` sets fifteen frames of `HitDelay` when a blow of its own lands |

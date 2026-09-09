@@ -267,10 +267,77 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
         `TrackOpponent` beyond that, and `FaceKnight` first. Every controller sets
         its opponent to the knight and to nothing else, which is why a dragon does
         not take its own claws for an enemy
-      - **Trogg** (`TroggAttacks`): the overhead from a hundred to a hundred and
-        twenty, the swing inside a hundred, ten frames between blows, and a roll of
-        `GETPERCENT` at 30 or under that chops through a held block rather than
-        swinging into it. `TroggAttack`'s finisher on a fallen knight is kept
+      - **Trogg** (`ControlTrogg` 0x2ddf, `TroggStart` 0x2e03, `TroggMove` 0x2e22,
+        `TroggAttack` 0x2e64, `TroggAttacks` 0x2ea7, `TroggSwing` 0x2eed, `TroggChop`
+        0x2eff): translated block for block, with the listing beside the code. The
+        overhead from a hundred to a hundred and twenty, the swing inside a hundred,
+        a roll of `GETPERCENT` at 30 or under that chops through a held block
+        (`cmp word [knight+0x28], 8` at 0x2ee6) rather than swinging into it, and
+        `TroggAttack`'s finisher on a fallen knight. **The cooldown is ten frames of
+        standing and the blow on the eleventh**: 0x2ea7 is `cmp byte [si+0x4a], 0;
+        je attack; sub byte [si+0x4a], 1; jmp 0x2d52`, an unconditional jump to the
+        stance after the decrement, where `DemonAttack` (0x502f) is `sub; jne` and
+        frees the demon on the tenth. An earlier reading gave both the demon's
+        shape. The two branches a blow raises are literal too: `TroggStruck+3`
+        (0x2f1c) zeroes `+0x4a`, `TroggHit+8` (0x2f55) writes ten into it, and
+        neither runs `FaceKnight`. `DeCapFLAG` (DS:0x7841) is a word of the bout's
+        (`Bout::decap`): `InitCombat` (0x307) zeroes it, `TroggAttack+0x3b` (0x2e9f)
+        sets it on the decision to go for the head, `SetDecapFLAG` (0x3e76) sets it
+        from a script, and 0x2e8b and `BKnightAttack+0x18` (0x4c2b) read it
+      - **Which way a creature faces, and the whole chain of it.** Nothing about it
+        is inferred; every link is a read instruction:
+        1. `FaceKnight` (0x3cf3): `mov ax, [me+2]; cmp ax, [knight+2]; jl` writes 1
+           into `+8` when the creature is left of the knight and 3 otherwise
+           (equal x faces left). `MonsterTrack+0x20` (0x56f9) calls it before it
+           looks at a single range, so every tracking controller re-faces on every
+           run; `ControlRatCollide+0x48` (0x3144) calls it directly; `TrackKnight`
+           (0x3be8, the dragon's) calls `MonsterTrack` and then writes 1 at 0x3c1f
+           whatever it said. `ControlBalok` (0x35fe, 0x3604), `BeastCharge`
+           (0x2ff8, 0x3009), `MudmenAppear` (0x5480, 0x548b) and `FlipKnight`
+           (0x3d13, from `RatmanHit`) are the other writers among the creatures
+        2. Walking never turns anyone. `MoveL` (0x4dd5), `MoveR` (0x4e09), `MoveU`
+           (0x4e39), `MoveD` (0x4e64) and `MonsterWalk` (0x4e8b) do not touch `+8`.
+           `MoveBACK` (0x5783) reads it: facing right and walking left, or facing
+           left and walking right, gives `bp = -1`, and `NextWalk` (0x4ef7) does
+           `add byte [si+0xa], al` with it, so giving ground plays the walk cycle
+           backwards with the creature still facing the knight. `monster::move_back`
+        3. The controller's tail (0x2d52): `mov ax, [di+2]; mov bx, [di+4];
+           mov cx, [di+6]; mov dh, [di+8]`, and the task loop `TASKHANDLE` (0x9702)
+           stores them with the new script: `[task+2] = si; [task+4] = ax;
+           [task+6] = bx; [task+8] = cx; [task+0x14] = dh` (0x9735..0x9741). The
+           task's facing is refreshed every time a controller hands over a script,
+           which for the trogg is every run, since `ControlTrogg+6` (0x2de5) writes
+           the stance into `DS:0x783a` before anything else. `ADDTASK` (0x968a)
+           copies `+8` the same way when the task is made
+        4. `perdone` (0x99bd), the end of every frame `PerformCOMMAND` builds,
+           writes the task back: x, y, z, and `mov al, [di+0x14]; mov [bx+8], al`
+           at 0x99d2, so the record always reads as the task by the time a
+           controller looks. `TASK_FLIP` (0x9a6d) writes `task+0x14` and copies it
+           to `+8` at 0x9a85; only `Knight_SwDeath` and `Beast_TurnAround` use it
+        5. The blit: `PerformCOMMAND+0x5e` (0x9859) tests bit 1 of `task+0x14`;
+           `TASKRIGHT` (0x985f) places at `task_x + x`, `TASKLEFT` (0x9864) at
+           `task_x - (x + cel_width)`. `taskvm::place`
+        6. The knight: `ControlKnight` writes 1 at 0x3f77 when right is held and 3
+           at 0x3f86 when left is, before `CheckBorder` and `SBORD` get to refuse
+           the step, and nothing else in his controller writes it. `KnightSLAP`
+           (0x44e5) sets it to `SLAP`, the slapper's facing, on a demon's or
+           Balok's slap. `SetKnightCombat` (0x297d) stands him at x 250, z 100,
+           facing 3; the creatures come from the spawn tables `InitNewMO` (0x27ee)
+           walks, eight bytes `[x][y][z][facing]`: `TroggTABLE` is (-50, 0, 100, 1),
+           (360, 0, 150, 3), (340, 0, 50, 3), (-80, 0, 120, 1), always facing into
+           the arena. **Not built**: that layout; henge stands the knight on the
+           left facing right and the creature on the right facing left, and
+           `FaceKnight` overwrites the creature's on its first frame anyway
+        7. `TASKWALKCOLLIDE` (0x9e06) reads the facing too: `xdir = facing & 3`,
+           and a fighter is refused the step into another actor's body only in the
+           direction he faces (0x9e58..0x9e74: facing right, only an actor to his
+           right; facing left, only one to his left), with the body boxes
+           `+0x22`/`+0x24` and `+0x4e`/`+0x50`. **Not built**: `Bout::separate`
+           pushes overlapping fighters apart instead, which is ours
+        What the video of the trogg swinging away from the knight showed was a
+        rule of ours, since removed: turning a creature toward the step it was
+        taking, which turned a trogg giving ground to the right to face right and
+        chop at nothing. There is no such rule in the original; see 2
       - **Trogg with spear**: the kind 0x10 branch, one lunge inside 130, twenty frames
       - **Troll** (`TrollAttack`): the club inside a hundred, the overhead from a
         hundred to a hundred and fifty, and never two overheads running, because it

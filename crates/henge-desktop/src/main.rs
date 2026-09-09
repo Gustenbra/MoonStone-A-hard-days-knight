@@ -429,7 +429,12 @@ fn main() -> anyhow::Result<()> {
                             } else {
                                 String::new()
                             };
-                            format!("{:<6} {:<12}{:>4} @{:>3},{:>3}{}", f.actor, state, f.health, f.x, f.y, script)
+                            // The facing, as the record's `+8` would read: `>`
+                            // is 1 and `<` is 3. Which way a creature faces is
+                            // decided by its controller and nothing else, so a
+                            // trace is the place to see it turn.
+                            let face = if f.facing < 0 { '<' } else { '>' };
+                            format!("{:<6} {:<12}{:>4} @{:>3},{:>3}{}{}", f.actor, state, f.health, f.x, f.y, face, script)
                         })
                         .collect();
                     // A dagger in the air is a line of its own, and a blow
