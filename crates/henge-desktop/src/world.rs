@@ -1,5 +1,5 @@
-//! The arena: backdrop, scenery and two fighters, drawn in one depth-sorted pass
-//! and simulated by `henge_core::combat`.
+//! The arena: a backdrop with its scenery stamped over it, and the fighters
+//! drawn on top in one depth-sorted pass, simulated by `henge_core::combat`.
 //!
 //! Nothing here knows where the pixels came from, so this file is unchanged when
 //! the reference art is replaced by our own.
@@ -14,10 +14,74 @@ use henge_core::content::{
     ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH,
 };
 use henge_core::taskvm::{field, Bank, BankTables, Task};
+use henge_core::{SCREEN_H, SCREEN_W};
 use std::collections::BTreeMap;
 
 const CELL_W: usize = 32;
 const CELL_H: usize = 25;
+
+/// How much of a scenery cell the top edge takes off, and the screen row what
+/// is left starts on.
+///
+/// **Recovered**, `ClipTile` at image `0x7d5a`:
+///
+/// ```text
+/// 07d61  mov  word [ClipYOffset], 0
+/// 07d67  cmp  bx, 0 / jge ClipBottom          ; bx is the placement's y
+/// 07d6c  mov  bp, bx
+/// 07d6e  not  bp                              ; bp = -y - 1, not -y
+/// 07d70  mov  dx, 0x19 / sub dx, bp
+/// 07d75  mov  cs:[CLIPHIEGHT], dx             ; 25 - (-y - 1) rows survive
+/// 07d7a  shl  dx, 1 (five times)
+/// 07d86  mov  [ClipYOffset], dx               ; and they start bp rows in
+/// 07d8a  mov  word [TileYOffset], 0           ; at screen row zero
+/// ```
+///
+/// `not` where `neg` was meant is the original's own arithmetic, and it is
+/// visible: every cell placed above the screen sits one row lower than its `y`
+/// says, and forty five of the fifty six layouts have at least one.
+fn cell_clip(y: i32) -> (usize, i32) {
+    if y < 0 {
+        ((!y).clamp(0, CELL_H as i32) as usize, 0)
+    } else {
+        (0, y)
+    }
+}
+
+/// Stamp one 32x25 scenery cell into the screen the way `Dump_Tile` stamps it.
+///
+/// **Recovered.** `Dump_Tile` (image `0x7f38`) writes through mode X's own
+/// address: `di` is a byte offset into the page, one plane at a time, eight
+/// bytes per row and then `add di, 0x48` to reach the next, which is a stride
+/// of eighty bytes per plane, three hundred and twenty pixels per row. There is
+/// no right-edge test anywhere in it, so a column past 319 lands at the start of
+/// the row below rather than being dropped. `GLL2`, `GL4` and `SWL2` are the
+/// three layouts that reach far enough right to do it, thirty three pixels in
+/// all. Index 0 is transparent, by the inner `lodsb / or al, al / je` that steps
+/// past the store.
+///
+/// The two clamps come in through [`cell_clip`] and the `max(0)` on `x`, which
+/// is `ClipTile`'s `cmp word [TileXOffset], 0 / jg / mov word [TileXOffset], 0`.
+fn stamp_cell(screen: &mut [u8], cell: &[u8; CELL_W * CELL_H], x: i32, y: i32) {
+    let (skip, top) = cell_clip(y);
+    let left = x.max(0);
+    for row in skip..CELL_H {
+        let dy = top + (row - skip) as i32;
+        if !(0..SCREEN_H as i32).contains(&dy) {
+            continue;
+        }
+        let base = dy as usize * SCREEN_W + left as usize;
+        for col in 0..CELL_W {
+            let v = cell[row * CELL_W + col];
+            if v == 0 {
+                continue;
+            }
+            if let Some(slot) = screen.get_mut(base + col) {
+                *slot = v;
+            }
+        }
+    }
+}
 
 /// Where a fighter's intent comes from. The bout cannot tell them apart, which
 /// is the point: a network peer slots in here later without touching combat.
@@ -939,12 +1003,11 @@ impl World {
             .families
             .get(&family_name)
             .ok_or_else(|| anyhow::anyhow!("unknown arena family {family_name}"))?;
-        let (sheet_id, backdrop_id) = (family.sheet.clone(), family.backdrop.clone());
-        // Which sheet each placement draws from. Recovered: the byte is 4 for
-        // the shared `FO2` sheet and the family's own sheet otherwise, and
-        // compositing an arena either way shows only that reading makes a
-        // coherent picture.
-        let tiles = family.tiles.clone();
+        let backdrop_id = family.backdrop.clone();
+        // Which sheet each placement draws from, and whether it is drawn at
+        // all: `Sholoop` skips a selector of 0xfe, keeps the family's own sheet
+        // for a 3 and sends everything else to `FO2`. See `Family::tile_sheet`.
+        let family = family.clone();
 
         // The backdrop's own palette is the base, and `BattlePal` is that with
         // the fighters written over it: the knight in 6 to 8, the creature or
@@ -963,16 +1026,27 @@ impl World {
             _ => fb.clear(0),
         }
 
-        enum Item<'a> {
-            Prop(&'a henge_core::arena::Prop),
+        // **Scenery is a background, and it is not sorted.** `Sholoop`, image
+        // `0x7ca9`, walks the layout's placement records once, in the order the
+        // file lists them, and stamps each cell straight into the compose page
+        // at `0xac00`; the fight loop copies that page back over the screen
+        // every frame and then draws the actors on top of it. So a placement
+        // never sorts against a fighter, and placements cover one another in
+        // file order. Sorting them by depth is what tore the tree line and the
+        // waste's cliffs into slabs: `WA6` alone put thirteen thousand pixels
+        // in the wrong place.
+        let props: Vec<henge_core::arena::Prop> = self.arena().terrain.placements.clone();
+        for p in &props {
+            if let Some(sheet) = family.tile_sheet(p.sheet) {
+                self.draw_prop(reg, fb, sheet, p);
+            }
+        }
+
+        enum Item {
             Fighter(usize),
             Missile(usize),
         }
-        let props: Vec<henge_core::arena::Prop> = self.arena().terrain.placements.clone();
-        let mut items: Vec<(i32, Item)> = props
-            .iter()
-            .map(|p| (p.y as i32 + CELL_H as i32, Item::Prop(p)))
-            .collect();
+        let mut items: Vec<(i32, Item)> = Vec::new();
         for (i, f) in self.bout.fighters.iter().enumerate() {
             items.push((f.depth(), Item::Fighter(i)));
         }
@@ -985,10 +1059,6 @@ impl World {
 
         for (_, item) in items {
             match item {
-                Item::Prop(p) => {
-                    let sheet = tiles.get(&p.sheet).unwrap_or(&sheet_id).clone();
-                    self.draw_prop(reg, fb, &sheet, p)
-                }
                 Item::Fighter(i) => self.draw_fighter(reg, fb, i)?,
                 Item::Missile(k) => {
                     let m = &self.bout.missiles[k];
@@ -1008,6 +1078,28 @@ impl World {
         Ok(())
     }
 
+    /// One scenery cell, stamped where `PlaceTile` stamps it.
+    ///
+    /// `PlaceTile` (image `0x7cec`) sets the cell's height to 25, runs
+    /// `ClipTile`, cuts the cell with `FindTile` and hands it to `Dump_Tile`.
+    /// Two things it does are not the ordinary clipped blit, and both show:
+    ///
+    /// * **`ClipTile` (`0x7d5a`) clamps rather than clips.** Off the left edge
+    ///   it is `cmp word [TileXOffset], 0 / jg ClipDone / mov word
+    ///   [TileXOffset], 0`, so a cell that starts left of the screen is moved
+    ///   to column zero with all thirty two of its columns intact. Off the top
+    ///   it is `mov bp, bx / not bp`, which is `-y - 1` and not `-y`, so it
+    ///   takes one row *fewer* off the cell than the coordinate asks for and
+    ///   the cell sits one row lower than it should. `SW2` and `WAL5` have the
+    ///   left-edge case; forty five of the fifty six layouts have the top one.
+    /// * **`Dump_Tile` (`0x7f38`) never tests the right edge.** It writes
+    ///   through mode X's own address (`di` counts bytes, one plane at a time,
+    ///   `add di, 0x48` per row), so a column past 319 lands at the start of
+    ///   the next row rather than being dropped. Three arenas reach far enough
+    ///   right to do it, and it is thirty three pixels in all.
+    ///
+    /// Index 0 is transparent: `Dump_Tile`'s inner step is `lodsb / or al, al /
+    /// je` past the store.
     fn draw_prop(
         &self,
         reg: &mut Registry,
@@ -1024,7 +1116,7 @@ impl World {
             (p.cell as usize % per_row) * CELL_W,
             (p.cell as usize / per_row) * CELL_H,
         );
-        let mut cell = vec![0u8; CELL_W * CELL_H];
+        let mut cell = [0u8; CELL_W * CELL_H];
         for row in 0..CELL_H {
             let src = (sy + row) * img.width + sx;
             if src + CELL_W <= img.pixels.len() {
@@ -1032,7 +1124,7 @@ impl World {
                     .copy_from_slice(&img.pixels[src..src + CELL_W]);
             }
         }
-        fb.blit(&cell, CELL_W, CELL_H, p.x as i32, p.y as i32, false);
+        stamp_cell(&mut fb.pixels, &cell, p.x as i32, p.y as i32);
     }
 
     fn draw_fighter(
@@ -1155,5 +1247,87 @@ impl World {
             fb.blit(&px, w, h, placed.x, placed.y, placed.mirror);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(v: u8) -> [u8; CELL_W * CELL_H] {
+        [v; CELL_W * CELL_H]
+    }
+
+    /// `ClipTile`'s `not bp` where a clip would want `neg bp`. A cell four rows
+    /// above the screen keeps twenty two of its twenty five rows, not
+    /// twenty one, and the first row it keeps is its **fourth**, not its fifth.
+    /// Clipping it exactly puts every such cell one row too high, and forty
+    /// five of the fifty six layouts have at least one.
+    #[test]
+    fn a_cell_above_the_screen_keeps_one_row_more_than_a_clip_would() {
+        assert_eq!(cell_clip(-4), (3, 0));
+        assert_eq!(cell_clip(-1), (0, 0));
+        assert_eq!(cell_clip(-25), (24, 0));
+        // On or below the top edge nothing is taken off at all.
+        assert_eq!(cell_clip(0), (0, 0));
+        assert_eq!(cell_clip(37), (0, 37));
+
+        let mut screen = vec![0u8; SCREEN_W * SCREEN_H];
+        let mut cell = solid(0);
+        // Only the cell's fourth row is inked, so where it lands says which
+        // row survived.
+        for col in 0..CELL_W {
+            cell[3 * CELL_W + col] = 9;
+        }
+        stamp_cell(&mut screen, &cell, 0, -4);
+        assert_eq!(screen[0], 9, "the fourth row should be the top one");
+        assert_eq!(screen[SCREEN_W], 0);
+    }
+
+    /// `ClipTile` moves a cell that starts left of the screen to column zero
+    /// with all thirty two of its columns, rather than cutting the part that
+    /// hangs off. `SW2` has one at -5 and `WAL5` one at -1.
+    #[test]
+    fn a_cell_left_of_the_screen_is_moved_to_column_zero_whole() {
+        let mut screen = vec![0u8; SCREEN_W * SCREEN_H];
+        let mut cell = solid(0);
+        cell[0] = 7;
+        cell[CELL_W - 1] = 8;
+        stamp_cell(&mut screen, &cell, -5, 0);
+        assert_eq!(screen[0], 7, "the first column is not cut off");
+        assert_eq!(screen[CELL_W - 1], 8, "and the last one is still 31 along");
+    }
+
+    /// `Dump_Tile` has no right-edge test, so a column past 319 lands at the
+    /// start of the row below. Three layouts reach far enough right to do it.
+    #[test]
+    fn a_column_past_the_right_edge_lands_on_the_row_below() {
+        let mut screen = vec![0u8; SCREEN_W * SCREEN_H];
+        let mut cell = solid(0);
+        cell[0] = 5;
+        cell[31] = 6;
+        stamp_cell(&mut screen, &cell, 303, 0);
+        assert_eq!(screen[303], 5);
+        assert_eq!(screen[SCREEN_W + (303 + 31 - SCREEN_W)], 6);
+        // And nothing was written at the far right of the first row.
+        assert_eq!(screen[SCREEN_W - 1], 0);
+    }
+
+    /// Index 0 is the hole in a cell, not a colour.
+    #[test]
+    fn index_zero_in_a_cell_leaves_what_is_under_it() {
+        let mut screen = vec![3u8; SCREEN_W * SCREEN_H];
+        let cell = solid(0);
+        stamp_cell(&mut screen, &cell, 10, 10);
+        assert!(screen.iter().all(|&v| v == 3));
+    }
+
+    /// A cell wholly below the screen writes nothing rather than running off
+    /// the end of the buffer.
+    #[test]
+    fn a_cell_below_the_screen_writes_nothing() {
+        let mut screen = vec![0u8; SCREEN_W * SCREEN_H];
+        stamp_cell(&mut screen, &solid(9), 0, SCREEN_H as i32 + 1);
+        assert!(screen.iter().all(|&v| v == 0));
     }
 }

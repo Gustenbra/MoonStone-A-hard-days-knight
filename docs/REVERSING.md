@@ -475,12 +475,21 @@ The loader for a family reads `Table[counter]`, loads it, then `inc counter` and
 
 Beside them, `TileTable` is four words indexed by the same landscape code and gives the
 scenery sheet: `FO1.CMP` for plain *and* forest, `SW1.CMP` for swamp, `WA1.CMP` for waste.
-The routine that reads it tests its argument against 4 first and keeps `FO2.CMP` when it
-matches. Every `.T` placement's first byte is 3, 4 or 0xfe, so the natural reading is that
-the byte is that argument. **Checked by compositing and looking**: drawing `GL1.T` with
-everything from `FO2` gives a black tangle where the canopy should be, everything from
-`FO1` gives blue-black blobs, and 4 from `FO2` with the rest from `FO1` gives a tree with a
-trunk, a canopy and a stump. The same test on `FO3.T` puts 0xfe with 3 rather than with 4.
+`SetTileSheet` (image `0x8dec`) tests its argument against 4 first and keeps `FO2.CMP`
+when it matches, and the argument is the placement's first byte, filtered by `Sholoop`
+(`0x7ca9`) on its way in: **0xff ends the list, 0xfe is skipped without drawing anything,
+3 goes through to the table, and every other value is forced to 4.** That was read out of
+the walk itself rather than guessed from what looks coherent, and it corrects two things
+this project had wrong. 0xfe does not draw from the family's sheet, it does not draw at
+all, and the 168 records that carry it are half the furniture of the lair arenas. And the
+six records that carry 1 draw from `FO2`, not from the family's sheet.
+
+**The walk is the whole of the scenery, and it is not sorted.** `Sholoop` steps the
+records six bytes at a time in file order, and `Dump_Tile` stamps each cell into the
+compose page at `0xac00`, which the fight loop copies back over the screen every frame
+before the actors go on top. Nothing about scenery is per-frame and nothing about it
+sorts against a fighter. `PlaceTile` clamps rather than clips, and `docs/FORMATS.md` has
+the two clamps and the missing right-edge test.
 
 ### Nothing walkable is a rectangle, and the tree line is a border list
 

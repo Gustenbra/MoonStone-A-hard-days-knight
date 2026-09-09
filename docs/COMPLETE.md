@@ -774,8 +774,10 @@ loads it, then does `inc counter` and `and counter, 7`. The four counters are th
 `TileTable`, four words indexed by the landscape code, says which sheet the scenery is cut
 from: `FO1.CMP` for both plain and forest, `SW1.CMP` for swamp, `WA1.CMP` for waste. A
 placement whose selector byte is 4 draws from `FO2.CMP` instead, whatever the family, which
-is what the routine's `cmp ax, 4` does before it consults the table. Every `.T` placement
-in the game carries 3, 4 or 0xfe there.
+is what the routine's `cmp ax, 4` does before it consults the table. `.T` placements in the
+release carry 3, 4, 0xfe, and six of them carry 1. `Sholoop` (image 0x7ca9) decides all
+four: 0xfe is skipped and draws nothing, 3 goes to the table, and everything else, the 1s
+included, is forced to 4 and draws from `FO2`.
 
 **The moors is settled, and it is not a fifth family.** `_LOADER`'s public list runs
 `LOADREGION`, `GENERATELANDSCAPE`, `GENERATEMOORES`, `GENERATEFOREST`, `GENERATESWAMP`,

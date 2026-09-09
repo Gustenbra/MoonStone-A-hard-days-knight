@@ -3969,6 +3969,57 @@ mod tests {
         assert_eq!(arenas["fo7"].field().floor(), 103);
     }
 
+    /// The placement selector byte, counted across the whole release.
+    ///
+    /// `Sholoop` (image `0x7ca9`) reads it as four cases and not two: 0xff ends
+    /// the list, 0xfe draws nothing at all, 3 goes to `TileTable`, and anything
+    /// else is forced to 4 and draws from `FO2`. This pins the census the walk
+    /// has to cope with, so a parse that slid the placement list out of step,
+    /// or a baker that quietly dropped the odd byte, shows up as a changed
+    /// count rather than as scenery in the wrong place.
+    #[test]
+    fn the_placement_selectors_are_three_four_fe_and_six_ones() {
+        use henge_core::content::Arenas;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/reference/data");
+        let Ok(text) = fs::read_to_string(root.join("arenas.json")) else {
+            eprintln!("no baked pack under packs/reference: selector census skipped");
+            return;
+        };
+        let arenas: Arenas = serde_json::from_str(&text).expect("arenas.json parses");
+        let mut census: BTreeMap<u8, usize> = BTreeMap::new();
+        for a in arenas.values() {
+            for p in &a.terrain.placements {
+                *census.entry(p.sheet).or_default() += 1;
+            }
+        }
+        assert_eq!(
+            census.get(&3).copied(),
+            Some(3338),
+            "the family's own sheet"
+        );
+        assert_eq!(census.get(&4).copied(), Some(1606), "the shared FO2 sheet");
+        assert_eq!(
+            census.get(&0xfe).copied(),
+            Some(168),
+            "and these draw nothing"
+        );
+        assert_eq!(census.get(&1).copied(), Some(6), "six records carry a 1");
+        assert_eq!(
+            census.len(),
+            4,
+            "no other selector is in the release: {census:?}"
+        );
+        // 0xff is the terminator and is never a record.
+        assert!(!census.contains_key(&0xff));
+        // Twenty eight of the fifty six layouts carry at least one 0xfe, which
+        // is how many were wrong while they were being drawn.
+        let with_fe = arenas
+            .values()
+            .filter(|a| a.terrain.placements.iter().any(|p| p.sheet == 0xfe))
+            .count();
+        assert_eq!(with_fe, 28);
+    }
+
     /// Every creature runs one of the original's controllers, and every
     /// controller in the engine is one some creature runs. Item 37 is only
     /// done if nobody is left on the plain opponent by accident.

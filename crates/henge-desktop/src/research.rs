@@ -114,9 +114,11 @@ impl Viewer {
 
         if let Some(name) = self.arenas.get(self.arena_idx) {
             if let Ok(t) = self.lib.terrain(name) {
-                let mut props = t.placements.clone();
-                props.sort_by_key(|p| p.y);
-                for p in props {
+                // `Sholoop` (image 0x7ca9) walks the records in file order and
+                // skips a selector of 0xfe; sorting them by depth is what tore
+                // the arenas into slabs. This viewer holds one sheet, so a
+                // placement that asks for `FO2` still comes out of this one.
+                for p in t.placements.iter().filter(|p| p.sheet != 0xfe) {
                     let c = sheet.cell(p.cell as usize);
                     fb.blit(
                         &c.pixels,

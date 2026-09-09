@@ -167,8 +167,8 @@ border[count]                      eight bytes each:
 placement[]                         six bytes each, until sheet == 0xff:
     u8  sheet
     u8  cell
-    i16 x
-    i16 y
+    i16be x
+    i16be y
 ```
 
 **The header is a list, not one rectangle, and a rectangle is impassable ground rather
@@ -201,17 +201,62 @@ The two stub layouts, which ship three times over as `F09.T`, `SW9.T` and `INTRO
 declare a count of 19,342. A count above about sixteen is how they are told apart from a
 layout.
 
-**`x` and `y` are signed.** Scenery may start above or left of the screen, so a tree can
-be cut off by the top edge. Reading them unsigned produces values like 65532 for -4.
+**`x` and `y` are signed and big-endian**, like everything else in the file. Scenery may
+start above or left of the screen. Reading them unsigned produces values like 65532 for
+-4, and reading them little-endian produces nonsense.
 
-**`sheet` says which of two sheets the cell is cut from**, and it is the only byte in the
-format that is not obvious. Every placement in the game carries 3, 4 or 0xfe there. The
-executable's `TileTable` gives each arena family one sheet, `FO1.CMP` for both plain and
-forest, `SW1.CMP` for swamp and `WA1.CMP` for waste, and the routine that reads it tests
-its argument against 4 first and keeps `FO2.CMP` when it matches. So 4 draws from `FO2`
-whatever the family, and 3 and 0xfe from the family's own sheet. Compositing `GL1.T` all
-three ways settles it: the mixed reading is the only one that makes a tree rather than a
-tangle. Props sort by `y` so that actors occlude correctly.
+**`sheet` says which sheet the cell is cut from, and whether it is drawn at all.** Every
+placement in the release carries 3, 4, 0xfe or, six times, 1. `Sholoop` (image `0x7ca9`)
+is the whole of the scenery walk and it settles the byte outright:
+
+```asm
+Sholoop:
+        mov  es, [0x8901]        ; the layout's placement records
+        mov  di, [ShowIndex]
+        mov  al, es:[di]         ; the selector
+        sub  ah, ah
+        cmp  ax, 0xff / je ShoDone   ; end of the list
+        cmp  ax, 0xfe / je ShoNext   ; drawn by nothing at all
+        cmp  ax, 3    / je +3
+        mov  ax, 4                   ; anything else becomes a 4
+        call SetTileSheet             ; (0x8dec) load the sheet that names
+        mov  ax, es:[di+2] / xchg ah, al    ; x, big-endian
+        mov  bx, es:[di+4] / xchg bh, bl    ; y, big-endian
+        mov  dl, es:[di+1] / sub dh, dh     ; the cell
+        call PlaceTile
+ShoNext:
+        add  [ShowIndex], 6
+        jmp  Sholoop
+```
+
+and `SetTileSheet` is `mov dx, FO2.CMP / cmp ax, 4 / je keep / mov bx, [landscape] /
+mov dx, TileTable[bx]`, where `TileTable` gives each family one sheet: `FO1.CMP` for
+both plain and forest, `SW1.CMP` for swamp and `WA1.CMP` for waste. So **3 is the
+family's own sheet, 0xfe draws nothing, and every other value draws from `FO2`**. The
+168 records that carry 0xfe are not scenery at all; drawing them puts stone slabs and
+loose foliage over half the lair arenas. The six that carry 1 draw from `FO2` like a 4.
+
+**Scenery is a background, and it is not sorted.** `Sholoop` walks the list once, in
+file order, and `Dump_Tile` stamps each cell straight into the compose page at `0xac00`;
+the fight loop copies that page back over the screen every frame and draws the actors on
+top of it. So a placement never sorts against a fighter, and placements cover one another
+in the order the file lists them. Sorting them by `y` tears the picture apart: it is what
+turned `WA6`'s cliff faces into a stack of slabs, thirteen thousand pixels of them.
+
+**The placement is clamped, not clipped.** `PlaceTile` (`0x7cec`) sets the cell's height
+to 25 and calls `ClipTile` (`0x7d5a`), which does two things that a clipped blit does not:
+
+* off the left edge, `cmp word [TileXOffset], 0 / jg ClipDone / mov word [TileXOffset], 0`
+  moves the cell to column zero with all thirty two of its columns intact, rather than
+  cutting the part that hangs off;
+* off the top, `mov bp, bx / not bp` is `-y - 1` and not `-y`, so one row *fewer* is taken
+  off the cell than the coordinate asks for and the cell sits one row lower than its `y`
+  says. Forty five of the fifty six layouts have at least one such cell.
+
+`Dump_Tile` (`0x7f38`) has no right-edge test at all: it writes through mode X's own
+linear address, `add di, 0x48` per row, so a column past 319 lands at the start of the row
+below. Three arenas reach far enough right to do it, and it is thirty three pixels in all.
+Index 0 is transparent, by `lodsb / or al, al / je` past the store.
 
 Every arena's first record spans the full width and starts at the same `y`, 10, and only
 its `bottom` varies, from 80 in `GLL2` to 159 in `WA6`. That one number is the tree line,

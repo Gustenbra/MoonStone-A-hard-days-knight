@@ -42,12 +42,11 @@ pub struct Family {
     /// **Recovered.** `_LOADER` picks the tile sheet from `TileTable`, four
     /// words indexed by the landscape code, which reads `FO1.CMP` for both
     /// plain and forest, `SW1.CMP` for swamp and `WA1.CMP` for waste. The
-    /// routine that does it first tests the selector against 4 and keeps
-    /// `FO2.CMP` when it matches, so an arena of any family draws part of its
-    /// scenery from `FO2`. Every `.T` placement in the game carries 3, 4 or
-    /// 0xfe in that byte, and compositing the three readings shows only one of
-    /// them makes a coherent picture: 4 from `FO2`, everything else from the
-    /// family's own sheet.
+    /// routine that does it (image `0x8dec`) first tests the selector against
+    /// 4 and keeps `FO2.CMP` when it matches, so an arena of any family draws
+    /// part of its scenery from `FO2`. That is the one entry this map holds;
+    /// `Family::tile_sheet` says what the other selector values do, and they
+    /// do not read this map at all.
     #[serde(default)]
     pub tiles: BTreeMap<u8, String>,
     /// The eight arenas this family rotates through, in file order.
@@ -81,9 +80,47 @@ impl Family {
         Some(self.creatures[pick % self.creatures.len()].as_str())
     }
 
-    /// Which sheet a placement's first byte asks for.
-    pub fn tile_sheet(&self, selector: u8) -> &str {
-        self.tiles.get(&selector).unwrap_or(&self.sheet)
+    /// Which sheet a placement's first byte asks for, and whether it is drawn
+    /// at all. `None` means the original draws nothing for it.
+    ///
+    /// **Recovered.** `Sholoop`, image `0x7ca9`, is the whole of the scenery
+    /// walk, and the selector is the first thing it looks at:
+    ///
+    /// ```text
+    /// 07ca9  mov  es, [0x8901]         ; the layout's placement records
+    /// 07cad  mov  di, [ShowIndex]
+    /// 07cb1  mov  al, es:[di]          ; the selector byte
+    /// 07cb4  sub  ah, ah
+    /// 07cb6  cmp  ax, 0xff  / je ShoDone   ; end of the list
+    /// 07cbb  cmp  ax, 0xfe  / je ShoNext   ; skipped: this one draws nothing
+    /// 07cc0  cmp  ax, 3     / je +3
+    /// 07cc5  mov  ax, 4                    ; anything else becomes a 4
+    /// 07cc8  call 0x8e6a                   ; load the sheet that selects
+    /// ```
+    ///
+    /// and the loader it calls is
+    ///
+    /// ```text
+    /// 08dec  mov  dx, FO2.CMP
+    /// 08def  cmp  ax, 4 / je +8            ; a 4 keeps FO2
+    /// 08df4  mov  bx, [0x694e]             ; the landscape code
+    /// 08df8  mov  dx, [bx + TileTable]     ; the family's own sheet
+    /// ```
+    ///
+    /// So **3 is the family's own sheet, 0xfe draws nothing, and every other
+    /// value draws from `FO2`**. The release carries 3, 4, 0xfe and six
+    /// placements that carry 1, and those six draw from `FO2` like a 4.
+    pub fn tile_sheet(&self, selector: u8) -> Option<&str> {
+        match selector {
+            0xfe | 0xff => None,
+            3 => Some(&self.sheet),
+            _ => Some(
+                self.tiles
+                    .get(&4)
+                    .map(String::as_str)
+                    .unwrap_or(self.sheet.as_str()),
+            ),
+        }
     }
 }
 
@@ -721,8 +758,51 @@ pub use crate::item::{ItemDef, Items};
 
 #[cfg(test)]
 mod tests {
+    use super::Family;
     use crate::combat::tests::scripted_def;
     use crate::taskvm::{End, Instr, Part, Script};
+    use std::collections::BTreeMap;
+
+    /// `Sholoop`'s reading of the placement selector, which is the byte that
+    /// says both which sheet a scenery cell comes from and whether it is drawn
+    /// at all. The release carries 3, 4, 0xfe and six 1s, and getting 0xfe
+    /// wrong put stone slabs and loose foliage over twenty eight arenas.
+    #[test]
+    fn the_placement_selector_skips_fe_and_sends_everything_but_three_to_fo2() {
+        let mut tiles = BTreeMap::new();
+        tiles.insert(4u8, "scene.fo2".to_string());
+        let f = Family {
+            sheet: "scene.fo1".into(),
+            backdrop: "scene.fob1".into(),
+            tiles,
+            arenas: Vec::new(),
+            creatures: Vec::new(),
+        };
+        assert_eq!(f.tile_sheet(3), Some("scene.fo1"));
+        assert_eq!(f.tile_sheet(4), Some("scene.fo2"));
+        // The six placements in the release that carry 1 go the same way a 4
+        // does: `cmp ax, 3 / je / mov ax, 4`.
+        assert_eq!(f.tile_sheet(1), Some("scene.fo2"));
+        assert_eq!(f.tile_sheet(7), Some("scene.fo2"));
+        // And these two draw nothing.
+        assert_eq!(f.tile_sheet(0xfe), None);
+        assert_eq!(f.tile_sheet(0xff), None);
+    }
+
+    /// A pack that names no shared sheet still has to draw something, so the
+    /// family's own sheet stands in rather than the cell vanishing.
+    #[test]
+    fn a_family_with_no_shared_sheet_falls_back_to_its_own() {
+        let f = Family {
+            sheet: "scene.wa1".into(),
+            backdrop: "scene.wab1".into(),
+            tiles: BTreeMap::new(),
+            arenas: Vec::new(),
+            creatures: Vec::new(),
+        };
+        assert_eq!(f.tile_sheet(4), Some("scene.wa1"));
+        assert_eq!(f.tile_sheet(0xfe), None);
+    }
 
     #[test]
     fn a_whole_scripted_actor_validates() {

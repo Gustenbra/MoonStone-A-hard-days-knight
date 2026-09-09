@@ -30,7 +30,8 @@ The engine and a vertical slice. Roughly a quarter of the game.
       here too, and is gone: the original colours a fighter by writing palette entries,
       item 78, and a sprite is blitted in its own indices
 - [x] 12. Text: glyph map read off the artwork, silhouette rendering
-- [x] 13. Arenas: 56 of them, scenery, the header's own border list, depth sorting
+- [x] 13. Arenas: 56 of them, scenery in file order, the header's own border list,
+      depth sorting for the fighters
 - [x] 14. Combat: positional hit lines, committed attacks, damage, death
 - [x] 15. Bouts of up to four fighters, in the simulation, deterministic and serializable
 - [x] 16. Overworld: travel, day cycle, ambushes, terrain off `_MAP:MapType`
