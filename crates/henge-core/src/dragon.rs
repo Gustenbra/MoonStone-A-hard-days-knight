@@ -100,6 +100,46 @@ pub fn flight_script(walk: u8) -> String {
 /// `DragonWander+22` (0xa682): the script the glide holds.
 pub const GLIDE: &str = "Dragon_Flight4";
 
+/// `InitAKnight`, image 0xc90d, falling straight into `NextKnight`, 0xc913:
+/// the Scroll of the Wyrm's own knight picker, `StatTYPE` 0xb.
+///
+/// ```text
+/// 0c90d  mov word [SelectCNT], 0
+/// NextKnight:
+/// 0c913  mov bx, [SelectCNT]; inc bx; and bx, 3; mov [SelectCNT], bx
+/// 0c91f  shl bx, 1; mov si, KnightTAB
+/// 0c924  mov ax, [StatHAND1]
+/// 0c927  cmp ax, [bx+si]; je NextKnight             ; the caster: skipped
+/// 0c92b  mov di, 0x8979
+/// 0c92e  push word [bx+si]; pop word [di+2]         ; the scratch pair
+/// 0c933  push word [bx+si]; pop word [StatHAND2]
+/// 0c939  mov si, [StatHAND2]
+/// 0c93d  push word [si+0x44]; pop word [StatMAGIC2]
+/// ```
+///
+/// `KnightTAB` (DS:`0xf448`) is itself static data holding the four
+/// records in seat order, `[0x6c9e, 0x6d00, 0x6d62, 0x6dc4]` — nothing in
+/// the whole image ever writes to it, so stepping `SelectCNT` is exactly
+/// the same as stepping the seat number, and `KnightTAB` needs no model of
+/// its own here. There is no aliveness test either: a grave can be offered
+/// and picked, exactly as little else on this page checks `+0x31`.
+///
+/// `MagicCast` slot 0x10 (0xcb60) calls `InitAKnight` once when the page
+/// opens, so the first candidate is `next_wyrm_seat(0, caster_seat)`; each
+/// click of the page's `NEXT` gadget (0xca1b) calls plain `NextKnight`
+/// again over whatever seat is already showing, `next_wyrm_seat(current,
+/// caster_seat)`. Panics only if `caster_seat` is itself out of `0..4`,
+/// which cannot happen: it is always one of the four seats.
+pub fn next_wyrm_seat(current: usize, caster_seat: usize) -> usize {
+    let mut seat = current;
+    loop {
+        seat = (seat + 1) % 4;
+        if seat != caster_seat {
+            return seat;
+        }
+    }
+}
+
 impl Flight {
     /// The script the map draws this frame: the glide while `TrackCNT` is
     /// ten or under, the beat otherwise.
@@ -499,6 +539,41 @@ impl Flight {
         true
     }
 
+    /// `StatusDone`, image 0xbe57: the picker's own commit, run once its
+    /// page closes.
+    ///
+    /// ```text
+    /// 0be50  cmp word [WyrmFLAG], 0; je 0be69
+    /// 0be57  mov si, 0x6e26
+    /// 0be5a  mov di, 0x8979
+    /// 0be5d  push word [di+2]; pop word [si+0x46]   ; NextKnight's own
+    ///                                                ; scratch: the last
+    ///                                                ; candidate it wrote
+    /// 0be63  mov word [WyrmFLAG], 0
+    /// ```
+    ///
+    /// `StatusDone` is not a function anyone `call`s: a byte scan of every
+    /// `call rel16` in the image, corrected across every `code_shift_map`
+    /// band, finds none, and disassembling the enclosing loop shows why —
+    /// it is simply where the page's own loop falls through once the
+    /// generic `EXIT` gadget (kind 7, `HotGadget` 0xca0a) has set the
+    /// close flag `[0xe4ac]`. So this runs on **every** status page's
+    /// close, for every `StatTYPE`, and the `WyrmFLAG` test above is what
+    /// narrows it back down to only mattering here. This crate does not
+    /// model `WyrmFLAG` as a field of its own; the desktop's `wyrm_picker`
+    /// being `Some` already stands for it, and this method is called only
+    /// from there, at the same place `WyrmFLAG` would have gated it.
+    ///
+    /// Unlike `KnightWyrm`, nothing here spends a charge — `MagicCast`'s own
+    /// `dec byte [bx+si]` at `0xcab6` already did that, before the picker
+    /// ever opened — and nothing calls `ContinueDragon`: the target sits
+    /// exactly where this leaves it until whichever knight's turn runs
+    /// `ContinueDragon` next rerolls it away at random, the same overwrite
+    /// `KnightWyrm`'s own commit takes (see its doc comment).
+    pub fn wyrm_picked(&mut self, seat: usize) {
+        self.target = Some(seat);
+    }
+
     /// Everything that goes into the fingerprint.
     pub fn hash_into(&self, mix: &mut impl FnMut(i64)) {
         for v in [
@@ -710,5 +785,41 @@ mod tests {
         };
         assert!(f.knight_wyrm(2, Some(1), 1, ALL, &mut seed));
         assert!(!f.aloft, "0a5b3");
+    }
+
+    /// `InitAKnight`/`NextKnight` (0xc90d/0xc913): steps mod four, skips
+    /// only the caster's own seat, and never checks whether a seat is
+    /// alive — there is no such test in the routine.
+    #[test]
+    fn next_wyrm_seat_steps_mod_four_and_skips_only_the_caster() {
+        // `InitAKnight`'s own first offer, `SelectCNT` reset to nought.
+        assert_eq!(next_wyrm_seat(0, 0), 1, "0c90d, 0c913: the first step");
+        assert_eq!(next_wyrm_seat(0, 1), 2, "the caster's own seat: skipped");
+        assert_eq!(next_wyrm_seat(0, 2), 1);
+        assert_eq!(next_wyrm_seat(0, 3), 1);
+        // Repeated `NEXT` clicks cycle the same three seats, wrapping past
+        // nought and back around, however many times it is pressed.
+        assert_eq!(next_wyrm_seat(1, 0), 2);
+        assert_eq!(next_wyrm_seat(2, 0), 3);
+        assert_eq!(next_wyrm_seat(3, 0), 1, "0: the caster, skipped again");
+        assert_eq!(next_wyrm_seat(1, 3), 2);
+        assert_eq!(next_wyrm_seat(2, 3), 0);
+        assert_eq!(next_wyrm_seat(0, 3), 1);
+    }
+
+    /// `StatusDone` (0xbe57): the commit alone. No charge (`MagicCast`
+    /// already spent it) and no `ContinueDragon` call (`KnightWyrm`'s own
+    /// commit is the one that makes that call).
+    #[test]
+    fn the_pickers_close_only_commits_the_seat() {
+        let mut f = Flight::default();
+        f.wyrm_picked(2);
+        assert_eq!(f.target, Some(2), "0be60: the scratch, into +0x46");
+        assert!(!f.aloft, "no ContinueDragon call here");
+        assert_eq!(f.track_cnt, 0, "continue_flight was never run");
+        // It overwrites whatever the dragon was after before, same as
+        // `KnightWyrm`'s own write does.
+        f.wyrm_picked(0);
+        assert_eq!(f.target, Some(0));
     }
 }

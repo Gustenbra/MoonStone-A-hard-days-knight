@@ -59,8 +59,11 @@ pub enum Cast {
     Warded,
     /// Put on, and whatever it replaced is in the pack.
     Worn,
-    /// The dragon over the map is after the knight in this seat: the scroll
-    /// of the Wyrm, through `StatusDone` (0xbe57).
+    /// The picker's page opened, `StatTYPE` 0xb (`Screen::AcquirePair`):
+    /// `seat` is `InitAKnight`'s (0xc90d) own first candidate, the caster's
+    /// own seat already skipped over. Cycling with `NEXT` and closing with
+    /// `EXIT` are the desktop's; only the close actually commits a seat into
+    /// the dragon's own target (`Flight::wyrm_picked`, `StatusDone`, 0xbe57).
     Wyrm { seat: usize },
     /// You are carrying none.
     HaveNone,
@@ -675,17 +678,17 @@ impl Run {
             // Taking off another knight needs another knight. There is one
             // traveller on this map, so the scroll has nobody to rob.
             Virtue::Seize => Cast::Pointless,
-            // `MagicCast` slot 0x10 (0xcb60): `WyrmFLAG` up and the knight
-            // picker opened by `InitAKnight` (0xc90d), whose `NextKnight`
-            // (0xc913) steps `SelectCNT` over `KnightTAB`, the four records
-            // in order, from the one after nought and skipping the caster's
-            // own; `StatusDone` (0xbe57) then copies the record taken into
-            // the dragon's `+0x46`. The picker's page is not built, so the
-            // record taken is the first one it offers, which for the player
-            // in record 0 is record 1.
+            // `MagicCast` slot 0x10 (0xcb60): `WyrmFLAG` up, `StatTYPE2`
+            // saved, and `InitAKnight` (0xc90d) reseeds `SelectCNT` to
+            // nought before falling straight into `NextKnight` (0xc913),
+            // which steps `SelectCNT` over `KnightTAB`, the four records in
+            // seat order, skipping only the caster's own
+            // (`crate::dragon::next_wyrm_seat`). `StatTYPE` becomes 0xb and
+            // the picker's page is up; nothing is committed yet, and the
+            // dragon does not move until the page closes
+            // (`Flight::wyrm_picked`, `StatusDone`, 0xbe57).
             Virtue::Wyrm => {
-                let seat = 1;
-                self.dragon.target = Some(seat);
+                let seat = crate::dragon::next_wyrm_seat(0, self.knight.seat);
                 Cast::Wyrm { seat }
             }
             // Worn things are handled by `wear`; anything inert says so.
@@ -1547,6 +1550,7 @@ mod magic_tests {
         put("hawk", "Scroll of the Hawk", 52, true, Virtue::Sight { astray: 16, returns: false });
         put("protection", "Scroll of Protection", 24, true, Virtue::Protection { backfire: 11 });
         put("talisman", "Talisman of the Wyrm", 52, false, Virtue::Inert);
+        put("wyrm", "Scroll of the Wyrm", 40, true, Virtue::Wyrm);
         items
     }
 
@@ -1775,6 +1779,50 @@ mod magic_tests {
             (20..80).contains(&backfired),
             "eleven in 128, got {backfired} of 512"
         );
+    }
+
+    /// `MagicCast` slot 0x10 (0xcb60): the charge is spent at once, the way
+    /// every other cast's is, and `apply` only opens the picker on
+    /// `InitAKnight`'s own first candidate — the caster's own seat, seat 0
+    /// here, skipped over and record 1 offered instead. The dragon's own
+    /// target is untouched until the picker actually closes
+    /// ([`crate::dragon::Flight::wyrm_picked`]).
+    #[test]
+    fn a_scroll_of_the_wyrm_spends_at_once_and_offers_a_seat_that_is_not_the_casters() {
+        let items = magic();
+        let mut r = knight_run(&items);
+        r.kit.take("wyrm", 1);
+        assert_eq!(r.cast("wyrm", &items), Cast::Wyrm { seat: 1 });
+        assert_eq!(r.kit.count("wyrm"), 0, "0cab6: dec byte [bx+si], at once");
+        assert!(
+            r.dragon.target.is_none(),
+            "0bf28 has not run: no commit yet"
+        );
+        // Whoever the caster is, that seat is never the one offered.
+        for caster in 0..4 {
+            let mut r = Run::for_knight(
+                &KnightDef {
+                    name: "SIR TEST".into(),
+                    shades: vec![0],
+                    home: [0, 0],
+                    strength: 1,
+                    constitution: 1,
+                    endurance: 1,
+                    life: 5,
+                    daggers: 10,
+                    gold: 0,
+                    weapon: "long_sword".into(),
+                    armour: "padded_armour".into(),
+                },
+                caster,
+                &items,
+            );
+            r.kit.take("wyrm", 1);
+            let Cast::Wyrm { seat } = r.cast("wyrm", &items) else {
+                panic!("a scroll of the Wyrm always opens the picker")
+            };
+            assert_ne!(seat, caster, "0c927: the caster's own seat, skipped");
+        }
     }
 
     #[test]

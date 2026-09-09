@@ -1073,6 +1073,14 @@ struct App {
     /// `TakeCNT` of its own the trade page has one for, so `EXIT` alone
     /// closes it; see `sheet_tick`.
     dragon_page: bool,
+    /// The Scroll of the Wyrm's own knight picker, `StatTYPE` 0xb
+    /// (`Screen::AcquirePair`), while it is up: the seat currently
+    /// highlighted. `InitAKnight`/`NextKnight` (0xc90d/0xc913) pick and step
+    /// it, skipping the caster's own; `close_wyrm_picker` is `StatusDone`
+    /// (0xbe57), run when `EXIT` closes the page. Stands in for `WyrmFLAG`
+    /// (DS:`0xf37a`): `Some` here is the flag up, and both come down
+    /// together.
+    wyrm_picker: Option<usize>,
     /// The dice table's own one-bank table, `dice.cel` in `DiceHANDLE`.
     dice_banks: Option<henge_core::taskvm::BankTables>,
     /// Every animation script, which the circle's two tasks run on. The bout
@@ -1506,6 +1514,7 @@ impl App {
             duel_settled: None,
             trade_page: None,
             dragon_page: false,
+            wyrm_picker: None,
             stones: None,
             stones_banks,
             dragon_banks,
@@ -3275,8 +3284,24 @@ impl App {
                 self.close_trade_page();
             } else if self.dragon_page {
                 self.dragon_page = false;
+            } else if let Some(seat) = self.wyrm_picker {
+                self.close_wyrm_picker(seat);
             } else {
                 self.sheet = false;
+            }
+            return;
+        }
+        // `HotGadget` (0xca1b) recognises `NEXT` by its own record rather
+        // than by id (`status::NEXT_ID` is not a real gadget id, only the
+        // marker this crate matches on): the only page it can appear on is
+        // the one `wyrm_picker` is up for.
+        if hit.id == status::NEXT_ID {
+            if let Some(seat) = self.wyrm_picker {
+                self.audio.play(CLICK_SOUND);
+                self.wyrm_picker = Some(henge_core::dragon::next_wyrm_seat(
+                    seat,
+                    self.run.knight.seat,
+                ));
             }
             return;
         }
@@ -3448,14 +3473,12 @@ impl App {
                 self.sheet = false;
                 self.notice("The hawk drops you");
             }
-            // `StatusDone` (0xbe57): the dragon's `+0x46` is the knight
-            // picked, and it flies at his row from its next frame.
+            // `InitAKnight`/`NextKnight` (0xc90d/0xc913): the picker's page
+            // opens on this seat, the caster's own already skipped over.
+            // Nothing is committed yet; that is `close_wyrm_picker`,
+            // `StatusDone` (0xbe57), once `EXIT` closes the page.
             Cast::Wyrm { seat } => {
-                let name = self
-                    .knights
-                    .get(seat)
-                    .map_or_else(|| "a knight".to_string(), |k| k.name.clone());
-                self.notice(format!("The dragon is after {name}"));
+                self.wyrm_picker = Some(seat);
             }
             Cast::Pointless => self.notice("Nothing comes of it"),
             Cast::HaveNone | Cast::Unknown => {}
@@ -3764,6 +3787,22 @@ impl App {
     /// so there is nothing left to settle on the way out.
     fn close_trade_page(&mut self) {
         self.trade_page = None;
+    }
+
+    /// `StatusDone`, image 0xbe57, run by `EXIT` closing the Wyrm picker:
+    /// the seat last highlighted becomes the dragon's own target. See
+    /// [`henge_core::dragon::Flight::wyrm_picked`] for why nothing here
+    /// spends a charge or sets the dragon flying — both already happened,
+    /// the first at `Op::Cast`, the second whenever `ContinueDragon` next
+    /// runs on somebody's turn.
+    fn close_wyrm_picker(&mut self, seat: usize) {
+        self.run.dragon.wyrm_picked(seat);
+        self.wyrm_picker = None;
+        let name = self
+            .knights
+            .get(seat)
+            .map_or_else(|| "a knight".to_string(), |k| k.name.clone());
+        self.notice(format!("The dragon is after {name}"));
     }
 
     /// `HGTakeDone`: `inc [TakeCNT]`, then `call ReDisplay` (0xbe6b) at
@@ -4344,7 +4383,7 @@ impl App {
                     hoard,
                     gold,
                     scouted: page.scouted,
-                    loser: None,
+                    second: None,
                 }),
             ));
         }
@@ -4355,7 +4394,7 @@ impl App {
                     hoard: henge_core::status::Hoard::default(),
                     gold: 0,
                     scouted: false,
-                    loser: Some(loser),
+                    second: Some(loser),
                 }),
             ));
         }
@@ -4366,7 +4405,21 @@ impl App {
                     hoard: self.run.dragon_hoard,
                     gold: 0,
                     scouted: false,
-                    loser: None,
+                    second: None,
+                }),
+            ));
+        }
+        // `ResetStatus`'s dispatch on `StatTYPE` 0xb: the picker's own page,
+        // up over the plain sheet exactly as the trade and dragon pages sit
+        // over it, with the highlighted candidate in the other arch.
+        if let Some(seat) = self.wyrm_picker {
+            return Some((
+                SheetScreen::AcquirePair,
+                Some(status::Other {
+                    hoard: henge_core::status::Hoard::default(),
+                    gold: 0,
+                    scouted: false,
+                    second: Some(seat),
                 }),
             ));
         }
@@ -4885,7 +4938,7 @@ mod tests {
         assert_eq!(other.hoard.gems, 3);
         assert_eq!(other.gold, 0);
         assert!(!other.scouted);
-        assert!(other.loser.is_none());
+        assert!(other.second.is_none());
     }
 
     /// `EXIT` closes the dragon's hoard page back to the map, the same way
@@ -4950,6 +5003,101 @@ mod tests {
             "0bee0: TakeCNT is forced clear"
         );
         assert!(!app.sheet);
+    }
+
+    /// `MagicCast` slot 0x10 (0xcb60) through `acted`: casting opens the
+    /// picker on `InitAKnight`'s own first candidate (0xc90d), the
+    /// caster's own seat skipped, and nothing is committed to the dragon
+    /// until the page closes.
+    #[test]
+    fn casting_the_scroll_of_the_wyrm_opens_the_picker_on_the_first_candidate() {
+        let Some(mut app) = quest_app() else { return };
+        // `Run::apply`'s own arm picks the seat; here the wiring is what is
+        // under test, so the seat `Run::cast` would have picked is handed
+        // straight to `acted`, the way `Op::Cast` does it.
+        app.acted(Cast::Wyrm { seat: 1 });
+        assert_eq!(app.wyrm_picker, Some(1), "the page is up on that seat");
+        assert!(
+            app.run.dragon.target.is_none(),
+            "0be57 has not run yet: EXIT alone commits"
+        );
+    }
+
+    /// `ResetStatus`'s dispatch on `StatTYPE` 0xb: `panel_now` puts the
+    /// highlighted candidate in the other arch, the same slot the trade
+    /// page's loser sits in.
+    #[test]
+    fn panel_now_shows_the_picker_with_the_candidate_in_the_other_arch() {
+        let Some(mut app) = quest_app() else { return };
+        app.wyrm_picker = Some(2);
+        let (screen, other) = app.panel_now().expect("wyrm_picker is up");
+        assert_eq!(screen, SheetScreen::AcquirePair);
+        assert_eq!(
+            other.expect("the candidate is in the other arch").second,
+            Some(2)
+        );
+    }
+
+    /// `HotGadget` (0xca1b): `NEXT` steps the picker exactly the way
+    /// `NextKnight` does, and the caster's own seat — whichever one it is —
+    /// is never offered, however many times it is clicked.
+    #[test]
+    fn the_next_gadget_cycles_the_picker_and_never_offers_the_caster() {
+        let Some(mut app) = quest_app() else { return };
+        app.mode = Mode::Map;
+        app.run.knight.seat = 2;
+        app.wyrm_picker = Some(3);
+        app.gadgets.add_box(status::NEXT_ID, 0, 0, 10, 10, "");
+        app.pointer.x = 5;
+        app.pointer.y = 5;
+        app.pointer.woken = true;
+        app.pressed[6] = true;
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            app.sheet_tick();
+            let seat = app.wyrm_picker.expect("NEXT never closes the page");
+            assert_ne!(seat, 2, "0c927: the caster's own seat, skipped");
+            seen.push(seat);
+        }
+        // Only the other three seats ever come up, cycling.
+        assert!(seen.iter().all(|s| [0, 1, 3].contains(s)));
+        assert_eq!(seen[0..3], seen[3..6], "0c918: mod four, round again");
+    }
+
+    /// `StatusDone` (0xbe57): `EXIT` closes the picker and commits whichever
+    /// seat was last highlighted into the dragon's own target — no charge
+    /// spent here (`MagicCast`'s `dec byte [bx+si]` already did that, at
+    /// the top, before the page ever opened) and no `ContinueDragon` call,
+    /// so the dragon does not leap into the air on the close alone; it
+    /// only actually flies at the seat once some knight's ordinary turn
+    /// runs `ContinueDragon` next.
+    #[test]
+    fn the_exit_gadget_closes_the_picker_and_commits_the_seat() {
+        let Some(mut app) = quest_app() else { return };
+        app.wyrm_picker = Some(1);
+        app.gadgets
+            .add_box(henge_core::status::EXIT_ID, 0, 0, 10, 10, "EXIT");
+        app.pointer.x = 5;
+        app.pointer.y = 5;
+        app.pointer.woken = true;
+        app.pressed[6] = true;
+        app.sheet_tick();
+        assert!(app.wyrm_picker.is_none(), "the page is down");
+        assert_eq!(app.run.dragon.target, Some(1), "0be60");
+        assert!(!app.run.dragon.aloft, "no ContinueDragon call from here");
+    }
+
+    /// Whichever seat the player happens to be sitting in, casting never
+    /// offers the picker that same seat as its first candidate.
+    #[test]
+    fn the_picker_never_opens_on_the_casters_own_seat() {
+        for caster in 0..4 {
+            let Some(mut app) = quest_app() else { return };
+            app.run.knight.seat = caster;
+            let seat = henge_core::dragon::next_wyrm_seat(0, caster);
+            app.acted(Cast::Wyrm { seat });
+            assert_ne!(app.wyrm_picker, Some(caster));
+        }
     }
 
     /// `NextWHICH` (0xa434): the day turns and the between-days screen

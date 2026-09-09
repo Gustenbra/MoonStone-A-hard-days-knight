@@ -324,8 +324,9 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       is built: `WhoLived+57` (0xaf7) for a dragon feeds `Rival::dragon_on_rival`
       the way it always did for a rival's own loss, and grounding the dragon
       for good opens `DisplayDragon` on `StatTYPE` 0xa through
-      `App::dragon_fight_settled`. **Not built**: the knight picker page the
-      Scroll of the Wyrm opens
+      `App::dragon_fight_settled`. The knight picker page the Scroll of the Wyrm
+      opens is built too: `App::wyrm_picker`, `dragon::next_wyrm_seat` and
+      `Flight::wyrm_picked`, `StatTYPE` 0xb
 - [x] 37. **Per-creature behaviour, and it is translation, not design.** Every
       controller is a named routine in `MOON` and every one of them reads. They are
       in `henge-core/src/monster.rs`, dispatched by the `controller` each actor now

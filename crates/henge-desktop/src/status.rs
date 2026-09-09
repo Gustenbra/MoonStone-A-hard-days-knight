@@ -908,18 +908,35 @@ pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
             display_magic(&mut panel, 1, right, &run.temple);
             display_msword(&mut panel, 1, right, &run.temple);
         }
-        Screen::Acquire | Screen::AcquirePair => display_acquire(&mut panel),
+        // `ResetStatus`'s shared 0xbf28 body, taken for both `StatTYPE` 8
+        // and 0xb alike: `Address` becomes `StatHAND2`, `StatACEL` 1, and
+        // `DisplayKnight` (0xc0c2) draws that candidate's own sheet in the
+        // right arch — the same call, on the same field, that draws
+        // `Screen::Trade`'s second knight below — before `DisplayAquire`
+        // (0xc8ce) puts the icon and the `NEXT` gadget over it.
+        Screen::Acquire | Screen::AcquirePair => {
+            if let Some(r) = other
+                .and_then(|o| o.second)
+                .and_then(|idx| run.rivals.get(idx.wrapping_sub(1)))
+            {
+                let name = other
+                    .and_then(|o| o.second)
+                    .map_or_else(String::new, |idx| run.record_name(idx));
+                display_knight(&mut panel, 1, right, &KnightSheet::of_rival(r), 1, &name);
+            }
+            display_acquire(&mut panel);
+        }
         // `_displayknight`'s second arm: the loser of a knight fight, in the
-        // other arch, `StatACEL` 1. `other.loser` names his record, off the
+        // other arch, `StatACEL` 1. `other.second` names his record, off the
         // run's own `rivals`, since a duel's loser is always a computer
         // knight (`Run::challenge` never lets two of them fight).
         Screen::Trade => {
             if let Some(r) = other
-                .and_then(|o| o.loser)
+                .and_then(|o| o.second)
                 .and_then(|idx| run.rivals.get(idx.wrapping_sub(1)))
             {
                 let name = other
-                    .and_then(|o| o.loser)
+                    .and_then(|o| o.second)
                     .map_or_else(String::new, |idx| run.record_name(idx));
                 display_knight(&mut panel, 1, right, &KnightSheet::of_rival(r), 1, &name);
             }
@@ -941,10 +958,12 @@ pub struct Other {
     /// and so carries no permission bit, and nothing on the floor can be
     /// taken. See `henge_core::lair::Page`.
     pub scouted: bool,
-    /// The trade page's second knight, by record index: `_displayknight`
-    /// wants a second record, and now there is one. `None` for every other
-    /// screen, none of which puts a second knight in the other arch.
-    pub loser: Option<usize>,
+    /// The second knight in the other arch, by record index: the trade
+    /// page's loser (`_displayknight` wants a second record, and now there
+    /// is one) or the Wyrm picker's own highlighted candidate
+    /// (`Screen::AcquirePair`, `StatHAND2`). `None` for every other screen,
+    /// none of which puts a second knight in the other arch.
+    pub second: Option<usize>,
 }
 
 /// The original's whole status screen, laid out and painted.
