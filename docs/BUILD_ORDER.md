@@ -618,15 +618,19 @@ the decapitation beside the bloodless collapse from the same fight.
       beast's charge 0x10; the mudman never writes one, and a swing stands in).
       Damage is the `*Dam` entry against the default attack's, so the chop is
       twice the swing (`CalcDamage` doubles it) and the rear thrust half; what
-      `CalcDamage` adds for strength and the sword is item 40's. Also read and
-      **not built**: the moment a blow lands the attacker is handed `+0x12`,
-      which is built (`Knight_SwRecover`; the creatures' is their stance, so a
-      swing that connects is cut short as the original cuts it); the encounter
-      overrides `InitKnightvs*` make to the knight's table (against the spear
-      trogg both guard slots become the evade, against the ratmen the block
-      becomes `Knight_SwOThrust` and the evade `Knight_SwDThrust`, which are the
-      two scripts not in the base table), which are item 37's business; and the
-      cursed knight's inverted joystick in `ControlKnight`, item 43's
+      `CalcDamage` adds for strength and the sword is item 40's. The moment a
+      blow lands the attacker is handed `+0x12`, which is built
+      (`Knight_SwRecover`; the creatures' is their stance, so a swing that
+      connects is cut short as the original cuts it), and the cursed knight's
+      inverted joystick in `ControlKnight` is item 43's. **The encounter
+      overrides are built too**: five `InitKnightvs*` routines rewrite rows of
+      the knight's own tables, and `Bout::init_knight_att` and the three
+      `*_struck_knight` helpers carry all five. The rows at `+0x16` turn out to
+      be `KnightAttSw` and not the block table (`SetKnightSwTables` 0x1f6a puts
+      `KnightBloSw` at `+0x1e`, which is what `CheckBlock` reads and what no
+      encounter touches), so the spear trogg's two evade rows and the ratmen's
+      `Knight_SwOThrust`/`Knight_SwDThrust` change what the knight is shown
+      doing on a guard and nothing about what it stops
 - [x] 47. **Blocking. Recovered**, from `CheckBlock`: the defender's block
       table (`KnightBloSw`, at `+0x1e`) is read at the attacker's kind and the
       entry has to equal what the defender is doing: a block stops a swing, an
