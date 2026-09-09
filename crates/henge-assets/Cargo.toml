@@ -4,6 +4,9 @@ description = "Logical asset ids resolved through a stack of packs, so artwork c
 publish = false
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 anyhow = "1"

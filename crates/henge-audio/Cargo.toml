@@ -4,6 +4,9 @@ description = "Turning what happened in a bout into sound, behind a trait so the
 publish = false
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [features]
 default = ["native"]

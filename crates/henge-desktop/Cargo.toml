@@ -4,6 +4,9 @@ description = "Desktop shell: window, input, and a palette-indexed software fram
 publish = false
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "henge"

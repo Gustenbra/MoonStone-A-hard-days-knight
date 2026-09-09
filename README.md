@@ -5,10 +5,23 @@ A reimplementation of *Moonstone: A Hard Days Knight* (Amiga 1991, DOS 1992) in 
 This is an **engine**. It ships no artwork, no sound and no game data. To play it you
 need your own copy of the original, which the engine reads and converts locally.
 
-> **Status: early, and private while the licence is undecided.**
-> Combat and overworld travel work, and the road is walked by the original's own
-> creatures, animated from its own scripts and fighting on their own recovered
-> controllers; `docs/BUILD_ORDER.md` says what is and is not there.
+> **Status: playable, and still being finished.** Combat, overworld travel, the
+> towns and the quest all work. `docs/BUILD_ORDER.md` says what is and is not
+> there, item by item, and never claims more than it can show.
+
+**The rule this project is built on: nothing is invented.** Where the original
+does something, its routine is found in the executable, disassembled, and
+translated into Rust with the address quoted in a comment beside it. Where the
+original does nothing, this engine does nothing either. Every value that could
+not be recovered is marked as designed rather than ported, in the code and in
+`docs/BUILD_ORDER.md`, so the line between the two is always visible.
+
+That rule is not decoration. Every time something was invented to fill a gap, it
+looked wrong to a player immediately and passed every test regardless: a hue
+substitution that turned the gold knight brown where the original rewrites three
+palette entries, an in-fight health bar over an arena the original draws to the
+last row, twenty four lairs placed by eye that turned out to sit in a table fifty
+one pixels away. Recovering beat guessing every single time.
 
 ## What works
 
@@ -579,8 +592,16 @@ networked play plugs into without touching combat. See `docs/ROADMAP.md`.
 
 ## Licence
 
-**Not yet chosen.** Until it is, all rights are reserved and contributions cannot be
-accepted, because there would be nothing to license them under.
+[MIT](LICENSE), for the source in this repository and nothing else.
 
-No code was taken from any other reimplementation. Every decoder here was written from
-scratch against the raw data.
+`Moonstone: A Hard Days Knight` belongs to its rights holders. None of it is here:
+no artwork, no audio, no level data, no code. What is here is an independent
+reimplementation written from measurements of the file formats and from the
+published game's own behaviour. Playing it needs a copy of the original that you
+already own; the engine reads that copy on your machine and converts it there,
+and `.gitignore` is written so nothing derived from it can be committed by
+accident.
+
+No code was taken from any other reimplementation. OpenMoonstone is AGPL-3.0 and
+was deliberately never read. Every decoder here was written from scratch against
+the raw data.

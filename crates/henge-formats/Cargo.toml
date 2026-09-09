@@ -4,6 +4,9 @@ description = "Readers for the original Moonstone (1991) data files. Research to
 publish = false
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 henge-audio = { path = "../henge-audio", default-features = false }

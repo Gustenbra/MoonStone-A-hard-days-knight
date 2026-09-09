@@ -4,6 +4,9 @@ description = "Game simulation. No rendering, no platform, no original-game asse
 publish = false
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
