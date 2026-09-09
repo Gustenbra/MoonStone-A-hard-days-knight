@@ -164,6 +164,58 @@ pub struct Intent {
     pub attack: bool,
 }
 
+/// `K_WalkRValue` (`0x77fe`), four words back to back with the two tables
+/// below it: the x-speed the **person-controlled** knight steps by while
+/// walking right or left, one entry per walk-cycle frame, in pixels per
+/// frame rather than per tick. `KnightWalkRight` (0x4048) is called once for
+/// right held and once for left, looks this same table up by `[di+0xa]`
+/// (`Fighter::cycle` here) and negates it facing left; right and left are a
+/// sign flip of the one table, not two tables.
+const KNIGHT_WALK_R_VALUE: [i32; 4] = [25, 3, 23, 4];
+
+/// `K_WalkUpValue` (`0x7808`): the z-speed walking up. `KnightWalkUp`
+/// (0x4067) looks this up and **always** negates it, unconditionally — a
+/// genuinely different table from the down one below, not its mirror.
+const KNIGHT_WALK_UP_VALUE: [i32; 4] = [2, 9, 2, 9];
+
+/// `K_WalkDownValue` (`0x7810`): the z-speed walking down. `KnightWalkDown`
+/// (0x4080) looks this up and **never** negates it.
+const KNIGHT_WALK_DOWN_VALUE: [i32; 4] = [8, 2, 9, 2];
+
+/// The step a person-controlled knight's walk takes on one displayed frame,
+/// `KnightWalkRight`/`KnightWalkUp`/`KnightWalkDown` (0x4048/0x4067/0x4080)
+/// translated: right/left write `x` from the one shared table, sign only;
+/// up/down write `z` from their own separate tables, one always negated and
+/// the other never. Both axes are independent `test`s in the original
+/// (0x3f5d/0x3f68/0x3f71/0x3f80), not an if/else chain, so a diagonal held
+/// sets both from the SAME `idx` — the one counter driving all three tables
+/// in lockstep.
+///
+/// `idx` is taken modulo the tables' own length rather than the walk
+/// script's row length: the original's mask is a literal `and byte [di+0xa],
+/// 3`, a fixed 4, independent of how many script names any row happens to
+/// have (they are 4 too, confirmed by
+/// `henge_formats::tables::tests::the_knight_tables_read_as_set_up_knight_writes_them`,
+/// but that is a second, separate fact, not the source of this one).
+fn knight_walk_step(intent: Intent, idx: usize) -> (i32, i32) {
+    let idx = idx % KNIGHT_WALK_R_VALUE.len();
+    let x = if intent.dx > 0 {
+        KNIGHT_WALK_R_VALUE[idx]
+    } else if intent.dx < 0 {
+        -KNIGHT_WALK_R_VALUE[idx]
+    } else {
+        0
+    };
+    let y = if intent.dy > 0 {
+        KNIGHT_WALK_DOWN_VALUE[idx]
+    } else if intent.dy < 0 {
+        -KNIGHT_WALK_UP_VALUE[idx]
+    } else {
+        0
+    };
+    (x, y)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Fighter {
     pub actor: String,
@@ -688,14 +740,40 @@ impl Fighter {
         // bit survived. Nothing is clamped, and a refused direction leaves the
         // other three alone.
         if self.state == State::Walk {
-            let step = (intent.dx * def.speed_x, intent.dy * def.speed_y);
-            let (moved, blocked) = self.walk(def, field, step, others);
-            self.blocked = blocked;
-            // `A4$`: a frame in which nothing moved winds the walk cycle back
-            // and plays the stance instead, which is what makes a man held up
-            // by a tree stand still rather than walk on the spot.
-            if !moved {
-                self.enter(State::Idle);
+            // The knight's own `KnightWalkRight`/`Up`/`Down` table, but only
+            // for the fighter a real person drives: `ControlBlackKnight`
+            // never calls any of the three, calling the same plain movers
+            // (`MoveL`/`MoveR`/the generic up/down movers) any ordinary
+            // scripted creature does instead, so a rival or a computer's
+            // black knight — `flag::DRIVEN`, even sharing this same `knight`
+            // `ActorDef` — keeps the flat `def.speed_x`/`speed_y` below.
+            let is_person_knight =
+                def.controller == "knight" && self.brain.flags & crate::monster::flag::DRIVEN == 0;
+            if is_person_knight {
+                // Moving once a frame by the table entry, not once a
+                // sub-tick by a flat fraction of it: see `knight_walk_pulse`.
+                if let Some(idx) = self.knight_walk_pulse(def) {
+                    let step = knight_walk_step(intent, idx);
+                    let (moved, blocked) = self.walk(def, field, step, others);
+                    self.blocked = blocked;
+                    // `A4$`: a frame in which nothing moved winds the walk
+                    // cycle back and plays the stance instead, which is what
+                    // makes a man held up by a tree stand still rather than
+                    // walk on the spot.
+                    if !moved {
+                        self.enter(State::Idle);
+                    }
+                }
+                // A sub-tick that is not this frame's one pulse: the
+                // original has no such tick at all, so nothing here moves,
+                // is blocked, or falls back to idle on it.
+            } else {
+                let step = (intent.dx * def.speed_x, intent.dy * def.speed_y);
+                let (moved, blocked) = self.walk(def, field, step, others);
+                self.blocked = blocked;
+                if !moved {
+                    self.enter(State::Idle);
+                }
             }
         } else {
             self.blocked = 0;
@@ -825,6 +903,55 @@ impl Fighter {
         self.x = cx;
         self.y = cy;
         (moved, wanted & !ok)
+    }
+
+    /// **Person-controlled knight only.** The walk-speed table index this
+    /// tick's step should use, or `None` on a tick nothing should move on.
+    ///
+    /// `ControlKnight` runs once per displayed frame: every frame a
+    /// direction is held, `[di+0xa]` (`Fighter::cycle`) is incremented and
+    /// masked mod 4 *before* `KnightWalkRight`/`Up`/`Down` look anything up,
+    /// so the index the speed tables read is always the one the frame about
+    /// to be drawn uses. This engine subdivides one displayed frame into
+    /// `ActorDef::script_ticks` sub-ticks (below, `run_task`'s own
+    /// `step_now`/cycle-advance below only fires once every that many
+    /// calls), so a step computed every sub-tick — the flat
+    /// `def.speed_x`/`speed_y` this replaces reads that way — applies the
+    /// same table entry `script_ticks` times over rather than once, and a
+    /// step computed off `self.cycle` as it stands is one whole displayed
+    /// frame stale on the sub-tick the frame changes: the flat step used to
+    /// run, and would still run, strictly before `run_task` updates
+    /// `self.cycle` this same call, not after.
+    ///
+    /// So this predicts what `run_task` is about to set `self.cycle` to,
+    /// using the exact conditions its own match arms below gate that same
+    /// decision on (a fresh task, a restart, or `script_tick` about to wrap
+    /// with the current script already finished) — never reading
+    /// `self.cycle` as it stands once the walk is already under way, only
+    /// what it is one tick away from becoming.
+    fn knight_walk_pulse(&self, def: &ActorDef) -> Option<usize> {
+        let names_len = def.walk_row(self.heading[0], self.heading[1]).len().max(1);
+        match &self.task {
+            // A fresh task, or a restart: `run_task` below plays `names[0]`
+            // outright in both cases, matching `self.cycle`'s own reset to 0
+            // on every state change (`Fighter::enter`), so no advance to
+            // predict — the pulse is this tick, at the index already there.
+            None => Some(self.cycle % names_len),
+            Some(_) if self.restart => Some(self.cycle % names_len),
+            // Continuing an already-running walk: `run_task` advances
+            // `self.cycle` exactly when `script_tick` is about to wrap AND
+            // the current script has already finished running, the same
+            // `self.script_tick + 1 >= def.script_ticks.max(1)` and
+            // `!t.running` this mirrors below.
+            Some(t) => {
+                let wrapping = self.script_tick + 1 >= def.script_ticks.max(1);
+                if wrapping && !t.running {
+                    Some((self.cycle + 1) % names_len)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// One tick of the task VM, for an actor animated by the recovered scripts.
@@ -2040,6 +2167,197 @@ pub(crate) mod tests {
         // A creature whose table has one row, as `TrollWal` and `MudmenWal`.
         let one = scripted_def();
         assert_eq!(one.walk_row(0, -1), one.scripts_for("walk"));
+    }
+
+    /// `K_WalkRValue`/`K_WalkUpValue`/`K_WalkDownValue`
+    /// (0x77fe/0x7808/0x7810), `docs/COMPLETE.md`:589.
+    ///
+    /// The person-controlled knight's own walk, built from `scripted_def()`
+    /// with `controller` set to the string only the real baked knight ever
+    /// carries and `script_ticks` shortened to 3 so a test only has to hold
+    /// a handful of ticks to see the pulse: one tick in three actually
+    /// moves, the walk-cycle frame that `ControlKnight` (0x3ec4) itself
+    /// would be showing right then, and the other two do not move at all.
+    fn person_knight_def(script_ticks: u32) -> ActorDef {
+        ActorDef {
+            controller: "knight".into(),
+            script_ticks,
+            ..scripted_def()
+        }
+    }
+
+    /// Right and left share `K_WalkRValue` (`[25, 3, 23, 4]`), sign only,
+    /// and the table is read once a displayed frame — three ticks here —
+    /// not once every tick: a naive per-tick read of the flat
+    /// `def.speed_x`/`speed_y` this replaces would move every one of these
+    /// twelve ticks; the original, and this, move on four of them.
+    #[test]
+    fn a_person_knight_walks_the_r_table_once_a_frame_right_and_left() {
+        let d = person_knight_def(3);
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        let mut xs = Vec::new();
+        for _ in 0..12 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 1,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+            xs.push(f.x);
+        }
+        assert_eq!(
+            xs,
+            [125, 125, 125, 128, 128, 128, 151, 151, 151, 155, 155, 155],
+            "+25, then flat, then +3, flat, +23, flat, +4, flat: K_WalkRValue, \
+             once every three ticks"
+        );
+
+        let mut f = Fighter::new("k", &d, 100, 100, -1);
+        let mut xs = Vec::new();
+        for _ in 0..12 {
+            f.step(
+                &d,
+                Intent {
+                    dx: -1,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+            xs.push(f.x);
+        }
+        assert_eq!(
+            xs,
+            [75, 75, 75, 72, 72, 72, 49, 49, 49, 45, 45, 45],
+            "the same table negated, held left"
+        );
+    }
+
+    /// `KnightWalkUp` (0x4067) always negates `K_WalkUpValue`
+    /// (`[2, 9, 2, 9]`); `KnightWalkDown` (0x4080) never negates
+    /// `K_WalkDownValue` (`[8, 2, 9, 2]`) — two separate tables, not one
+    /// table mirrored by sign, and the asymmetry (2 and 9 swap places
+    /// between them) is the point.
+    #[test]
+    fn a_person_knight_walks_the_up_and_down_tables_unmirrored() {
+        let d = person_knight_def(3);
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        let mut ys = Vec::new();
+        for _ in 0..12 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 0,
+                    dy: -1,
+                    attack: false,
+                },
+                &field(),
+            );
+            ys.push(f.y);
+        }
+        assert_eq!(
+            ys,
+            [98, 98, 98, 89, 89, 89, 87, 87, 87, 78, 78, 78],
+            "-2, -9, -2, -9: K_WalkUpValue, always negated"
+        );
+
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        let mut ys = Vec::new();
+        for _ in 0..12 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 0,
+                    dy: 1,
+                    attack: false,
+                },
+                &field(),
+            );
+            ys.push(f.y);
+        }
+        assert_eq!(
+            ys,
+            [108, 108, 108, 110, 110, 110, 119, 119, 119, 121, 121, 121],
+            "+8, +2, +9, +2: K_WalkDownValue, never negated"
+        );
+    }
+
+    /// The four direction tests are independent in the original
+    /// (0x3f5d/0x3f68/0x3f71/0x3f80), not an if/else chain, so a diagonal
+    /// held sets both axes the same tick from the SAME table index — one
+    /// counter driving all three tables in lockstep.
+    #[test]
+    fn a_person_knight_walking_diagonally_sets_both_axes_from_one_index() {
+        let d = person_knight_def(3);
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        let mut xy = Vec::new();
+        for _ in 0..6 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 1,
+                    dy: 1,
+                    attack: false,
+                },
+                &field(),
+            );
+            xy.push((f.x, f.y));
+        }
+        assert_eq!(
+            xy,
+            [
+                (125, 108),
+                (125, 108),
+                (125, 108),
+                (128, 110),
+                (128, 110),
+                (128, 110),
+            ],
+            "K_WalkRValue[idx] on x and K_WalkDownValue[idx] on y, the same \
+             idx, the same tick"
+        );
+    }
+
+    /// `ControlBlackKnight` (0x4b79) never calls `KnightWalkRight`/`Up`/
+    /// `Down` at all — it calls the same plain `MoveL`/`MoveR`/`MoveU`/
+    /// `MoveD` any ordinary scripted creature does — so a computer-driven
+    /// seat of this SAME `knight` `ActorDef` (`flag::DRIVEN`) must keep the
+    /// flat `def.speed_x`/`speed_y` every tick, table or no table.
+    #[test]
+    fn a_driven_knight_ignores_the_table_and_keeps_the_flat_speed() {
+        let d = person_knight_def(3);
+        let mut f = Fighter::new("k", &d, 100, 100, 1);
+        f.brain.flags |= crate::monster::flag::DRIVEN;
+        // A driven fighter has no joystick, so what puts it in `State::Walk`
+        // is its own controller's order, not `Intent`; once given, it keeps
+        // walking on its own until a fresh order says otherwise (`else if
+        // self.brain.flags & flag::DRIVEN != 0` in `step_among`).
+        f.ordered = Some(Order {
+            state: State::Walk,
+            script: String::new(),
+            attack: None,
+        });
+        let mut xs = Vec::new();
+        for _ in 0..6 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 1,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+            xs.push(f.x);
+        }
+        assert_eq!(
+            xs,
+            [102, 104, 106, 108, 110, 112],
+            "def.speed_x (2) added every tick, not gated on script_ticks"
+        );
     }
 
     /// The hit shape comes out of the frame's own weapon parts, so only the

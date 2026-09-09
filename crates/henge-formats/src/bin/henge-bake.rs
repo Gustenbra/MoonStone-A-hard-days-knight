@@ -1761,6 +1761,18 @@ fn actor_definitions(
         sheet: "actor.knight".into(),
         name: "Knight".into(),
         health: 100,
+        // `MoveL`/`MoveR`/`MoveU`/`MoveD` (0x4dd5/0x4e09/0x4e39/0x4e64), the
+        // flat movers `ControlBlackKnight` (0x4b79) calls: this is the flat
+        // per-tick speed a computer-controlled seat of this SAME `ActorDef`
+        // still walks at (`flag::DRIVEN`, `crate::monster::bk_move`). It is
+        // no longer what the person's own seat walks by: `ControlKnight`
+        // (0x3ec4) calls `KnightWalkRight`/`Up`/`Down` (0x4048/0x4067/0x4080)
+        // instead, an unequal pixels-per-*frame* table
+        // (`henge_core::combat::KNIGHT_WALK_R_VALUE` and its two companions),
+        // applied once a displayed frame rather than flatly every tick —
+        // see `Fighter::knight_walk_pulse` and the `is_person_knight` branch
+        // in `Fighter::step_among`, gated on `def.controller == "knight"`
+        // and not `flag::DRIVEN`.
         speed_x: 2,
         speed_y: 1,
         reach: 38,
@@ -1777,8 +1789,11 @@ fn actor_definitions(
         // `BKwon`: a knight put down is one point of experience.
         experience: 1,
         body: [-9, 0, 9, 50],
-        // One stride of `Knight_SwWalkOn` covers about 47 pixels in four
-        // frames, and he walks two pixels a tick. See `ActorDef::script_ticks`.
+        // One stride of `Knight_SwWalkOn` is four frames, and this is how
+        // many sub-ticks this engine holds each of them for. See
+        // `ActorDef::script_ticks`; the person's own per-frame speed is the
+        // walk-speed table cited above, not a multiple of a flat per-tick
+        // number.
         script_ticks: 6,
         bank_table: 1,
         ..ActorDef::default()
