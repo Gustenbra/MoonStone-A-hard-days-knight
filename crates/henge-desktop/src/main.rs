@@ -2337,8 +2337,16 @@ impl App {
                         // What the fallen were carrying, and what they were
                         // worth. The run decides whether it is collected; a
                         // corpse collects nothing.
-                        self.run
-                            .finished_fight_worth(health, won, w.purse(), w.experience());
+                        // `BKwon` (0x49f) pays the duel's own point and
+                        // spends it on the spot through `BKAddstuff`; the
+                        // road's tally pays for everything else. One or the
+                        // other, never both.
+                        let duel = w.is_duel();
+                        let xp = if duel { 0 } else { w.experience() };
+                        self.run.finished_fight_worth(health, won, w.purse(), xp);
+                        if duel && won {
+                            self.run.duel_won(&self.items);
+                        }
                         w.set_player_cursed(false);
                         // And what was thrown is gone: the sheet's daggers are
                         // whatever is left on the belt.
@@ -2515,7 +2523,22 @@ impl App {
         let Some(table) = self.dice_table.as_mut() else {
             return;
         };
-        table.tick(&self.scripts);
+        // `ShakeDiceSnd` (0xb32f), which `DD_ThrowDice` calls six times
+        // through `TASKGOSUB` (DS:0xce91, 0xcecd, 0xceed, 0xceff, 0xcf1f and
+        // one more) and nothing else in the game calls at all: the rattle of
+        // the cup, on the frames the hand shakes it. The routine is silent on
+        // a Roland (`cmp word ptr [MUSICTYPE], 2; je ret`), which this engine
+        // is not.
+        let frame = table.tick(&self.scripts);
+        let rattled = frame.is_some_and(|f| {
+            f.effects.iter().any(|e| {
+                matches!(e, henge_core::taskvm::Effect::Gosub { routine, .. }
+                    if routine == "ShakeDiceSnd")
+            })
+        });
+        if rattled {
+            self.audio.play(&sfx::asset(henge_core::sound::DICE_SHAKE));
+        }
         if !table.landed() {
             return;
         }

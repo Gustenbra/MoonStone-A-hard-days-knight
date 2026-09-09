@@ -65,6 +65,9 @@ pub mod field {
     pub const FACING: i16 = 0x08;
     /// Hit points. `TASKDEAD` branches when this is not greater than zero.
     pub const HEALTH: i16 = 0x38;
+    /// `+0x0b`, the frame counter `DecTimer` (0x2a63) runs down and
+    /// `Balok_Stance`'s `TASKTESTEQ` reads: thirty frames between blinks.
+    pub const TIMER: i16 = 0x0b;
     /// Daggers carried, a byte. `SetKnightEquipment` writes ten here,
     /// `Knight_SwKnife` opens with a `TASKTESTEQ` on it and goes back to the
     /// stance when it is zero, and `KnifeThrow` takes one off before it spawns
@@ -811,6 +814,27 @@ impl Task {
                     self.pc.at += 1;
                 }
                 Instr::Gosub { routine } => {
+                    // `DecTimer` (0x2a63) is the one `TASKGOSUB` target that
+                    // touches nothing but the actor record, and the frame that
+                    // calls it reads what it wrote two instructions later:
+                    //
+                    //   02a63  sub byte ptr [di+0xb], 1
+                    //   02a67  jge 02a72
+                    //   02a69  call RND          ; and al, 0x1f is then dead
+                    //   02a6e  mov byte ptr [di+0xb], 0x1e
+                    //
+                    // `Balok_Stance` is `TASKGOSUB DecTimer` followed at once
+                    // by `TASKTESTEQ +0xb -> Balok_Blink`, so the count has to
+                    // be down before the branch is taken or Balok blinks every
+                    // frame; `Balok_Blink` ends on `ff 00` rather than `ff ff`,
+                    // so blinking every frame is a stance whose animation never
+                    // ends and a creature whose controller is never asked
+                    // again. Everything else a gosub does is a call into the
+                    // game and stays an effect.
+                    if routine == "DecTimer" {
+                        let left = actor.get(field::TIMER) - 1;
+                        actor.set(field::TIMER, if left < 0 { 0x1e } else { left });
+                    }
                     let kind = gosub_kind(&routine);
                     frame.effects.push(Effect::Gosub { routine, kind });
                     self.pc.at += 1;

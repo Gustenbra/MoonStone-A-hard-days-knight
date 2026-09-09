@@ -176,13 +176,6 @@ pub struct ActorDef {
     pub experience: u32,
     /// Body box relative to the feet: [x_min, y_min, x_max, y_max], y upward.
     pub body: [i16; 4],
-    /// How much ground this fighter stands on, for keeping two of them apart.
-    /// Separate from `body`, which is the hit box: a body narrow enough to make
-    /// strikes feel fair is much narrower than the drawn figure, so using it
-    /// for spacing let four knights stand inside one another.
-    /// Zero, or absent, means fall back to the body's width.
-    #[serde(default)]
-    pub girth: i32,
     /// Frame lists, for an actor animated by hand rather than by script.
     ///
     /// This is the simple authoring path and the one our own artwork will use
@@ -425,7 +418,6 @@ impl Default for ActorDef {
             bounty: 0,
             experience: 0,
             body: [0; 4],
-            girth: 0,
             sequences: BTreeMap::new(),
             animation: ScriptSet::new(),
             scripts: BTreeMap::new(),
@@ -597,6 +589,21 @@ impl ActorDef {
                     ));
                 }
                 pending.push((branch.clone(), table));
+                // A `TASKGOTO` with mode 3 transfers at once (`0x9843`, and
+                // `Task::step`'s own `if mode == 3`), so nothing after it in
+                // this script is reached from this entry. Walking on past it
+                // is how the beast's toss came to be rejected: the decoder
+                // reads a script to its terminating `ff ff`, and
+                // `Beast_BackToss` runs straight through the bytes of
+                // `Beast_ChestToss`, `Beast_KnightDown` and
+                // `Beast_ImpaleChest`, whose `TASKCELBUF 1` then makes every
+                // later part look as though it came out of the wrong table.
+                // Each of those runs is a named script of its own and is
+                // checked under its own entry, with the table it is really
+                // entered with.
+                if matches!(i, Instr::Goto { mode: 3, .. }) {
+                    break;
+                }
             }
         }
         Ok(())

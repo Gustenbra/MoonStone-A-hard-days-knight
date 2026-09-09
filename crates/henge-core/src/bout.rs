@@ -9,7 +9,7 @@
 //! from. A keyboard, an AI and a network packet are interchangeable, which is
 //! the seam networked play plugs into.
 
-use crate::arena::{Arrivals, Border, Field, GLOBAL};
+use crate::arena::{Arrivals, Border, Field, Occupant, GLOBAL};
 use crate::combat::{line_hits_body, Attack, Fighter, Intent, Order, State};
 use crate::content::ActorDef;
 use crate::monster::Controller;
@@ -67,6 +67,21 @@ pub struct Missile {
     /// whirl away when the demon dies (`StopDemonWhirl`).
     #[serde(default)]
     pub follow: bool,
+    /// This task is standing in for its owner while he is off the board, and
+    /// it is over once it reaches this script.
+    ///
+    /// `BeastStruck1` (0x447b) hands `Beast_BackToss` to the **knight's** own
+    /// task, and the script draws him out of the beast's bank tables, because
+    /// `TASKCELBUF` chooses from a global `TaskCelTable` the loader filled and
+    /// not from anything the actor carries. This engine looks a bank up on the
+    /// actor's own definition, so the only way to draw the beast's cels is on
+    /// the beast's definition: the toss runs as a task of its own out of that
+    /// definition while the knight is on standby, which is the same picture
+    /// and the same chain of scripts. It ends where the chain ends, at
+    /// `Knight_SwStance`, and the knight comes back standing where it left
+    /// him.
+    #[serde(default)]
+    pub until: String,
 }
 
 impl Missile {
@@ -188,6 +203,16 @@ pub struct Bout {
     /// which `PracticeCombat5` reaches straight out of `InitGameStart`.
     #[serde(default)]
     pub progression: i32,
+    /// The words a fight keeps for a whole species: `RatFLAGS` (DS:`0x779c`),
+    /// `HitDelay` (`0x779e`), `BalokFLAGS` (`0x7794`) and the two scratch
+    /// words the jumps leave behind. See [`crate::monster::Shared`].
+    #[serde(default)]
+    pub shared: crate::monster::Shared,
+    /// The tree `InitKnightvsRatmen+82` (0x236f) stands in the middle of a
+    /// ratmen fight, which is the only thing `RatmanLeap` (0x31c7) aims a
+    /// first leap at.
+    #[serde(default)]
+    pub perch: Option<crate::monster::Perch>,
 }
 
 /// Any non-zero start; the original seeds its register off the BIOS tick,
@@ -212,6 +237,8 @@ impl Bout {
             wave: Wave::default(),
             arrivals: Arrivals::default(),
             progression: 0,
+            shared: crate::monster::Shared::default(),
+            perch: None,
         }
     }
 
@@ -409,6 +436,7 @@ impl Bout {
             script_tick: 0,
             spent: false,
             follow: false,
+            until: String::new(),
         };
         // Its first frame now, so it is on screen the tick it leaves the hand,
         // and `SpeedKnife` opens with the `TASKSOUND` for the throw.
@@ -442,6 +470,7 @@ impl Bout {
             script_tick: 0,
             spent: false,
             follow: true,
+            until: String::new(),
         };
         self.launch(m, &def.animation);
     }
@@ -470,6 +499,7 @@ impl Bout {
             script_tick: 0,
             spent: false,
             follow: false,
+            until: String::new(),
         };
         self.launch(m, &def.animation);
     }
@@ -500,6 +530,7 @@ impl Bout {
             script_tick: 0,
             spent: false,
             follow: false,
+            until: String::new(),
         };
         self.launch(m, &def.animation);
     }
@@ -541,32 +572,55 @@ impl Bout {
         }
     }
 
-    /// The rest of the `+0xc` branch, for the one controller whose blow turns
-    /// what it hit: `RatmanHit` (0x34f0) calls `FlipKnight` (0x3d13) when the
-    /// two are facing the same way, which is the ratman spinning a knight it
-    /// has clawed in the back. See [`crate::monster::ratman_flips`].
+    /// `RatmanHit`, image 0x34f0: the ratman's own `+0xc` branch, and the
+    /// two things it does that nothing else in the game does.
     ///
-    /// `FlipKnight` writes the *task*'s `+0x14` and lets `perdone` (0x99d2)
-    /// carry it into the record, so the fighter and the task are both turned
-    /// here; leaving the task alone would have shown the old mirror until the
-    /// next hand-over.
+    /// ```text
+    /// 034f0  mov si, [di+0xc]                 ; whoever it hit
+    /// 034f3  cmp byte [si+0x35], 0x12
+    /// 034f7  jne 034fc; jmp ControlRatCollide ; another rat: nothing
+    /// 034fc  test byte [di+0x48], 1;  jne RatLeapHit    ; it was in the air
+    /// 03502  test byte [di+0x48], 8;  jne RatTailHit    ; it was in the tree
+    /// 03508  mov word [0x783a], 0xffff        ; carry the claw through
+    /// 0350e  mov word [di+0x48], 0
+    /// 03513  mov word [HitDelay], 0xf         ; and no rat claws for fifteen
+    /// 03519  mov al, [si+8]; cmp al, [di+8]   ; FlipKnight, see below
+    /// ```
     ///
-    /// The `+0x48` branches the original takes before this are the leap and
-    /// the tail from a tree. Neither is a flag on the brain here, and the
-    /// script the ratman is on is what tells them apart, so that is what is
-    /// asked.
-    fn ratman_hit(&mut self, attacker: usize, target: usize, def: &ActorDef) {
+    /// `+0x48 & 0x80`, the short hop, is **not** tested here, so a hop that
+    /// connects takes the ordinary path and the `mov word [di+0x48], 0` at
+    /// 0x350e ends the hop where it stands. The jump's slot is left occupied
+    /// in the original and nothing steps it again; dropping it is the same
+    /// thing.
+    ///
+    /// `FlipKnight` (0x3d13) writes the *task*'s `+0x14` and lets `perdone`
+    /// (0x99d2) carry it into the record, so the fighter and the task are both
+    /// turned here; leaving the task alone would have shown the old mirror
+    /// until the next hand-over. See [`crate::monster::ratman_flips`].
+    fn ratman_hit(&mut self, attacker: usize, target: usize, def: &ActorDef) -> bool {
         if def.controller() != Controller::Ratman {
-            return;
+            return false;
         }
-        let busy = def
-            .scripts_for("leap")
-            .iter()
-            .any(|s| *s == self.fighters[attacker].script);
-        let same_kind = self.fighters[attacker].actor == self.fighters[target].actor;
+        // 034f3: a rat's claw does nothing at all to another rat.
+        if self.fighters[attacker].actor == self.fighters[target].actor {
+            return false;
+        }
+        let flags = self.fighters[attacker].brain.flags;
+        // 034fc  test byte ptr [di + 0x48], 1
+        if flags & crate::monster::flag::LEAPING != 0 {
+            return self.rat_leap_hit(attacker, target, def);
+        }
+        // 03502  test byte ptr [di + 0x48], 8
+        if flags & crate::monster::flag::IN_TREE != 0 {
+            return self.rat_tail_hit(attacker, target, def);
+        }
+        // 0350e / 03513.
+        self.clear_rat_flags(attacker);
+        self.shared.hit_delay = 0xf;
         let (victim, ratman) = (self.fighters[target].facing, self.fighters[attacker].facing);
-        if !crate::monster::ratman_flips(same_kind, busy, victim, ratman) {
-            return;
+        if !crate::monster::ratman_flips(false, false, victim, ratman) {
+            // 03508  mov word ptr [0x783a], 0xffff: carry the claw through.
+            return true;
         }
         let f = &mut self.fighters[target];
         f.facing = -victim;
@@ -574,6 +628,147 @@ impl Bout {
             // 03d26  xor byte ptr [si + 0x14], 2
             t.facing ^= 2;
         }
+        true
+    }
+
+    /// `+0x48` and `+0x49` put down together, which four of the ratman's
+    /// branches do with one `mov word [di+0x48], 0`.
+    fn clear_rat_flags(&mut self, who: usize) {
+        use crate::monster::flag;
+        let f = &mut self.fighters[who];
+        f.brain.flags &= !(flag::LEAPING
+            | flag::TREE_BOUND
+            | flag::IN_TREE
+            | flag::GOUGING
+            | flag::ON_HEAD
+            | flag::SHORT_HOP
+            | flag::RELEASING
+            | flag::HANGING);
+        f.brain.jump = None;
+        f.brain.height = 0;
+    }
+
+    /// `RatLeapHit`, image 0x353f: a leap that lands on somebody puts the rat
+    /// on his head for as long as his endurance holds out.
+    ///
+    /// ```text
+    /// 0353f  cmp byte [si+0x35], 0x12; jne; jmp RatmanLeaping
+    /// 03548  test word [RatFLAGS], 0x20
+    /// 0354e  jne RatmanLeaping                ; one is up there already
+    /// 03553  mov word [di+0x48], 0; or byte [di+0x48], 0x20
+    /// 0355c  or  word [RatFLAGS], 0x20
+    /// 03561  mov al, [si+0x30]; add al, 6     ; his endurance, plus six
+    /// 03567  mov [di+0x4a], ax
+    /// 0356a  mov word [0x783a], Ratman_SitOnHead
+    /// 03570  mov word [di+4], 0               ; and it is on the ground again
+    /// 03575  mov ax, si; call TASKSTANDBY     ; he is drawn inside its frame
+    /// ```
+    fn rat_leap_hit(&mut self, attacker: usize, target: usize, def: &ActorDef) -> bool {
+        use crate::monster::{flag, rat_flag};
+        // 03548: one rat at a time, and the rest carry on falling.
+        if self.shared.rat & rat_flag::ON_HEAD != 0 {
+            return true;
+        }
+        self.clear_rat_flags(attacker);
+        self.shared.rat |= rat_flag::ON_HEAD;
+        let endurance = self.fighters[target]
+            .record
+            .get(crate::monster::ENDURANCE)
+            .clamp(0, 255);
+        let script = def.scripts_for("sit").first().cloned().unwrap_or_default();
+        if script.is_empty() {
+            return false;
+        }
+        let f = &mut self.fighters[attacker];
+        f.brain.flags |= flag::ON_HEAD;
+        f.brain.cooldown = endurance + 6;
+        f.ordered = Some(Order {
+            state: State::Attack,
+            script,
+            attack: None,
+        });
+        self.fighters[target].holder = Some(attacker);
+        self.fighters[target].hidden = true;
+        true
+    }
+
+    /// `RatTailHit`, image 0x357d: the tail a rat hangs into the arena from
+    /// its tree, and what it catches with it.
+    ///
+    /// ```text
+    /// 0357d  mov word [di+0x48], 0
+    /// 03582  or  byte [di+0x49], 4
+    /// 03586  or  word [RatFLAGS], 8
+    /// 0358b  mov word [0x783a], Ratman_SnagKnight
+    /// 03591  mov ax, si; call TASKSTANDBY
+    /// ```
+    fn rat_tail_hit(&mut self, attacker: usize, target: usize, def: &ActorDef) -> bool {
+        use crate::monster::{flag, rat_flag};
+        let script = def.scripts_for("snag").first().cloned().unwrap_or_default();
+        if script.is_empty() {
+            return false;
+        }
+        let height = self.fighters[attacker].brain.height;
+        self.clear_rat_flags(attacker);
+        self.shared.rat |= rat_flag::HANGING;
+        let f = &mut self.fighters[attacker];
+        // The rat stays where it was: only `+0x48`/`+0x49` change, and it is
+        // still up the tree while it holds him.
+        f.brain.height = height;
+        f.brain.flags |= flag::HANGING;
+        f.ordered = Some(Order {
+            state: State::Attack,
+            script,
+            attack: None,
+        });
+        self.fighters[target].holder = Some(attacker);
+        self.fighters[target].hidden = true;
+        true
+    }
+
+    /// `BalokHit`, image 0x377a, and `BalokGrabbed` (0x379b): the grab that
+    /// connects takes hold of the knight rather than staggering him.
+    ///
+    /// ```text
+    /// 0377a  mov di, [si+0xc]
+    /// 0377d  cmp word [si+0x28], 0x10        ; the grab
+    /// 03781  je  BalokGrabbed
+    /// 03783  cmp word [si+0x28], 4           ; the uppercut
+    /// 03787  jne 03792
+    /// 03789  mov word [0x783a], Balok_SlapRecover
+    /// 03792  mov ax, [si+0x12]               ; anything else: Balok_Recover
+    /// BalokGrabbed:
+    /// 0379b  mov ax, di; call TASKSTANDBY
+    /// 037a0  mov word [0x783a], Balok_GrabKnight
+    /// 037a6  or  word [BalokFLAGS], 1
+    /// ```
+    fn balok_hit(&mut self, attacker: usize, target: usize, def: &ActorDef) -> bool {
+        if def.controller() != Controller::Balok {
+            return false;
+        }
+        // 0377d  cmp word ptr [si + 0x28], 0x10: the grab and nothing else.
+        // The uppercut's own branch is `Balok_SlapRecover` and everything
+        // else's is `+0x12`, which is what [`Fighter::recover`] already gives.
+        if self.fighters[attacker].attack != Some(Attack::Chop) {
+            return false;
+        }
+        if !def.animation.contains_key("Balok_GrabKnight") {
+            return false;
+        }
+        self.shared.balok |= crate::monster::balok_flag::HELD;
+        // `BalokGrabbed` writes `[0x783a]` itself, so this is the controller's
+        // own answer rather than an order it can be talked out of: the flag is
+        // what `ControlBalok` reads on its next pass, and the script is what
+        // this frame turns into.
+        self.fighters[attacker].brain.flags |= crate::monster::flag::GRABBED;
+        self.fighters[attacker].ordered = Some(Order {
+            state: State::Attack,
+            script: "Balok_GrabKnight".into(),
+            attack: None,
+        });
+        self.fighters[target].holder = Some(attacker);
+        self.fighters[target].hidden = true;
+        true
     }
 
     /// `KnightGotStruck` (0x4267): the facing its table writes into whoever
@@ -595,10 +790,214 @@ impl Bout {
     /// The task loop's `+0xe` branch: `TroggStruck` (0x2f19) zeroes `+0x4a`
     /// (0x2f1c) beside picking the blow-taken script, which
     /// [`Fighter::struck`] already did. No `FaceKnight` on this path either.
-    fn got_struck(&mut self, target: usize, def: &ActorDef) {
+    fn got_struck(&mut self, target: usize, def: &ActorDef, by: Option<Attack>) {
         if matches!(def.controller(), Controller::Trogg | Controller::TroggSpear) {
             crate::monster::trogg_struck(&mut self.fighters[target].brain);
         }
+        if def.controller() == Controller::Ratman {
+            self.ratman_struck(target, def, by);
+        }
+    }
+
+    /// `RatmanStruck` (0x3465) and `KnightStruckRatInAir` (0x34b5): what a
+    /// blow does to a ratman, which depends on what it was doing when the
+    /// blow arrived.
+    ///
+    /// ```text
+    /// 03465  mov si, [di+0xe]                  ; whoever struck it
+    /// 03468  cmp byte [si+0x35], 6
+    /// 0346c  je 03471; jmp ControlRatCollide   ; not a joystick knight: nothing
+    /// 03471  test byte [di+0x48], 1
+    /// 03475  jne KnightStruckRatInAir
+    /// 03477  cmp word [si+0x28], 8;    je 03483    ; a block
+    /// 0347d  cmp word [si+0x28], 0xe; jne 0349b    ; an evade
+    /// 03483  mov word [0x783a], Ratman_HitOnHead
+    /// 03489  mov word [di+0x48], 0
+    /// 0348e  mov word [di+4], 0
+    /// 03493  mov word [di+0x38], 0xffff          ; and that is the end of it
+    /// 0349b  the ordinary blow: CalcDamage and the `*Hit` row
+    /// KnightStruckRatInAir:
+    /// 034b5  cmp word [si+0x28], 0xc; je 034d8    ; the up thrust
+    /// 034bb  CalcDamage; mov word [di+0x48], 0; mov word [di+4], 0
+    /// 034cf  mov word [0x783a], Ratman_Stabbed
+    /// 034d8  mov word [0x783a], Ratman_KnockDead
+    /// 034de  mov word [di+0x48], 0; mov word [di+4], 0
+    /// 034e8  mov word [di+0x38], 0xffff
+    /// ```
+    ///
+    /// So a block or an evade **kills** a ratman outright, and so does an up
+    /// thrust that catches one in the air: three of the eight attack kinds end
+    /// it whatever its hit points say.
+    ///
+    /// The kind test at 0x3468 is read and **not** reproduced. `+0x35` 6 is
+    /// `ControlKnight`, a knight with a joystick, so in the original a rat is
+    /// unhurt by another rat and by the computer knight alike; this engine has
+    /// already taken the damage off by the time the branch is reached, and
+    /// undoing it here would be a worse lie than leaving the gate out of a
+    /// fight the player is always in.
+    fn ratman_struck(&mut self, target: usize, def: &ActorDef, by: Option<Attack>) {
+        let airborne = self.fighters[target].brain.flags & crate::monster::flag::LEAPING != 0;
+        // The three branches, and whether each one is the end of it.
+        let (script, fatal) = match (airborne, by) {
+            // 034b5  cmp word ptr [si + 0x28], 0xc; 034e8 hit points to -1
+            (true, Some(Attack::UThrust)) => ("Ratman_KnockDead", true),
+            // 034bb: anything else that catches it in the air takes its
+            // damage the ordinary way, which `Fighter::struck` has done.
+            (true, _) => ("Ratman_Stabbed", false),
+            // 03477 / 0347d: a block or an evade, and 03493 hit points to -1.
+            (false, Some(Attack::Block | Attack::Evade)) => ("Ratman_HitOnHead", true),
+            _ => return,
+        };
+        if !def.animation.contains_key(script) {
+            return;
+        }
+        self.clear_rat_flags(target);
+        let f = &mut self.fighters[target];
+        if fatal {
+            // `mov word ptr [di+0x38], 0xffff`.
+            f.health = 0;
+        }
+        f.state = State::Idle;
+        f.enter_on(if fatal { State::Dead } else { State::Hurt }, script.into());
+    }
+
+    /// A task in the arena that fights nobody: the ratmen's tree.
+    ///
+    /// `InitKnightvsRatmen+82` (0x236f) builds it out of `SetDecapFLAG+7`
+    /// (0x3e7d), which is the general "put an actor here on this script"
+    /// routine, with kind `0x14` and `ControlMisc` (0x3ead) for a controller,
+    /// and `ControlMisc` does nothing at all but keep `[0x783a]` at `0xffff`.
+    /// Here it is a task with no fighter behind it, which is the same thing
+    /// with nothing left over.
+    pub fn stand_scenery(
+        &mut self,
+        actor: &str,
+        def: &ActorDef,
+        row: &str,
+        at: crate::monster::Perch,
+    ) {
+        let Some(script) = def.scripts_for(row).first().cloned() else {
+            return;
+        };
+        let mut task = Task::new(&script, at.x, at.y + def.origin[1] as i32, FACING_RIGHT);
+        task.table = def.bank_table;
+        task.z = at.height;
+        let m = Missile {
+            owner: 0,
+            actor: actor.to_string(),
+            task,
+            record: TaskActor::default(),
+            depth: at.y,
+            attack: None,
+            flight: String::new(),
+            script_tick: 0,
+            spent: false,
+            follow: false,
+            until: String::new(),
+        };
+        let scripts = def.animation.clone();
+        self.launch(m, &scripts);
+    }
+
+    /// `BeastStruck1`, image 0x4430: the two things a beast does to whoever it
+    /// runs into, which are the only blows in the game that pick the animation
+    /// off which way the two are *facing*.
+    ///
+    /// ```text
+    /// 04430  sub word [di+0x38], 5
+    /// 04434  cmp word [di+0x38], 0; jg 0447b        ; he lived: a toss
+    /// 0443a  cmp word [GORESWITCH], 0; jne 0447b    ; gore off: a toss
+    /// 04441  mov word [0x7834], 1
+    /// 04447  mov si, [di+0xe]                       ; the beast
+    /// 0444a  mov al, [di+8]; cmp al, [si+8]
+    /// 04450  je  04457
+    /// 04452  mov si, Beast_ImpaleChest              ; facing each other
+    /// 04457  mov si, Beast_ImpaleBack               ; facing the same way
+    /// 0445a  mov di, [di+0xe]; call REPLACEANIM     ; on the beast's own task
+    /// 04466  call StopCombat
+    /// 04469  call KillKnight
+    /// 0446c  mov word [0x783a], 0
+    /// 04472  mov word [0x788b], 1
+    /// 0447b  mov si, [di+0xe]
+    /// 0447e  mov al, [di+8]; cmp al, [si+8]; je 0448f
+    /// 04486  mov word [0x783a], Beast_ChestToss     ; facing each other
+    /// 0448f  mov word [0x783a], Beast_BackToss      ; facing the same way
+    /// ```
+    ///
+    /// The impale is played by the **beast**, the toss by the **knight**, and
+    /// both draw out of the beast's bank tables; see [`Missile::until`] for
+    /// how the toss reaches the screen here. The five hit points at 0x4430 are
+    /// the beast's `*Dam` figure and are already off by the time this runs.
+    fn beast_tosses(
+        &mut self,
+        attacker: usize,
+        target: usize,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) -> bool {
+        if a_def.controller() != Controller::Beast {
+            return false;
+        }
+        // 0444a / 0447e: the same comparison twice, on `+8` either side.
+        let same_way = self.fighters[target].facing == self.fighters[attacker].facing;
+        // 04434 / 0443a: the impale wants him dead and the gore switch on.
+        if self.fighters[target].health <= 0 && !self.bloodless {
+            let script = if same_way {
+                "Beast_ImpaleBack"
+            } else {
+                "Beast_ImpaleChest"
+            };
+            if !a_def.animation.contains_key(script) {
+                return false;
+            }
+            self.fighters[target].hidden = true;
+            self.fighters[target].holder = Some(attacker);
+            self.fighters[attacker].ordered = Some(Order {
+                state: State::Attack,
+                script: script.to_string(),
+                attack: None,
+            });
+            return true;
+        }
+        if self.fighters[target].health <= 0 {
+            return false;
+        }
+        let script = if same_way {
+            "Beast_BackToss"
+        } else {
+            "Beast_ChestToss"
+        };
+        if !a_def.animation.contains_key(script) || !a_def.animation.contains_key("Knight_SwStance")
+        {
+            return false;
+        }
+        let (x, y, facing) = {
+            let f = &self.fighters[target];
+            match f.task.as_ref() {
+                Some(t) => (t.x, t.y, t.facing),
+                None => (f.x, f.y + t_def.origin[1] as i32, 1),
+            }
+        };
+        let mut task = Task::new(script, x, y, facing);
+        task.table = a_def.bank_table;
+        let depth = self.fighters[target].y;
+        let m = Missile {
+            owner: target,
+            actor: self.fighters[attacker].actor.clone(),
+            task,
+            record: TaskActor::with_health(self.fighters[target].health),
+            depth,
+            attack: None,
+            flight: String::new(),
+            script_tick: 0,
+            spent: false,
+            follow: false,
+            until: "Knight_SwStance".into(),
+        };
+        self.fighters[target].hidden = true;
+        let scripts = a_def.animation.clone();
+        self.launch(m, &scripts);
+        true
     }
 
     /// `TrollStruck1` (0x438a) and `TrollOHead` (0x4397): the troll's own
@@ -786,6 +1185,13 @@ impl Bout {
             return i;
         }
         let decapped = self.decapping(&def_of);
+        // `CalcDamage` (0x2d67) with the opponent in `si`, taken before the
+        // fighters are borrowed: what his own blow takes off.
+        let foe_blow = {
+            let t_def = def_of(&self.fighters[target].actor);
+            let kind = self.fighters[target].attack.unwrap_or(Attack::Swing);
+            self.blow(target, t_def, kind)
+        };
         let (act, mut intent) = {
             let def = def_of(&self.fighters[me].actor);
             let foe = &self.fighters[target];
@@ -799,6 +1205,10 @@ impl Bout {
                 body: foe.finishable(t_def),
                 decapped,
                 progression: self.progression,
+                perch: self.perch,
+                // `CalcDamage` with the opponent in `si`: what his own blow
+                // takes off, which `RatHangKnight` is the one caller of.
+                foe_blow,
             };
             let mut brain = self.fighters[me].brain;
             let mut seed = self.rng;
@@ -808,7 +1218,8 @@ impl Bout {
             // `NOTEND+20` loaded from `[di+8]`, into the task on the way
             // out. A creature's facing is set here and nowhere else.
             let mut facing = self.fighters[me].facing;
-            let act = decide(&sight, &mut brain, &mut seed, &mut facing);
+            let mut shared = self.shared;
+            let act = decide(&sight, &mut brain, &mut seed, &mut facing, &mut shared);
             // TroggAttack+0x3b (0x2e9f): `mov word ptr [DeCapFLAG], 1`, on
             // the one path that orders an attack on a knight with no hit
             // points left. The controller cannot reach the bout's word, so
@@ -822,6 +1233,7 @@ impl Bout {
             self.fighters[me].brain = brain;
             self.fighters[me].facing = facing;
             self.rng = seed;
+            self.shared = shared;
             (act, Intent::default())
         };
         let order = |state, script: String, attack| {
@@ -879,6 +1291,74 @@ impl Bout {
                 intent.dy = 1;
                 intent.attack = true;
                 None
+            }
+            // `RatmanLeaping` (0x3276) and `BalokJumping` (0x36df): the arc
+            // writes `+2` and `+6` itself and names the frame to draw. The
+            // height is `+4` and lives on the brain, which the controller has
+            // already written.
+            Act::Fly { x, y, script } => {
+                let b = GLOBAL;
+                let (nx, ny) = b.clamp(x, y);
+                let f = &mut self.fighters[me];
+                f.x = nx;
+                f.y = ny;
+                if script.is_empty() {
+                    order(State::Idle, String::new(), None)
+                } else {
+                    order(State::Attack, script, None)
+                }
+            }
+            // One frame of a hold, from the holder's side: see `Act::Grip`.
+            Act::Grip {
+                script,
+                damage,
+                cost,
+                fatal,
+                hold,
+                victim,
+            } => {
+                let t_def = def_of(&self.fighters[target].actor);
+                if hold {
+                    self.fighters[target].holder = Some(me);
+                    self.fighters[target].hidden = true;
+                } else {
+                    self.fighters[target].holder = None;
+                    self.fighters[target].hidden = false;
+                }
+                // `sub word [di+0x38], n` on the one held: hit points off,
+                // with no blow-taken script of his own, because he is drawn
+                // inside the creature's animation while this lasts.
+                if fatal {
+                    let left = self.fighters[target].health.max(1);
+                    self.fighters[target].struck(t_def, left, None);
+                } else if damage > 0 {
+                    let f = &mut self.fighters[target];
+                    f.health -= damage;
+                    if f.health <= 0 {
+                        f.health = 0;
+                        f.struck(t_def, 0, None);
+                    }
+                }
+                // `REPLACEANIM` on the one held: `Knight_Explode` under
+                // Balok's landing, `Knight_GetUp` off a dead ratman's grip.
+                if !victim.is_empty() && t_def.animation.contains_key(&victim) {
+                    let f = &mut self.fighters[target];
+                    f.state = State::Idle;
+                    f.enter_on(State::Dead, victim);
+                } else if !hold && self.fighters[target].alive() {
+                    self.fighters[target].enter(State::Idle);
+                }
+                // `sub word [di+0x38], ax` on the creature itself:
+                // `RatHangKnight+32` puts the knight's own blow through it.
+                if cost > 0 {
+                    let def = def_of(&self.fighters[me].actor);
+                    self.fighters[me].struck(def, cost, None);
+                }
+                if script.is_empty() {
+                    order(State::Idle, String::new(), None)
+                } else {
+                    order(State::Attack, script, None)
+                }
             }
             Act::Strike {
                 script,
@@ -940,7 +1420,35 @@ impl Bout {
             }
             let intent = intents.get(i).copied().unwrap_or_default();
             let def = def_of(&self.fighters[i].actor);
-            let line = self.fighters[i].step_gated(def, intent, &self.field, bloodless);
+            // `TASKWALKCOLLIDE`'s own loop over the task table (0x9e1e): every
+            // slot that is filled, is not this actor, has a body box
+            // (`[di+0x22]` non-zero, which is to say it has been drawn at
+            // least once) and has hit points left, so the dead are no longer
+            // in the way.
+            //
+            // A fighter somebody has hold of is left out here and is not left
+            // out there: `TASKSTANDBY` takes his *task* off the draw list and
+            // his record keeps whatever box it last had, so in the original he
+            // is still a body while a mudman or Balok holds him. He is drawn
+            // inside his holder's animation, standing where his holder stands,
+            // and leaving him in would be a second body on the same ground.
+            let others: Vec<Occupant> = (0..self.fighters.len())
+                .filter(|k| *k != i)
+                .filter(|k| self.fighters[*k].alive() && !self.fighters[*k].hidden)
+                .map(|k| {
+                    let f = &self.fighters[k];
+                    let (l, t, r, b) = f.body(def_of(&f.actor));
+                    Occupant {
+                        x: f.x,
+                        depth: f.y,
+                        box_left: l,
+                        box_right: r,
+                        box_top: t,
+                        box_bottom: b,
+                    }
+                })
+                .collect();
+            let line = self.fighters[i].step_among(def, intent, &self.field, bloodless, &others);
             if !line.is_empty() {
                 let f = &self.fighters[i];
                 blows.push(Blow {
@@ -1014,9 +1522,14 @@ impl Bout {
                             self.field_creature(&actor, def, seat);
                         }
                     }
-                    // `KillKnight`, which the dragon's own chewing calls.
+                    // `KillKnight` (0xab2), which the dragon's own chewing
+                    // calls, and Balok's bite and squeeze with it. Whoever this
+                    // fighter has hold of is the one it means, since a held
+                    // fighter is off the board and `nearest_foe` will not name
+                    // him.
                     Effect::Gosub { routine, .. } if routine == "KillKnight" => {
-                        if let Some(t) = self.nearest_foe(i) {
+                        let held = self.fighters.iter().position(|f| f.holder == Some(i));
+                        if let Some(t) = held.or_else(|| self.nearest_foe(i)) {
                             let t_def = def_of(&self.fighters[t].actor);
                             let left = self.fighters[t].health.max(1);
                             self.fighters[t].holder = None;
@@ -1040,6 +1553,7 @@ impl Bout {
                                 script_tick: 0,
                                 spent: false,
                                 follow: false,
+                                until: String::new(),
                             };
                             self.launch(m, &def.animation);
                         }
@@ -1118,6 +1632,27 @@ impl Bout {
             }
             if !m.task.active {
                 m.spent = true;
+            }
+            // A stand-in that has reached the end of its chain: the fighter it
+            // stood in for comes back where it left him.
+            if !m.until.is_empty() && (m.task.pc.script == m.until || !m.task.active) {
+                m.spent = true;
+                let (owner, x) = (m.owner, m.task.x);
+                if let Some(f) = self.fighters.get_mut(owner) {
+                    f.hidden = false;
+                    f.holder = None;
+                    // The column the chain left him at. The depth is his own:
+                    // a task's `y` here is the anchor row, and turning it back
+                    // into a feet row wants the actor's origin, which is the
+                    // fighter's rather than the stand-in's.
+                    let (nx, ny) = GLOBAL.clamp(x, f.y);
+                    f.x = nx;
+                    f.y = ny;
+                    if f.alive() {
+                        f.enter(State::Idle);
+                    }
+                }
+                continue;
             }
             if !m.flight.is_empty() {
                 let off = if m.task.mirror() {
@@ -1212,7 +1747,7 @@ impl Bout {
                     }
                     let evading = self.fighters[target].guarding() == Some(Attack::Evade);
                     self.fighters[target].struck(t_def, damage, blow.attack);
-                    self.got_struck(target, t_def);
+                    self.got_struck(target, t_def, blow.attack);
                     if blow.missile.is_none() {
                         self.troll_explodes(target, blow.attack, a_def, t_def);
                         self.trogg_spear_toss(attacker, target, a_def, t_def);
@@ -1272,6 +1807,21 @@ impl Bout {
                     // well. `flag::DRIVEN` is the original's `+0x35`: kind 8
                     // runs `ControlBlackKnight`, kind 6 reads a joystick.
                     let driven = |f: &Fighter| f.brain.flags & crate::monster::flag::DRIVEN != 0;
+                    // The three creatures whose `+0xc` branch names a script
+                    // of its own rather than falling into a recovery:
+                    // `RatmanHit` (0x34f0) with `RatLeapHit` and `RatTailHit`
+                    // under it, `BalokHit` (0x377a) with `BalokGrabbed`, and
+                    // `BeastStruck1` (0x4430). Each answers whether it took
+                    // the frame over, which is what `carries_on` then reads.
+                    let taken = if blow.missile.is_none() {
+                        self.hit_something(attacker, a_def);
+                        let rat = self.ratman_hit(attacker, target, a_def);
+                        let balok = self.balok_hit(attacker, target, a_def);
+                        let beast = self.beast_tosses(attacker, target, a_def, t_def);
+                        rat || balok || beast
+                    } else {
+                        false
+                    };
                     let carries_on = if a_def.controller() == Controller::Knight
                         && driven(&self.fighters[attacker])
                     {
@@ -1282,14 +1832,10 @@ impl Bout {
                             evading,
                         )
                     } else {
-                        blow.attack == Some(Attack::UThrust) || evading
+                        blow.attack == Some(Attack::UThrust) || evading || taken
                     };
                     if blow.missile.is_none() && !carries_on {
                         self.fighters[attacker].recover(a_def);
-                    }
-                    if blow.missile.is_none() {
-                        self.hit_something(attacker, a_def);
-                        self.ratman_hit(attacker, target, a_def);
                     }
                     break;
                 }
@@ -1322,59 +1868,10 @@ impl Bout {
         }
         self.missiles.retain(|m| !m.spent);
 
-        self.separate(&def_of);
         if self.settled() {
             self.settled_for += 1;
         }
         events
-    }
-
-    /// Living fighters at the same depth cannot occupy the same ground. Pushing
-    /// them apart rather than blocking movement keeps a scrappy close-quarters
-    /// fight readable instead of jamming people into a stalemate.
-    ///
-    /// Two different kinds of fighter are kept apart by the wider of the two
-    /// girths and judged level by the looser of the two depth tolerances, so
-    /// a troll and a knight agree about whether they are standing on each
-    /// other whichever of them is asked.
-    fn separate<'a, F>(&mut self, def_of: &F)
-    where
-        F: Fn(&str) -> &'a ActorDef,
-    {
-        let girth_of = |def: &ActorDef| {
-            if def.girth > 0 {
-                def.girth
-            } else {
-                (def.body[2] - def.body[0]) as i32
-            }
-        };
-        let living: Vec<usize> = self.alive().collect();
-        for a in 0..living.len() {
-            for b in a + 1..living.len() {
-                let (i, j) = (living[a], living[b]);
-                let (di, dj) = (
-                    def_of(&self.fighters[i].actor),
-                    def_of(&self.fighters[j].actor),
-                );
-                if (self.fighters[i].y - self.fighters[j].y).abs()
-                    > di.depth_tolerance.max(dj.depth_tolerance)
-                {
-                    continue;
-                }
-                let min_gap = girth_of(di).max(girth_of(dj));
-                let gap = self.fighters[j].x - self.fighters[i].x;
-                if gap.abs() >= min_gap {
-                    continue;
-                }
-                let push = (min_gap - gap.abs() + 1) / 2;
-                let dir = if gap >= 0 { 1 } else { -1 };
-                let bounds = GLOBAL;
-                let (ix, _) = bounds.clamp(self.fighters[i].x - push * dir, self.fighters[i].y);
-                let (jx, _) = bounds.clamp(self.fighters[j].x + push * dir, self.fighters[j].y);
-                self.fighters[i].x = ix;
-                self.fighters[j].x = jx;
-            }
-        }
     }
 
     /// A cheap fingerprint of the whole simulation.
@@ -1412,6 +1909,16 @@ impl Bout {
             mix(f.brain.walk as i64);
             mix(f.brain.phase as i64);
             mix(f.brain.rest as i64);
+            mix(f.brain.height as i64);
+            if let Some(j) = f.brain.jump {
+                for v in [
+                    j.steps, j.yvel, j.grav, j.xvel, j.zvel, j.xpos, j.zpos, j.ypos,
+                ] {
+                    mix(v as i64);
+                }
+            } else {
+                mix(-1);
+            }
             mix(f.holder.map_or(-1, |h| h as i64));
             mix(f.hidden as i64);
             mix(f.drive.dx as i64);
@@ -1541,7 +2048,6 @@ mod tests {
             depth_tolerance: 6,
             attack_cooldown: 30,
             bounty: 0,
-            girth: 0,
             body: [-9, 0, 9, 52],
             sequences,
             ..ActorDef::default()
@@ -1649,6 +2155,248 @@ mod tests {
         b.fighters[0].ordered = None;
         b.trogg_spear_toss(0, 1, &axe, &knight);
         assert_eq!(b.fighters[0].ordered, None);
+    }
+
+    /// `RatLeapHit` (0x353f) and `RatTailHit` (0x357d): the two things a rat's
+    /// blow does that no other creature's does, and the two branches
+    /// `RatmanHit` (0x34fc, 0x3502) takes before the ordinary claw.
+    #[test]
+    fn a_ratmans_blow_from_the_air_takes_his_head_and_one_from_a_tree_snags_him() {
+        use crate::monster::{flag, rat_flag};
+        let mut rat = def();
+        rat.controller = "ratman".into();
+        for row in ["sit", "snag"] {
+            let name = if row == "sit" {
+                "Ratman_SitOnHead"
+            } else {
+                "Ratman_SnagKnight"
+            };
+            rat.scripts.insert(row.into(), vec![name.into()]);
+            rat.animation.insert(name.into(), Default::default());
+        }
+        let knight = def();
+        let field = arena_field();
+        let bout = || {
+            Bout::new(
+                field.clone(),
+                vec![
+                    Fighter::new("r", &rat, 100, 100, 1),
+                    Fighter::new("k", &knight, 140, 100, -1),
+                ],
+            )
+        };
+        // 034fc: the leap. The knight goes off the board and the rat sits on
+        // him for his endurance plus six.
+        let mut b = bout();
+        b.fighters[1].record.set(crate::monster::ENDURANCE, 3);
+        b.fighters[0].brain.flags |= flag::LEAPING;
+        b.fighters[0].brain.height = -30;
+        assert!(b.ratman_hit(0, 1, &rat), "the frame is the rat's own");
+        assert_eq!(b.shared.rat & rat_flag::ON_HEAD, rat_flag::ON_HEAD);
+        assert!(b.fighters[0].brain.flags & flag::ON_HEAD != 0);
+        assert_eq!(b.fighters[0].brain.cooldown, 9, "03561: endurance plus six");
+        assert_eq!(b.fighters[0].brain.height, 0, "03570: mov [di+4], 0");
+        assert!(b.fighters[1].hidden && b.fighters[1].holder == Some(0));
+        assert_eq!(
+            b.fighters[0].ordered.as_ref().map(|o| o.script.as_str()),
+            Some("Ratman_SitOnHead")
+        );
+        // 03548: and a second rat finds the head taken and falls past.
+        let mut second = bout();
+        second.shared.rat |= rat_flag::ON_HEAD;
+        second.fighters[0].brain.flags |= flag::LEAPING;
+        assert!(second.ratman_hit(0, 1, &rat));
+        assert!(!second.fighters[1].hidden, "one rat at a time");
+        // 03502: the tail from the tree, which leaves it in the tree.
+        let mut b = bout();
+        b.fighters[0].brain.flags |= flag::IN_TREE;
+        b.fighters[0].brain.height = -88;
+        assert!(b.ratman_hit(0, 1, &rat));
+        assert_eq!(b.shared.rat & rat_flag::HANGING, rat_flag::HANGING);
+        assert!(b.fighters[0].brain.flags & flag::HANGING != 0);
+        assert_eq!(b.fighters[0].brain.height, -88, "it is still up the tree");
+        assert!(b.fighters[1].hidden && b.fighters[1].holder == Some(0));
+        // 03508: an ordinary claw, which buys every rat fifteen frames.
+        let mut b = bout();
+        assert!(b.ratman_hit(0, 1, &rat));
+        assert_eq!(b.shared.hit_delay, 0xf, "03513: mov [HitDelay], 0xf");
+        assert!(!b.fighters[1].hidden);
+        // 034f3: and a rat's claw does nothing at all to another rat.
+        let mut b = Bout::new(
+            field,
+            vec![
+                Fighter::new("r", &rat, 100, 100, 1),
+                Fighter::new("r", &rat, 140, 100, -1),
+            ],
+        );
+        assert!(!b.ratman_hit(0, 1, &rat));
+        assert_eq!(b.shared.hit_delay, 0);
+    }
+
+    /// `BeastStruck1` (0x4430): the toss when the knight lives, the impale
+    /// when he does not and the gore switch is on, and which of each pair by
+    /// which way the two are facing.
+    #[test]
+    fn the_beast_tosses_a_knight_who_lives_and_impales_one_who_does_not() {
+        let mut beast = def();
+        beast.controller = "beast".into();
+        for name in [
+            "Beast_BackToss",
+            "Beast_ChestToss",
+            "Beast_ImpaleBack",
+            "Beast_ImpaleChest",
+            "Knight_SwStance",
+        ] {
+            beast.animation.insert(name.into(), Default::default());
+        }
+        let knight = def();
+        let field = arena_field();
+        let bout = || {
+            Bout::new(
+                field.clone(),
+                vec![
+                    Fighter::new("b", &beast, 100, 100, 1),
+                    Fighter::new("k", &knight, 140, 100, -1),
+                ],
+            )
+        };
+        // 0447e: facing each other is the chest, and he is thrown as a task of
+        // the beast's own so that the beast's bank tables can draw him.
+        let mut b = bout();
+        b.fighters[1].health = 5;
+        assert!(b.beast_tosses(0, 1, &beast, &knight));
+        assert_eq!(b.missiles.len(), 1);
+        assert_eq!(b.missiles[0].task.pc.script, "Beast_ChestToss");
+        assert_eq!(b.missiles[0].until, "Knight_SwStance");
+        assert!(b.fighters[1].hidden, "he is drawn inside the toss");
+        // 0448f: facing the same way is the back.
+        let mut b = bout();
+        b.fighters[1].health = 5;
+        b.fighters[1].facing = 1;
+        assert!(b.beast_tosses(0, 1, &beast, &knight));
+        assert_eq!(b.missiles[0].task.pc.script, "Beast_BackToss");
+        // 04434 and 0443a: nothing left and the gore on is the impale, which
+        // the beast plays itself.
+        let mut b = bout();
+        b.fighters[1].health = 0;
+        assert!(b.beast_tosses(0, 1, &beast, &knight));
+        assert!(b.missiles.is_empty());
+        assert_eq!(
+            b.fighters[0].ordered.as_ref().map(|o| o.script.as_str()),
+            Some("Beast_ImpaleChest")
+        );
+        assert!(b.fighters[1].hidden && b.fighters[1].holder == Some(0));
+        // 0443a: with the gore off it is a toss like any other.
+        let mut b = bout();
+        b.fighters[1].health = 0;
+        b.bloodless = true;
+        assert!(!b.beast_tosses(0, 1, &beast, &knight), "and he stays down");
+        assert!(b.missiles.is_empty());
+        assert_eq!(b.fighters[0].ordered, None);
+    }
+
+    /// `BalokHit` (0x377a) and `BalokGrabbed` (0x379b): the grab takes hold of
+    /// the knight, and `ControlBalok`'s own flag word carries the three frames
+    /// after it.
+    #[test]
+    fn baloks_grab_takes_hold_and_the_shake_and_the_release_follow() {
+        use crate::monster::{balok_flag, flag};
+        let mut balok = def();
+        balok.controller = "balok".into();
+        for name in [
+            "Balok_GrabKnight",
+            "Balok_ShakeKnight",
+            "Balok_BiteKnight",
+            "Balok_SqueezeKnight",
+            "Balok_Recover",
+        ] {
+            balok.animation.insert(name.into(), Default::default());
+        }
+        let knight = def();
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("b", &balok, 100, 100, 1),
+                Fighter::new("k", &knight, 160, 100, -1),
+            ],
+        );
+        // 0377d: the uppercut's blow is an ordinary one.
+        b.fighters[0].attack = Some(Attack::Swing);
+        assert!(!b.balok_hit(0, 1, &balok));
+        assert!(!b.fighters[1].hidden);
+        // The grab, kind 0x10.
+        b.fighters[0].attack = Some(Attack::Chop);
+        assert!(b.balok_hit(0, 1, &balok));
+        assert_eq!(b.shared.balok & balok_flag::HELD, balok_flag::HELD);
+        assert!(b.fighters[0].brain.flags & flag::GRABBED != 0);
+        assert!(b.fighters[1].hidden && b.fighters[1].holder == Some(0));
+        // And what the controller makes of that, frame by frame: the grab,
+        // the shake, and then the release while he still lives.
+        let mut brain = b.fighters[0].brain;
+        let mut shared = b.shared;
+        let mut seed = 1u16;
+        let mut facing = 1;
+        let held = crate::monster::Sight {
+            me: &b.fighters[0],
+            foe: &b.fighters[1],
+            def: &balok,
+            bounds: GLOBAL,
+            gore: true,
+            body: false,
+            decapped: false,
+            progression: 0,
+            perch: None,
+            foe_blow: 0,
+        };
+        let grip = |a: &crate::monster::Act| match a {
+            crate::monster::Act::Grip { script, hold, .. } => Some((script.clone(), *hold)),
+            _ => None,
+        };
+        let first = crate::monster::decide(&held, &mut brain, &mut seed, &mut facing, &mut shared);
+        assert_eq!(
+            grip(&first),
+            Some(("Balok_GrabKnight".to_string(), true)),
+            "0x37a0"
+        );
+        let second = crate::monster::decide(&held, &mut brain, &mut seed, &mut facing, &mut shared);
+        assert_eq!(
+            grip(&second),
+            Some(("Balok_ShakeKnight".to_string(), true)),
+            "ControlBalokGrab, 0x37ae"
+        );
+        assert_eq!(shared.balok & balok_flag::RELEASING, balok_flag::RELEASING);
+        let third = crate::monster::decide(&held, &mut brain, &mut seed, &mut facing, &mut shared);
+        assert_eq!(
+            grip(&third),
+            Some(("Balok_Recover".to_string(), false)),
+            "ControlBalokRelease, 0x37fa: he lived, so it lets go"
+        );
+        // 037f8: and if he had not, it would be eating him instead.
+        let mut dead = b.fighters[1].clone();
+        dead.health = 0;
+        let done = crate::monster::Sight { foe: &dead, ..held };
+        let mut shared = crate::monster::Shared {
+            balok: balok_flag::RELEASING,
+            ..Default::default()
+        };
+        let bite = crate::monster::decide(&done, &mut brain, &mut seed, &mut facing, &mut shared);
+        assert_eq!(
+            grip(&bite),
+            Some(("Balok_BiteKnight".to_string(), true)),
+            "ControlBalokBite, 0x37c8"
+        );
+        let mut shared = crate::monster::Shared {
+            balok: balok_flag::RELEASING,
+            balok_bite: 1,
+            ..Default::default()
+        };
+        let squeeze =
+            crate::monster::decide(&done, &mut brain, &mut seed, &mut facing, &mut shared);
+        assert_eq!(
+            grip(&squeeze),
+            Some(("Balok_SqueezeKnight".to_string(), true)),
+            "ControlBalokCrush, 0x37dc: every other one"
+        );
     }
 
     /// A lair fight is not over while it still owes creatures, and each death

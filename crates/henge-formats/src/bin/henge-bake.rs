@@ -373,9 +373,6 @@ struct Creature {
     speed: [i32; 2],
     /// Ours: what it is worth to whoever puts it down.
     bounty: u32,
-    /// Ours: how much ground it stands on, or zero to take three quarters of
-    /// the standing frame's width the way the knight's was set.
-    girth: i32,
     /// What the moon does to it: the phase key, the hit points and the blow it
     /// is fielded with on that night. Only the ratman has one.
     moon: &'static [(&'static str, i32, i32)],
@@ -459,7 +456,7 @@ const CREATURES: &[Creature] = &[
         bleeds: true,
         health: 40, damage: 3, approach: 150, back_off: 90, depth: 5,
         // `TrollWALKR` steps 16, 26, 13, 26: twenty pixels a frame.
-        reach: 80, speed: [3, 1], bounty: 40, girth: 0, moon: &[],
+        reach: 80, speed: [3, 1], bounty: 40, moon: &[],
         // `InitKnightvsTroll` (0x26f1) hands `InitTrogg` the trogg's own table,
         // and `InitTrogg`'s `xor [SIDE], 1` starts it on record one.
         seats: TROGG_SEATS, first_seat: 1,
@@ -490,7 +487,7 @@ const CREATURES: &[Creature] = &[
         bleeds: false,
         health: 20, damage: 3, approach: 100, back_off: 90, depth: 5,
         // `TroggWALKR` steps 0, 7, 23: ten pixels a frame.
-        reach: 70, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
+        reach: 70, speed: [2, 1], bounty: 15, moon: &[],
         seats: TROGG_SEATS, first_seat: 0,
         // `InitKnightvsTroggAxe` (0x20b9): one at a time, three owed.
         wave: wave(1, 3, 0, true, false, LEV_TROGG_AXE),
@@ -513,7 +510,7 @@ const CREATURES: &[Creature] = &[
         blockable: true,
         bleeds: false,
         health: 20, damage: 2, approach: 70, back_off: 65, depth: 5,
-        reach: 60, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
+        reach: 60, speed: [2, 1], bounty: 15, moon: &[],
         seats: TROGG_SEATS, first_seat: 0,
         // `InitKnightvsTroggHammer` (0x2145), the same numbers and its own row.
         wave: wave(1, 3, 0, true, false, LEV_TROGG_HAMMER),
@@ -542,7 +539,7 @@ const CREATURES: &[Creature] = &[
         // No `TroggDamSp` exists; the spear's blow is set where the lunge
         // lands, in code not yet read. Three is the axe's, as a stand-in.
         health: 15, damage: 3, approach: 130, back_off: 120, depth: 5,
-        reach: 100, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
+        reach: 100, speed: [2, 1], bounty: 15, moon: &[],
         seats: TROGG_SEATS, first_seat: 0,
         // `InitKnightvsTroggSpear` (0x21e2).
         wave: wave(1, 3, 0, true, false, LEV_TROGG_SPEAR),
@@ -561,8 +558,35 @@ const CREATURES: &[Creature] = &[
         // `RatmenDam` gives one for the slash and three for the bite.
         alternates: &[("lunge", "Ratman_Bite", 3)],
         controller: "ratman",
-        // `RatmenWal`'s up row is the leap, which is what it crosses ground on.
-        rows: &[("leap", &["Ratman_Leap"])],
+        // The whole of the ratman's repertoire, by the row `ControlRatCollide`
+        // and the branches under it name. `RatmanLeaps` (0x325f) writes
+        // `Ratman_Leap` outright; `RatmenWal`'s **up row**, which
+        // `SetMonsterAnims+607` (0x1acd) fills with `Ratman_Leap1`..`4`, is
+        // what `AnimWalk` draws while the arc is running.
+        rows: &[
+            ("leap", &["Ratman_Leap"]),
+            ("fly", &["Ratman_Leap1", "Ratman_Leap2", "Ratman_Leap3", "Ratman_Leap4"]),
+            // `RatmanGouged` (0x33fb).
+            ("leaps", &["Ratman_Leaps"]),
+            // `RatmanInTree` (0x32ce, 0x32d7), sixty apart either way.
+            ("hover_far", &["Ratman_HoverR"]),
+            ("hover_near", &["Ratman_HoverD"]),
+            // `RatTailHit` (0x358b) and `RatHangKnight` (0x32fc, 0x3331,
+            // 0x333a, 0x334a).
+            ("snag", &["Ratman_SnagKnight"]),
+            ("hang", &["Ratman_HangKnight"]),
+            ("hung", &["Ratman_HungKnight"]),
+            ("shake", &["Knight_HangSd"]),
+            ("fall", &["Ratman_FallDown"]),
+            // `RatLeapHit` (0x356a), `RatmanGouge` (0x338c) and
+            // `RatmanOnHead+30` (0x3371).
+            ("sit", &["Ratman_SitOnHead"]),
+            ("gouge", &["Ratman_EyeGouge"]),
+            ("whack", &["Ratman_KnightWhack"]),
+            // `InitKnightvsRatmen+82` (0x236f) stands one actor on this in
+            // the middle of the arena and `RatmanLeap` aims at it.
+            ("tree", &["Rat_TreeBrush"]),
+        ],
         border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "Ratman_Stabbed"), ("swing", "Ratman_Knocked"),
@@ -581,7 +605,7 @@ const CREATURES: &[Creature] = &[
         // routine rewrites them as seven and three, and on the new moon as
         // twelve and five, and that is the table below.
         health: 5, damage: 1, approach: 40, back_off: 30, depth: 5,
-        reach: 24, speed: [3, 1], bounty: 5, girth: 0,
+        reach: 24, speed: [3, 1], bounty: 5,
         moon: &[("full", 7, 3), ("new", 12, 5)],
         seats: RATMAN_SEATS, first_seat: 0,
         // `InitKnightvsRatmen` (0x2337): the one fight in the game that holds
@@ -613,7 +637,7 @@ const CREATURES: &[Creature] = &[
         health: 30, damage: 2, approach: 80, back_off: 75, depth: 5,
         // `MudmenWALK` steps (12, 12), (10, 14): it comes at you on a
         // diagonal, eleven across and thirteen deep a frame.
-        reach: 90, speed: [2, 2], bounty: 25, girth: 0, moon: &[],
+        reach: 90, speed: [2, 2], bounty: 25, moon: &[],
         // `InitMudmen` (0x2655) is the other `SIDE` one: record one.
         seats: MUDMAN_SEATS, first_seat: 1,
         // `InitKnightvsMudmen` (0x2620): two owed, and `AdjustLevel` (0x2898)
@@ -656,7 +680,7 @@ const CREATURES: &[Creature] = &[
         // is not in a `*Dam` table; four is a stand-in between a troll's and
         // a dragon's bite. It moves five pixels a frame, which is one a tick.
         health: 250, damage: 4, approach: 95, back_off: 90, depth: 2,
-        reach: 65, speed: [1, 1], bounty: 100, girth: 0, moon: &[],
+        reach: 65, speed: [1, 1], bounty: 100, moon: &[],
         // `InitKnightvsDemon` writes the record itself, 0x278d..0x27ab:
         // x 100, y 5, z 100, facing 1. It is the one creature that opens on
         // screen and in the middle of it.
@@ -670,9 +694,9 @@ const CREATURES: &[Creature] = &[
         idle: &["Beast_Drool1"],
         walk: &["Beast_Run1", "Beast_Run2", "Beast_Run3", "Beast_Run4"],
         // The beast has no swing: its run is the attack, every `Beast_Run`
-        // frame carrying a weapon part, and what it does to a knight it
-        // reaches (`Beast_BackToss`, `Beast_ChestToss`) is the knight's own
-        // animation. Until that is built, the first run frame is its attack.
+        // frame carrying a weapon part. What it does to a knight it reaches
+        // is `BeastStruck1` (0x4430), and the four scripts that answers with
+        // are the rows below.
         attack: &["Beast_Run1"],
         hurt: &["Beast_LowerHit"],
         death: &["Beast_LowerDead"],
@@ -683,7 +707,17 @@ const CREATURES: &[Creature] = &[
         // `ControlBeast`: it never tracks. It runs from one side of the arena
         // to the other, turns off the edge, waits five to twenty frames, picks
         // a depth and comes back.
-        controller: "beast", rows: &[], border: None, spawns: &[],
+        controller: "beast",
+        // `BeastStruck1` (0x4430): the impale it plays itself when the blow
+        // was the last one and the gore switch is on, and the toss the knight
+        // plays out of the beast's own bank tables when it was not.
+        rows: &[
+            ("impale_back", &["Beast_ImpaleBack"]),
+            ("impale_chest", &["Beast_ImpaleChest"]),
+            ("back_toss", &["Beast_BackToss"]),
+            ("chest_toss", &["Beast_ChestToss"]),
+        ],
+        border: None, spawns: &[],
         hurt_by: &[
             ("lunge", "Beast_LowerHit"), ("swing", "Beast_LowerHit"),
             ("knife", "Beast_LowerHit"), ("rthrust", "Beast_LowerHit"),
@@ -697,7 +731,7 @@ const CREATURES: &[Creature] = &[
         // `BeastChargeOffsets` 33, 27, 17, 33: nearly thirty pixels a frame.
         // Its weapon parts are its own body, so it has to be allowed close:
         // three quarters of its width would keep it out of its own bite.
-        reach: 40, speed: [4, 1], bounty: 30, girth: 20, moon: &[],
+        reach: 40, speed: [4, 1], bounty: 30, moon: &[],
         seats: BEAST_SEATS, first_seat: 0,
         // `InitKnightvsBeast` (0x228d).
         wave: wave(1, 3, 0, true, false, LEV_BEAST),
@@ -713,14 +747,25 @@ const CREATURES: &[Creature] = &[
         // `BalokStruck` calls `AddBlood`.
         kind: "swing",
         alternates: &[("chop", "Balok_Grab", 4)],
-        controller: "balok", rows: &[], border: None, spawns: &[],
+        controller: "balok",
+        // The grab, which `BalokGrabbed` (0x37a0) and the three routines under
+        // `ControlBalok`'s own flags word hand over in turn, and the knight
+        // that bursts under a landing (`BalokJumping+76`, 0x371d).
+        rows: &[
+            ("grab", &["Balok_GrabKnight"]),
+            ("shake", &["Balok_ShakeKnight"]),
+            ("bite", &["Balok_BiteKnight"]),
+            ("squeeze", &["Balok_SqueezeKnight"]),
+            ("slap_recover", &["Balok_SlapRecover"]),
+        ],
+        border: None, spawns: &[],
         hurt_by: &[],
         blockable: false,
         bleeds: true,
         health: 30, damage: 4, approach: 80, back_off: 60, depth: 10,
         // Its uppercut lands from 41 to 74 pixels out, and its own width
         // keeps a knight sixty away, so it swings from just outside that.
-        reach: 70, speed: [2, 1], bounty: 80, girth: 0, moon: &[],
+        reach: 70, speed: [2, 1], bounty: 80, moon: &[],
         seats: BALOK_SEATS, first_seat: 0,
         // `InitKnightvsBalok` (0x2591): two owed, `MaxMonsters` forced back to
         // one at 0x288a, and `InitBalok` (0x25cf) is the one `INITMO` with no
@@ -768,10 +813,7 @@ const CREATURES: &[Creature] = &[
         // `DragonDam`, as `InitKnightvsDragon` overwrites it for this fight,
         // is 10 for a lunge or a right thrust and 30 for a swing or a chop.
         health: 200, damage: 10, approach: 60, back_off: 20, depth: 5,
-        // The girth is a fraction of the figure, which is 212 wide: the bite
-        // is at its origin, and a knight kept the figure's width away could
-        // never be bitten.
-        reach: 60, speed: [1, 1], bounty: 250, girth: 50, moon: &[],
+        reach: 60, speed: [1, 1], bounty: 250, moon: &[],
         // `InitKnightvsDragon` 0x2476: the head at x 80, forty rows up, facing
         // right. Its `z` of 100 goes the way every other arrival's does.
         seats: &[[80, -40, 100, 1]], first_seat: 0,
@@ -800,7 +842,7 @@ const CREATURES: &[Creature] = &[
         // `SetUpDragonTables` runs after the fifty is written and puts the
         // dragon's own 200 and 120 back over it, so fifty never takes effect.
         health: 200, damage: 10, approach: 0, back_off: 0, depth: 10,
-        reach: 60, speed: [0, 0], bounty: 0, girth: 30, moon: &[],
+        reach: 60, speed: [0, 0], bounty: 0, moon: &[],
         // 0x249c and 0x24d5: both claws at x 5, depths 80 and 120, facing
         // right. `DragonMoveClaw1` then pins them either side of the head.
         seats: &[[5, 0, 80, 1], [5, 0, 120, 1]], first_seat: 0,
@@ -1778,11 +1820,6 @@ fn actor_definitions(
         // `BKwon`: a knight put down is one point of experience.
         experience: 1,
         body: [-9, 0, 9, 50],
-        // Wider than the hit box on purpose. The hit box is narrow so that a
-        // strike has to be aimed; the girth is roughly the drawn figure, so
-        // four knights in one arena stand beside each other rather than inside
-        // each other. Median standing frame in KN1.OB is 29 wide.
-        girth: 28,
         origin: origin_of(&animation, &knight_banks, 1, "Knight_SwStance"),
         // One stride of `Knight_SwWalkOn` covers about 47 pixels in four
         // frames, and he walks two pixels a tick. See `ActorDef::script_ticks`.
@@ -1851,8 +1888,8 @@ fn actor_definitions(
 }
 
 /// One creature, built the same way the knight is: the closure of the
-/// scripts its states reach, its loader's bank tables, and an origin, a hit
-/// box and a girth read off its own standing frame.
+/// scripts its states reach, its loader's bank tables, and an origin and a hit
+/// box read off its own standing frame.
 ///
 /// The definition is checked whole before it is written. A script named
 /// wrongly, a state left empty or a part that no bank in the table can
@@ -1892,8 +1929,7 @@ fn creature_definition(
     let origin = origin_of(&animation, &tables, table, stance);
     // The hit box is the standing frame's `BODY` parts, narrowed to their
     // middle half the way the knight's was authored (his stance is 36 wide
-    // and his box is 18), and as tall as those parts. The girth is three
-    // quarters of the drawn width, which is the knight's 28 against 36.
+    // and his box is 18), and as tall as those parts.
     let extent = body_extent(&animation, &tables, table, stance).ok_or_else(|| {
         anyhow::anyhow!("{}: {stance} has no BODY parts to size a box from", c.id)
     })?;
@@ -1929,7 +1965,6 @@ fn creature_definition(
             _ => 1,
         },
         body,
-        girth: if c.girth > 0 { c.girth } else { w * 3 / 4 },
         origin,
         // Six ticks a frame, as the knight: every `InitKnightvs*` routine also
         // writes 6 into `DELAY`, though nothing in the image reads it back.

@@ -94,7 +94,33 @@ pub enum Challenge {
 
 /// Ours, not the original's: see [`Run::xp_per_level`].
 fn default_xp_per_level() -> u32 {
-    4
+    XP_LEVELS[0]
+}
+
+/// `XPlevels`, DS:`0x4d4` (image `0x12884`): what one point of ability costs,
+/// by how many people are playing.
+///
+/// ```text
+/// Adjplayers:
+/// 013c2  add word [NUM_PLAYERS], ax
+/// 013c6  jne 013d0 / mov word [NUM_PLAYERS], 1     ; never zero
+/// 013d0  cmp word [NUM_PLAYERS], 4; jle / mov word [NUM_PLAYERS], 4
+/// 013dd  mov si, 0x4d4                            ; XPlevels
+/// 013e0  mov ax, [NUM_PLAYERS]; sub ax, 1; shl ax, 1
+/// 013e8  add si, ax; mov ax, [si]
+/// 013ec  mov [0x718], ax
+/// ```
+///
+/// and the eight bytes at image `0x12884` are `03 00 02 00 01 00 01 00`. So a
+/// point costs three won bouts alone, two for a pair, and one for three or
+/// four: the more of you there are, the faster each of you rises.
+#[rustfmt::skip]
+pub const XP_LEVELS: [u32; 4] = [3, 2, 1, 1];
+
+/// `Adjplayers` (0x13c2), which clamps the count to one to four and then reads
+/// the table.
+pub fn xp_per_level(players: u32) -> u32 {
+    XP_LEVELS[(players.clamp(1, 4) - 1) as usize]
 }
 
 /// `mov byte ptr [di+0x3b], 0xff` in `SetKnightEquipment`: the grudge a knight
@@ -165,17 +191,15 @@ pub struct Run {
     /// fights are. Spending it is [`Run::spend_experience`].
     #[serde(default)]
     pub experience: u32,
-    /// What one point of ability costs.
+    /// What one point of ability costs: `[0x718]`.
     ///
-    /// **Half recovered.** `HGAbility` and `_MAP:KnightXP` both take exactly
-    /// `[0x718]` off the experience for one point, and `MOON:Adjplayers` fills
-    /// that word from `XPlevels` indexed by the player count. `XPlevels` sits
-    /// at DS:`0x4d4`, inside the first 2,906 bytes of `DGROUP`, which the load
-    /// image used to carry as a stale copy of another region, so its four
-    /// values were not recoverable and this one is ours: four won bouts a
-    /// point, which makes five of everything forty-eight wins away. That span
-    /// is readable now (`docs/REVERSING.md`) and `XPlevels` has not been read
-    /// out of it.
+    /// **Recovered.** `HGAbility` (0xcc23), `_MAP:KnightXP` (0xac7a) and
+    /// `BKAddstuff` (0x4d9) all take exactly `[0x718]` off the experience for
+    /// one point, and `MOON:Adjplayers` (0x13dd) fills that word from
+    /// [`XP_LEVELS`] indexed by the player count. The doc that stood here said
+    /// the four values were not recoverable and that the figure was ours;
+    /// `XPlevels` is at DS:`0x4d4`, which is image `0x12884`, and it reads
+    /// `03 00 02 00 01 00 01 00`.
     #[serde(default = "default_xp_per_level")]
     pub xp_per_level: u32,
     /// The day's travel is doubled. `CastHaste`'s flag, `[0xcca2]`, which the
@@ -784,6 +808,63 @@ impl Run {
         true
     }
 
+    /// `BKwon` (0x49f) and `BKAddstuff` (0x4b0): the duel's own experience,
+    /// which is the only levelling that happens inside a bout rather than on
+    /// the status screen.
+    ///
+    /// ```text
+    /// BKwon:
+    /// 0049f  add word [si+0x36], 1        ; a point for putting him down
+    /// 004a3  mov word [si+0x46], 0
+    /// 004a8  call BKAddstuff
+    /// BKAddstuff:
+    /// 004b1  mov ax, [si+0x36]
+    /// 004b4  cmp ax, [0x718]
+    /// 004b8  jl  ret                      ; not enough yet
+    /// 004ba  call RND
+    /// 004bd  and ax, 3
+    /// 004c0  cmp ax, 2; jle; mov ax, 2    ; three in four is the last one
+    /// 004c8  mov bx, ax
+    /// 004ca  inc byte [bx+si+0x2e]        ; and no ceiling is asked about
+    /// 004cd  cmp bx, 1; jne 004d6
+    /// 004d2  add word [si+0x38], 0xa      ; constitution also adds ten now
+    /// 004d6  mov cx, [si+0x36]; sub cx, [0x718]; mov [si+0x36], cx
+    /// 004e0  call the two health routines
+    /// ```
+    ///
+    /// Three things it does that the status screen's `HGAbility` does not.
+    /// The roll is flat and **not** the weighted one `WIZABL` holds, so the
+    /// three abilities are 1, 1 and 2 in four rather than the wizard's
+    /// weighting. It **skips no ability that is already at five**: the
+    /// increment at 0x4ca is unconditional, which is the one way in the game
+    /// past the ceiling. And the ten hit points at 0x4d2 are added before the
+    /// maximum is recomputed at 0x4e0, so a point of constitution pays twice
+    /// on the frame it lands.
+    ///
+    /// Returns the ability the roll picked, or `None` when there was not
+    /// enough experience to spend.
+    pub fn duel_won(&mut self, items: &Items) -> Option<Ability> {
+        // 0049f  add word ptr [si + 0x36], 1
+        self.experience = self.experience.saturating_add(1);
+        // 004b4  cmp ax, [0x718]; 004b8 jl
+        if self.experience < self.xp_per_level {
+            return None;
+        }
+        // 004bd  and ax, 3; 004c0 cmp ax, 2; jle; mov ax, 2
+        let bx = (self.next_random() & 3).min(2) as usize;
+        let which = Ability::ALL[bx];
+        self.knight.raise_unchecked(which);
+        // 004cd  cmp bx, 1; 004d2 add word ptr [si + 0x38], 0xa
+        if bx == 1 {
+            self.health += 10;
+        }
+        // 004d9  sub cx, [0x718]
+        self.experience -= self.xp_per_level;
+        // 004e0 / 004e3: the two routines that put the maximum back together.
+        self.refresh(items);
+        Some(which)
+    }
+
     /// The same, with the ability picked by the original's own weighting
     /// rather than by the player: what `KnightXP` does for a computer knight.
     pub fn spend_experience_rolled(&mut self, items: &Items) -> Option<Ability> {
@@ -1215,6 +1296,49 @@ mod tests {
         assert_eq!(r.experience, 0);
         assert_eq!(r.health, 40);
         assert!(r.alive());
+    }
+
+    /// `BKwon` (0x49f) and `BKAddstuff` (0x4b0): the point a duel pays is
+    /// spent where it is earned, and the ceiling is not asked about.
+    #[test]
+    fn a_won_duel_pays_a_point_and_spends_it_on_the_spot() {
+        let items = Items::new();
+        let mut r = Run::new(40);
+        // 004b8: three wins before the first one lands, `XPlevels[0]`.
+        assert_eq!(r.xp_per_level, 3);
+        assert_eq!(r.duel_won(&items), None);
+        assert_eq!(r.duel_won(&items), None);
+        assert_eq!(r.experience, 2);
+        let before: Vec<i32> = Ability::ALL.iter().map(|a| r.knight.ability(*a)).collect();
+        let got = r.duel_won(&items).expect("the third pays");
+        assert_eq!(r.experience, 0, "004d9: the cost comes straight off");
+        for (i, a) in Ability::ALL.iter().enumerate() {
+            let want = before[i] + i32::from(*a == got);
+            assert_eq!(r.knight.ability(*a), want, "004ca: one point, into {a:?}");
+        }
+        // 004ca has no ceiling: a knight who keeps winning goes past five,
+        // which `Knight::raise` would refuse and this does not.
+        let mut r = Run::new(40);
+        r.knight.strength = 5;
+        r.knight.constitution = 5;
+        r.knight.endurance = 5;
+        assert!(r.knight.maxed());
+        let mut raised = 0;
+        for _ in 0..30 {
+            if r.duel_won(&items).is_some() {
+                raised += 1;
+            }
+        }
+        assert_eq!(raised, 10, "thirty wins at three a point");
+        let highest = Ability::ALL
+            .iter()
+            .map(|a| r.knight.ability(*a))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            highest > crate::knight::MAX_ABILITY,
+            "0x4ca asks no ceiling: {highest}"
+        );
     }
 
     /// `BKwon`: a knight put down is worth a point, and a fight you lost is
@@ -1850,7 +1974,9 @@ mod magic_tests {
             !r.can_level(),
             "nothing left to buy, whatever the purse says"
         );
-        assert_eq!(r.experience, 1000 - 48);
+        // `XPlevels`, image 0x12884: three a point for one player.
+        assert_eq!(r.xp_per_level, XP_LEVELS[0]);
+        assert_eq!(r.experience, 1000 - 12 * XP_LEVELS[0]);
         assert_eq!(
             r.bestow_ability(&items),
             None,

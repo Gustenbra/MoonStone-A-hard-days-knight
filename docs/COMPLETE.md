@@ -330,7 +330,8 @@ lets a status panel print health the way the original does, as `have/most`.
       swing, so the reading checks out against something chosen independently of it. (0x0b
       is not `KnightGruntSound`'s, as this entry used to say: that routine's ids are 4 to 8
       and it plays none of them. 0x0b is the `TASKSOUND` on the second frame of
-      `Knight_SwSwing`.) The click itself is still not wired to anything
+      `Knight_SwSwing`.) The click is wired: the gadget layer plays it on the tick a
+      gadget's action is taken
 - [x] **Sounds are carried on the animation frames, and nothing is inferred.** The cue
       layer that watched the fight is gone: `henge-audio/src/cue.rs` announced a swing when
       a fighter's state became `Attack`, a footfall on frames 0 and 4 of a walk, and a hit
@@ -369,11 +370,15 @@ lets a status panel print health the way the original does, as `have/most`.
       loading it, so it reads the task x the `TASKGOSUB` handler left there and the
       mudman's crush is heard on three columns in four. All of it is in `docs/TASKVM.md`
       and in `crates/henge-core/src/sound.rs`, with addresses
-- [ ] The two sound sites outside a fight. Both are recovered, neither is wired:
-      `AddClickSound` (`0xd508`, id `0x0f`, `hit3`) is the gadget click and belongs to
-      whatever draws the gadget, and `ShakeDiceSnd` (`0xb32f`, id `0x10`, `hedland`) is the
-      dice cup, played unless `MUSICTYPE` at DS:`0x8643` is 2, which is the Roland. Both
-      ids are in `henge_core::sound` as `CLICK` and `DICE_SHAKE`
+- [x] **The two sound sites outside a fight, wired.** `AddClickSound` (`0xd508`, id
+      `0x0f`, `hit3`) is the gadget click, and the gadget layer plays it the moment a
+      gadget's action is taken, which is what its seventeen callers do.
+      `ShakeDiceSnd` (`0xb32f`, id `0x10`, `hedland`) is **not** the shake at all:
+      nothing calls it, and `DD_ThrowDice` (DS:`0xce6d`) calls it six times through
+      `TASKGOSUB` (0xce91, 0xcecd, 0xceed, 0xceff, 0xcf1f and one more), so it is the
+      rattle of the cup during the **throw**. The dice loop plays it when the frame it
+      steps carries that gosub. The routine is silent when `MUSICTYPE` at DS:`0x8643`
+      is 2, which is the Roland, and this engine is not one
 - [x] **Music. The driver was traced and the note data came out.** `xTUNEn.BIN` is a
       relocatable x86 driver with the song welded into it, entered through `int 60h` with
       `ah = 0` to start, `1` to tick and `2` to stop, and ticked by the game's own timer
@@ -457,12 +462,12 @@ hardware. Nothing to port. Listed so the symbol list is complete.
 |---|---|---|
 | `CALCHIT` | resolve a strike | done, positional hit lines |
 | `CALCMOVE` | movement and bounds | done |
-| `CLEARCOLLISIONS`, `TASKCOLLISION`, `TASKWALKCOLLIDE`, `TaskCol_MainLoop` (0x9f26), `COLCHK` (0x9fcd) | collision | partial. **The weapon pile is recovered**: `COLLIDE.HIT`'s polyline is baked onto each cel and swept exactly as `CHECKL` (0xa0da) and `NOWID1` (0xa0ed) walk it, mirrored by `neg ax; add ax, [WIDTH]` at 0xa0e7. **The strike point is recovered**: `CXx`/`CY` (0xa130, 0xa13f) are the point of the sweep that landed, not the middle of anything, and `TaskCol_MainLoop` writes them into the struck actor's `+0x58`/`+0x5a` (0x9f87). **The body pile is not**: the original tests each weapon point against the body cel's own pixel mask (`CBITLP`, 0xa190) and this tests the swept line against the authored body box |
+| `CLEARCOLLISIONS`, `TASKCOLLISION`, `TASKWALKCOLLIDE` (0x9e06), `TaskCol_MainLoop` (0x9f26), `COLCHK` (0x9fcd) | collision | **`TASKWALKCOLLIDE` is built** (see below). **The weapon pile is recovered**: `COLLIDE.HIT`'s polyline is baked onto each cel and swept exactly as `CHECKL` (0xa0da) and `NOWID1` (0xa0ed) walk it, mirrored by `neg ax; add ax, [WIDTH]` at 0xa0e7, and **with no state test**, because `TaskCol_MainLoop` has none: a part is on the weapon pile because its own record is flagged `WEAPON`, which is how the beast's run frames hurt you. **The strike point is recovered**: `CXx`/`CY` (0xa130, 0xa13f) are the point of the sweep that landed, not the middle of anything, and `TaskCol_MainLoop` writes them into the struck actor's `+0x58`/`+0x5a` (0x9f87). **The body pile is not**: the original tests each weapon point against the body cel's own pixel mask (`CBITLP`, 0xa190) and this tests the swept line against the authored body box |
 | `ControlKnight`, `KnightAttack`, `Rjoystick`, `Ljoystick`, `KnightAttSw` | the attack the direction picks | **done**, recovered: `Attack::for_direction` |
 | `KnightHitSw`, `KnightDamSw`, `*Hit`, `*Dam`, `KnightSAnim`, `CalcDamage` | blow taken and damage by kind | done, as `hurt_by` and `attacks` on every actor; `CalcDamage`'s strength and sword are item 40 |
 | `CheckBlock`, `blockflag`, `KnightBloSw` | blocking | **done**, recovered; `KnightBloSw` is the block table |
 | `KnightHitNormal`, `KnightHitKnight`, `TroggHit`, actor `+0x12` | the recovery a landed blow cuts a swing into | done as `State::Recover` |
-| `SWORDFLAG` | weapon state, drawn and sheathed | todo |
+| `SWORDFLAG`, `TakeSword` (0xccd4), `DisplayMSword` (0xc70c), actor `+0x40` | weapon state, drawn and sheathed | **as far as it goes, and it does not go far.** `SWORDFLAG` is a `PUBLIC` name with no address, sitting between `DRAGON` and `PLAYERPOINTER` in the blob, and nothing in the image has been found that reads or writes it. There is **no sheathed animation set**: every one of the knight's 38 scripts is `Knight_Sw*`, so drawn and sheathed is not something the shipped game can draw. The weapon state the code does keep is `+0x40`, the sword's item id, which `CalcDamage` (0x2d7d, 0x2d86, 0x2d8f) reads for its 2, 3 and 5, and which `TakeSword` writes: 0x19 to the knight who lifts the magic sword and **0x16 to the other one**, which is the only place a sword is taken away. That is `Knight::weapon` and it is built; the temple gadget that calls `TakeSword` belongs to the status screen |
 | `ControlBlackKnight` (0x4b79), `BKnightMove` (0x4bd3), `BKnightAttack` (0x4c13), `BKBlock` (0x4c40), `_evadechop` (0x4cad), `BKAttack` (0x4cc3), `BKnightStruck` (0x4d50), `BlackKnightStruck` (0x4d7f), `BKnightHit` (0x4da8), `BKnightHitKnight` (0x4dc6), `Progression` (DS:0x7c01) | the knight the machine plays | **done**, translated block for block; see 3.2 |
 | `KnifeThrow`, `ControlKnife`, `Knife`, `SpeedKnife`, `KnifeDam`, `SetKnightEquipment` | the thrown dagger | **done**, as a `Missile` in the bout |
 | `BLOW` | a landed blow | done as `HitEvent`; a stopped one is a `Parry` |
@@ -474,7 +479,7 @@ hardware. Nothing to port. Listed so the symbol list is complete.
 | `ALLDEAD` | everyone down | done as `Bout::settled` |
 | `KNIGHTREFRESH`, `KNIGHTLOC`, `KNIGHTBUFFER`, `ENEMYBUFFER` | actor state | done as `Fighter` |
 | `NUM_PLAYERS`, `PLAYER1`-`PLAYER4`, `PLAYERPOINTER` | up to four players | done |
-| `GAME_XP` | experience inside a bout | **todo** |
+| `GAME_XP`, `XPlevels` (DS:0x4d4), `Adjplayers` (0x13c2), `BKwon` (0x49f), `BKAddstuff` (0x4b0), `KnightXP` (0xac61) | experience inside a bout | **done**. `XPlevels` is readable now and is `03 00 02 00 01 00 01 00`: a point of ability costs three won bouts with one player, two with two and one with three or four, which `Adjplayers` puts in `[0x718]` and every spender takes off. The doc that stood here said the four values were not recoverable and that the figure was ours. `BKwon` and `BKAddstuff` are the duel's own levelling and are the only levelling that happens inside a bout: a point for putting him down, and it is spent on the spot on a flat roll of three, not on `WIZABL`'s weighting, with ten hit points thrown in for constitution and **no ceiling asked about** (the `inc byte [bx+si+0x2e]` at 0x4ca is the one way past five in the game) |
 
 The knight's controller was read in full for build order items 46 to 49, and it is
 where the pieces that had been taken for design turned out to live. The account of
@@ -487,8 +492,11 @@ those items in `BUILD_ORDER.md`; the tables themselves are in `TASKVM.md`.
       never blocks, which is a simplification
 - [x] Gore and dismemberment: the switch, the gated parts, the blood, the knight's
       decapitation and collapse. The creatures' own finishers wait on their behaviour
-- [ ] Experience and levelling
-- [ ] Weapon state: the thrown dagger is done; drawn, sheathed and dropped are not
+- [x] **Experience and levelling**, with `XPlevels` read out of the image and
+      `BKAddstuff` transcribed. See the `GAME_XP` row above
+- [x] Weapon state, as far as the image goes: the thrown dagger is done, `+0x40` is
+      done, and drawn/sheathed is not in the shipped game at all. See the `SWORDFLAG`
+      row above
 - [x] **The computer knight (`ControlBlackKnight`).** What stood here was three
       lines: close, swing, cool down twenty. The routine and its eleven blocks are
       translated now, with `Progression` and the day count that indexes it
@@ -521,7 +529,7 @@ stat block. These are recovered and in the pack:
 | `ControlTrogg` (0x2ddf) to `TroggChop` (0x2eff), `TroggStruck+3` (0x2f1c), `TroggHit+8` (0x2f55), `DeCapFLAG` (DS:0x7841) | the trogg, whole | **done**, translated block for block: ten frames of stance after a blow and the next on the eleventh (`sub; jmp` at 0x2eb1, not the demon's `sub; jne`), the count forgotten when struck and restarted at ten when a blow lands, the flag raised on the decision to finish |
 | `KnightGotStruck` (0x4267), `DemonStruck1` (0x4360) into `DemonSlap` (0x437f), `ClawStruck1+26` (0x43ed), `BalokStruck1+7` (0x427d) | a blow turning whoever takes it: the table at DS:0x7843 is indexed by the *striker's* kind, and only the demon's slap (kinds 0x10 and 2) and the dragon's claw write `+8` | **done**, as `monster::struck_facing` and `Bout::turn_struck`. The balok's copy of the demon's three instructions is dead code: the `jne` at 0x427b reads the flags `add bx, ax` left at 0x4272 and `0x7843 + kind` is never zero, so a balok's slap does not turn the knight |
 | `RatmanHit` (0x34f0, the `cmp al, [di+8]` at 0x351c), `FlipKnight` (0x3d13) | a ratman's claw on someone facing the same way spins him round, task (`xor byte [si+0x14], 2`) and record (0x3d31) together. The leap (`+0x48 & 1`), the tail (`+0x48 & 8`) and a blow on its own kind (`+0x35 == 0x12`) never reach it | **done**, as `monster::ratman_flips` and `Bout::ratman_hit` |
-| `TASKWALKCOLLIDE` (0x9e06) | a fighter may not step into another actor's body, tested only in the direction he faces (`xdir = facing & 3`, 0x9e58) | **not built**; `Bout::separate` pushes overlapping fighters apart instead, which is ours |
+| `TASKWALKCOLLIDE` (0x9e06), `CHECK_WALK` (0x9e49), `CheckAboveBelow` (0x9ea9), `FindWidth` (0x9dbc), `perdone` (0x99bd) | a fighter may not step into another actor's body, tested only in the direction he faces (`xdir = facing & 3`, 0x9e58) | **done**, transcribed as `arena::walk_collide`, and `Bout::separate` and the `girth` it read are deleted. Three things about it are not what a designer would write and all three are reproduced: the sideways half refuses only the direction the actor *faces*, so a fighter backing away never bumps into anything; the sideways half wants the two within **ten** rows of depth (`CheckZAxis`, 0x9ef5, its own literal and not the creature's `+0x56`) while the up/down half wants **twenty** (0x9ed2); and `jns` at 0x9ec2 takes the equal case to the `up` bit, so two actors on exactly the same row refuse each other up and allow each other down. The body box is the actor's authored one rather than `FindWidth`'s running min and max of the drawn parts, which is the same stand-in `SBORD` already uses. The depth step in `bx` is loaded by both callers (`ControlKnight+217` 0x3f9d, `MonsterWalk+19` 0x4e9e) and never read by the routine |
 | `SetKnightCombat` (0x2962, the facing at 0x297d), `InitNewMO` (0x27ee), `TroggTABLE` and the other spawn tables | the knight at x 250, y 0, z 100, facing 3; creatures from eight-byte `[x][y][z][facing]` records, off screen and facing in | **done**. The records are in the readable span (`TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3), (-80, 0, 120, 1)) and they are baked on each actor as `ActorDef::seats`. Only x and facing survive the arrival: `AddPlayer` (0x2989) falls into `AddKnight`, whose `mov [di+6], ax` at 0x29b6 is unconditional, so every `z` in every table is dead, `SetKnightCombat`'s `0x64` included. The second knight's record is x 30 facing 1, written identically by `InitPractice` (0x200a) and `InitKnightvsKnight` (0x206b). `FaceKnight` still turns a creature on its first frame, which is the original doing that too |
 | `CONTROLTABLE`, `ControlTrogg`, `ControlTroll`, `ControlRatmen`, `ControlMudmen`, `ControlBalok`, `ControlBeast`, `ControlDemon`, `ControlDragon`, `ControlClaw` | the controller each kind runs | **done**, as `monster::Controller`, named on each actor |
 | `TroggStart`, `TroggAttacks`, `TroggChop`, `TroggSwing`, `TrollAttack`, `TrollBunt`, `ControlRatCollide`, `MudmenReach`, `MudmenIBury`, `MudmenAppear`, `MudmenEntangle`, `MudmenChoke`, `BeastCharge`, `SetBEASTZ`, `SetBeastTimer`, `BalokJump`, `DemonAttack` | per-creature behaviour | **done**, item 37 |
@@ -542,11 +550,57 @@ stat block. These are recovered and in the pack:
       `monster.rs` is a transcription of them, with the ranges and the counts the
       code holds. A test drives all nine at eight distances and no two answer alike
 - [x] `SETDEMONBORD`, and the correction that it was never a decoration
-- [ ] What is left of a creature's own repertoire: the ratman's leap into a tree and
-      onto the knight's head (`RatmanInitLeap`, `RatHangKnight`, `RatmanOnHead`,
-      `RatmanGouge`), Balok's grab and its landing on a knight (`ControlBalokGrab`,
-      `ControlBalokBite`, `ControlBalokCrush`, `Knight_Explode`), and the beast's
-      `Beast_BackToss` and `ChestToss`
+- [x] **What is left of a creature's own repertoire, built.** The jump engine under
+      three of them is `CalcJUMP` (0x2a8e), `ADDJUMP` (0x2b8d) and `ControlJump`
+      (0x2cde), a six slot table at DS:`0x76b2` filled from a twenty byte template at
+      DS:`0x77cc`; it is `henge_core::jump`, and it is **not** the task VM's
+      `TASKJUMP`, which is a different thing and only `Beast_BackToss` uses.
+
+      **The ratman, whole**: `RatmanLeap` (0x31a9), `RatmanInitLeap` (0x3215),
+      `RatNormalLeap` (0x325c), `RatmanLeaps` (0x325f), `RatmanLeaping` (0x3270),
+      `RatWithinTree` (0x32af), `RatmanInTree` (0x32b8), `RatLeapOutTree` (0x32e0),
+      `RatHangKnight` (0x32ed), `RatmanOnHead` (0x3353), `RatmanGouge` (0x3383),
+      `RatmanGouged` (0x3395), `RatmanReleaseKnight` (0x343d), `RatmanStruck`
+      (0x3465), `KnightStruckRatInAir` (0x34b5), `RatmanHit` (0x34f0), `RatLeapHit`
+      (0x353f) and `RatTailHit` (0x357d). The **tree** is real: `InitKnightvsRatmen+82`
+      (0x236f) stands one more actor in the arena on `Rat_TreeBrush` at x `0xa0`, `y`
+      = `HalfSCAPE - 0xc8` and `z` = `HalfSCAPE`, keeps it in `TreeHANDLE` (DS:`0x69ae`),
+      and `RatmanLeap+30` (0x31c7) aims the **first** rat's leap at it. The rest aim at
+      the knight, land his approach range short of him (`CalcJUMP`'s `bp`), and hop
+      rather than leap inside forty. A rat that lands on him sits on his head for his
+      endurance (`+0x30`) plus six, gouges, and throws itself a hundred and fifty
+      pixels clear leaving five points off him; one that catches him with its tail from
+      the tree hangs off him and takes a point a frame
+
+      **Balok, whole**: `BalokJump` (0x366f), `BalokJumping` (0x36d1), `BalokHit`
+      (0x377a), `BalokGrabbed` (0x379b), `ControlBalokGrab` (0x37ae),
+      `ControlBalokBite` (0x37c1), `ControlBalokCrush` (0x37dc) and
+      `ControlBalokRelease` (0x37f0). Its walk is the real arc rather than a step, and
+      **`Knight_Explode` is built**: a hop that comes down within ten pixels of him in
+      the second half of its flight and under forty off the ground is `KillKnight` and
+      the knight bursts (`BalokJumping+64`, 0x3711). The grab takes hold of him, shakes
+      him once, and lets him go if he lived or eats him if he did not, the bite and the
+      squeeze alternating on DS:`0x77a0`
+
+      **The beast**: `BeastStruck1` (0x4430), which is the knight's `*Struck1` entry
+      for a beast and the only blow in the game that picks its animation off which way
+      the two are *facing*. Alive, he is tossed (`Beast_BackToss` from behind,
+      `Beast_ChestToss` from the front); dead with the gore on, he is impaled on the
+      beast's own task (`Beast_ImpaleBack`, `Beast_ImpaleChest`). The toss is the
+      knight's own animation in the original and draws out of the beast's bank tables,
+      because `TASKCELBUF` chooses from a global `TaskCelTable` the loader filled;
+      this engine looks a bank up on the actor's own definition, so the toss runs as a
+      task of its own out of the **beast's** definition while the knight is on standby,
+      which is the same picture and the same chain of scripts, and ends where the chain
+      ends at `Knight_SwStance`
+
+      Three globals came with them and are on the bout as `monster::Shared`:
+      `ratman_flags` (DS:`0x779c`), `HitDelay` (`0x779e`) and `BalokFLAGS` (`0x7794`).
+      `HitDelay` was a per-creature cooldown here and is one word for the whole fight,
+      which is what the code says
+
+- [ ] The dragon's own two, `Dragon_BitKnight` and `DrDropHead`, and `DrDropClaws`
+      with them
 - [x] **Waves (item 38).** All of it reads and all of it is transcribed in
       `henge_core::wave`. Four words of BSS carry it: `TotalMonsters` (DS:0x96a),
       `MaxMonsters` (0x96c), `NumberInCombat` (0x96e) and `SIDE` (0x970), with `INITMO`

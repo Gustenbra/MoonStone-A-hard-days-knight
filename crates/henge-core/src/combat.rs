@@ -295,7 +295,6 @@ impl Fighter {
             depth_tolerance: 0,
             attack_cooldown: 0,
             bounty: 0,
-            girth: 0,
             body: [0; 4],
             sequences: Default::default(),
             ..ActorDef::default()
@@ -391,7 +390,7 @@ impl Fighter {
         }
     }
 
-    fn enter(&mut self, state: State) {
+    pub(crate) fn enter(&mut self, state: State) {
         if self.state == state {
             return;
         }
@@ -410,7 +409,7 @@ impl Fighter {
     }
 
     /// Enter a state on a particular script of it.
-    fn enter_on(&mut self, state: State, script: String) {
+    pub(crate) fn enter_on(&mut self, state: State, script: String) {
         if self.state == state && self.script == script {
             // The same thing again: a held block is replayed frame by frame
             // in the original, and here it simply carries on.
@@ -479,6 +478,23 @@ impl Fighter {
         intent: Intent,
         field: &Field,
         bloodless: bool,
+    ) -> Vec<(i32, i32)> {
+        self.step_among(def, intent, field, bloodless, &[])
+    }
+
+    /// The same tick, with the other bodies in the arena.
+    ///
+    /// `others` is the task table `TASKWALKCOLLIDE` (0x9e06) walks: every
+    /// other actor that has been drawn and still has hit points. A fighter
+    /// may not step into one of them, and the routine decides in which
+    /// directions; see [`crate::arena::walk_collide`].
+    pub fn step_among(
+        &mut self,
+        def: &ActorDef,
+        intent: Intent,
+        field: &Field,
+        bloodless: bool,
+        others: &[crate::arena::Occupant],
     ) -> Vec<(i32, i32)> {
         self.effects.clear();
         // The cursed knight's joystick, before anything reads it.
@@ -659,7 +675,7 @@ impl Fighter {
         // other three alone.
         if self.state == State::Walk {
             let step = (intent.dx * def.speed_x, intent.dy * def.speed_y);
-            let (moved, blocked) = self.walk(def, field, step);
+            let (moved, blocked) = self.walk(def, field, step, others);
             self.blocked = blocked;
             // `A4$`: a frame in which nothing moved winds the walk cycle back
             // and plays the stance instead, which is what makes a man held up
@@ -724,7 +740,13 @@ impl Fighter {
     /// through the tree line as happily as our knight used to. Running every
     /// fighter through the same gate is ours, and it is the only sense in which
     /// this is not a transcription.
-    fn walk(&mut self, def: &ActorDef, field: &Field, step: (i32, i32)) -> (bool, u8) {
+    fn walk(
+        &mut self,
+        def: &ActorDef,
+        field: &Field,
+        step: (i32, i32),
+        others: &[crate::arena::Occupant],
+    ) -> (bool, u8) {
         let (dx, dy) = step;
         let mut wanted = 0u8;
         if dx > 0 {
@@ -737,7 +759,23 @@ impl Fighter {
         } else if dy < 0 {
             wanted |= dir::UP;
         }
-        let (bl, _, br, bb) = self.body(def);
+        let (bl, bt, br, bb) = self.body(def);
+        // `TASKWALKCOLLIDE`, which `ControlKnight+217` (0x3f9d),
+        // `MonsterWalk+19` (0x4e9e) and `MudmenMove+65` (0x53c0) all call
+        // before `CheckBorder` and `SBORD`, and whose answer they `and` into
+        // `+0x26` exactly as this does.
+        if !others.is_empty() {
+            let me = crate::arena::Occupant {
+                x: self.x,
+                depth: self.y,
+                box_left: bl,
+                box_right: br,
+                box_top: bt,
+                box_bottom: bb,
+            };
+            let facing = if self.facing < 0 { 3 } else { 1 };
+            wanted &= crate::arena::walk_collide(&me, facing, dx, others);
+        }
         let mut probe = Step {
             x: self.x,
             y: self.y,
@@ -871,6 +909,13 @@ impl Fighter {
                         let next = names[self.cycle].clone();
                         t.replace(next);
                         t.facing = facing;
+                        // One connect per script, not one per state. The
+                        // original has no such flag: `TaskCol_MainLoop`
+                        // writes `+0xc` on the striker and `+0xe` on the
+                        // struck (0x9f81) and the controller clears them on
+                        // its next pass, so a creature whose walk cycle is
+                        // its attack is armed again on every frame of it.
+                        self.struck = false;
                     }
                 }
             }
@@ -881,6 +926,12 @@ impl Fighter {
         };
         task.x = self.x + ox;
         task.y = self.y + oy;
+        // `+4`, the height, which `perdone` (0x99c6) copies into the task
+        // every frame and `TASKRIGHT`/`TASKLEFT` add to the depth when they
+        // place a part. This engine keeps the depth in `Fighter::y` and so in
+        // `Task::y`, which leaves `Task::z` for exactly this; nothing else
+        // reads it, since a script's own `TASKMOVE` z is thrown away here.
+        task.z = self.brain.height;
         if step_now {
             self.record.set_health(self.health);
             // `[actor+8]` as the script sees it. A `TASK_FLIP` writes it
@@ -901,7 +952,17 @@ impl Fighter {
             task.y = ny + oy;
         }
 
-        if self.state != State::Attack || self.struck {
+        // **No state test.** `TaskCol_MainLoop` (0x9f26) walks the task's
+        // `WeoponPile` at `+0x1e` against every other task's `BodyPile` at
+        // `+0x20`, and neither pile knows what state anybody is in: a part is
+        // on the weapon pile because its own record is flagged `WEAPON` and
+        // for no other reason. Six scripts in the shipped game carry a weapon
+        // part outside an attack, and every one of them is a creature that is
+        // meant to hurt you with it: the beast's four run frames and its turn,
+        // Balok's hop, the ratman's four leap frames and the two it hangs out
+        // of a tree on. Gating this on `State::Attack` is what kept the beast
+        // from ever touching anybody, since its run *is* its attack.
+        if self.struck {
             return Vec::new();
         }
         self.hit_line(def)
@@ -1563,7 +1624,6 @@ pub(crate) mod tests {
             depth_tolerance: 6,
             attack_cooldown: 30,
             bounty: 0,
-            girth: 0,
             body: [-9, 0, 9, 52],
             sequences,
             ..ActorDef::default()
@@ -2224,10 +2284,18 @@ pub(crate) mod tests {
                 body: false,
                 decapped: false,
                 progression: 0,
+                perch: None,
+                foe_blow: 0,
             };
             let mut seed = seed;
             let mut facing = 1;
-            decide(&s, brain, &mut seed, &mut facing)
+            decide(
+                &s,
+                brain,
+                &mut seed,
+                &mut facing,
+                &mut crate::monster::Shared::default(),
+            )
         };
         // `BKBlock` spends one roll before `BKAttack` spends its own, so the
         // seed that makes the knight strike is one whose *second* roll clears
@@ -2363,11 +2431,19 @@ pub(crate) mod tests {
                 body: false,
                 decapped: false,
                 progression: 0,
+                perch: None,
+                foe_blow: 0,
             };
             let mut brain = Brain::default();
             let mut seed = wary;
             let mut f = 1;
-            decide(&s, &mut brain, &mut seed, &mut f)
+            decide(
+                &s,
+                &mut brain,
+                &mut seed,
+                &mut f,
+                &mut crate::monster::Shared::default(),
+            )
         };
         assert_eq!(
             answer(Attack::Swing, -1),

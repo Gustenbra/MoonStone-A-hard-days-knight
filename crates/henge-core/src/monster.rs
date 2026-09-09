@@ -156,6 +156,25 @@ pub struct Brain {
     /// the controller's own copy is kept here instead.
     #[serde(default)]
     pub att: Option<crate::combat::Attack>,
+    /// The actor record's `+4`: how far off the ground this creature is,
+    /// negative upward.
+    ///
+    /// `perdone` (0x99c6) carries it between the record and the task every
+    /// frame, and `TASKRIGHT`/`TASKLEFT` place a part at `task_y + task_z +
+    /// part_y`, so it is a screen offset and nothing else: a leaping ratman is
+    /// drawn high and still stands, fights and sorts at the depth it left.
+    /// This engine keeps the depth in `Fighter::y` and leaves `Task::z` free,
+    /// so this is what goes into `Task::z`.
+    #[serde(default)]
+    pub height: i32,
+    /// The slot in the table at DS:`0x76b2` this creature's jump is using.
+    ///
+    /// The original has six for the whole game and `ADDJUMP` (0x2b8d) walks
+    /// them looking for one that is free or already this creature's; only the
+    /// ratman and Balok ever ask, and neither can have two at once, so one per
+    /// creature is the same table with the search taken out.
+    #[serde(default)]
+    pub jump: Option<crate::jump::Jump>,
 }
 
 /// `DemonFLAGS`, `DragonFLAGS`, `BalokFLAGS`, `MudmenFLAGS` and `+0x48`, as
@@ -183,6 +202,101 @@ pub mod flag {
     /// until the controller names the next script, which is what `DS:0x783a`
     /// holding 0xffff means.
     pub const DRIVEN: u32 = 0x0200;
+    /// `+0x48 & 1` on a ratman: it is in the air (`RatmanLeaps`, 0x3263).
+    pub const LEAPING: u32 = 0x0400;
+    /// `+0x48 & 4`: this leap is aimed at the tree rather than at the knight
+    /// (`RatmanLeap+26`, 0x31c3).
+    pub const TREE_BOUND: u32 = 0x0800;
+    /// `+0x48 & 8`: it is in the tree (`RatWithinTree`, 0x32b4).
+    pub const IN_TREE: u32 = 0x1000;
+    /// `+0x48 & 0x10`: the eye gouge has been played and the leap away from
+    /// the knight is due (`RatmanGouge`, 0x3388).
+    pub const GOUGING: u32 = 0x2000;
+    /// `+0x48 & 0x20`: it is sitting on the knight's head (`RatLeapHit+25`,
+    /// 0x3558).
+    pub const ON_HEAD: u32 = 0x4000;
+    /// `+0x48 & 0x80`: a short hop rather than a leap, which `RatmanInitLeap`
+    /// takes when the gap is forty or less (0x323b).
+    pub const SHORT_HOP: u32 = 0x8000;
+    /// `+0x49 & 1`: the knight has shaken it off his head and it is letting
+    /// go (`RatmanOnHead+41`, 0x337c).
+    pub const RELEASING: u32 = 0x0001_0000;
+    /// `+0x49 & 4`: it has hold of the knight from the tree (`RatTailHit+5`,
+    /// 0x3582).
+    pub const HANGING: u32 = 0x0002_0000;
+    /// `BalokGrabbed` (0x379b) has just run: the grab connected and
+    /// `Balok_GrabKnight` is this frame's answer.
+    ///
+    /// The original has no bit for this because it does not need one:
+    /// `BalokHit` is a branch *inside* `ControlBalok` and writes `[0x783a]`
+    /// where it stands. This engine resolves a blow after the controllers have
+    /// spoken, so the branch leaves a mark the controller reads on its next
+    /// pass; `BalokFLAGS & 1`, which `BalokGrabbed` raises beside it, is what
+    /// carries the frame after that.
+    pub const GRABBED: u32 = 0x0004_0000;
+}
+
+/// The words a fight keeps for a whole species rather than for one creature.
+///
+/// Four of the five are the ratman's and Balok's own globals, and they are
+/// globals in the original too: one rat leaping into the tree stops the next
+/// from trying, one rat on the knight's head stops the next from landing
+/// there, and the delay a landed claw buys is shared by every rat on the
+/// screen. Kept on the bout, which is the smallest thing in this engine that
+/// owns a whole fight.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shared {
+    /// `RatFLAGS`, DS:`0x779c`. Bit 2 (`4`) the tree is taken, bit 3 (`8`)
+    /// somebody is hanging off the knight, bit 5 (`0x20`) somebody is on his
+    /// head. `InitKnightvsRatmen+67` (0x2360) zeroes it.
+    pub rat: u32,
+    /// `HitDelay`, DS:`0x779e`: fifteen frames after any rat's claw lands
+    /// before any rat claws again (`RatmanHit+35`, 0x3513).
+    pub hit_delay: i32,
+    /// `BalokFLAGS`, DS:`0x7794`. Bit 0 it has the knight, bit 1 it is in the
+    /// air, bit 5 the grab is over, bit 6 the bite or the squeeze is running.
+    pub balok: u32,
+    /// DS:`0x77a0`, the word `ControlBalokBite` (0x37c1) flips to alternate
+    /// the bite and the squeeze.
+    pub balok_bite: u32,
+    /// DS:`0x779a`, how many frames of the current hop are left, which
+    /// `BalokJumping` counts down beside the jump's own count.
+    pub balok_hop: i32,
+    /// DS:`0x7796`, the frame count the last `CalcJUMP` worked out.
+    ///
+    /// It is scratch in the original and every `CalcJUMP` overwrites it, but
+    /// `BalokJumping` (0x36f5) reads it a frame after `BalokJump` wrote it, so
+    /// it has to outlive the call.
+    pub jump_steps: i32,
+}
+
+/// The knight sheet's endurance, `+0x30` of the actor record, which
+/// `RatLeapHit+34` (0x3561) reads to size how long a rat sits on his head.
+/// It is the third of `CheckMaxAbility`'s three abilities (0xb7e1).
+pub const ENDURANCE: i16 = 0x30;
+
+/// `RatFLAGS`' three bits, by the numbers the code tests.
+pub mod rat_flag {
+    /// `4`: a rat has gone for the tree.
+    pub const TREE: u32 = 4;
+    /// `8`: a rat is hanging off the knight.
+    pub const HANGING: u32 = 8;
+    /// `0x20`: a rat is on the knight's head.
+    pub const ON_HEAD: u32 = 0x20;
+}
+
+/// `BalokFLAGS`' four bits.
+pub mod balok_flag {
+    /// `1`: it has hold of the knight (`BalokGrabbed`, 0x37a6).
+    pub const HELD: u32 = 1;
+    /// `2`: a hop is running (`BalokJump+84`, 0x36c3).
+    pub const JUMPING: u32 = 2;
+    /// `0x20`: the grab is done with and the knight is to be let go
+    /// (`ControlBalokGrab+11`, 0x37b9).
+    pub const RELEASING: u32 = 0x20;
+    /// `0x40`: a bite or a squeeze is playing (`ControlBalokBite+19`,
+    /// 0x37d4).
+    pub const CHEWING: u32 = 0x40;
 }
 
 /// What a controller decided to do this tick.
@@ -226,6 +340,39 @@ pub enum Act {
     /// down together off the joystick and nothing else, so this is that press
     /// rather than an order.
     Struggle,
+    /// One frame of a ballistic arc: `RatmanLeaping` (0x3270) and
+    /// `BalokJumping` (0x36d1) both write `ControlJump`'s three answers
+    /// straight into `+2`, `+6` and `+4` and then name a frame to draw.
+    ///
+    /// The height goes into [`Brain::height`], since the controller owns it;
+    /// `x` and `y` are the record's own and the bout writes them.
+    Fly { x: i32, y: i32, script: String },
+    /// One frame of a hold, from either side of it.
+    ///
+    /// `RatHangKnight` (0x32ed), `RatmanOnHead` (0x3353), `RatmanGouged`
+    /// (0x3395) and `RatmanReleaseKnight` (0x343d) are the ratman's;
+    /// `ControlBalokBite` (0x37c1), `ControlBalokCrush` (0x37dc) and
+    /// `ControlBalokRelease` (0x37f0) are Balok's. All seven play a script of
+    /// their own while the one held is off the board, take hit points off him
+    /// without a blow-taken script of his own, and let go at the end.
+    Grip {
+        /// What this creature plays.
+        script: String,
+        /// Off the one held, this frame: one for `RatHangKnight`, five for
+        /// `RatmanGouged`, all of them for a `KillKnight`.
+        damage: i32,
+        /// Off this creature, this frame: `RatHangKnight+29` (0x330a) puts the
+        /// knight's own blow through `CalcDamage` and takes it off the rat.
+        cost: i32,
+        /// Everything he has left, `KillKnight` (0xab2).
+        fatal: bool,
+        /// Keep hold of him, or let go.
+        hold: bool,
+        /// What the one held is put on by `REPLACEANIM`: `Knight_Explode`
+        /// under Balok's landing, `Knight_GetUp` when a hanging ratman is
+        /// killed. Empty leaves him on whatever his own state names.
+        victim: String,
+    },
 }
 
 // --------------------------------------------------------------- the tracker
@@ -557,6 +704,29 @@ pub struct Sight<'a> {
     /// computer knight's nerve is the calendar: the longer the game has run,
     /// the less often it hesitates.
     pub progression: i32,
+    /// Where the ratmen's tree stands: its column, the depth row its foot is
+    /// on, and how far above that its branches are.
+    ///
+    /// `InitKnightvsRatmen+82` (0x236f) puts one actor in the arena beside the
+    /// creatures, on `Rat_TreeBrush`, at x `0xa0`, `y` = `HalfSCAPE - 0xc8` and
+    /// `z` = `HalfSCAPE`, and keeps its record in `TreeHANDLE` (DS:`0x69ae`).
+    /// It is the only thing that reads it: `RatmanLeap+30` (0x31c7) finds its
+    /// task and aims the leap at it.
+    pub perch: Option<Perch>,
+    /// What the opponent's blow would take off this creature: `CalcDamage`
+    /// (0x2d67) called with the opponent in `si`, which `RatHangKnight+29`
+    /// (0x330a) is the one controller that does.
+    pub foe_blow: i32,
+}
+
+/// The tree at DS:`0x69ae`, as far as anything in a fight cares about it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Perch {
+    pub x: i32,
+    /// The depth row, which this engine keeps as a fighter's `y`.
+    pub y: i32,
+    /// `+4`, negative upward.
+    pub height: i32,
 }
 
 /// One tick of one creature's own controller.
@@ -571,14 +741,20 @@ pub struct Sight<'a> {
 /// copies it into the task on the way out (`NOTEND+20`, `mov dh, [di+8]`, to
 /// `TASKHANDLE` 0x9741, `mov [di+0x14], dh`). A controller that never
 /// touches it leaves the creature facing the way it was.
-pub fn decide(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act {
+pub fn decide(
+    s: &Sight,
+    brain: &mut Brain,
+    seed: &mut u16,
+    facing: &mut i32,
+    shared: &mut Shared,
+) -> Act {
     match s.def.controller() {
         Controller::Trogg => trogg(s, brain, seed, false, facing),
         Controller::TroggSpear => trogg(s, brain, seed, true, facing),
         Controller::Troll => troll(s, brain, facing),
-        Controller::Ratman => ratman(s, brain, facing),
+        Controller::Ratman => ratman(s, brain, facing, shared),
         Controller::Mudman => mudman(s, brain, facing),
-        Controller::Balok => balok(s, brain, facing),
+        Controller::Balok => balok(s, brain, facing, shared),
         Controller::Beast => beast(s, brain, seed, facing),
         Controller::Demon => demon(s, brain, facing),
         Controller::Dragon => dragon(s, brain, facing),
@@ -1096,52 +1272,543 @@ fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     }
 }
 
-/// `ControlRatCollide`: it does not use the tracker at all. It slashes inside
-/// forty, bites out to fifty, and leaps at anything further.
-fn ratman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
-    let dy = s.foe.y - s.me.y;
-    let toward = (s.foe.x - s.me.x).signum();
-    let leap = |dy: i32| Act::Walk {
-        dx: toward,
-        dy,
-        script: s.def.scripts_for("leap").first().cloned(),
-    };
-    // ControlRatCollide+72 (0x3144): `call FaceKnight`, once the in-tree,
-    // on-head and hanging branches have been passed over.
+/// The first script of a named row, or nothing where a pack has not got one.
+fn row(def: &ActorDef, name: &str) -> String {
+    def.scripts_for(name).first().cloned().unwrap_or_default()
+}
+
+/// `NextWalk` (0x4ef7) and `AnimWalk` (0x4f1a): step the walk frame and name
+/// the script that row holds at it.
+///
+/// ```text
+/// NextWalk:
+/// 04ef7  mov ax, bp                ; 1 forwards, -1 back
+/// 04ef9  add byte [si+0xa], al
+/// 04efc  and byte [si+0xa], 7
+/// 04f02  mov di, [si+0x1c]         ; the walk table
+/// 04f05  mov al, [si+0xa]; shl ax, 1; add ax, dx   ; dx is the row
+/// 04f0f  cmp word [di], 0; je NextWalk             ; skip the empty tail
+/// AnimWalk:
+/// 04f1a  mov al, [si+0xa] ... mov [0x783a], ax
+/// ```
+///
+/// The tail of a row is zeros, and the loop steps over them, so a four entry
+/// row cycles four ways round. That is what this is.
+fn next_walk(brain: &mut Brain, names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    brain.walk = (brain.walk + 1) % names.len() as u32;
+    names[brain.walk as usize].clone()
+}
+
+/// `ControlRatmen` (0x30d8) and everything under it, translated block for
+/// block: `ControlRatCollide` (0x30fc), `RatmanLeap` (0x31a9),
+/// `RatmanInitLeap` (0x3215), `RatNormalLeap` (0x325c), `RatmanLeaps`
+/// (0x325f), `RatmanLeaping` (0x3270), `RatWithinTree` (0x32af),
+/// `RatmanInTree` (0x32b8), `RatLeapOutTree` (0x32e0), `RatHangKnight`
+/// (0x32ed), `RatmanOnHead` (0x3353), `RatmanGouge` (0x3383), `RatmanGouged`
+/// (0x3395) and `RatmanReleaseKnight` (0x343d).
+///
+/// The eight branches `ControlRatCollide` opens with are the whole of it, and
+/// they are taken in this order:
+///
+/// ```text
+/// 030fc  mov word [si+0x28], 0          ; no attack kind unless one is chosen
+/// 03105  test byte [di+0x48], 0x80; jne RatmanLeaping   ; a short hop
+/// 0310e  test byte [di+0x48], 1;    jne RatmanLeaping   ; a leap
+/// 03117  test byte [di+0x48], 0x20; jne RatmanOnHead
+/// 03120  test byte [di+0x49], 1;    jne RatmanReleaseKnight
+/// 03129  test byte [di+0x48], 0x10; jne RatmanGouged
+/// 03132  test byte [di+0x48], 8;    jne RatmanInTree
+/// 0313b  test byte [di+0x49], 4;    jne RatHangKnight
+/// 03144  call FaceKnight
+/// 03147  call CheckZAxis; or ax, ax; je RatmanLeap
+/// 0314e  test word [RatFLAGS], 0x20; jne exit    ; one is on his head
+/// 03159  test word [RatFLAGS], 8;    jne exit    ; one is hanging off him
+/// 03164  cmp word [knight+0x38], 0; jle exit
+/// 03171  cmp word [HitDelay], 0; jne (sub 1; exit)
+/// 03180  call FindDistance
+/// 03183  cmp ax, 0x28; jle (kind 4, Ratman_Slash)
+/// 03196  cmp ax, 0x32; jle (kind 2, Ratman_Bite)
+/// 031a9  RatmanLeap
+/// ```
+///
+/// The two joysticks the original reads (`RatHangKnight+0`, `RatmanOnHead+0`)
+/// are fire and down together, which is the same press `MudmenEntangle` reads
+/// and which [`crate::combat::Fighter::step_gated`] already answers by
+/// dropping the hold. So both branches ask whether the one held is still held
+/// rather than reading a button of their own.
+fn ratman(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) -> Act {
+    // 03105 / 0310e: a hop and a leap both land in RatmanLeaping.
+    if brain.flags & (flag::SHORT_HOP | flag::LEAPING) != 0 {
+        return ratman_leaping(s, brain, shared);
+    }
+    // 03117  test byte ptr [di + 0x48], 0x20
+    if brain.flags & flag::ON_HEAD != 0 {
+        return ratman_on_head(s, brain);
+    }
+    // 03120  test byte ptr [di + 0x49], 1
+    if brain.flags & flag::RELEASING != 0 {
+        // RatmanReleaseKnight, 0x343d: the knight comes back on the board on
+        // his own `+0x12`, and `RatFLAGS`' head bit is put down.
+        //   0343d  mov ax, [KnightTable]; call TASKSTANDBY
+        //   03443  mov word [di+0xc], 0; mov word [di+0xe], 0
+        //   03451  mov si, [di+0x12]; call REPLACEANIM
+        //   03457  and word [RatFLAGS], 0xffdf
+        //   0345c  mov word [0x783a], 0
+        brain.flags &= !flag::RELEASING;
+        shared.rat &= !rat_flag::ON_HEAD;
+        return Act::Grip {
+            script: String::new(),
+            damage: 0,
+            cost: 0,
+            fatal: false,
+            hold: false,
+            victim: String::new(),
+        };
+    }
+    // 03129  test byte ptr [di + 0x48], 0x10
+    if brain.flags & flag::GOUGING != 0 {
+        return ratman_gouged(s, brain, shared);
+    }
+    // 03132  test byte ptr [di + 0x48], 8
+    if brain.flags & flag::IN_TREE != 0 {
+        return ratman_in_tree(s, brain, shared);
+    }
+    // 0313b  test byte ptr [di + 0x49], 4
+    if brain.flags & flag::HANGING != 0 {
+        return ratman_hang_knight(s, brain, shared);
+    }
+    // 03144  call FaceKnight
     *facing = face_knight(s.me, s.foe);
     // 03147  call CheckZAxis; 0314c je RatmanLeap
     if !check_z(s.me, s.foe, s.def) {
-        return leap(dy.signum());
+        return ratman_leap(s, brain, shared);
+    }
+    // 0314e / 03159: one rat at a time is on him, and one at a time hangs
+    // off him; the rest stand and watch.
+    if shared.rat & (rat_flag::ON_HEAD | rat_flag::HANGING) != 0 {
+        return Act::Idle;
     }
     // 03168  cmp word ptr [si + 0x38], 0; 0316c jg; else the exit
     if !s.foe.alive() {
         return Act::Idle;
     }
     // 03171  cmp [HitDelay], 0; 03178 sub [HitDelay], 1; then the exit.
-    // `RatmanHit` sets the fifteen frame delay every time a blow of its own
-    // lands, which is what keeps the slash from being a blur.
-    if brain.cooldown > 0 {
-        brain.cooldown -= 1;
+    // The delay is one word for the whole fight, not one per rat.
+    if shared.hit_delay != 0 {
+        shared.hit_delay -= 1;
         return Act::Idle;
     }
     // 03180  call FindDistance
     let d = find_distance(s.me, s.foe);
     // 03183  cmp ax, 0x28; 03186 jg
     if d <= 40 {
-        brain.cooldown = 15;
         return Act::Attack {
             kind: Attack::Swing,
             spawn: None,
         };
     }
+    // 03196  cmp ax, 0x32; 03199 jg RatmanLeap
     if d <= 50 {
-        brain.cooldown = 15;
         return Act::Attack {
             kind: Attack::Lunge,
             spawn: None,
         };
     }
-    leap(0)
+    ratman_leap(s, brain, shared)
+}
+
+/// `RatmanLeap`, image 0x31a9: the first rat to want to leap goes for the
+/// tree, and every one after it goes for the knight.
+///
+/// ```text
+/// 031ad  mov word [si+0x28], 0
+/// 031b2  mov byte [si+0xa], 0                ; the walk frame starts again
+/// 031b6  test word [RatFLAGS], 4
+/// 031bc  jne RatmanInitLeap                  ; the tree is taken
+/// 031be  or  word [RatFLAGS], 4
+/// 031c3  or  byte [si+0x48], 4               ; this one is tree bound
+/// 031c7  mov ax, [TreeHANDLE]; call FINDTASK
+/// 031d3  mov word [di+0x4a], 0x1e            ; thirty frames up there
+/// 031d9  mov bx, 0x77cc
+/// 031dc  mov [bx], di
+/// 031de  mov ax, [di+2];  mov [bx+4], ax     ; x0
+/// 031e4  mov ax, [di+6];  mov [bx+6], ax     ; z0
+/// 031ea  mov word [bx+8], 0xffec             ; y0, twenty above the ground
+/// 031ef  mov ax, [si+4];  mov [bx+0xa], ax   ; x1, the tree task's x
+/// 031f5  mov ax, [si+8];  mov [bx+0xc], ax   ; z1, its z
+/// 031fb  mov ax, [si+6];  mov [bx+0xe], ax   ; y1, its y
+/// 03201  add word [bx+0xc], 3
+/// 03205  mov word [bx+0x10], 0xe             ; fourteen frames
+/// 0320a  mov word [bx+0x12], 0
+/// 03210  call ADDJUMP
+/// 03213  jmp RatmanLeaps
+/// ```
+///
+/// `y0` is twenty above the ground and not the rat's own height, which is the
+/// instruction as written. With the tree at `HalfSCAPE - 200` the difference
+/// is far more than five, so this is the one jump in the game that takes
+/// `ADDJUMP`'s `JUMPDOWN` branch and starts at rest.
+fn ratman_leap(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    // 031b2  mov byte ptr [si + 0xa], 0
+    brain.walk = 0;
+    // 031b6  test word ptr [0x779c], 4
+    let perch = s.perch.filter(|_| shared.rat & rat_flag::TREE == 0);
+    let Some(tree) = perch else {
+        return ratman_init_leap(s, brain);
+    };
+    shared.rat |= rat_flag::TREE;
+    brain.flags |= flag::TREE_BOUND;
+    // 031d3  mov word ptr [di + 0x4a], 0x1e
+    brain.cooldown = 0x1e;
+    let plan = crate::jump::Plan {
+        x0: s.me.x,
+        z0: s.me.y,
+        y0: -20,
+        x1: tree.x,
+        z1: tree.y + 3,
+        y1: tree.height,
+        steps: 0xe,
+        rise: 0,
+    };
+    brain.jump = Some(plan.start());
+    ratman_leaps(s, brain)
+}
+
+/// `RatmanInitLeap`, image 0x3215: aim at the knight, and hop rather than
+/// leap when he is close.
+///
+/// ```text
+/// 03215  mov bp, [si+0x52]              ; the approach range
+/// 03218  call CalcJUMP
+/// 0321b  mov ax, [0x7796]; shr ax, 1    ; half the frame count
+/// 03220  cmp ax, 8; jge; mov ax, 8      ; and never fewer than eight
+/// 03230  mov [0x77cc+0x10], ax
+/// 03234  cmp word [0x76b0], 0x28
+/// 03239  jg  RatNormalLeap              ; forty or more apart: a leap
+/// 0323b  or  byte [si+0x48], 0x80       ; closer: a short hop
+/// 03243  mov word [0x77cc+0x12], 2      ; two pixels of rise
+/// 03249  call ADDJUMP
+/// 0324c  mov bp, 1; mov dx, 0x10        ; and it is drawn on the up row now
+/// 03256  call NextWalk; jmp AnimWalk
+/// RatNormalLeap:
+/// 0325c  call ADDJUMP                   ; and fall into RatmanLeaps
+/// ```
+fn ratman_init_leap(s: &Sight, brain: &mut Brain) -> Act {
+    let aim = crate::jump::calc(
+        (s.me.x, s.me.y, brain.height),
+        (s.foe.x, s.foe.y, s.foe.brain.height),
+        s.def.approach,
+    );
+    let mut plan = aim.plan;
+    // 0321b: half the frames, floored at eight.
+    let mut steps = aim.steps >> 1;
+    if steps < 8 {
+        steps = 8;
+    }
+    plan.steps = steps;
+    // 03234  cmp word ptr [0x76b0], 0x28
+    if aim.reach > 0x28 {
+        // RatNormalLeap into RatmanLeaps.
+        brain.jump = Some(plan.start());
+        return ratman_leaps(s, brain);
+    }
+    brain.flags |= flag::SHORT_HOP;
+    plan.rise = 2;
+    brain.jump = Some(plan.start());
+    // 0324c: the hop is drawn on the up row from its first frame.
+    Act::Play(next_walk(brain, s.def.scripts_for("fly")))
+}
+
+/// `RatmanLeaps`, image 0x325f: `+0x48 |= 1`, and the frame it leaves the
+/// ground on.
+///
+/// ```text
+/// 03263  or  byte ptr [si + 0x48], 1
+/// 03267  mov word ptr [0x783a], Ratman_Leap
+/// ```
+fn ratman_leaps(s: &Sight, brain: &mut Brain) -> Act {
+    brain.flags |= flag::LEAPING;
+    Act::Play(row(s.def, "leap"))
+}
+
+/// `RatmanLeaping`, image 0x3270, with `RatWithinTree` (0x32af) on the end.
+///
+/// ```text
+/// 03270  mov ax, [0x77e8]; call ControlJump
+/// 03276  mov [si+2], bx; mov [si+6], cx; mov [si+4], dx
+/// 03283  or  ax, ax; je 0x329a                 ; still in the air
+/// 03287  test byte [si+0x48], 4
+/// 0328b  jne RatWithinTree
+/// 0328d  mov word [si+4], 0                    ; down, and on the ground
+/// 03292  mov word [si+0x48], 0
+/// 03297  jmp exit                              ; the stance
+/// 0329a  mov bp, 1; mov dx, 0x10
+/// 032a0  cmp word [si+4], -0xa
+/// 032a4  jle 0x32a9; mov dx, 0                 ; low enough for the walk row
+/// 032a9  call NextWalk; jmp AnimWalk
+/// RatWithinTree:
+/// 032af  mov word [si+0x48], 0
+/// 032b4  or  byte [si+0x48], 8                 ; and fall into RatmanInTree
+/// ```
+fn ratman_leaping(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    let Some(mut jump) = brain.jump else {
+        // Nothing running: the only way out the original has is landing.
+        brain.flags &= !(flag::LEAPING | flag::SHORT_HOP | flag::TREE_BOUND);
+        brain.height = 0;
+        return Act::Idle;
+    };
+    let step = jump.step();
+    brain.jump = Some(jump);
+    brain.height = step.y;
+    if !step.done {
+        // 0329a: the up row above ten off the ground, the walk row under it.
+        let row = if step.y <= -10 { "fly" } else { "walk" };
+        let script = next_walk(brain, s.def.scripts_for(row));
+        return Act::Fly {
+            x: step.x,
+            y: step.z,
+            script,
+        };
+    }
+    brain.jump = None;
+    if brain.flags & flag::TREE_BOUND != 0 {
+        // RatWithinTree, 0x32af, which falls into RatmanInTree. The position
+        // 0x3276 wrote is carried out with it: the arc's last frame is
+        // written before 0x3283 asks whether the arc is over.
+        brain.flags &= !(flag::LEAPING | flag::SHORT_HOP | flag::TREE_BOUND);
+        brain.flags |= flag::IN_TREE;
+        return match ratman_in_tree(s, brain, shared) {
+            Act::Play(script) => Act::Fly {
+                x: step.x,
+                y: step.z,
+                script,
+            },
+            other => other,
+        };
+    }
+    // 0328d: back on the ground with every bit down.
+    brain.flags &= !(flag::LEAPING | flag::SHORT_HOP | flag::TREE_BOUND);
+    brain.height = 0;
+    Act::Fly {
+        x: step.x,
+        y: step.z,
+        script: String::new(),
+    }
+}
+
+/// `RatmanInTree`, image 0x32b8, and `RatLeapOutTree` (0x32e0).
+///
+/// ```text
+/// 032bc  sub word [si+0x4a], 1
+/// 032c0  je  RatLeapOutTree
+/// 032c2  mov di, [KnightTable]; call FindDistance
+/// 032c9  cmp ax, 0x3c
+/// 032cc  jl  0x32d7
+/// 032ce  mov word [0x783a], Ratman_HoverR      ; sixty or more away
+/// 032d7  mov word [0x783a], Ratman_HoverD      ; nearer than that
+/// RatLeapOutTree:
+/// 032e0  mov word [si+0x48], 0
+/// 032e5  and word [RatFLAGS], 0xfffb           ; the tree is free again
+/// 032ea  jmp RatmanInitLeap
+/// ```
+fn ratman_in_tree(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    brain.cooldown -= 1;
+    if brain.cooldown == 0 {
+        brain.flags &= !(flag::IN_TREE | flag::TREE_BOUND);
+        shared.rat &= !rat_flag::TREE;
+        brain.height = 0;
+        return ratman_init_leap(s, brain);
+    }
+    let far = find_distance(s.me, s.foe) >= 0x3c;
+    Act::Play(row(s.def, if far { "hover_far" } else { "hover_near" }))
+}
+
+/// `RatHangKnight`, image 0x32ed: it has him by the shoulders and takes a
+/// point off him every frame until he shakes it loose.
+///
+/// ```text
+/// 032ed  call JOY1
+/// 032f0  test bx, 0x10; je 0x333a           ; fire...
+/// 032f6  test bx, 4;    je 0x333a           ; ...and down together
+/// 032fc  mov word [0x783a], Knight_HangSd
+/// 03302  mov di, [0x77e8]; mov si, [KnightTable]
+/// 0330a  call CalcDamage                    ; the knight's own blow...
+/// 0330d  sub word [di+0x38], ax             ; ...comes off the rat
+/// 03310  jg  exit
+/// 03312  mov ax, [KnightTable]; call TASKSTANDBY
+/// 03318  mov word [di+0xc], 0; mov word [di+0xe], 0
+/// 03326  mov si, Knight_GetUp; call REPLACEANIM
+/// 0332c  and word [RatFLAGS], 0xfff7
+/// 03331  mov word [0x783a], Ratman_FallDown
+/// 0333a  mov word [0x783a], Ratman_HangKnight
+/// 03340  mov si, [KnightTable]; sub word [si+0x38], 1
+/// 03348  jg  exit
+/// 0334a  mov word [0x783a], Ratman_HungKnight
+/// ```
+fn ratman_hang_knight(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    if !s.foe.held() {
+        // Fire and down together: the knight has swung at it.
+        if s.foe_blow >= s.me.health {
+            // The blow finished it: it lets go and falls.
+            brain.flags &= !flag::HANGING;
+            shared.rat &= !rat_flag::HANGING;
+            return Act::Grip {
+                script: row(s.def, "fall"),
+                damage: 0,
+                cost: s.foe_blow,
+                fatal: false,
+                hold: false,
+                // 03326  mov si, Knight_GetUp; call REPLACEANIM
+                victim: "Knight_GetUp".into(),
+            };
+        }
+        return Act::Grip {
+            script: row(s.def, "shake"),
+            damage: 0,
+            cost: s.foe_blow,
+            fatal: false,
+            hold: true,
+            victim: String::new(),
+        };
+    }
+    // 0333a: one point a frame, and the last one is the death.
+    let last = s.foe.health <= 1;
+    Act::Grip {
+        script: row(s.def, if last { "hung" } else { "hang" }),
+        damage: 1,
+        cost: 0,
+        fatal: false,
+        hold: true,
+        victim: String::new(),
+    }
+}
+
+/// `RatmanOnHead`, image 0x3353, with `RatmanGouge` (0x3383) on the end.
+///
+/// ```text
+/// 03353  call JOY1
+/// 03356  test bx, 0x10; jne 0x336b          ; fire held?
+/// 0335c  sub word [di+0x4a], 1
+/// 03360  je  RatmanGouge
+/// 03362  mov word [0x783a], Ratman_SitOnHead
+/// 0336b  test bx, 4; je 0x335c              ; fire, but not down: sit on
+/// 03371  mov word [0x783a], Ratman_KnightWhack
+/// 03377  mov word [di+0x48], 0
+/// 0337c  or  byte [di+0x49], 1              ; and let go next frame
+/// RatmanGouge:
+/// 03383  mov word [di+0x48], 0
+/// 03388  or  byte [di+0x48], 0x10
+/// 0338c  mov word [0x783a], Ratman_EyeGouge
+/// ```
+fn ratman_on_head(s: &Sight, brain: &mut Brain) -> Act {
+    if !s.foe.held() {
+        // 03371: he got a hand to it.
+        brain.flags &= !flag::ON_HEAD;
+        brain.flags |= flag::RELEASING;
+        return Act::Grip {
+            script: row(s.def, "whack"),
+            damage: 0,
+            cost: 0,
+            fatal: false,
+            hold: true,
+            victim: String::new(),
+        };
+    }
+    brain.cooldown -= 1;
+    if brain.cooldown == 0 {
+        // RatmanGouge.
+        brain.flags &= !flag::ON_HEAD;
+        brain.flags |= flag::GOUGING;
+        return Act::Grip {
+            script: row(s.def, "gouge"),
+            damage: 0,
+            cost: 0,
+            fatal: false,
+            hold: true,
+            victim: String::new(),
+        };
+    }
+    Act::Grip {
+        script: row(s.def, "sit"),
+        damage: 0,
+        cost: 0,
+        fatal: false,
+        hold: true,
+        victim: String::new(),
+    }
+}
+
+/// `RatmanGouged`, image 0x3395: the eye gouge is over, so it throws itself a
+/// hundred and fifty pixels clear and leaves the knight five points down.
+///
+/// ```text
+/// 03395  and word [RatFLAGS], 0xffdf
+/// 0339a  mov si, 0x77cc; mov di, [0x77e8]
+/// 033a1  mov word [di+0x4a], 0x11
+/// 033a6  mov [si], di
+/// 033a8  mov ax, [di+2]; mov [si+4], ax        ; x0
+/// 033ae  mov ax, [di+6]; mov [si+6], ax        ; z0
+/// 033b4  mov ax, [di+4]; mov [si+8], ax; add word [si+8], -0x5a
+/// 033be  mov ax, [di+2]; mov [si+0xa], ax; add word [si+0xa], 0x96
+/// 033c9  mov ax, [di+6]; mov [si+0xc], ax
+/// 033cf  mov ax, [di+4]; mov [si+0xe], ax
+/// 033d5  mov word [si+0x10], 0x11              ; seventeen frames
+/// 033da  mov word [si+0x12], 0x78
+/// 033df  add si, 0x14                          ; dead: ADDJUMP finds its own
+/// 033e2  call ADDJUMP
+/// 033e9  mov word [di+0x48], 0
+/// 033ee  or  byte [di+0x48], 1
+/// 033f2  mov byte [di+0xa], 0
+/// 033f6  mov word [di+4], 0xffba               ; seventy off the ground
+/// 033fb  mov word [0x783a], Ratman_Leaps
+/// 03404  mov ax, [KnightTable]; call FINDTASK  ; his task takes the rat's
+/// 0340f  mov al, [rat+8]; mov [di+0x14], al    ; facing
+/// 03417  mov di, [KnightTable]
+/// 0341b  mov word [di+0xc], 0; mov word [di+0xe], 0
+/// 03425  mov si, [di+0x10]                     ; his stance...
+/// 03428  sub word [di+0x38], 5
+/// 0342c  jg  0x3431
+/// 0342e  mov si, Knight_SwDeath                ; ...or his death
+/// 03431  call REPLACEANIM
+/// 03434  mov ax, [KnightTable]; call TASKSTANDBY
+/// ```
+///
+/// The jump starts ninety rows *above* where it means to end and ends where
+/// the rat's own `+4` is, so `ADDJUMP` takes the upward branch; `+4` is then
+/// written to seventy up anyway, which is what the first frame is drawn at
+/// before `ControlJump` takes it over.
+fn ratman_gouged(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    shared.rat &= !rat_flag::ON_HEAD;
+    // 033a1  mov word ptr [di + 0x4a], 0x11
+    brain.cooldown = 0x11;
+    let plan = crate::jump::Plan {
+        x0: s.me.x,
+        z0: s.me.y,
+        y0: brain.height - 0x5a,
+        x1: s.me.x + 0x96,
+        z1: s.me.y,
+        y1: brain.height,
+        steps: 0x11,
+        rise: 0x78,
+    };
+    brain.jump = Some(plan.start());
+    brain.flags &= !(flag::GOUGING | flag::ON_HEAD | flag::RELEASING);
+    brain.flags |= flag::LEAPING;
+    // 033f2  mov byte ptr [di + 0xa], 0
+    brain.walk = 0;
+    // 033f6  mov word ptr [di + 4], 0xffba
+    brain.height = -0x46;
+    Act::Grip {
+        script: row(s.def, "leaps"),
+        damage: 5,
+        cost: 0,
+        fatal: false,
+        hold: false,
+        victim: String::new(),
+    }
 }
 
 /// `ControlMudmen`: it reaches for you between seventy five and a hundred,
@@ -1211,61 +1878,303 @@ fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     }
 }
 
-/// `ControlBalok`: it closes in hops, uppercuts at arm's length, grabs from
-/// further out, and stands off between a hundred and twenty and a hundred and
-/// eighty unless you are throwing daggers at it.
-fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
-    let dy = s.foe.y - s.me.y;
-    let d = (s.foe.x - s.me.x).abs();
-    let toward = (s.foe.x - s.me.x).signum();
-    let hop = |dy: i32| Act::Walk {
-        dx: toward,
-        dy,
-        script: None,
-    };
+/// `ControlBalok` (0x3599) and everything under it: `BalokJump` (0x366f),
+/// `BalokJumping` (0x36d1), `ControlBalokGrab` (0x37ae), `ControlBalokBite`
+/// (0x37c1), `ControlBalokCrush` (0x37dc) and `ControlBalokRelease` (0x37f0).
+///
+/// It closes in hops, uppercuts at arm's length, grabs from further out, and
+/// stands off between a hundred and twenty and a hundred and eighty unless you
+/// are throwing daggers at it.
+///
+/// ```text
+/// 035ad  test word [BalokFLAGS], 2;    jne BalokJumping
+/// 035b8  cmp  word [si+0xe], 0;        jne BalokStruck
+/// 035c1  cmp  word [si+0xc], 0;        jne BalokHit
+/// 035ca  test word [BalokFLAGS], 1;    jne ControlBalokGrab
+/// 035d5  test word [BalokFLAGS], 0x20; jne ControlBalokRelease
+/// 035e0  cmp  word [di+0x38], 0; jle exit
+/// 035f5  cmp  ax, [0x7790]; jl; mov byte [si+8], 3 / mov byte [si+8], 1
+/// 03608  call CheckZAxis; je BalokJump
+/// 0360f  mov  word [BalokFLAGS], 0
+/// 03615  call FindDistance
+/// 03618  cmp  ax, 0x46; jg;  mov byte [si+0x49], 0; jmp BalokJump
+/// 03623  cmp  ax, 0x50; jg;  cmp word [si+0x28], 4; je 0x364d
+///        mov [0x783a], Balok_UpperCut; mov [si+0x28], 4
+///        mov al, [si+8]; mov [SLAP], al; mov [0x782e], BalokSLAP
+/// 03648  cmp  ax, 0x78; jg;  mov [si+0x28], 0x10; mov [0x783a], Balok_Grab
+/// 0365b  cmp  byte [knight+0x34], 0; jne BalokJump      ; he has daggers
+/// 03667  cmp  ax, 0xb4; jg BalokJump; else exit
+/// ```
+fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) -> Act {
+    // 035ad  test word ptr [0x7794], 2
+    if shared.balok & balok_flag::JUMPING != 0 {
+        return balok_jumping(s, brain, shared);
+    }
+    // `BalokGrabbed` (0x379b), which is `BalokHit`'s own branch: the grab
+    // connected on the frame just gone, so this one is `Balok_GrabKnight`.
+    if brain.flags & flag::GRABBED != 0 {
+        brain.flags &= !flag::GRABBED;
+        return Act::Grip {
+            script: "Balok_GrabKnight".into(),
+            damage: 0,
+            cost: 0,
+            fatal: false,
+            hold: true,
+            victim: String::new(),
+        };
+    }
+    // 035ca  test word ptr [0x7794], 1
+    if shared.balok & balok_flag::HELD != 0 {
+        // ControlBalokGrab, 0x37ae: one shake, and the grab is over.
+        shared.balok &= !balok_flag::HELD;
+        shared.balok |= balok_flag::RELEASING;
+        return Act::Grip {
+            script: "Balok_ShakeKnight".into(),
+            damage: 0,
+            cost: 0,
+            fatal: false,
+            hold: true,
+            victim: String::new(),
+        };
+    }
+    // 035d5  test word ptr [0x7794], 0x20
+    if shared.balok & balok_flag::RELEASING != 0 {
+        return balok_release(s, shared);
+    }
     // 035e0  cmp word ptr [di + 0x38], 0; 035e4 jg; else the exit
     if !s.foe.alive() {
         return Act::Idle;
     }
-    // ControlBalok+80..107: its own `FaceKnight`, against `balok_seek_x`.
-    //   035e9  mov ax, [di+2]; 035ec mov [balok_seek_x], ax
-    //   035f5  mov ax, [si+2]; 035f8 cmp ax, [balok_seek_x]; 035fc jl 03604
-    //   035fe  mov byte ptr [si + 8], 3
-    //   03604  mov byte ptr [si + 8], 1
+    // ControlBalok+80..107: its own `FaceKnight`, against `[0x7790]`.
     *facing = if s.me.x < s.foe.x { 1 } else { -1 };
     // 03608  call CheckZAxis; 0360d je BalokJump
     if !check_z(s.me, s.foe, s.def) {
-        return hop(dy.signum());
+        return balok_jump(s, brain, shared);
     }
-    if d <= 70 {
-        brain.phase = 0;
-        return hop(0);
+    // 0360f  mov word ptr [0x7794], 0
+    shared.balok = 0;
+    let d = find_distance(s.me, s.foe);
+    // 03618  cmp ax, 0x46
+    if d <= 0x46 {
+        // 0361d  mov byte ptr [si + 0x49], 0: the hop's own wait is dropped.
+        brain.timer = 0;
+        return balok_jump(s, brain, shared);
     }
-    if d <= 80 {
-        if brain.phase == 1 {
-            brain.phase = 0;
-            return Act::Attack {
-                kind: Attack::Chop,
-                spawn: None,
-            };
-        }
-        brain.phase = 1;
+    // 03623  cmp ax, 0x50; 03628 cmp word [si+0x28], 4; 0362c je 0x364d.
+    // `+0x28` is the record's, which this engine clears the moment a fighter
+    // leaves the attack state, so the controller keeps its own copy of it in
+    // `Brain::att` exactly as `ControlBlackKnight` keeps `ATT`.
+    if d <= 0x50 && brain.att != Some(Attack::Swing) {
+        brain.att = Some(Attack::Swing);
         return Act::Attack {
             kind: Attack::Swing,
             spawn: None,
         };
     }
-    if d <= 120 {
-        brain.phase = 0;
+    // 03648  cmp ax, 0x78, which `0x364d` is also where a repeated uppercut
+    // lands: an uppercut is never played twice running, and the grab is what
+    // comes instead.
+    if d <= 0x78 {
+        brain.att = Some(Attack::Chop);
         return Act::Attack {
             kind: Attack::Chop,
             spawn: None,
         };
     }
-    if s.foe.daggers() > 0 || d > 180 {
-        return hop(0);
+    // 0365b  cmp byte ptr [bx + 0x34], 0; 03667 cmp ax, 0xb4
+    if s.foe.daggers() > 0 || d > 0xb4 {
+        return balok_jump(s, brain, shared);
     }
     Act::Idle
+}
+
+/// `BalokJump`, image 0x366f.
+///
+/// ```text
+/// 0366f  mov bp, 0x50; call CalcJUMP
+/// 03675  cmp word [0x7796], 3; jle exit          ; too close to be worth it
+/// 03683  cmp byte [si+0x49], 0; je 0x3692
+/// 03689  sub byte [si+0x49], 1; jne exit         ; five frames between hops
+/// 03692  mov word [si+0x28], 0
+/// 03697  mov si, 0x77cc + 0x10
+/// 0369d  mov ax, [0x7796]; cmp ax, 0x14; jle; mov ax, 0x14
+/// 036a8  mov [si], ax                            ; at most twenty frames
+/// 036ad  mov [0x779a], ax
+/// 036b1  mov ax, [0x7798]; mov [si+2], ax        ; the rise
+/// 036ba  call ADDJUMP
+/// 036bd  mov word [BalokFLAGS], 0; or word [BalokFLAGS], 2
+/// 036c8  mov word [0x783a], Balok_Jump
+/// ```
+fn balok_jump(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    let aim = crate::jump::calc(
+        (s.me.x, s.me.y, brain.height),
+        (s.foe.x, s.foe.y, s.foe.brain.height),
+        0x50,
+    );
+    // 03675  cmp word ptr [0x7796], 3
+    if aim.steps <= 3 {
+        return Act::Idle;
+    }
+    // 03683: the wait between hops, `+0x49`.
+    if brain.timer != 0 {
+        brain.timer -= 1;
+        if brain.timer != 0 {
+            return Act::Idle;
+        }
+    }
+    let mut plan = aim.plan;
+    plan.steps = aim.steps.min(0x14);
+    plan.rise = aim.rise;
+    shared.jump_steps = aim.steps;
+    shared.balok_hop = plan.steps;
+    brain.jump = Some(plan.start());
+    shared.balok = balok_flag::JUMPING;
+    Act::Play("Balok_Jump".into())
+}
+
+/// `BalokJumping`, image 0x36d1: the hop, and the landing that kills whoever
+/// is under it.
+///
+/// ```text
+/// 036d1  mov byte [si+0x49], 0
+/// 036d5  mov ax, [0x77e8]; call ControlJump
+/// 036df  mov [si+2], bx; mov [si+6], cx; mov [si+4], dx
+/// 036e8  sub word [0x779a], 1; je 0x372a          ; the hop is over
+/// 036ef  mov word [0x783a], Balok_Jumping
+/// 036f5  mov ax, [0x7796]; shr ax, 1
+/// 036fa  cmp ax, [0x779a]; jl exit                ; still on the way up
+/// 03700  cmp dx, -0x28; jl exit                   ; still forty off the ground
+/// 03709  call FindDistance; cmp ax, 0xa; jg exit
+/// 03711  mov ax, [di+2]; mov [si+2], ax           ; land on him exactly
+/// 03717  mov ax, [di+6]; mov [si+6], ax
+/// 0371d  mov si, Knight_Explode; call REPLACEANIM
+/// 03723  call KillKnight                          ; and fall into the landing
+/// 0372a  mov byte [si+0x49], 5                    ; five frames before another
+/// 0372e  mov word [0x783a], Balok_Jump
+/// 03734  mov word [si+4], 0
+/// 03739  mov byte [BalokFLAGS], 0
+/// 0373e  mov ax, 2                                ; dead: the calls clobber it
+/// 03741  cmp word [0x7798], 8
+/// 03746  jl  LittleLandAudio                      ; sound 0x2f
+/// 03748  call BigLandAudio                        ; sound 0x2d, and the screen
+/// 0374b  call ShakeADD                            ; shakes
+/// ```
+///
+/// The landing is tested against the *hop's* own counter at DS:`0x779a` and
+/// not against the jump slot's, and the two run together, so the second half
+/// of the hop is where it can land on somebody.
+fn balok_jumping(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+    // 036d1  mov byte ptr [si + 0x49], 0
+    brain.timer = 0;
+    let Some(mut jump) = brain.jump else {
+        shared.balok &= !balok_flag::JUMPING;
+        brain.height = 0;
+        return Act::Idle;
+    };
+    let step = jump.step();
+    brain.jump = Some(jump);
+    brain.height = step.y;
+    shared.balok_hop -= 1;
+    let landed = shared.balok_hop == 0;
+    if !landed {
+        // 036f5  mov ax, [0x7796]; shr ax, 1; cmp ax, [0x779a]; jl exit
+        // 03700  cmp dx, -0x28; jl exit
+        // 03709  call FindDistance; cmp ax, 0xa; jg exit
+        let over = (shared.jump_steps >> 1) >= shared.balok_hop
+            && step.y >= -0x28
+            && (step.x - s.foe.x).abs() <= 0xa
+            && s.foe.alive();
+        if !over {
+            return Act::Fly {
+                x: step.x,
+                y: step.z,
+                script: "Balok_Jumping".into(),
+            };
+        }
+        // 03711: it comes down on him, and that is the whole of him.
+        brain.jump = None;
+        brain.height = 0;
+        brain.timer = 5;
+        shared.balok &= !balok_flag::JUMPING;
+        return Act::Grip {
+            script: "Balok_Jump".into(),
+            damage: 0,
+            cost: 0,
+            fatal: true,
+            hold: false,
+            // 0371d  mov si, Knight_Explode; call REPLACEANIM
+            victim: "Knight_Explode".into(),
+        };
+    }
+    // 0372a: the ordinary landing.
+    brain.jump = None;
+    brain.height = 0;
+    brain.timer = 5;
+    shared.balok &= !balok_flag::JUMPING;
+    Act::Fly {
+        x: step.x,
+        y: step.z,
+        script: "Balok_Jump".into(),
+    }
+}
+
+/// `ControlBalokRelease`, image 0x37f0, with `ControlBalokBite` (0x37c1) and
+/// `ControlBalokCrush` (0x37dc).
+///
+/// ```text
+/// 037f0  mov di, [KnightTable]
+/// 037f4  cmp word [di+0x38], 0
+/// 037f8  jle ControlBalokBite                ; already dead: it eats him
+/// 037fa  mov word [di+0xc], 0; mov word [di+0xe], 0
+/// 03804  call TASKSTANDBY                    ; back on the board
+/// 0380e  mov si, [di+0x10]; call REPLACEANIM ; on his own stance
+/// 03817  call FINDTASK
+/// 03820  mov ax, [si+2]; mov bx, 0x4b
+/// 03826  test byte [si+8], 2; je; neg bx     ; seventy five to whichever side
+/// 0382e  add ax, bx; mov [di+4], ax
+/// 03834  mov word [BalokFLAGS], 0
+/// 0383a  mov ax, [si+0x12]                   ; Balok_Recover
+/// ControlBalokBite:
+/// 037c1  xor word [0x77a0], 1
+/// 037c6  je  ControlBalokCrush               ; every other one is the squeeze
+/// 037c8  mov word [0x783a], Balok_BiteKnight
+/// 037ce  mov word [BalokFLAGS], 0; or word [BalokFLAGS], 0x40
+/// ControlBalokCrush:
+/// 037dc  mov word [0x783a], Balok_SqueezeKnight
+/// ```
+///
+/// Neither the bite nor the squeeze takes a hit point itself: both scripts
+/// call `KillKnight` through `TASKGOSUB` partway through, which is what
+/// finishes him, and `0x40` is a bit nothing in `ControlBalok` reads, so the
+/// frame after one of them the creature is back on the ordinary path.
+fn balok_release(s: &Sight, shared: &mut Shared) -> Act {
+    if !s.foe.alive() {
+        // 037c1  xor word ptr [0x77a0], 1
+        shared.balok_bite ^= 1;
+        let crush = shared.balok_bite == 0;
+        shared.balok = balok_flag::CHEWING;
+        return Act::Grip {
+            script: if crush {
+                "Balok_SqueezeKnight".into()
+            } else {
+                "Balok_BiteKnight".into()
+            },
+            damage: 0,
+            cost: 0,
+            fatal: false,
+            hold: true,
+            victim: String::new(),
+        };
+    }
+    shared.balok = 0;
+    Act::Grip {
+        script: "Balok_Recover".into(),
+        damage: 0,
+        cost: 0,
+        fatal: false,
+        hold: false,
+        victim: String::new(),
+    }
 }
 
 /// `ControlBeast`, `BeastCharge`, `SetBEASTZ` and `SetBeastTimer`: it does not
@@ -2128,10 +3037,14 @@ mod tests {
             "knight",
         ] {
             let def = creature(name, 100, 90);
+            // A fresh mind each side: a ratman that has already thrown itself
+            // into the air on the first ask is in `RatmanLeaping` on the
+            // second, and that branch turns nobody, which is the original.
             let mut b = Brain::default();
             let mut facing = 1;
             ask_facing(&def, &mut b, 200, 100, 0, &mut facing);
             assert_eq!(facing, -1, "{name} to the knight's right faces left");
+            let mut b = Brain::default();
             let mut facing = -1;
             ask_facing(&def, &mut b, 0, 100, 0, &mut facing);
             assert_eq!(facing, 1, "{name} to the knight's left faces right");
@@ -2150,8 +3063,11 @@ mod tests {
     }
 
     /// A definition with one creature's controller and its recovered ranges.
+    ///
+    /// The ratman is given the script rows the baker gives it, under their own
+    /// names, because half of its repertoire is choosing between them.
     fn creature(controller: &str, approach: i32, back_off: i32) -> ActorDef {
-        ActorDef {
+        let mut def = ActorDef {
             controller: controller.into(),
             approach,
             back_off,
@@ -2159,7 +3075,38 @@ mod tests {
             speed_x: 2,
             speed_y: 1,
             ..scripted_def()
+        };
+        if controller == "ratman" {
+            for (row, names) in [
+                ("leap", vec!["Ratman_Leap"]),
+                (
+                    "fly",
+                    vec![
+                        "Ratman_Leap1",
+                        "Ratman_Leap2",
+                        "Ratman_Leap3",
+                        "Ratman_Leap4",
+                    ],
+                ),
+                ("leaps", vec!["Ratman_Leaps"]),
+                ("hover_far", vec!["Ratman_HoverR"]),
+                ("hover_near", vec!["Ratman_HoverD"]),
+                ("snag", vec!["Ratman_SnagKnight"]),
+                ("hang", vec!["Ratman_HangKnight"]),
+                ("hung", vec!["Ratman_HungKnight"]),
+                ("shake", vec!["Knight_HangSd"]),
+                ("fall", vec!["Ratman_FallDown"]),
+                ("sit", vec!["Ratman_SitOnHead"]),
+                ("gouge", vec!["Ratman_EyeGouge"]),
+                ("whack", vec!["Ratman_KnightWhack"]),
+            ] {
+                def.scripts.insert(
+                    row.to_string(),
+                    names.iter().map(|n| n.to_string()).collect(),
+                );
+            }
         }
+        def
     }
 
     /// One tick of one controller against a knight standing at `foe_x`,
@@ -2189,9 +3136,49 @@ mod tests {
             body: false,
             decapped: false,
             progression: 0,
+            perch: None,
+            foe_blow: 0,
         };
         let mut seed = 0x2f1du16;
-        decide(&s, brain, &mut seed, facing)
+        decide(
+            &s,
+            brain,
+            &mut seed,
+            facing,
+            &mut crate::monster::Shared::default(),
+        )
+    }
+
+    /// The same, keeping the fight's own shared words and, for the ratman, a
+    /// tree to leap into: what the two creatures with a repertoire need.
+    fn ask_shared(
+        def: &ActorDef,
+        brain: &mut Brain,
+        shared: &mut Shared,
+        me: &Fighter,
+        foe: &Fighter,
+        perch: Option<Perch>,
+    ) -> Act {
+        let s = Sight {
+            me,
+            foe,
+            def,
+            bounds: Bounds {
+                left: 0,
+                right: 319,
+                top: 10,
+                bottom: 114,
+            },
+            gore: true,
+            body: false,
+            decapped: false,
+            progression: 0,
+            perch,
+            foe_blow: 3,
+        };
+        let mut seed = 0x2f1du16;
+        let mut facing = 1;
+        decide(&s, brain, &mut seed, &mut facing, shared)
     }
 
     /// One tick of one controller against a knight standing at `foe_x`.
@@ -2352,15 +3339,29 @@ mod tests {
             body,
             decapped: false,
             progression: 0,
+            perch: None,
+            foe_blow: 0,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
         assert!(matches!(
-            decide(&sight(true), &mut b, &mut seed, &mut facing),
+            decide(
+                &sight(true),
+                &mut b,
+                &mut seed,
+                &mut facing,
+                &mut Shared::default()
+            ),
             Act::Idle
         ));
         assert!(matches!(
-            decide(&sight(true), &mut b, &mut seed, &mut facing),
+            decide(
+                &sight(true),
+                &mut b,
+                &mut seed,
+                &mut facing,
+                &mut Shared::default()
+            ),
             Act::Idle
         ));
         assert_eq!(b.cooldown, 0);
@@ -2368,7 +3369,13 @@ mod tests {
         // 0x2e86 is the distance, 0x2e8b the flag, 0x2e92 the count, and
         // then the swing. `Sight::body` is the black knight's concern.
         assert_eq!(
-            kind(&decide(&sight(false), &mut b, &mut seed, &mut facing)),
+            kind(&decide(
+                &sight(false),
+                &mut b,
+                &mut seed,
+                &mut facing,
+                &mut Shared::default()
+            )),
             Some(Attack::Swing),
             "TroggAttack+0x41: jmp TroggSwing"
         );
@@ -2496,6 +3503,8 @@ mod tests {
                 body: false,
                 decapped: false,
                 progression: 0,
+                perch: None,
+                foe_blow: 0,
             }
         }
         // Walk the register until it hands out a roll at thirty or under,
@@ -2524,7 +3533,8 @@ mod tests {
                 &sight(&me, &blocking, &def),
                 &mut Brain::default(),
                 &mut s,
-                &mut facing
+                &mut facing,
+                &mut Shared::default()
             )),
             Some(Attack::Swing)
         );
@@ -2535,7 +3545,8 @@ mod tests {
                 &sight(&me, &blocking, &def),
                 &mut Brain::default(),
                 &mut s,
-                &mut facing
+                &mut facing,
+                &mut Shared::default()
             )),
             Some(Attack::Chop)
         );
@@ -2545,7 +3556,8 @@ mod tests {
                 &sight(&me, &open, &def),
                 &mut Brain::default(),
                 &mut s,
-                &mut facing
+                &mut facing,
+                &mut Shared::default()
             )),
             Some(Attack::Swing),
             "a low roll on an open knight is still the swing"
@@ -2599,15 +3611,170 @@ mod tests {
             Some(Attack::Lunge),
             "the bite"
         );
+        // The leap, which used to be a walk on a named script and is now the
+        // original's own ballistic arc. `RatmanInitLeap` (0x3215) aims it,
+        // `RatmanLeaps` (0x325f) names the frame and raises `+0x48 & 1`, and
+        // `RatmanLeaping` (0x3270) steps it until it comes down.
         let mut b = Brain::default();
-        assert!(
-            matches!(ask(&def, &mut b, 0, 60, 0), Act::Walk { .. }),
-            "the leap"
+        let mut shared = Shared::default();
+        let (me, foe) = (at(0, 50), at(120, 50));
+        let first = ask_shared(&def, &mut b, &mut shared, &me, &foe, None);
+        assert_eq!(
+            first,
+            Act::Play("Ratman_Leap".into()),
+            "RatmanLeaps names the frame it leaves the ground on"
         );
-        // A landed blow buys fifteen frames: `RatmanHit` sets `HitDelay`.
+        assert!(b.flags & flag::LEAPING != 0, "0x3263: +0x48 |= 1");
+        assert!(b.jump.is_some(), "and a slot in the jump table is running");
+        // Every frame after it is `RatmanLeaping` moving the rat itself.
+        let mut me = me;
+        let mut airborne = 0;
+        let mut highest = 0;
+        let mut landed = false;
+        for _ in 0..40 {
+            match ask_shared(&def, &mut b, &mut shared, &me, &foe, None) {
+                Act::Fly { x, y, script } => {
+                    me.x = x;
+                    me.y = y;
+                    highest = highest.min(b.height);
+                    if script.is_empty() {
+                        landed = true;
+                        break;
+                    }
+                    airborne += 1;
+                }
+                other => panic!("expected a step of the arc, got {other:?}"),
+            }
+        }
+        assert!(landed, "the arc ends");
+        assert!(airborne >= 4, "and lasts more than a frame: {airborne}");
+        assert!(highest < 0, "it left the ground: {highest}");
+        assert_eq!(b.height, 0, "0x328d: mov word ptr [si + 4], 0");
+        assert_eq!(b.flags & flag::LEAPING, 0, "0x3292: mov [si+0x48], 0");
+        assert!(me.x > 0, "and it covered ground: {}", me.x);
+        // Close in it is a hop rather than a leap: `RatmanInitLeap+31`
+        // (0x323b) raises `+0x48 & 0x80` and gives it two pixels of rise.
         let mut b = Brain::default();
-        ask(&def, &mut b, 0, 35, 0);
-        assert_eq!(b.cooldown, 15);
+        let mut shared = Shared::default();
+        let hop = ask_shared(&def, &mut b, &mut shared, &at(0, 50), &at(60, 50), None);
+        assert!(b.flags & flag::SHORT_HOP != 0, "0x323b: +0x48 |= 0x80");
+        assert!(
+            b.flags & flag::LEAPING == 0,
+            "and never through RatmanLeaps"
+        );
+        assert!(
+            matches!(hop, Act::Play(ref n) if n.starts_with("Ratman_Leap")),
+            "drawn on the up row from the first frame: {hop:?}"
+        );
+    }
+
+    /// `RatmanLeap` (0x31a9): the first rat to want to leap takes the tree,
+    /// sits in it for thirty frames, and the next one has to go for the
+    /// knight because `RatFLAGS & 4` is up.
+    #[test]
+    fn the_first_ratman_leaps_into_the_tree_and_the_next_one_does_not() {
+        let def = creature("ratman", 40, 30);
+        let tree = Perch {
+            x: 160,
+            y: 112,
+            height: -88,
+        };
+        let mut shared = Shared::default();
+        let mut b = Brain::default();
+        let mut me = at(0, 50);
+        let foe = at(120, 50);
+        let first = ask_shared(&def, &mut b, &mut shared, &me, &foe, Some(tree));
+        assert_eq!(first, Act::Play("Ratman_Leap".into()));
+        assert!(b.flags & flag::TREE_BOUND != 0, "0x31c3: +0x48 |= 4");
+        assert_eq!(shared.rat & rat_flag::TREE, rat_flag::TREE, "0x31be");
+        assert_eq!(b.cooldown, 0x1e, "0x31d3: thirty frames up there");
+        // Fourteen frames of arc, and then it is in the tree.
+        let mut frames = 0;
+        for _ in 0..30 {
+            match ask_shared(&def, &mut b, &mut shared, &me, &foe, Some(tree)) {
+                Act::Fly { x, y, .. } => {
+                    me.x = x;
+                    me.y = y;
+                    frames += 1;
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(frames, 14, "0x3205: the arc is fourteen frames long");
+        assert!(b.flags & flag::IN_TREE != 0, "0x32b4: +0x48 |= 8");
+        assert!(
+            (me.x - tree.x).abs() <= 2,
+            "and it is in the tree at {}",
+            me.x
+        );
+        assert!(b.height < -40, "and up it: {}", b.height);
+        // In the tree it hovers, and it hangs there for the rest of its count.
+        let hover = ask_shared(&def, &mut b, &mut shared, &me, &foe, Some(tree));
+        assert!(
+            matches!(hover, Act::Play(ref n) if n.starts_with("Ratman_Hover")),
+            "{hover:?}"
+        );
+        // A second rat finds the tree taken and aims at the knight instead.
+        let mut second = Brain::default();
+        let out = ask_shared(&def, &mut second, &mut shared, &at(0, 50), &foe, Some(tree));
+        assert_eq!(out, Act::Play("Ratman_Leap".into()));
+        assert_eq!(
+            second.flags & flag::TREE_BOUND,
+            0,
+            "0x31bc: the tree is taken"
+        );
+    }
+
+    /// `RatmanOnHead` (0x3353), `RatmanGouge` (0x3383) and `RatmanGouged`
+    /// (0x3395): it sits, it gouges, and it throws itself clear leaving five
+    /// points off him.
+    #[test]
+    fn a_ratman_on_the_head_sits_gouges_and_throws_itself_clear() {
+        let def = creature("ratman", 40, 30);
+        let mut shared = Shared::default();
+        let mut b = Brain::default();
+        b.flags |= flag::ON_HEAD;
+        b.cooldown = 3;
+        let mut me = at(100, 50);
+        let mut foe = at(100, 50);
+        foe.holder = Some(0);
+        for left in [2, 1] {
+            let sit = ask_shared(&def, &mut b, &mut shared, &me, &foe, None);
+            assert_eq!(sit, grip("Ratman_SitOnHead", 0, true));
+            assert_eq!(b.cooldown, left);
+        }
+        let gouge = ask_shared(&def, &mut b, &mut shared, &me, &foe, None);
+        assert_eq!(gouge, grip("Ratman_EyeGouge", 0, true), "0x3383");
+        assert!(b.flags & flag::GOUGING != 0 && b.flags & flag::ON_HEAD == 0);
+        let done = ask_shared(&def, &mut b, &mut shared, &me, &foe, None);
+        assert_eq!(done, grip("Ratman_Leaps", 5, false), "0x3395: five points");
+        assert_eq!(b.height, -0x46, "0x33f6: mov word ptr [di + 4], 0xffba");
+        assert!(b.flags & flag::LEAPING != 0, "0x33ee: +0x48 |= 1");
+        // And a hundred and fifty pixels of arc away from him.
+        for _ in 0..24 {
+            if let Act::Fly { x, y, .. } = ask_shared(&def, &mut b, &mut shared, &me, &foe, None) {
+                me.x = x;
+                me.y = y;
+            } else {
+                break;
+            }
+        }
+        assert!(
+            me.x >= 200,
+            "0x33c4: a hundred and fifty clear, at {}",
+            me.x
+        );
+    }
+
+    fn grip(script: &str, damage: i32, hold: bool) -> Act {
+        Act::Grip {
+            script: script.into(),
+            damage,
+            cost: 0,
+            fatal: false,
+            hold,
+            victim: String::new(),
+        }
     }
 
     /// `MudmenReach` between seventy five and a hundred, `MudmenIBury` inside
@@ -2674,18 +3841,71 @@ mod tests {
             body: false,
             decapped: false,
             progression: 0,
+            perch: None,
+            foe_blow: 0,
         };
         let mut seed = 1u16;
         let mut brain = Brain::default();
         let mut facing = -1;
-        assert!(
-            matches!(
-                decide(&s, &mut brain, &mut seed, &mut facing),
-                Act::Walk { dx: 1, .. }
-            ),
+        let mut shared = Shared::default();
+        // `BalokJump` (0x366f), which used to be a walk and is the original's
+        // own arc: `CalcJUMP` aims it eighty short of him, `ADDJUMP` starts it
+        // and `BalokFLAGS` bit 1 goes up.
+        assert_eq!(
+            decide(&s, &mut brain, &mut seed, &mut facing, &mut shared),
+            Act::Play("Balok_Jump".into()),
             "a thrown dagger brings it in"
         );
         assert_eq!(facing, 1, "ControlBalok+107: me.x < foe.x writes 1 into +8");
+        assert_eq!(shared.balok & balok_flag::JUMPING, balok_flag::JUMPING);
+        assert!(
+            brain.jump.is_some(),
+            "and a slot in the jump table is running"
+        );
+        assert!(
+            shared.balok_hop > 0 && shared.balok_hop <= 0x14,
+            "0x369d: twenty frames at the most, {}",
+            shared.balok_hop
+        );
+        // Every frame after it is `BalokJumping` moving Balok itself, and it
+        // comes down eighty short of him with five frames before the next hop.
+        let mut walked = me.clone();
+        let mut highest = 0;
+        for _ in 0..0x18 {
+            let s = Sight {
+                me: &walked,
+                foe: &foe,
+                def: &def,
+                bounds: Bounds {
+                    left: 0,
+                    right: 319,
+                    top: 10,
+                    bottom: 114,
+                },
+                gore: true,
+                body: false,
+                decapped: false,
+                progression: 0,
+                perch: None,
+                foe_blow: 0,
+            };
+            match decide(&s, &mut brain, &mut seed, &mut facing, &mut shared) {
+                Act::Fly { x, y, script } => {
+                    walked.x = x;
+                    walked.y = y;
+                    highest = highest.min(brain.height);
+                    if script == "Balok_Jump" {
+                        break;
+                    }
+                }
+                other => panic!("expected a step of the arc, got {other:?}"),
+            }
+        }
+        assert!(highest < 0, "it left the ground: {highest}");
+        assert_eq!(brain.height, 0, "0x3734: mov word ptr [si + 4], 0");
+        assert_eq!(brain.timer, 5, "0x372a: mov byte ptr [si + 0x49], 5");
+        assert_eq!(shared.balok & balok_flag::JUMPING, 0);
+        assert!(walked.x > 40, "and it covered ground: {}", walked.x);
         // The uppercut at arm's length, the grab from further out.
         let mut b = Brain::default();
         assert_eq!(kind(&ask(&def, &mut b, 0, 75, 0)), Some(Attack::Swing));

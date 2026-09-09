@@ -766,6 +766,24 @@ impl World {
             let actors = &self.actors;
             self.bout.apply_actor_borders(|name| &actors[name]);
         }
+        // **The ratmen's tree.** `InitKnightvsRatmen+82` (0x236f) puts one
+        // more actor in the arena beside the creatures, on `Rat_TreeBrush`,
+        // at x `0xa0` with `y` = `HalfSCAPE - 0xc8` and `z` = `HalfSCAPE`, and
+        // keeps its record in `TreeHANDLE` (DS:`0x69ae`). It fights nobody:
+        // `RatmanLeap` (0x31c7) is the only thing that reads it, and it aims
+        // the first rat's leap at it. `HalfSCAPE` is what `FindHalfBORD`
+        // (0x29cb) left behind, which is `Field::standing_depth(2)` here.
+        if self.foe == "ratmen" && self.actors.contains_key("ratmen") {
+            let def = self.actors["ratmen"].clone();
+            let anchor = self.bout.field.standing_depth(2);
+            let perch = henge_core::monster::Perch {
+                x: 0xa0,
+                y: self.bout.field.standing_row(2),
+                height: anchor - 0xc8,
+            };
+            self.bout.perch = Some(perch);
+            self.bout.stand_scenery("ratmen", &def, "tree", perch);
+        }
         // The scale every fight is at. With a sheet it is the original's:
         // the knight's swing is its `*Dam` entry and the creatures, whose
         // hit points and blows are at the scale of a twenty point knight,
@@ -868,6 +886,13 @@ impl World {
             .filter(|(i, f)| *i != 0 && !f.alive())
             .map(|(_, f)| self.def_of(&f.actor).bounty)
             .sum()
+    }
+
+    /// Whether this bout is a knight against a knight, which is the one the
+    /// original pays through `BKwon` (0x49f) rather than through the road's
+    /// own tally.
+    pub fn is_duel(&self) -> bool {
+        self.foe == "knight"
     }
 
     /// What the fallen were worth in experience, the same way.

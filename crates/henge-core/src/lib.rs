@@ -14,6 +14,7 @@ pub mod ending;
 pub mod harness;
 pub mod intro;
 pub mod item;
+pub mod jump;
 pub mod knight;
 pub mod lair;
 pub mod message;

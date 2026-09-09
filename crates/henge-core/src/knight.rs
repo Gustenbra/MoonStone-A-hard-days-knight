@@ -229,6 +229,15 @@ impl Knight {
         true
     }
 
+    /// The same increment with no ceiling at all: `BKAddstuff`'s
+    /// `inc byte ptr [bx+si+0x2e]` at 0x4ca, which is the one place in the
+    /// game that raises an ability without asking `CheckMaxAbility` first. A
+    /// knight who keeps winning duels goes past five, and `CheckMaxAbility`'s
+    /// own `cmp ... 5 / jl` still counts him as full.
+    pub fn raise_unchecked(&mut self, which: Ability) {
+        *self.ability_mut(which) += 1;
+    }
+
     /// Take a point off one ability: `MysticAbility`'s `dec byte [bx+di]`,
     /// refused at one so a knight is never hollowed out entirely.
     pub fn lower(&mut self, which: Ability) -> bool {

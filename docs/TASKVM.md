@@ -556,7 +556,7 @@ The baker writes three things into `packs/reference/data/`:
 |---|---|
 | `scripts.json` | all 239 named scripts (the 236 with an encounter prefix, plus `SpeedKnife`, `Knife` and `Blood1`), as the engine's own `Instr` values, sound commands included |
 | `banks.json` | the four bank tables for each of the eleven creature loaders, with a sheet, a frame base and every cel's size |
-| `actors.json` | the knight and the ten creatures, each carrying the closure of the scripts its states reach, its bank tables, which table a task starts on, which script each state plays, its origin, hit box and girth read off its standing frame, its frame rate, and the numbers from its `Set*Tables` routine |
+| `actors.json` | the knight and the ten creatures, each carrying the closure of the scripts its states reach, its bank tables, which table a task starts on, which script each state plays, its origin and hit box read off its standing frame, its frame rate, and the numbers from its `Set*Tables` routine |
 
 Two of those numbers are ours and are marked so in the data's own comments.
 The **origin** is where the task's point sits relative to the feet, read off

@@ -351,6 +351,127 @@ impl Field {
     }
 }
 
+/// One actor's body as `TASKWALKCOLLIDE` finds it in the task list.
+///
+/// The four box fields are the actor record's `+0x22`/`+0x24` and
+/// `+0x4e`/`+0x50`, which `perdone` (0x99d8) copies out of the four words
+/// `FindWidth` (0x9dbc) accumulated while the frame was placed: the smallest
+/// and largest column and row every part of the drawn figure reached. This
+/// engine has no such accumulator, and the actor's authored body box is what
+/// it uses for `SBORD` already, so it is what is used here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Occupant {
+    /// `+2`, the anchor column.
+    pub x: i32,
+    /// `+6`, the depth row.
+    pub depth: i32,
+    pub box_left: i32,
+    pub box_right: i32,
+    pub box_top: i32,
+    pub box_bottom: i32,
+}
+
+/// `TASKWALKCOLLIDE`, image 0x9e06: which of the four directions another
+/// actor's body is standing in.
+///
+/// ```text
+/// 09e06  mov [0xc2e6], ax          ; the column step being asked for
+/// 09e09  mov [0xc2e8], cx          ; the facing
+/// 09e0d  and [0xc2e8], 3
+/// 09e12  mov word [0xc2ea], 0x1f   ; every direction allowed to start with
+/// 09e18  mov bp, 0x947e            ; the task table, ten slots of 0x24
+/// TaskWalkLoop:
+/// 09e20  cmp byte [bp], 0;          je NextWalk    ; an empty slot
+/// 09e27  mov di, [bp+0x16]; cmp di, si; je NextWalk ; myself
+/// 09e2f  cmp word [di+0x22], 0;     je NextWalk    ; never drawn: no box
+/// 09e35  cmp word [di+0x38], 0;    jle NextWalk    ; dead: no body
+/// 09e3b  call CHECK_WALK
+/// 09e45  mov ax, [0xc2ea]          ; what is left
+/// CHECK_WALK:
+/// 09e4a  call CheckZAxis           ; |me.z - his z| <= 10 ?
+/// 09e4f  je  CheckAboveBelow       ; no: only the depth pair can be refused
+/// 09e51  sub bp, bp; mov ax, 1; mov es, ax
+/// 09e58  cmp [0xc2e8], 1
+/// 09e5d  je  09e6e
+/// 09e5f  mov ax, 2; mov es, ax     ; facing left: bit 1
+/// 09e64  mov ax, [si+2]; cmp ax, [di+2]; jl CheckAboveBelow  ; he is to the
+///                                                            ; right: skip
+/// 09e6e  mov ax, [si+2]; cmp ax, [di+2]; jg CheckAboveBelow  ; facing right
+///                                                            ; and he is left
+/// 09e76  ax = [si+0x22] + step; bx = [si+0x24] + step
+/// 09e84  cx = [di+0x22];       dx = [di+0x24];   call overlap
+/// 09e8d  ax = [si+0x4e]; bx = [si+0x50]; cx = [di+0x4e]; dx = [di+0x50]; overlap
+/// 09e9c  cmp bp, 2; jne CheckAboveBelow
+/// 09ea1  mov ax, es; not ax; and [0xc2ea], ax     ; that direction is out
+/// CheckAboveBelow:
+/// 09eab  ax = [si+0x22]; bx = [si+0x24]; cx = [di+0x22]; dx = [di+0x24]; overlap
+/// 09eba  bx = [di+6]; cx = [si+6]; sub cx, bx
+/// 09ec2  jns 09ecd
+/// 09ec4  mov ax, 4; mov es, ax; neg cx    ; I am in front of him: bit 2, down
+/// 09ecd  mov ax, 8; mov es, ax            ; level or behind: bit 3, up
+/// 09ed2  cmp cx, 0x14; jg  done           ; more than twenty apart in depth
+/// 09ed7  the same y box overlap
+/// 09ee6  cmp bp, 2; jne done
+/// 09eeb  mov ax, es; not ax; and [0xc2ea], ax
+/// ```
+///
+/// Three things about it are worth naming, because none of them is what a
+/// designer would have written.
+///
+/// * **The sideways test is one sided.** Only the direction the actor *faces*
+///   can be refused, and only by a body on that side of him, so a fighter
+///   backing away from something never bumps into it. `xdir = facing & 3` at
+///   0x9e58 is the whole of the test, and the facing is 1 or 3.
+/// * **The two halves have different tolerances.** Sideways wants the two
+///   within ten rows of each other (`CheckZAxis`, and the creature's own
+///   `+0x56` is not consulted: the routine calls the ten row form at 0x9ef5,
+///   not the tracker's); the depth pair wants twenty (0x9ed2).
+/// * **Level counts as behind.** `jns` at 0x9ec2 takes the equal case to bit
+///   3, so two actors on exactly the same row refuse each other *up* and allow
+///   each other *down*.
+///
+/// `step` is `[0x783d]`, the column step the caller is about to take;
+/// `[0x783f]`, the depth step, is loaded by both callers and never read.
+/// `0x1f`'s fifth bit is fire, which this routine never clears, so what comes
+/// back here is the four direction bits.
+pub fn walk_collide(me: &Occupant, facing: i32, step: i32, others: &[Occupant]) -> u8 {
+    let mut ok = dir::ALL;
+    for other in others {
+        // 09e4a  call CheckZAxis: ten rows, and its own literal.
+        if (me.depth - other.depth).abs() <= 10 {
+            // 09e58: the facing, and the side he has to be on.
+            let (bit, ahead) = if facing == 1 {
+                (dir::RIGHT, me.x <= other.x)
+            } else {
+                (dir::LEFT, me.x >= other.x)
+            };
+            if ahead
+                && overlaps(
+                    me.box_left + step,
+                    me.box_right + step,
+                    other.box_left,
+                    other.box_right,
+                )
+                && overlaps(me.box_top, me.box_bottom, other.box_top, other.box_bottom)
+            {
+                ok &= !bit;
+            }
+        }
+        // CheckAboveBelow, 0x9ea9: the column boxes as they stand, with no
+        // step added to either.
+        let dz = me.depth - other.depth;
+        // 09ec2  jns 09ecd: equal depth takes the `up` branch.
+        let bit = if dz < 0 { dir::DOWN } else { dir::UP };
+        if dz.abs() <= 0x14
+            && overlaps(me.box_left, me.box_right, other.box_left, other.box_right)
+            && overlaps(me.box_top, me.box_bottom, other.box_top, other.box_bottom)
+        {
+            ok &= !bit;
+        }
+    }
+    ok
+}
+
 /// One piece of scenery stamped onto the arena.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prop {
@@ -617,5 +738,98 @@ mod tests {
             ],
         };
         assert_eq!(a.draw_order(), vec![1, 0]);
+    }
+
+    /// `TASKWALKCOLLIDE` (0x9e06), which stands where `Bout::separate` used
+    /// to: a fighter may not step into another body, and the refusal is one
+    /// sided.
+    ///
+    /// This replaces nothing that was tested before, because `separate` had
+    /// no test: it pushed two overlapping fighters apart, which the original
+    /// never does at all.
+    #[test]
+    fn a_body_refuses_the_step_only_in_the_direction_the_fighter_faces() {
+        // A knight at 100 and something at 130, level, both eighteen wide and
+        // fifty tall.
+        let me = Occupant {
+            x: 100,
+            depth: 150,
+            box_left: 91,
+            box_right: 109,
+            box_top: 100,
+            box_bottom: 150,
+        };
+        let him = Occupant {
+            x: 118,
+            depth: 150,
+            box_left: 109,
+            box_right: 127,
+            box_top: 100,
+            box_bottom: 150,
+        };
+        // Facing right, and a step right takes the box into his: refused.
+        assert_eq!(
+            walk_collide(&me, 1, 4, &[him]) & dir::RIGHT,
+            0,
+            "0x9e58: the direction he faces"
+        );
+        // The same pair, the same step, facing left: the sideways half of the
+        // routine never runs, because the `jg` at 0x9e74 is not the `jl` at
+        // 0x9e6a.
+        assert_eq!(walk_collide(&me, 3, 4, &[him]) & dir::LEFT, dir::LEFT);
+        // And a step that does not reach him is allowed either way.
+        let far = Occupant {
+            box_left: 200,
+            box_right: 218,
+            x: 209,
+            ..him
+        };
+        assert_eq!(walk_collide(&me, 1, 4, &[far]), dir::ALL);
+    }
+
+    /// The two halves of the routine measure depth differently, and the
+    /// equal case goes to `up`.
+    #[test]
+    fn the_depth_pair_reaches_twice_as_far_as_the_sideways_one() {
+        let me = Occupant {
+            x: 100,
+            depth: 150,
+            box_left: 91,
+            box_right: 109,
+            box_top: 100,
+            box_bottom: 150,
+        };
+        // Fifteen rows behind him: too far for `CheckZAxis`'s ten, inside
+        // `CheckAboveBelow`'s twenty.
+        let behind = Occupant {
+            depth: 135,
+            x: 109,
+            box_left: 100,
+            box_right: 118,
+            box_top: 85,
+            box_bottom: 135,
+        };
+        let ok = walk_collide(&me, 1, 4, &[behind]);
+        assert_eq!(ok & dir::RIGHT, dir::RIGHT, "0x9e4f: ten rows, no more");
+        assert_eq!(ok & dir::UP, 0, "0x9ecd: he is up-screen of me");
+        assert_eq!(ok & dir::DOWN, dir::DOWN, "and down is still free");
+        // Twenty five rows: out of reach of both.
+        let further = Occupant {
+            depth: 125,
+            box_top: 75,
+            box_bottom: 125,
+            ..behind
+        };
+        assert_eq!(walk_collide(&me, 1, 4, &[further]), dir::ALL);
+        // Exactly level: `jns` at 0x9ec2 takes the equal case to `up`.
+        let level = Occupant {
+            depth: 150,
+            box_top: 100,
+            box_bottom: 150,
+            ..behind
+        };
+        let ok = walk_collide(&me, 1, 0, &[level]);
+        assert_eq!(ok & dir::UP, 0);
+        assert_eq!(ok & dir::DOWN, dir::DOWN);
     }
 }

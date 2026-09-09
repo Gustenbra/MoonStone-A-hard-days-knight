@@ -148,7 +148,7 @@ numbers below are the original's, not chosen. `docs/TASKVM.md` has the tables.
 
 Each creature is an `ActorDef` like the knight's: the closure of the scripts its
 states reach, its loader's bank tables starting on table 2 (the actor record's `+0x18`,
-where the knight's holds table 1), an origin, hit box and girth read off its own
+where the knight's holds table 1), an origin and hit box read off its own
 standing frame, and the five states. Which of its attacks the one button gets is ours
 and marked so in the baker. **Every one was checked by looking**: `--start arena
 --foe <id>` in the arena browser, `,` and `.` to cycle, screenshots against the
@@ -222,12 +222,13 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       list rather than intersecting it and runs before the fighters are stood up
 - [x] 34. **Beast.** `Beast_Drool1` to stand (its `+0x10` stance), `Run1`..`4`,
       `LowerHit`, `LowerDead`. Ten hit points, a tracker that closes to two pixels. It
-      has no swing: every run frame carries a weapon part, so the first run frame is
-      its attack until the charge and the toss (`Beast_BackToss`, `ChestToss`, which
-      are the knight's own animation on the beast's banks) are built under 37
+      has no swing: every run frame carries a weapon part, and those parts threaten
+      whatever state it is in, because `TaskCol_MainLoop` (0x9f26) has no state test
+      of any kind. The toss and the impale are item 51
 - [x] 35. **Balok.** `Balok_Stance`, `Jump` and `Jumping` for a walk, `UpperCut`,
       `UpperHit`, `Dead`. Thirty hit points, a blow of four (`BalokDam`), ranges
-      80/60/10. The grab and the three things it does to a held knight wait on 37
+      80/60/10. The grab, the shake, the bite, the squeeze and the landing that
+      bursts a knight are item 51
 - [x] 36. **Dragon: the set piece, and it was all readable.** `InitKnightvsDragon`
       (0x2438) and `ControlDragon` (0x3843) give the whole encounter, and none of it
       had to be invented. The dragon is not an opponent that walks up to you: its
@@ -351,8 +352,19 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
            and a fighter is refused the step into another actor's body only in the
            direction he faces (0x9e58..0x9e74: facing right, only an actor to his
            right; facing left, only one to his left), with the body boxes
-           `+0x22`/`+0x24` and `+0x4e`/`+0x50`. **Not built**: `Bout::separate`
-           pushes overlapping fighters apart instead, which is ours
+           `+0x22`/`+0x24` and `+0x4e`/`+0x50`. **Built**, as
+           `arena::walk_collide`, called from `Fighter::walk` before
+           `CheckBorder` and `SBORD` exactly as `ControlKnight+217` (0x3f9d),
+           `MonsterWalk+19` (0x4e9e) and `MudmenMove+65` (0x53c0) call it, and
+           `and`ed into the same direction byte. `Bout::separate`, which pushed
+           overlapping fighters apart, and `ActorDef::girth`, which only
+           `separate` read, are **deleted**. Its two halves have different
+           depth tolerances (ten sideways, twenty up and down) and `jns` at
+           0x9ec2 puts the equal case on the `up` bit; both are reproduced.
+           `+0x22`/`+0x24` and `+0x4e`/`+0x50` are `FindWidth`'s (0x9dbc)
+           running min and max over the drawn parts, carried into the record by
+           `perdone` (0x99d8); this engine has no such accumulator and uses the
+           authored body box, which is the stand-in `SBORD` already used
         8. A blow turns whoever takes it in exactly three places, and the whole
            table was read to say so. `KnightGotStruck` (0x4267) picks a
            `*Struck1` entry out of DS:0x7843 by the *striker's* kind
@@ -407,11 +419,10 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
         it, and picks its next line: dead on him one pass, up to twenty eight rows
         off the next, because `BeastFLAGS` bit 0 alternates
       - **Demon** and **dragon**: items 33 and 36
-      What is **not** built, and is honest about it: the ratman's ballistic leap into
-      a tree and onto the knight's head (`RatmanInitLeap`, `RatHangKnight`,
-      `RatmanOnHead`, `RatmanGouge`), which is a whole second fight; Balok's grab and
-      the three things it does to a held knight, and the landing on him that plays
-      `Knight_Explode`; and the beast's `Beast_BackToss` and `ChestToss`
+      **The repertoire under all this is built now** and has an item of its own,
+      51 below: the ratman's leap, tree, head and gouge; Balok's hop, grab and
+      landing; the beast's toss and impale. What is still not built is the
+      dragon's own two, `Dragon_BitKnight` and `DrDropHead`
 
 ## Phase 3: economy and character
 
@@ -463,7 +474,25 @@ Independent of phase 1. **Can start immediately, in parallel with the research.*
       the player count, and `AdjustLevel` spends it on one of the three abilities.
       The sheet carries the three `Increase` gadgets in the original's own order
       (`ab1`..`ab3`), lit only while the experience covers the cost and the ability
-      is under five, as the status screen at 0xd3a7 lights them
+      is under five, as the status screen at 0xd3a7 lights them.
+
+      **`XPlevels` itself is read now.** It is at DS:`0x4d4`, image `0x12884`, and
+      the eight bytes are `03 00 02 00 01 00 01 00`: `Adjplayers` (0x13c2) clamps
+      the player count to one to four, indexes the table with it and puts the
+      answer in `[0x718]`, which `HGAbility` (0xcc23), `_MAP:KnightXP` (0xac7a) and
+      `BKAddstuff` (0x4d9) all subtract. So a point costs three won bouts alone,
+      two for a pair and one for three or four. The figure that stood here was
+      four, and it was ours.
+
+      **`BKwon` (0x49f) and `BKAddstuff` (0x4b0)** are the experience that happens
+      *inside* a bout, and they are `Run::duel_won`: a point for putting the other
+      knight down, spent where it is earned, on a flat roll (`and ax, 3` clamped to
+      two, not `WIZABL`'s weighting), with ten hit points added on top for
+      constitution and **no ceiling asked about at all** (the `inc byte
+      [bx+si+0x2e]` at 0x4ca is the one increment in the game that does not go
+      through `CheckMaxAbility`, so a knight who keeps winning duels goes past
+      five). A duel pays through this and not through the road's own tally, which
+      is what `World::is_duel` decides
 
 ## Phase 4: combat depth
 
@@ -545,11 +574,18 @@ the decapitation beside the bloodless collapse from the same fight.
       stepped by the same interpreter, folded into the fingerprint, and
       serialized with everything else; the daggers come off the run's sheet
       going in and what is left goes back onto it, so a thrown dagger is a
-      dagger gone. **What the item covers that is not done:** `SWORDFLAG`, the
-      drawn and sheathed state (`Knight_SwWalkOn` is the walk on with the
-      sword drawn, and nothing here sheathes it), and a dropped or lost sword
-      (`TakeSword`, `_no_sword`, `DisplayMSword` are the status panel's side of
-      it, and what drops one in a fight has not been found)
+      dagger gone. **What the item covers, looked at again and closed.**
+      `SWORDFLAG` is a `PUBLIC` name with no address at all, between `DRAGON`
+      and `PLAYERPOINTER` in the blob, and no routine in the image has been
+      found that touches it. There is no sheathed animation set: all 38 of the
+      knight's scripts are `Knight_Sw*`, so drawn against sheathed is not a
+      state the shipped game can draw, and `Knight_SwWalkOn` is his walk-on and
+      not the drawing of a sword. The weapon state the code does keep is
+      `+0x40`, the sword's item id, which `CalcDamage` reads at 0x2d7d, 0x2d86
+      and 0x2d8f for its 2, 3 and 5 and which `TakeSword` (0xccd4) writes,
+      giving 0x19 to whoever lifts the magic sword and **0x16 to the other
+      knight**, which is the only place in the game a sword is taken away. That
+      is `Knight::weapon`, and it is built
 - [x] 49. **Gore. Recovered**, and the switch is real: `OSWITCHES` toggles
       DS:0x700 off the title's gore row, `DisplaySelect` prints `ON` for zero,
       and every `TASKSKIP` and every part flagged 0x80 reads it. It goes through
@@ -678,6 +714,93 @@ the decapitation beside the bloodless collapse from the same fight.
       0xa190, over the plane the cel's row stride at 0xa0b5 addresses), and this
       tests the swept line against the authored body box. Doing it properly
       means the packed sheets carrying a per-cel mask, which they do not.
+
+- [x] 52. **What a creature can actually do to you: the repertoire under item
+      37, and the jump engine three of them stand on.**
+
+      **The jump engine** is `CalcJUMP` (0x2a8e), `ADDJUMP` (0x2b8d) and
+      `ControlJump`/`CONJUMP` (0x2cde): six slots at DS:`0x76b2`, stride
+      `0x14`, filled from a twenty byte template at DS:`0x77cc`. It is
+      `henge_core::jump`, and it is not the task VM's `TASKJUMP`, which is a
+      different thing that only `Beast_BackToss` uses. `CalcJUMP` aims at the
+      opponent, offset by the caller's stand-off (Balok passes `0x50`, the
+      ratman its own `+0x52`), and sizes the arc off the larger of the two
+      gaps: half of it is the rise and an eighth is the frame count, floored at
+      three and four, and the frame-count floor drags the rise to ten with it
+      (0x2b48). `ADDJUMP` has three branches and they are not each other's
+      mirror: jumping **up** starts with a speed and loses it to gravity,
+      jumping **down** starts at rest and gains, and `NORM`, the flat hop that
+      a rise of five or less takes, is the only one that divides unsigned and
+      the only one that reads the template's `+0x12`. `ControlJump` steps the
+      height by the speed as it was **before** that frame's gravity came off
+      it, which is one frame of lead the whole arc keeps.
+
+      **The ratman**, block for block: `RatmanLeap` (0x31a9), `RatmanInitLeap`
+      (0x3215), `RatNormalLeap` (0x325c), `RatmanLeaps` (0x325f),
+      `RatmanLeaping` (0x3270), `RatWithinTree` (0x32af), `RatmanInTree`
+      (0x32b8), `RatLeapOutTree` (0x32e0), `RatHangKnight` (0x32ed),
+      `RatmanOnHead` (0x3353), `RatmanGouge` (0x3383), `RatmanGouged` (0x3395),
+      `RatmanReleaseKnight` (0x343d), `RatmanStruck` (0x3465),
+      `KnightStruckRatInAir` (0x34b5), `RatmanHit` (0x34f0), `RatLeapHit`
+      (0x353f) and `RatTailHit` (0x357d). The **tree is an actor**:
+      `InitKnightvsRatmen+82` (0x236f) builds one out of `SetDecapFLAG+7`
+      (0x3e7d), the general put-an-actor-here routine, on `Rat_TreeBrush`, at x
+      `0xa0` with `y` = `HalfSCAPE - 0xc8` and `z` = `HalfSCAPE`, gives it kind
+      `0x14` and `ControlMisc` (0x3ead), which does nothing at all, and keeps
+      it in `TreeHANDLE` (DS:`0x69ae`). Only `RatmanLeap+30` (0x31c7) reads it,
+      and only the first rat to want to leap takes it (`RatFLAGS & 4`); it
+      stays up there thirty frames, hovering on `Ratman_HoverR` past sixty and
+      `Ratman_HoverD` inside it, with its tail out as a weapon part. A rat that
+      lands on the knight sits on his head for his endurance (`+0x30`) plus six
+      (0x3561), gouges when that runs out, and throws itself a hundred and
+      fifty pixels clear leaving five points off him. Three of the knight's
+      eight attack kinds **kill** a rat outright whatever its hit points say: a
+      block and an evade (0x3477, 0x347d) and an up thrust that catches one in
+      the air (0x34b5). The kind gate at 0x3468, which makes a rat unhurt by
+      anything that is not a joystick knight, is read and deliberately not
+      reproduced.
+
+      **Balok**: `BalokJump` (0x366f), `BalokJumping` (0x36d1), `BalokHit`
+      (0x377a), `BalokGrabbed` (0x379b), `ControlBalokGrab` (0x37ae),
+      `ControlBalokBite` (0x37c1), `ControlBalokCrush` (0x37dc) and
+      `ControlBalokRelease` (0x37f0). Its walk is the arc, five frames between
+      hops. `Knight_Explode` is built: a hop past halfway, under forty off the
+      ground and within ten pixels of him is `KillKnight` and the knight bursts
+      (0x3711). The grab takes hold of him, shakes him once, then lets him go
+      if he lived and eats him if he did not, the bite and the squeeze
+      alternating on the word at DS:`0x77a0`; neither takes a hit point itself,
+      because both scripts call `KillKnight` through `TASKGOSUB` partway
+      through.
+
+      **The beast**: `BeastStruck1` (0x4430), the knight's `*Struck1` entry for
+      a beast and the only blow in the game that picks its animation off which
+      way the two are *facing*. Alive, he is tossed; dead with the gore on, he
+      is impaled on the beast's own task. The toss is the knight's own
+      animation in the original and draws out of the beast's bank tables,
+      because `TASKCELBUF` chooses from a global `TaskCelTable` the loader
+      filled and not from anything the actor carries; this engine looks a bank
+      up on the actor's own definition, so the toss runs as a task of its own
+      out of the beast's definition while the knight is on standby, and ends
+      where the chain ends at `Knight_SwStance`.
+
+      **Three globals came with them**, on the bout as `monster::Shared`:
+      `ratman_flags` (DS:`0x779c`), `HitDelay` (`0x779e`) and `BalokFLAGS`
+      (`0x7794`). `HitDelay` was a per-creature cooldown here and is one word
+      for the whole fight, which is what `RatmanHit+35` says.
+
+      **Two things this needed that were not there.** `DecTimer` (0x2a63) is
+      the one `TASKGOSUB` target that touches nothing but the actor record and
+      whose frame reads what it wrote two instructions later, so it is applied
+      in the VM rather than handed out as an effect; without it `Balok_Stance`
+      branched to `Balok_Blink` every frame and Balok's animation never ended,
+      so its controller was never asked again. And the weapon pile is tested
+      with **no state test**, because `TaskCol_MainLoop` has none: the six
+      shipped scripts that carry a weapon part outside an attack are the
+      beast's four run frames and its turn, Balok's hop, the ratman's four leap
+      frames and its two tree frames, and every one of them is a creature that
+      is meant to hurt you with it.
+
+      **Not built**: the dragon's own two, `Dragon_BitKnight` and `DrDropHead`.
 
 ## Phase 5: the shell
 
