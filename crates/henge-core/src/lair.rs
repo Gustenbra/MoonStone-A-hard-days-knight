@@ -227,7 +227,9 @@ impl Run {
         }
         if kind != 1 {
             for _ in 0..MAGIC_PER_LAIR {
-                let Some(slot) = self.known_magic_slot(items) else { continue };
+                let Some(slot) = self.known_magic_slot(items) else {
+                    continue;
+                };
                 let Some(id) = magic_item(slot) else { continue };
                 if let Some(lair) = self.lairs.get_mut(index) {
                     lair.magic.push(id.to_string());
@@ -241,7 +243,9 @@ impl Run {
     /// the run has not stocked is on the map, so a pack works before a quest
     /// has begun.
     pub fn lair_on_the_map(&self, index: usize) -> bool {
-        self.lairs.get(index).map_or(true, |l| !(l.cleared && l.empty()))
+        self.lairs
+            .get(index)
+            .is_none_or(|l| !(l.cleared && l.empty()))
     }
 
     /// Walk in. Either the guardian is up, or the floor is yours.
@@ -281,8 +285,13 @@ impl Run {
     /// a beaten lair can still be worth coming back to. The key is small and
     /// goes first, so the quest is never blocked by a pack full of potions.
     fn strip_lair(&mut self, index: usize, items: &Items) -> Spoils {
-        let Some(lair) = self.lairs.get(index).cloned() else { return Spoils::default() };
-        let mut got = Spoils { gold: lair.gold, ..Spoils::default() };
+        let Some(lair) = self.lairs.get(index).cloned() else {
+            return Spoils::default();
+        };
+        let mut got = Spoils {
+            gold: lair.gold,
+            ..Spoils::default()
+        };
         if got.gold > 0 {
             self.earn(got.gold);
             self.lairs[index].gold = 0;
@@ -312,7 +321,10 @@ impl Run {
     /// Which keys the run carries, as `Valley` reads them: all four bits set
     /// is `0xf`, and the Valley wants all four.
     pub fn keys_held(&self) -> Vec<Key> {
-        Key::ALL.into_iter().filter(|k| self.kit.count(k.item()) > 0).collect()
+        Key::ALL
+            .into_iter()
+            .filter(|k| self.kit.count(k.item()) > 0)
+            .collect()
     }
 }
 
@@ -325,14 +337,34 @@ mod tests {
     fn goods() -> Items {
         let mut items = Items::new();
         let mut add = |id: &str, virtue: Virtue| {
-            items.insert(id.into(), ItemDef { name: id.into(), price: 0, virtue, consumed: false });
+            items.insert(
+                id.into(),
+                ItemDef {
+                    name: id.into(),
+                    price: 0,
+                    virtue,
+                    consumed: false,
+                },
+            );
         };
-        for id in ["potion", "gem_of_seeing", "ring_of_protection", "talisman", "scroll_of_haste"] {
+        for id in [
+            "potion",
+            "gem_of_seeing",
+            "ring_of_protection",
+            "talisman",
+            "scroll_of_haste",
+        ] {
             add(id, Virtue::Inert);
         }
         add("sword_of_sharpness", Virtue::Weapon { damage: 5 });
         add("long_sword", Virtue::Weapon { damage: 0 });
-        add("padded_armour", Virtue::Armour { health: 0, stride: 0 });
+        add(
+            "padded_armour",
+            Virtue::Armour {
+                health: 0,
+                stride: 0,
+            },
+        );
         for k in Key::ALL {
             add(k.item(), Virtue::Inert);
         }
@@ -342,7 +374,7 @@ mod tests {
     fn families() -> Vec<String> {
         ["forest", "waste", "swamp", "glade"]
             .iter()
-            .flat_map(|f| std::iter::repeat(f.to_string()).take(PER_FAMILY))
+            .flat_map(|f| std::iter::repeat_n(f.to_string(), PER_FAMILY))
             .collect()
     }
 
@@ -386,7 +418,11 @@ mod tests {
                     .filter(|n| r.lairs[*n].key == Some(key))
                     .collect();
                 assert_eq!(here.len(), 1, "{key:?} at seed {seed}: {here:?}");
-                assert_eq!(fams[here[0]], key.family(), "and in its own family's ground");
+                assert_eq!(
+                    fams[here[0]],
+                    key.family(),
+                    "and in its own family's ground"
+                );
             }
         }
     }
@@ -398,7 +434,12 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for seed in 1..80u32 {
             let (r, _) = run(seed.wrapping_mul(0x9e37_79b9) | 1);
-            seen.insert(r.lairs[..PER_FAMILY].iter().position(|l| l.key.is_some()).unwrap());
+            seen.insert(
+                r.lairs[..PER_FAMILY]
+                    .iter()
+                    .position(|l| l.key.is_some())
+                    .unwrap(),
+            );
         }
         assert!(seen.len() >= 5, "the forest key moves about: {seen:?}");
     }
@@ -426,7 +467,10 @@ mod tests {
                 }
             }
         }
-        assert!(only_gold > both && both > only_magic, "{only_gold} {both} {only_magic}");
+        assert!(
+            only_gold > both && both > only_magic,
+            "{only_gold} {both} {only_magic}"
+        );
     }
 
     /// A lair is stocked from what the pack declares. A slot the pack has no
@@ -435,11 +479,20 @@ mod tests {
     #[test]
     fn a_lair_only_holds_what_the_pack_knows() {
         let mut items = goods();
-        items.retain(|id, _| id == "potion" || id.starts_with("key.") || id.ends_with("sword") || id.ends_with("armour"));
+        items.retain(|id, _| {
+            id == "potion"
+                || id.starts_with("key.")
+                || id.ends_with("sword")
+                || id.ends_with("armour")
+        });
         let mut r = run(9).0;
         r.stock_lairs(&families(), &items);
         for lair in &r.lairs {
-            assert!(lair.magic.iter().all(|id| id == "potion"), "{:?}", lair.magic);
+            assert!(
+                lair.magic.iter().all(|id| id == "potion"),
+                "{:?}",
+                lair.magic
+            );
         }
     }
 
@@ -468,13 +521,19 @@ mod tests {
         assert!(r.lairs[0].empty());
         assert!(!r.lair_on_the_map(0), "beaten and stripped is off the map");
         assert_eq!(r.raid(0, &items), Raid::Bare);
-        assert!(r.lair_on_the_map(99), "a lair the run has not stocked is still on it");
+        assert!(
+            r.lair_on_the_map(99),
+            "a lair the run has not stocked is still on it"
+        );
     }
 
     #[test]
     fn a_full_pack_leaves_the_magic_on_the_floor_but_never_the_key() {
         let (mut r, items) = run(3);
-        let key_at = r.lairs[..PER_FAMILY].iter().position(|l| l.key.is_some()).unwrap();
+        let key_at = r.lairs[..PER_FAMILY]
+            .iter()
+            .position(|l| l.key.is_some())
+            .unwrap();
         // Room for the key and nothing else.
         r.kit.capacity = r.kit.carried() + 1;
         let floor = r.lairs[key_at].clone();
@@ -483,7 +542,11 @@ mod tests {
         assert!(r.lairs[key_at].key.is_none());
         assert_eq!(r.keys_held(), vec![floor.key.unwrap()]);
         if !floor.magic.is_empty() {
-            assert_eq!(spoils.left, floor.magic.len(), "and what would not fit is still there");
+            assert_eq!(
+                spoils.left,
+                floor.magic.len(),
+                "and what would not fit is still there"
+            );
             assert_eq!(r.lairs[key_at].magic, floor.magic);
             assert!(r.lair_on_the_map(key_at));
         }
@@ -522,7 +585,12 @@ mod tests {
     #[test]
     fn spoils_are_said_in_words() {
         let items = goods();
-        let s = Spoils { gold: 12, magic: vec!["potion".into()], key: Some(Key::Swamp), left: 1 };
+        let s = Spoils {
+            gold: 12,
+            magic: vec!["potion".into()],
+            key: Some(Key::Swamp),
+            left: 1,
+        };
         assert_eq!(
             s.describe(&items),
             "You take 12 gold, potion, the Key of the marsh. More lies here than you can carry."

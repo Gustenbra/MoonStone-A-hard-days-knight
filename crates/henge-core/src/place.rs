@@ -16,8 +16,8 @@
 
 use crate::item::{Items, Purchase};
 use crate::lair::Raid;
-use crate::quest::Gate;
 use crate::overworld::{TOKEN_H, TOKEN_W};
+use crate::quest::Gate;
 use crate::run::{Run, Used};
 use crate::service::{Gift, Rite, Sale, Wager};
 use serde::{Deserialize, Serialize};
@@ -87,11 +87,22 @@ pub enum Effect {
     Offer,
     /// Walk into a lair. The guardian is fought in the lair's own arena, and
     /// its floor is yours once it is down. `lair` indexes the run's table.
-    Raid { lair: usize, arena: String, family: String, guardian: String, count: u32 },
+    Raid {
+        lair: usize,
+        arena: String,
+        family: String,
+        guardian: String,
+        count: u32,
+    },
     /// The gate of the Valley of the Gods. `MOON:Valley`: four keys or
     /// nothing, and beyond it the Guardian, which `InitKnightvsDemon` builds
     /// with 250 health, one of it, and `ColourBackDrop` 4, the marsh.
-    Valley { arena: String, family: String, guardian: String, count: u32 },
+    Valley {
+        arena: String,
+        family: String,
+        guardian: String,
+        count: u32,
+    },
     /// On the sign, not built yet. The game admits it rather than pretending.
     Closed { said: String },
     /// Back out onto the map.
@@ -429,29 +440,53 @@ pub enum Answer {
     Left,
     /// A guardian is waiting. The caller sets the bout up in `arena` with
     /// `count` of `guardian` and comes back to `lair` with the outcome.
-    Fight { lair: usize, arena: String, family: String, guardian: String, count: u32 },
+    Fight {
+        lair: usize,
+        arena: String,
+        family: String,
+        guardian: String,
+        count: u32,
+    },
     /// The Valley gate stood open. The caller sets the bout up the same way
     /// and comes back through [`Run::valley_won`] or [`Run::valley_lost`].
     ///
     /// [`Run::valley_won`]: crate::run::Run::valley_won
     /// [`Run::valley_lost`]: crate::run::Run::valley_lost
-    Guardian { arena: String, family: String, guardian: String, count: u32 },
+    Guardian {
+        arena: String,
+        family: String,
+        guardian: String,
+        count: u32,
+    },
 }
 
 impl Visit {
     pub fn open(place: &str) -> Visit {
-        Visit { place: place.to_string(), cursor: 0, said: String::new(), dice: None }
+        Visit {
+            place: place.to_string(),
+            cursor: 0,
+            said: String::new(),
+            dice: None,
+        }
     }
 
     /// Open, with what the place says on the way in.
     pub fn open_at(place: &str, def: &PlaceDef) -> Visit {
-        Visit { said: def.intro.clone(), ..Visit::open(place) }
+        Visit {
+            said: def.intro.clone(),
+            ..Visit::open(place)
+        }
     }
 
     /// Step through a door, keeping what was just said and thrown: the dice
     /// screen shows the throw the tavern made.
     pub fn through(&self, place: &str) -> Visit {
-        Visit { place: place.to_string(), cursor: 0, said: self.said.clone(), dice: self.dice }
+        Visit {
+            place: place.to_string(),
+            cursor: 0,
+            said: self.said.clone(),
+            dice: self.dice,
+        }
     }
 
     /// Move the highlight, wrapping. A menu this short reads better as a ring
@@ -483,7 +518,9 @@ impl Visit {
         };
         match &choice.effect {
             Effect::Leave => Answer::Left,
-            Effect::Go { place } => Answer::Went { place: place.clone() },
+            Effect::Go { place } => Answer::Went {
+                place: place.clone(),
+            },
             Effect::Closed { said } => {
                 self.said = said.clone();
                 Answer::Stayed { days: 0 }
@@ -491,11 +528,19 @@ impl Visit {
             // `ForestVillage` (0x112a): one life point, three is the ceiling,
             // and it costs nothing at all.
             Effect::Village { said, refused } => {
-                self.said =
-                    if run.rest_at_village() { said.clone() } else { refused.clone() };
+                self.said = if run.rest_at_village() {
+                    said.clone()
+                } else {
+                    refused.clone()
+                };
                 Answer::Stayed { days: 0 }
             }
-            Effect::Buy { item, said, too_dear, no_room } => {
+            Effect::Buy {
+                item,
+                said,
+                too_dear,
+                no_room,
+            } => {
                 self.said = match run.buy(item, items) {
                     Purchase::Bought { .. } => said.clone(),
                     Purchase::TooDear => too_dear.clone(),
@@ -504,7 +549,11 @@ impl Visit {
                 };
                 Answer::Stayed { days: 0 }
             }
-            Effect::Use { item, said, refused } => {
+            Effect::Use {
+                item,
+                said,
+                refused,
+            } => {
                 self.said = match run.use_item(item, items) {
                     Used::Did => said.clone(),
                     _ => refused.clone(),
@@ -515,7 +564,9 @@ impl Visit {
                 Wager::Threw(t) => {
                     self.dice = Some(t.dice);
                     self.said = t.describe(run.gold);
-                    Answer::Went { place: room.clone() }
+                    Answer::Went {
+                        place: room.clone(),
+                    }
                 }
                 Wager::TooPoor => {
                     self.said = "Your purse will not cover that.".into();
@@ -570,7 +621,13 @@ impl Visit {
                 }
                 Answer::Stayed { days: 0 }
             }
-            Effect::Raid { lair, arena, family, guardian, count } => match run.raid(*lair, items) {
+            Effect::Raid {
+                lair,
+                arena,
+                family,
+                guardian,
+                count,
+            } => match run.raid(*lair, items) {
                 Raid::Guardian => Answer::Fight {
                     lair: *lair,
                     arena: arena.clone(),
@@ -587,7 +644,12 @@ impl Visit {
                     Answer::Stayed { days: 0 }
                 }
             },
-            Effect::Valley { arena, family, guardian, count } => match run.valley() {
+            Effect::Valley {
+                arena,
+                family,
+                guardian,
+                count,
+            } => match run.valley() {
                 Gate::Barred => {
                     self.said = Gate::Barred.describe();
                     Answer::Stayed { days: 0 }
@@ -613,7 +675,11 @@ impl Visit {
     /// the pack. What it says is `ValleyEnter`, the original's own four lines.
     pub fn won_valley(&mut self, items: &Items, run: &mut Run) {
         let stone = run.valley_won(items);
-        self.said = format!("{} The {} is yours.", crate::quest::VALLEY_ENTER.join(" "), stone.name());
+        self.said = format!(
+            "{} The {} is yours.",
+            crate::quest::VALLEY_ENTER.join(" "),
+            stone.name()
+        );
     }
 
     /// The Guardian won. Two life points, and the keys stay in the pack.
@@ -663,7 +729,9 @@ mod tests {
             options: vec![
                 Choice {
                     label: "Merchant".into(),
-                    effect: Effect::Closed { said: "Nothing to sell you.".into() },
+                    effect: Effect::Closed {
+                        said: "Nothing to sell you.".into(),
+                    },
                 },
                 Choice {
                     label: "Enter Village".into(),
@@ -672,7 +740,10 @@ mod tests {
                         refused: "You are as whole as this place can make you.".into(),
                     },
                 },
-                Choice { label: "Leave".into(), effect: Effect::Leave },
+                Choice {
+                    label: "Leave".into(),
+                    effect: Effect::Leave,
+                },
             ],
         }
     }
@@ -715,7 +786,9 @@ mod tests {
                 },
                 Choice {
                     label: "Back".into(),
-                    effect: Effect::Go { place: "highwood".into() },
+                    effect: Effect::Go {
+                        place: "highwood".into(),
+                    },
                 },
             ],
         }
@@ -740,11 +813,17 @@ mod tests {
         let def = village();
         let mut run = Run::new(100);
         let mut v = Visit::open("village");
-        assert!(matches!(def.options[v.cursor].effect, Effect::Closed { .. }));
+        assert!(matches!(
+            def.options[v.cursor].effect,
+            Effect::Closed { .. }
+        ));
         v.choose(&def, &shop(), &mut run);
         assert!(!v.said.is_empty(), "a shut option should say why");
         v.move_by(&def, 1);
-        assert!(v.said.is_empty(), "the refusal must not sit under the next option");
+        assert!(
+            v.said.is_empty(),
+            "the refusal must not sit under the next option"
+        );
     }
 
     /// A box, not a circle. `MOON:CheckGROOC` overlaps two rectangles, so a
@@ -766,11 +845,21 @@ mod tests {
     #[test]
     fn the_towns_hold_the_spots_the_original_sends_a_knight_to() {
         let town = |x, y, w, h| PlaceDef {
-            name: "t".into(), scene: "s".into(), x, y, w, h,
-            hidden: false, intro: String::new(), icon: None, line: String::new(),
+            name: "t".into(),
+            scene: "s".into(),
+            x,
+            y,
+            w,
+            h,
+            hidden: false,
+            intro: String::new(),
+            icon: None,
+            line: String::new(),
             knight: None,
             menu: [0, 0, 0, 0],
-            text: None, dice: false, options: vec![],
+            text: None,
+            dice: false,
+            options: vec![],
         };
         // Highwood: icon 0x19 is 25x32, hung so that (94, 47) is in the middle.
         let highwood = town(86, 36, 25, 32);
@@ -795,7 +884,11 @@ mod tests {
         assert_eq!(s.only(), None);
         s.gather(&places, 102, 101, 0);
         assert_eq!(s.ids(), ["village"]);
-        assert_eq!(s.only(), Some("village"), "one entry goes straight to StackDecision");
+        assert_eq!(
+            s.only(),
+            Some("village"),
+            "one entry goes straight to StackDecision"
+        );
         assert_eq!(s.answer(1), Some("village"));
     }
 
@@ -845,7 +938,11 @@ mod tests {
         // The number keys answer, and only the live slots do.
         assert_eq!(s.answer(1), Some("lair.glade.1"));
         assert_eq!(s.answer(2), Some("village"));
-        assert_eq!(s.answer(3), None, "an empty slot is refused and the paper waits");
+        assert_eq!(
+            s.answer(3),
+            None,
+            "an empty slot is refused and the paper waits"
+        );
         assert_eq!(s.answer(0), None, "scan codes below 2 are not answers");
         assert_eq!(s.answer(10), None, "nor above 0x0a");
     }
@@ -874,7 +971,11 @@ mod tests {
     #[test]
     fn the_paper_line_is_the_recovered_one_when_there_is_one() {
         let mut d = village();
-        assert_eq!(d.paper_line(), "Village", "a place with no recovered line falls back to its name");
+        assert_eq!(
+            d.paper_line(),
+            "Village",
+            "a place with no recovered line falls back to its name"
+        );
         d.line = "Enter the city of Highwood".into();
         assert_eq!(d.paper_line(), "Enter the city of Highwood");
     }
@@ -889,7 +990,10 @@ mod tests {
         let mut v = Visit::open("village");
         v.move_by(&def, 1);
         let (day, gold) = (run.day, run.gold);
-        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(
+            v.choose(&def, &shop(), &mut run),
+            Answer::Stayed { days: 0 }
+        );
         assert_eq!(run.lives, 2, "one life point");
         assert_eq!(run.health, 30, "and the routine touches nothing else");
         assert_eq!(run.day, day, "no day passes");
@@ -906,7 +1010,10 @@ mod tests {
         run.lives = 3;
         let mut v = Visit::open("village");
         v.move_by(&def, 1);
-        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(
+            v.choose(&def, &shop(), &mut run),
+            Answer::Stayed { days: 0 }
+        );
         assert_eq!(run.lives, 3);
         assert_eq!(v.said, "You are as whole as this place can make you.");
     }
@@ -925,7 +1032,10 @@ mod tests {
         assert_eq!(s.ids(), ["village.c"], "his own village is under his feet");
         for other in [0, 1, 3] {
             s.gather(&places, 100, 100, other);
-            assert!(s.is_empty(), "knight {other} stands on the same ground and sees nothing");
+            assert!(
+                s.is_empty(),
+                "knight {other} stands on the same ground and sees nothing"
+            );
             assert!(s.paper(&places).is_empty());
         }
         // And a place that belongs to nobody is everybody's.
@@ -939,7 +1049,10 @@ mod tests {
         let (def, mut run) = (village(), Run::new(100));
         let mut v = Visit::open("village");
         assert!(!def.options[0].effect.available());
-        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(
+            v.choose(&def, &shop(), &mut run),
+            Answer::Stayed { days: 0 }
+        );
         assert_eq!(run, Run::new(100), "the run is untouched");
     }
 
@@ -971,7 +1084,10 @@ mod tests {
         let places = world();
         let mut s = Overlaps::default();
         s.gather(&places, 110, 105, 0);
-        assert!(s.is_empty(), "two pixels clear of the box is clear of the box");
+        assert!(
+            s.is_empty(),
+            "two pixels clear of the box is clear of the box"
+        );
         s.gather(&places, 109, 105, 0);
         assert_eq!(s.ids(), ["village"], "one pixel of overlap is inside");
     }
@@ -981,7 +1097,10 @@ mod tests {
         let def = village();
         let json = serde_json::to_string(&def).unwrap();
         assert_eq!(serde_json::from_str::<PlaceDef>(&json).unwrap(), def);
-        assert!(json.contains("\"do\":\"village\""), "effects are tagged in the data");
+        assert!(
+            json.contains("\"do\":\"village\""),
+            "effects are tagged in the data"
+        );
     }
 
     // The merchant.
@@ -1030,7 +1149,10 @@ mod tests {
         let (def, items) = (merchant(), shop());
         let mut run = Run::new(100);
         assert!(def.options[0].effect.available(), "the stall is open");
-        assert!(!def.options[0].effect.offered(&items, &run), "but not to a pauper");
+        assert!(
+            !def.options[0].effect.offered(&items, &run),
+            "but not to a pauper"
+        );
         run.earn(25);
         assert!(def.options[0].effect.offered(&items, &run));
         // Nor is a potion you are not carrying.
@@ -1063,7 +1185,9 @@ mod tests {
         v.move_by(&def, -1);
         assert_eq!(
             v.choose(&def, &items, &mut run),
-            Answer::Went { place: "highwood".into() }
+            Answer::Went {
+                place: "highwood".into()
+            }
         );
     }
 
@@ -1077,7 +1201,10 @@ mod tests {
         let mut s = Overlaps::default();
         s.gather(&places, 0, 0, 0);
         assert!(s.is_empty(), "standing on its coordinates finds nothing");
-        assert!(s.paper(&places).is_empty(), "and it puts no line on the paper");
+        assert!(
+            s.paper(&places).is_empty(),
+            "and it puts no line on the paper"
+        );
     }
 
     /// The run's lair table is built from the pack, and each lair keeps the
@@ -1154,7 +1281,10 @@ mod tests {
                         count: 1,
                     },
                 },
-                Choice { label: "Leave".into(), effect: Effect::Leave },
+                Choice {
+                    label: "Leave".into(),
+                    effect: Effect::Leave,
+                },
             ],
         };
         let mut run = Run::new(100);
@@ -1162,7 +1292,10 @@ mod tests {
         let mut visit = Visit::open("valley");
         // The gate is always offered; what it does depends on the pack.
         assert!(def.options[0].effect.offered(&items, &run));
-        assert_eq!(visit.choose(&def, &items, &mut run), Answer::Stayed { days: 0 });
+        assert_eq!(
+            visit.choose(&def, &items, &mut run),
+            Answer::Stayed { days: 0 }
+        );
         assert_eq!(visit.said, crate::quest::NO_KEYS.join(" "));
         for k in crate::moon::Key::ALL {
             run.kit.take(k.item(), 1);
@@ -1186,7 +1319,14 @@ mod tests {
         assert!(page.said.starts_with("You have proven your skill"));
         let before = run.lives;
         visit.lost_valley(&mut run);
-        assert_eq!(run.lives, before, "no life points to take from a run that has none");
-        assert_eq!(run.key_bits(), 0xf, "and the keys stay, so the gate stays open");
+        assert_eq!(
+            run.lives, before,
+            "no life points to take from a run that has none"
+        );
+        assert_eq!(
+            run.key_bits(),
+            0xf,
+            "and the keys stay, so the gate stays open"
+        );
     }
 }

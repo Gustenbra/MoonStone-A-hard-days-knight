@@ -75,8 +75,14 @@ pub enum Attack {
 
 impl Attack {
     pub const ALL: [Attack; 8] = [
-        Attack::Lunge, Attack::Swing, Attack::Knife, Attack::Block,
-        Attack::RThrust, Attack::UThrust, Attack::Evade, Attack::Chop,
+        Attack::Lunge,
+        Attack::Swing,
+        Attack::Knife,
+        Attack::Block,
+        Attack::RThrust,
+        Attack::UThrust,
+        Attack::Evade,
+        Attack::Chop,
     ];
 
     /// The original's kind code: the byte offset into `KnightAttSw`.
@@ -281,10 +287,17 @@ impl Fighter {
     /// definitions are in hand. Never simulated.
     pub fn placeholder_def() -> ActorDef {
         ActorDef {
-            sheet: String::new(), health: 1, speed_x: 0, speed_y: 0,
-            reach: 0, depth_tolerance: 0, attack_cooldown: 0,
-            bounty: 0, girth: 0,
-            body: [0; 4], sequences: Default::default(),
+            sheet: String::new(),
+            health: 1,
+            speed_x: 0,
+            speed_y: 0,
+            reach: 0,
+            depth_tolerance: 0,
+            attack_cooldown: 0,
+            bounty: 0,
+            girth: 0,
+            body: [0; 4],
+            sequences: Default::default(),
             ..ActorDef::default()
         }
     }
@@ -292,7 +305,9 @@ impl Fighter {
     pub fn new(actor: impl Into<String>, def: &ActorDef, x: i32, y: i32, facing: i32) -> Fighter {
         let mut f = Fighter {
             actor: actor.into(),
-            x, y, facing,
+            x,
+            y,
+            facing,
             state: State::Idle,
             player: Player::default(),
             health: def.health,
@@ -328,9 +343,17 @@ impl Fighter {
         // nothing to draw.
         if def.scripted() {
             if let Some(first) = def.scripts_for(State::Idle.sequence_name()).first() {
-                let facing = if facing < 0 { FACING_LEFT } else { FACING_RIGHT };
-                let mut task =
-                    Task::new(first, x + def.origin[0] as i32, y + def.origin[1] as i32, facing);
+                let facing = if facing < 0 {
+                    FACING_LEFT
+                } else {
+                    FACING_RIGHT
+                };
+                let mut task = Task::new(
+                    first,
+                    x + def.origin[0] as i32,
+                    y + def.origin[1] as i32,
+                    facing,
+                );
                 task.table = def.bank_table;
                 task.step(&def.animation, &mut f.record, false);
                 f.task = Some(task);
@@ -353,14 +376,19 @@ impl Fighter {
     pub fn finishable(&self, def: &ActorDef) -> bool {
         self.state == State::Dead
             && !def.finishes.is_empty()
-            && self.task.as_ref().map_or(false, |t| {
-                t.active && t.shown.iter().any(|p| p.is(taskvm::part_flags::BODY))
-            })
+            && self
+                .task
+                .as_ref()
+                .is_some_and(|t| t.active && t.shown.iter().any(|p| p.is(taskvm::part_flags::BODY)))
     }
 
     /// Holding a block or an evade.
     pub fn guarding(&self) -> Option<Attack> {
-        if self.state == State::Guard { self.attack } else { None }
+        if self.state == State::Guard {
+            self.attack
+        } else {
+            None
+        }
     }
 
     fn enter(&mut self, state: State) {
@@ -412,7 +440,8 @@ impl Fighter {
         // begun has not finished. Reading it as finished is what would make a
         // recoil last exactly one tick.
         if self.restart {
-            return self.script.is_empty() && def.scripts_for(self.state.sequence_name()).is_empty();
+            return self.script.is_empty()
+                && def.scripts_for(self.state.sequence_name()).is_empty();
         }
         match &self.task {
             Some(t) => !t.running,
@@ -454,7 +483,11 @@ impl Fighter {
         self.effects.clear();
         // The cursed knight's joystick, before anything reads it.
         let intent = if self.cursed {
-            Intent { dx: -intent.dx, dy: -intent.dy, attack: intent.attack }
+            Intent {
+                dx: -intent.dx,
+                dy: -intent.dy,
+                attack: intent.attack,
+            }
         } else {
             intent
         };
@@ -570,7 +603,11 @@ impl Fighter {
             let wanted = Attack::for_direction(forward, intent.dy).unwrap_or(Attack::Swing);
             match def.attack_for(wanted) {
                 Some((script, kind)) => {
-                    let state = if kind.is_guard() { State::Guard } else { State::Attack };
+                    let state = if kind.is_guard() {
+                        State::Guard
+                    } else {
+                        State::Attack
+                    };
                     self.enter_on(state, script);
                     self.attack = Some(kind);
                 }
@@ -653,7 +690,9 @@ impl Fighter {
         let frame = self.player.current(seq).cloned();
         self.player.advance(seq);
 
-        let Some(frame) = frame else { return Vec::new() };
+        let Some(frame) = frame else {
+            return Vec::new();
+        };
         if frame.dx != 0 || frame.dy != 0 {
             let (x, y) = GLOBAL.clamp(
                 self.x + frame.dx as i32 * self.facing,
@@ -745,7 +784,11 @@ impl Fighter {
         if names.is_empty() {
             return Vec::new();
         }
-        let facing = if self.facing < 0 { FACING_LEFT } else { FACING_RIGHT };
+        let facing = if self.facing < 0 {
+            FACING_LEFT
+        } else {
+            FACING_RIGHT
+        };
         let (ox, oy) = (def.origin[0] as i32, def.origin[1] as i32);
 
         // When the task's own facing (`task+0x14`) is taken from the record's
@@ -821,7 +864,9 @@ impl Fighter {
             }
         }
 
-        let Some(task) = self.task.as_mut() else { return Vec::new() };
+        let Some(task) = self.task.as_mut() else {
+            return Vec::new();
+        };
         task.x = self.x + ox;
         task.y = self.y + oy;
         if step_now {
@@ -864,10 +909,18 @@ impl Fighter {
     /// pile, each weapon cel's own rectangle is swept as a polyline against the
     /// target's body box, which is the same shape at cel resolution.
     fn hit_line(&self, def: &ActorDef) -> Vec<(i32, i32)> {
-        let Some(task) = self.task.as_ref() else { return Vec::new() };
+        let Some(task) = self.task.as_ref() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
-        for p in task.shown.iter().filter(|p| p.is(taskvm::part_flags::WEAPON)) {
-            let Some(bank) = def.bank(p.table, p.bank) else { continue };
+        for p in task
+            .shown
+            .iter()
+            .filter(|p| p.is(taskvm::part_flags::WEAPON))
+        {
+            let Some(bank) = def.bank(p.table, p.bank) else {
+                continue;
+            };
             let Some(r) = taskvm::place(p, bank, (task.x, task.y, task.z), task.mirror()) else {
                 continue;
             };
@@ -912,7 +965,11 @@ impl Fighter {
         if !self.alive() {
             return;
         }
-        let hurt = if def.scripted() { def.hurt_for(by) } else { None };
+        let hurt = if def.scripted() {
+            def.hurt_for(by)
+        } else {
+            None
+        };
         // `ControlClaw` never subtracts: the dragon's forelimbs take a blow
         // and are unmoved by it.
         if def.controller().takes_damage() {
@@ -950,8 +1007,14 @@ impl Fighter {
         if !self.finishable(def) {
             return false;
         }
-        let which = if by == Some(Attack::Swing) || by_own_kind { "decap" } else { "collapse" };
-        let Some(script) = def.finishes.get(which).cloned() else { return false };
+        let which = if by == Some(Attack::Swing) || by_own_kind {
+            "decap"
+        } else {
+            "collapse"
+        };
+        let Some(script) = def.finishes.get(which).cloned() else {
+            return false;
+        };
         if let Some(t) = self.task.as_mut() {
             t.replace(script.clone());
         }
@@ -985,7 +1048,10 @@ impl Fighter {
             State::Idle | State::Walk => None,
             _ => return false,
         };
-        let wanted = def.blocks.get(attack.name()).and_then(|g| Attack::from_name(g));
+        let wanted = def
+            .blocks
+            .get(attack.name())
+            .and_then(|g| Attack::from_name(g));
         if wanted != holding {
             return false;
         }
@@ -1018,7 +1084,9 @@ impl Fighter {
         let task = self.task.as_ref()?;
         let mut out: Option<(i32, i32, i32, i32)> = None;
         for p in task.shown.iter().filter(|p| p.is(taskvm::part_flags::BODY)) {
-            let Some(bank) = def.bank(p.table, p.bank) else { continue };
+            let Some(bank) = def.bank(p.table, p.bank) else {
+                continue;
+            };
             let Some(r) = taskvm::place(p, bank, (task.x, task.y, task.z), task.mirror()) else {
                 continue;
             };
@@ -1048,7 +1116,8 @@ pub fn line_hits_body(line: &[(i32, i32)], body: (i32, i32, i32, i32)) -> bool {
         let (x, y) = line[0];
         return x >= l && x <= r && y >= t && y <= b;
     }
-    line.windows(2).any(|w| segment_hits_rect(w[0], w[1], l, t, r, b))
+    line.windows(2)
+        .any(|w| segment_hits_rect(w[0], w[1], l, t, r, b))
 }
 
 fn segment_hits_rect(a: (i32, i32), b: (i32, i32), l: i32, t: i32, r: i32, bo: i32) -> bool {
@@ -1089,28 +1158,48 @@ pub(crate) mod tests {
     /// hit points have run out.
     pub(crate) fn scripted_def() -> ActorDef {
         let body = |cel: u8| {
-            Instr::Part(Part { table: 1, bank: 0, cel, x: -8, y: 0, flags: part_flags::BODY })
+            Instr::Part(Part {
+                table: 1,
+                bank: 0,
+                cel,
+                x: -8,
+                y: 0,
+                flags: part_flags::BODY,
+            })
         };
         let stop = Instr::EndFrame { end: End::Stop };
         let next = Instr::EndFrame { end: End::Next };
         let mut animation = ScriptSet::new();
         animation.insert("stance".into(), Script::new(vec![body(0), stop.clone()]));
         for (i, n) in ["walk1", "walk2", "walk3", "walk4"].iter().enumerate() {
-            animation.insert(n.to_string(), Script::new(vec![body(1 + i as u8), stop.clone()]));
+            animation.insert(
+                n.to_string(),
+                Script::new(vec![body(1 + i as u8), stop.clone()]),
+            );
         }
         animation.insert(
             "swing".into(),
             Script::new(vec![
                 Instr::Sound { sample: 0x0b },
-                Instr::Gosub { routine: "KnightGruntSound".into() },
+                Instr::Gosub {
+                    routine: "KnightGruntSound".into(),
+                },
                 body(6),
                 next.clone(),
                 body(7),
                 Instr::Part(Part {
-                    table: 1, bank: 0, cel: 8, x: 10, y: 20, flags: part_flags::WEAPON,
+                    table: 1,
+                    bank: 0,
+                    cel: 8,
+                    x: 10,
+                    y: 20,
+                    flags: part_flags::WEAPON,
                 }),
                 next.clone(),
-                Instr::Goto { mode: 0, target: "stance".into() },
+                Instr::Goto {
+                    mode: 0,
+                    target: "stance".into(),
+                },
                 body(6),
                 stop.clone(),
             ]),
@@ -1121,7 +1210,9 @@ pub(crate) mod tests {
                 Instr::Hold { count: 4 },
                 body(9),
                 next.clone(),
-                Instr::Dead { target: "fall".into() },
+                Instr::Dead {
+                    target: "fall".into(),
+                },
                 body(9),
                 stop.clone(),
             ]),
@@ -1129,7 +1220,14 @@ pub(crate) mod tests {
         animation.insert(
             "fall".into(),
             Script::new(vec![
-                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }),
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 10,
+                    x: -20,
+                    y: 40,
+                    flags: 0,
+                }),
                 stop.clone(),
             ]),
         );
@@ -1140,7 +1238,10 @@ pub(crate) mod tests {
         scripts.insert("idle".into(), vec!["stance".to_string()]);
         scripts.insert(
             "walk".into(),
-            ["walk1", "walk2", "walk3", "walk4"].iter().map(|s| s.to_string()).collect(),
+            ["walk1", "walk2", "walk3", "walk4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         );
         scripts.insert("attack".into(), vec!["swing".to_string()]);
         scripts.insert("hurt".into(), vec!["recoil".to_string()]);
@@ -1159,7 +1260,14 @@ pub(crate) mod tests {
             script_ticks: 1,
             animation,
             scripts,
-            banks: BTreeMap::from([(1u8, vec![Bank { sheet: "test".into(), base: 0, cels }])]),
+            banks: BTreeMap::from([(
+                1u8,
+                vec![Bank {
+                    sheet: "test".into(),
+                    base: 0,
+                    cels,
+                }],
+            )]),
             ..ActorDef::default()
         }
     }
@@ -1173,17 +1281,37 @@ pub(crate) mod tests {
         use crate::taskvm::field;
         let mut d = scripted_def();
         let body = |cel: u8| {
-            Instr::Part(Part { table: 1, bank: 0, cel, x: -8, y: 0, flags: part_flags::BODY })
+            Instr::Part(Part {
+                table: 1,
+                bank: 0,
+                cel,
+                x: -8,
+                y: 0,
+                flags: part_flags::BODY,
+            })
         };
         let blade = Instr::Part(Part {
-            table: 1, bank: 0, cel: 8, x: 10, y: 20, flags: part_flags::WEAPON,
+            table: 1,
+            bank: 0,
+            cel: 8,
+            x: 10,
+            y: 20,
+            flags: part_flags::WEAPON,
         });
         let stop = Instr::EndFrame { end: End::Stop };
         let next = Instr::EndFrame { end: End::Next };
         let a = &mut d.animation;
         // One frame with the blade out, held for two, so a chop can be told
         // from a swing by its script and lands on its first frame.
-        a.insert("chop".into(), Script::new(vec![Instr::Hold { count: 2 }, body(6), blade.clone(), stop.clone()]));
+        a.insert(
+            "chop".into(),
+            Script::new(vec![
+                Instr::Hold { count: 2 },
+                body(6),
+                blade.clone(),
+                stop.clone(),
+            ]),
+        );
         a.insert("block".into(), Script::new(vec![body(9), stop.clone()]));
         a.insert("evade".into(), Script::new(vec![body(9), stop.clone()]));
         a.insert("recover".into(), Script::new(vec![body(9), stop.clone()]));
@@ -1191,10 +1319,16 @@ pub(crate) mod tests {
         a.insert(
             "throw".into(),
             Script::new(vec![
-                Instr::TestEq { mode: 1, field: field::DAGGERS, target: "stance".into() },
+                Instr::TestEq {
+                    mode: 1,
+                    field: field::DAGGERS,
+                    target: "stance".into(),
+                },
                 body(6),
                 next.clone(),
-                Instr::Gosub { routine: "KnifeThrow".into() },
+                Instr::Gosub {
+                    routine: "KnifeThrow".into(),
+                },
                 body(7),
                 stop.clone(),
             ]),
@@ -1203,14 +1337,28 @@ pub(crate) mod tests {
             "SpeedKnife".into(),
             Script::new(vec![
                 Instr::Sound { sample: 0x0b },
-                Instr::Move { flags: 0x01, x: 5, y: 0, z: 0 },
+                Instr::Move {
+                    flags: 0x01,
+                    x: 5,
+                    y: 0,
+                    z: 0,
+                },
                 blade.clone(),
                 stop.clone(),
             ]),
         );
         a.insert(
             "Knife".into(),
-            Script::new(vec![Instr::Move { flags: 0x01, x: 20, y: 0, z: 0 }, blade.clone(), stop.clone()]),
+            Script::new(vec![
+                Instr::Move {
+                    flags: 0x01,
+                    x: 20,
+                    y: 0,
+                    z: 0,
+                },
+                blade.clone(),
+                stop.clone(),
+            ]),
         );
         // The death kneels with a body on it for ten frames, then lies flat
         // with none, the way `Knight_SwDeath` does before its collapse.
@@ -1218,29 +1366,76 @@ pub(crate) mod tests {
             "fall".into(),
             Script::new(vec![
                 Instr::Hold { count: 10 },
-                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 20, flags: part_flags::BODY }),
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 10,
+                    x: -20,
+                    y: 20,
+                    flags: part_flags::BODY,
+                }),
                 next.clone(),
-                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }),
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 10,
+                    x: -20,
+                    y: 40,
+                    flags: 0,
+                }),
                 stop.clone(),
             ]),
         );
         a.insert(
             "decap".into(),
             Script::new(vec![
-                Instr::Skip { target: "collapse".into() },
-                Instr::Part(Part { table: 1, bank: 0, cel: 5, x: 0, y: -10, flags: part_flags::GATED }),
-                Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }),
+                Instr::Skip {
+                    target: "collapse".into(),
+                },
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 5,
+                    x: 0,
+                    y: -10,
+                    flags: part_flags::GATED,
+                }),
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 10,
+                    x: -20,
+                    y: 40,
+                    flags: 0,
+                }),
                 stop.clone(),
             ]),
         );
         a.insert(
             "collapse".into(),
-            Script::new(vec![Instr::Part(Part { table: 1, bank: 0, cel: 10, x: -20, y: 40, flags: 0 }), stop.clone()]),
+            Script::new(vec![
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 10,
+                    x: -20,
+                    y: 40,
+                    flags: 0,
+                }),
+                stop.clone(),
+            ]),
         );
         a.insert(
             "Blood1".into(),
             Script::new(vec![
-                Instr::Part(Part { table: 4, bank: 4, cel: 0, x: -5, y: -5, flags: part_flags::GATED }),
+                Instr::Part(Part {
+                    table: 4,
+                    bank: 4,
+                    cel: 0,
+                    x: -5,
+                    y: -5,
+                    flags: part_flags::GATED,
+                }),
                 next.clone(),
                 Instr::KillTask,
                 stop.clone(),
@@ -1253,7 +1448,13 @@ pub(crate) mod tests {
             ("block", "block", 0),
             ("evade", "evade", 0),
         ] {
-            d.attacks.insert(name.into(), AttackDef { script: script.into(), damage });
+            d.attacks.insert(
+                name.into(),
+                AttackDef {
+                    script: script.into(),
+                    damage,
+                },
+            );
         }
         d.attack = "swing".into();
         d.scripts.insert("recover".into(), vec!["recover".into()]);
@@ -1266,7 +1467,11 @@ pub(crate) mod tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let blood = Bank { sheet: "blood".into(), base: 0, cels: vec![[12, 12]; 4] };
+        let blood = Bank {
+            sheet: "blood".into(),
+            base: 0,
+            cels: vec![[12, 12]; 4],
+        };
         d.banks.insert(4, vec![blood; 5]);
         assert_eq!(d.validate(), Ok(()));
         d
@@ -1279,11 +1484,22 @@ pub(crate) mod tests {
                 .map(|s| Frame {
                     sprite: *s,
                     ticks: 1,
-                    hit: if hits { vec![[10, 30], [40, 30]] } else { vec![] },
+                    hit: if hits {
+                        vec![[10, 30], [40, 30]]
+                    } else {
+                        vec![]
+                    },
                     ..Frame::default()
                 })
                 .collect();
-            (name.to_string(), Sequence { name: name.into(), frames, end })
+            (
+                name.to_string(),
+                Sequence {
+                    name: name.into(),
+                    frames,
+                    end,
+                },
+            )
         };
         let mut sequences = BTreeMap::new();
         for (k, v) in [
@@ -1314,14 +1530,27 @@ pub(crate) mod tests {
     /// One arena's ground. The tree line is put high enough that every
     /// fighter in these tests stands below it and is free to walk.
     fn field() -> Field {
-        Field::new(vec![crate::arena::Border { left: 0, right: 319, bottom: 60, top: 10 }])
+        Field::new(vec![crate::arena::Border {
+            left: 0,
+            right: 319,
+            bottom: 60,
+            top: 10,
+        }])
     }
 
     #[test]
     fn walking_moves_and_turns_the_fighter() {
         let d = def();
         let mut f = Fighter::new("a", &d, 100, 100, 1);
-        f.step(&d, Intent { dx: -1, dy: 0, attack: false }, &field());
+        f.step(
+            &d,
+            Intent {
+                dx: -1,
+                dy: 0,
+                attack: false,
+            },
+            &field(),
+        );
         assert_eq!(f.facing, -1);
         assert_eq!(f.x, 98);
         assert_eq!(f.state, State::Walk);
@@ -1331,10 +1560,26 @@ pub(crate) mod tests {
     fn an_attack_commits_and_ignores_input_until_it_finishes() {
         let d = def();
         let mut f = Fighter::new("a", &d, 100, 100, 1);
-        f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
+        f.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(f.state, State::Attack);
         // Trying to walk away mid-swing does nothing.
-        f.step(&d, Intent { dx: 1, dy: 0, attack: false }, &field());
+        f.step(
+            &d,
+            Intent {
+                dx: 1,
+                dy: 0,
+                attack: false,
+            },
+            &field(),
+        );
         assert_eq!(f.state, State::Attack);
         assert_eq!(f.x, 100);
     }
@@ -1349,7 +1594,18 @@ pub(crate) mod tests {
         let mut lines = 0;
         // One swing only: stop as soon as the sequence completes.
         for _ in 0..8 {
-            if !f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field()).is_empty() {
+            if !f
+                .step(
+                    &d,
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                    &field(),
+                )
+                .is_empty()
+            {
                 lines += 1;
                 f.struck = true; // what the arena does once a hit lands
             }
@@ -1357,7 +1613,10 @@ pub(crate) mod tests {
                 break;
             }
         }
-        assert_eq!(lines, 1, "two frames carry a line but only one connect is allowed");
+        assert_eq!(
+            lines, 1,
+            "two frames carry a line but only one connect is allowed"
+        );
     }
 
     /// A swing that misses must not disarm the rest of the swing.
@@ -1367,7 +1626,18 @@ pub(crate) mod tests {
         let mut f = Fighter::new("a", &d, 100, 100, 1);
         let mut lines = 0;
         for _ in 0..8 {
-            if !f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field()).is_empty() {
+            if !f
+                .step(
+                    &d,
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                    &field(),
+                )
+                .is_empty()
+            {
                 lines += 1; // nothing was hit, so `struck` stays false
             }
             if f.player.finished {
@@ -1384,7 +1654,18 @@ pub(crate) mod tests {
         let mut f = Fighter::new("a", &d, 100, 100, 1);
         let mut swings = 0;
         for _ in 0..24 {
-            if !f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field()).is_empty() {
+            if !f
+                .step(
+                    &d,
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                    &field(),
+                )
+                .is_empty()
+            {
                 swings += 1;
                 f.struck = true;
             }
@@ -1398,12 +1679,32 @@ pub(crate) mod tests {
         let mut right = Fighter::new("a", &d, 100, 100, 1);
         let mut left = Fighter::new("a", &d, 100, 100, -1);
         let a = loop {
-            let l = right.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
-            if !l.is_empty() { break l; }
+            let l = right.step(
+                &d,
+                Intent {
+                    dx: 0,
+                    dy: 0,
+                    attack: true,
+                },
+                &field(),
+            );
+            if !l.is_empty() {
+                break l;
+            }
         };
         let b = loop {
-            let l = left.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
-            if !l.is_empty() { break l; }
+            let l = left.step(
+                &d,
+                Intent {
+                    dx: 0,
+                    dy: 0,
+                    attack: true,
+                },
+                &field(),
+            );
+            if !l.is_empty() {
+                break l;
+            }
         };
         assert_eq!(a[0], (110, 70));
         assert_eq!(b[0], (90, 70));
@@ -1436,11 +1737,35 @@ pub(crate) mod tests {
     fn a_scripted_fighter_shows_the_script_its_state_names() {
         let d = scripted_def();
         let mut f = Fighter::new("k", &d, 100, 100, 1);
-        assert_eq!(f.task.as_ref().unwrap().pc.script, "stance", "standing before a tick");
-        f.step(&d, Intent { dx: 1, dy: 0, attack: false }, &field());
+        assert_eq!(
+            f.task.as_ref().unwrap().pc.script,
+            "stance",
+            "standing before a tick"
+        );
+        f.step(
+            &d,
+            Intent {
+                dx: 1,
+                dy: 0,
+                attack: false,
+            },
+            &field(),
+        );
         assert_eq!(f.task.as_ref().unwrap().pc.script, "walk1");
-        f.step(&d, Intent { dx: 1, dy: 0, attack: false }, &field());
-        assert_eq!(f.task.as_ref().unwrap().pc.script, "walk2", "the cycle advances");
+        f.step(
+            &d,
+            Intent {
+                dx: 1,
+                dy: 0,
+                attack: false,
+            },
+            &field(),
+        );
+        assert_eq!(
+            f.task.as_ref().unwrap().pc.script,
+            "walk2",
+            "the cycle advances"
+        );
     }
 
     /// The walk is four one-frame scripts, and the cycle wraps rather than
@@ -1451,7 +1776,15 @@ pub(crate) mod tests {
         let mut f = Fighter::new("k", &d, 100, 100, 1);
         let seen: Vec<String> = (0..5)
             .map(|_| {
-                f.step(&d, Intent { dx: 1, dy: 0, attack: false }, &field());
+                f.step(
+                    &d,
+                    Intent {
+                        dx: 1,
+                        dy: 0,
+                        attack: false,
+                    },
+                    &field(),
+                );
                 f.task.as_ref().unwrap().pc.script.clone()
             })
             .collect();
@@ -1465,9 +1798,24 @@ pub(crate) mod tests {
         let d = scripted_def();
         let mut f = Fighter::new("k", &d, 100, 100, 1);
         let lines: Vec<usize> = (0..3)
-            .map(|_| f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field()).len())
+            .map(|_| {
+                f.step(
+                    &d,
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                    &field(),
+                )
+                .len()
+            })
             .collect();
-        assert_eq!(lines, vec![0, 5, 0], "one frame of three, and a rectangle is five points");
+        assert_eq!(
+            lines,
+            vec![0, 5, 0],
+            "one frame of three, and a rectangle is five points"
+        );
     }
 
     /// The blade is placed by the same arithmetic that draws it, mirror term
@@ -1476,15 +1824,47 @@ pub(crate) mod tests {
     fn the_hit_shape_is_the_weapon_cel_where_it_is_drawn() {
         let d = scripted_def();
         let mut right = Fighter::new("k", &d, 100, 100, 1);
-        right.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
-        let a = right.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
+        right.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
+        let a = right.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         // The task origin is 52 above the feet; the cel is 30 by 10 at (10, 20).
         assert_eq!(a[0], (110, 68), "left, top");
         assert_eq!(a[2], (140, 78), "right, bottom");
 
         let mut left = Fighter::new("k", &d, 100, 100, -1);
-        left.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
-        let b = left.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
+        left.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
+        let b = left.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(b[0], (60, 68), "task_x - (x + cel_width) = 100 - (10 + 30)");
         assert_eq!(b[2], (90, 78));
     }
@@ -1528,15 +1908,34 @@ pub(crate) mod tests {
         use crate::taskvm::{Effect, GosubKind};
         let d = scripted_def();
         let mut f = Fighter::new("k", &d, 100, 100, 1);
-        f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
+        f.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(
             f.effects,
             vec![
                 Effect::Sound { sample: 0x0b },
-                Effect::Gosub { routine: "KnightGruntSound".into(), kind: GosubKind::Sound },
+                Effect::Gosub {
+                    routine: "KnightGruntSound".into(),
+                    kind: GosubKind::Sound
+                },
             ]
         );
-        f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
+        f.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         assert!(f.effects.is_empty(), "and not again on the next frame");
     }
 
@@ -1548,9 +1947,23 @@ pub(crate) mod tests {
         d.script_ticks = 3;
         let mut f = Fighter::new("k", &d, 100, 100, 1);
         let lines: Vec<bool> = (0..9)
-            .map(|_| !f.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field()).is_empty())
+            .map(|_| {
+                !f.step(
+                    &d,
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                    &field(),
+                )
+                .is_empty()
+            })
             .collect();
-        assert_eq!(lines, [false, false, false, true, true, true, false, false, false]);
+        assert_eq!(
+            lines,
+            [false, false, false, true, true, true, false, false, false]
+        );
     }
 
     /// `Rjoystick` and `Ljoystick`, as one table over forward and back. The
@@ -1559,15 +1972,26 @@ pub(crate) mod tests {
     #[test]
     fn the_direction_held_with_fire_picks_the_attack() {
         use Attack::*;
+        // Hand-aligned: the nine cells are a three by three grid of the joystick,
+        // read as forward/back across and up/down the screen down.
+        #[rustfmt::skip]
         let table = [
             ((1, -1), Some(UThrust)), ((1, 0), Some(Swing)), ((1, 1), Some(Lunge)),
             ((0, -1), Some(Chop)), ((0, 0), None), ((0, 1), Some(Evade)),
             ((-1, -1), Some(Knife)), ((-1, 0), Some(RThrust)), ((-1, 1), Some(Block)),
         ];
         for ((fwd, dy), want) in table {
-            assert_eq!(Attack::for_direction(fwd, dy), want, "forward {fwd}, dy {dy}");
+            assert_eq!(
+                Attack::for_direction(fwd, dy),
+                want,
+                "forward {fwd}, dy {dy}"
+            );
         }
-        assert_eq!(Attack::Chop.kind(), 0x10, "the kinds are KnightAttSw offsets");
+        assert_eq!(
+            Attack::Chop.kind(),
+            0x10,
+            "the kinds are KnightAttSw offsets"
+        );
         assert_eq!(Attack::Lunge.kind(), 2);
         assert_eq!(Attack::from_name("rthrust"), Some(RThrust));
     }
@@ -1579,38 +2003,85 @@ pub(crate) mod tests {
     fn the_attack_is_chosen_relative_to_the_facing() {
         let d = depth_def();
         let mut left = Fighter::new("k", &d, 100, 100, -1);
-        left.step(&d, Intent { dx: -1, dy: 0, attack: true }, &field());
+        left.step(
+            &d,
+            Intent {
+                dx: -1,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(left.attack, Some(Attack::Swing));
         assert_eq!(left.task.as_ref().unwrap().pc.script, "swing");
         assert_eq!(left.facing, -1, "attacking does not turn him");
 
         let mut right = Fighter::new("k", &d, 100, 100, 1);
-        right.step(&d, Intent { dx: -1, dy: 1, attack: true }, &field());
+        right.step(
+            &d,
+            Intent {
+                dx: -1,
+                dy: 1,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(right.state, State::Guard, "back and down is the block");
         assert_eq!(right.attack, Some(Attack::Block));
         assert_eq!(right.task.as_ref().unwrap().pc.script, "block");
 
         let mut up = Fighter::new("k", &d, 100, 100, 1);
-        up.step(&d, Intent { dx: 0, dy: -1, attack: true }, &field());
+        up.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: -1,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(up.attack, Some(Attack::Chop));
         assert_eq!(up.task.as_ref().unwrap().pc.script, "chop");
 
         // Fire alone is the stance in the original; here it is the swing, so
         // that one button still fights.
         let mut plain = Fighter::new("k", &d, 100, 100, 1);
-        plain.step(&d, Intent { dx: 0, dy: 0, attack: true }, &field());
+        plain.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            },
+            &field(),
+        );
         assert_eq!(plain.attack, Some(Attack::Swing));
 
         // An actor with fewer attacks than the table falls back to its own.
         let mut one = scripted_def();
         one.attacks.insert(
             "lunge".into(),
-            crate::content::AttackDef { script: "swing".into(), damage: 3 },
+            crate::content::AttackDef {
+                script: "swing".into(),
+                damage: 3,
+            },
         );
         one.attack = "lunge".into();
         let mut f = Fighter::new("t", &one, 100, 100, 1);
-        f.step(&one, Intent { dx: 0, dy: -1, attack: true }, &field());
-        assert_eq!(f.attack, Some(Attack::Lunge), "no chop of its own, so its one attack");
+        f.step(
+            &one,
+            Intent {
+                dx: 0,
+                dy: -1,
+                attack: true,
+            },
+            &field(),
+        );
+        assert_eq!(
+            f.attack,
+            Some(Attack::Lunge),
+            "no chop of its own, so its one attack"
+        );
     }
 
     /// A held guard has no gap in it: the block script is one frame ending
@@ -1621,7 +2092,15 @@ pub(crate) mod tests {
         let d = depth_def();
         let mut f = Fighter::new("k", &d, 100, 100, 1);
         for t in 0..8 {
-            f.step(&d, Intent { dx: -1, dy: 1, attack: true }, &field());
+            f.step(
+                &d,
+                Intent {
+                    dx: -1,
+                    dy: 1,
+                    attack: true,
+                },
+                &field(),
+            );
             assert_eq!(f.state, State::Guard, "tick {t}");
             assert_eq!(f.guarding(), Some(Attack::Block), "tick {t}");
         }
@@ -1639,7 +2118,12 @@ pub(crate) mod tests {
     #[test]
     fn the_plain_opponent_closes_distance_then_swings() {
         use crate::monster::{decide, Act, Brain, Sight};
-        let d = ActorDef { controller: "knight".into(), approach: 100, back_off: 80, ..def() };
+        let d = ActorDef {
+            controller: "knight".into(),
+            approach: 100,
+            back_off: 80,
+            ..def()
+        };
         let me = Fighter::new("a", &d, 0, 100, 1);
         let look = |foe: &Fighter, brain: &mut Brain| {
             let s = Sight {

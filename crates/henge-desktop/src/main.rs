@@ -7,23 +7,21 @@ mod framebuffer;
 mod input;
 mod map;
 mod place;
+#[cfg(feature = "research")]
+mod research;
 mod shell;
 mod sprite;
 mod status;
 mod text;
 mod world;
-#[cfg(feature = "research")]
-mod research;
 
 use framebuffer::Framebuffer;
 use henge_assets::Registry;
 use henge_audio::{Clips, Sink, Voices};
-use map::MapScene;
-use text::Font;
 use henge_core::combat::{Intent, State};
+use henge_core::intro::Intro;
 use henge_core::item::{Items, Loss};
 use henge_core::knight::{Ability, Knight, Knights, MAX_ABILITY};
-use henge_core::intro::Intro;
 use henge_core::message::{Message, Messages};
 use henge_core::place::{Answer, Overlaps, Places};
 use henge_core::pointer::{Gadgets, Pointer};
@@ -31,15 +29,19 @@ use henge_core::run::{Cast, Challenge, Run};
 use henge_core::save::Save;
 use henge_core::shell::Start;
 use henge_core::{SCREEN_H, SCREEN_W};
-use world::{Sheet, World};
+use map::MapScene;
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use text::Font;
 use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
+use world::{Sheet, World};
 
-fn args_of() -> Vec<String> { std::env::args().collect() }
+fn args_of() -> Vec<String> {
+    std::env::args().collect()
+}
 
 /// What the pack holds, for one column of the trace. Ids rather than names,
 /// because a trace is read against the data and the data is keyed by id.
@@ -49,7 +51,13 @@ fn carrying(run: &Run) -> String {
     }
     run.kit
         .iter()
-        .map(|(id, n)| if n == 1 { id.to_string() } else { format!("{id}x{n}") })
+        .map(|(id, n)| {
+            if n == 1 {
+                id.to_string()
+            } else {
+                format!("{id}x{n}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -86,29 +94,44 @@ fn carrying(run: &Run) -> String {
 /// numpad: 8 up, 2 down, 4 left, 6 right, 7 9 1 3 the diagonals, 5 fire on
 /// its own. That is how the direction chosen attacks are reached headlessly.
 fn hurt_arg(a: &[String]) -> Option<i32> {
-    a.iter().position(|s| s == "--hurt").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+    a.iter()
+        .position(|s| s == "--hurt")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }
 
 fn gold_arg(a: &[String]) -> Option<u32> {
-    a.iter().position(|s| s == "--gold").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+    a.iter()
+        .position(|s| s == "--gold")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }
 
 /// `--keys <0..4>`: start holding that many of the four lair keys, so the
 /// Valley of the Gods can be reached without first clearing four lairs.
 fn keys_arg(a: &[String]) -> Option<usize> {
-    a.iter().position(|s| s == "--keys").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+    a.iter()
+        .position(|s| s == "--keys")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }
 
 /// `--lives <n>`: how many life points to ride out with, so the game-over
 /// screen is one lost fight away instead of five.
 fn lives_arg(a: &[String]) -> Option<i32> {
-    a.iter().position(|s| s == "--lives").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+    a.iter()
+        .position(|s| s == "--lives")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }
 
 /// `--stone <new|full|half|gibbous>`: start carrying that moonstone, so the
 /// stone circle's winning branch can be reached without beating the Guardian.
 fn stone_arg(a: &[String]) -> Option<henge_core::moon::Moonstone> {
-    let name = a.iter().position(|s| s == "--stone").and_then(|i| a.get(i + 1))?;
+    let name = a
+        .iter()
+        .position(|s| s == "--stone")
+        .and_then(|i| a.get(i + 1))?;
     let found = henge_core::moon::Moonstone::ALL
         .into_iter()
         .find(|m| m.item().trim_start_matches("moonstone.") == name);
@@ -119,11 +142,17 @@ fn stone_arg(a: &[String]) -> Option<henge_core::moon::Moonstone> {
 }
 
 fn knight_arg(a: &[String]) -> Option<usize> {
-    a.iter().position(|s| s == "--knight").and_then(|i| a.get(i + 1)).and_then(|v| v.parse().ok())
+    a.iter()
+        .position(|s| s == "--knight")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse().ok())
 }
 
 fn foe_arg(a: &[String]) -> Option<String> {
-    a.iter().position(|s| s == "--foe").and_then(|i| a.get(i + 1)).cloned()
+    a.iter()
+        .position(|s| s == "--foe")
+        .and_then(|i| a.get(i + 1))
+        .cloned()
 }
 
 /// Which screen a headless run opens on.
@@ -132,7 +161,10 @@ fn foe_arg(a: &[String]) -> Option<String> {
 /// still does what it did. An interactive run opens on the title, because that
 /// is where a game opens.
 fn start_arg(a: &[String]) -> Option<Mode> {
-    let name = a.iter().position(|s| s == "--start").and_then(|i| a.get(i + 1))?;
+    let name = a
+        .iter()
+        .position(|s| s == "--start")
+        .and_then(|i| a.get(i + 1))?;
     match name.as_str() {
         "intro" => Some(Mode::Intro),
         "title" => Some(Mode::Title),
@@ -148,7 +180,10 @@ fn start_arg(a: &[String]) -> Option<Mode> {
 
 /// `--point x,y`: put the pointer there, for checking the gadgets headlessly.
 fn point_arg(a: &[String]) -> Option<(i32, i32)> {
-    let v = a.iter().position(|s| s == "--point").and_then(|i| a.get(i + 1))?;
+    let v = a
+        .iter()
+        .position(|s| s == "--point")
+        .and_then(|i| a.get(i + 1))?;
     let (x, y) = v.split_once(',')?;
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
@@ -188,14 +223,19 @@ struct Script {
 impl Script {
     fn from_args(a: &[String]) -> Script {
         let after = |flag: &str| {
-            a.iter().position(|s| s == flag).and_then(|i| a.get(i + 1)).cloned()
+            a.iter()
+                .position(|s| s == flag)
+                .and_then(|i| a.get(i + 1))
+                .cloned()
         };
         Script {
             goto: after("--goto").and_then(|v| {
                 let (x, y) = v.split_once(',')?;
                 Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
             }),
-            keys: after("--input").map(|s| s.chars().collect()).unwrap_or_default(),
+            keys: after("--input")
+                .map(|s| s.chars().collect())
+                .unwrap_or_default(),
             at: after("--at"),
             peaceful: a.iter().any(|s| s == "--peaceful"),
         }
@@ -302,10 +342,8 @@ fn prepare(app: &mut App, a: &[String]) {
     }
     // `--load` replaces everything above it: a save is the state, and posing a
     // run and then loading over it would be posing nothing.
-    if a.iter().any(|s| s == "--load") {
-        if !app.load_game() {
-            std::process::exit(3);
-        }
+    if a.iter().any(|s| s == "--load") && !app.load_game() {
+        std::process::exit(3);
     }
     // `--point x,y` puts the pointer somewhere, which is the only way to reach
     // it with no mouse and no display.
@@ -330,12 +368,16 @@ fn main() -> anyhow::Result<()> {
         let a = args_of();
         let ticks: u64 = a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(600);
         let arena: i32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if let Some(w) = app.world.as_mut() { w.step_arena(arena); }
+        if let Some(w) = app.world.as_mut() {
+            w.step_arena(arena);
+        }
         let script = Script::from_args(&a);
         let scripts = a.iter().any(|s| s == "--scripts");
         app.peaceful = script.peaceful;
         prepare(&mut app, &a);
-        if let Some(id) = script.at.as_deref() { app.enter(id); }
+        if let Some(id) = script.at.as_deref() {
+            app.enter(id);
+        }
         // Travel while tracing, so the overworld loop is exercised too.
         app.keys[3] = true;
         let mut last = String::new();
@@ -365,29 +407,30 @@ fn main() -> anyhow::Result<()> {
             let line = if let Some(m) = app.showing.as_ref() {
                 let said: Vec<&str> = m.shown().map(|l| l.text.trim()).collect();
                 format!("{t:>5}  MESSAGE {:?}  {}", m.kind, said.join(" / "))
-            } else { match app.mode {
-                // The shell has no state worth a line of trace: what it does is
-                // decided by looking at it, and it is checked by test in
-                // `henge_core::shell` instead.
-                Mode::Intro => format!("{t:>5}  INTRO   card {}", app.intro.card),
-                Mode::Title => format!("{t:>5}  TITLE"),
-                Mode::Select => format!("{t:>5}  SELECT"),
-                Mode::Map if app.map.is_none() => break,
-                Mode::Combat if app.world.is_none() => break,
-                Mode::Place if app.visiting.is_none() => break,
-                Mode::Map => {
-                    let Some(m) = app.map.as_ref() else { break };
-                    let r = &app.run;
-                    // The three abilities and the experience ride on the
-                    // line too, since what a level buys is checked by
-                    // watching them move.
-                    let k = &r.knight;
-                    let aloft = match app.flight {
-                        Some(Flight { returns: true, .. }) => " gem",
-                        Some(Flight { returns: false, .. }) => " hawk",
-                        None => "",
-                    };
-                    format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} {} s{}c{}e{} xp{}{}{}",
+            } else {
+                match app.mode {
+                    // The shell has no state worth a line of trace: what it does is
+                    // decided by looking at it, and it is checked by test in
+                    // `henge_core::shell` instead.
+                    Mode::Intro => format!("{t:>5}  INTRO   card {}", app.intro.card),
+                    Mode::Title => format!("{t:>5}  TITLE"),
+                    Mode::Select => format!("{t:>5}  SELECT"),
+                    Mode::Map if app.map.is_none() => break,
+                    Mode::Combat if app.world.is_none() => break,
+                    Mode::Place if app.visiting.is_none() => break,
+                    Mode::Map => {
+                        let Some(m) = app.map.as_ref() else { break };
+                        let r = &app.run;
+                        // The three abilities and the experience ride on the
+                        // line too, since what a level buys is checked by
+                        // watching them move.
+                        let k = &r.knight;
+                        let aloft = match app.flight {
+                            Some(Flight { returns: true, .. }) => " gem",
+                            Some(Flight { returns: false, .. }) => " hawk",
+                            None => "",
+                        };
+                        format!("{:>5}  MAP     day {:<3} at {:>3},{:<3} hp{:>4}  gold{:>5} {:<12} won {:<3} fought {:<3} {} on {} {} s{}c{}e{} xp{}{}{}",
                         t, m.state.day, m.state.x, m.state.y, r.health, r.gold, carrying(r),
                         r.victories, r.fights,
                         if r.alive() { "     " } else { "ENDED" }, m.last_terrain.name(),
@@ -397,87 +440,116 @@ fn main() -> anyhow::Result<()> {
                         r.moon.phase().key(),
                         k.strength, k.constitution, k.endurance, r.experience, aloft,
                         if app.sheet { format!(" SHEET > {}", app.sheet_rows().get(app.sheet_cursor).map_or("", |r| r.0.as_str())) } else { String::new() })
-                }
-                Mode::Place => {
-                    let Some(s) = app.visiting.as_ref() else { break };
-                    let Some(def) = app.places.get(&s.visit.place) else { break };
-                    // The tune, when the room has one. Five of the original's
-                    // rooms do and nothing else in the game does, so a trace is
-                    // the way to check that the right one is on and that it
-                    // stops at the door.
-                    let tune = match app.audio.music() {
-                        Some(id) => format!("  [{id}]"),
-                        None => String::new(),
-                    };
-                    format!("{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}{}",
-                        t, app.run.day, app.run.health, app.run.gold, carrying(&app.run),
-                        place::describe(def, &s.visit, &app.items), s.visit.said, tune)
-                }
-                Mode::Combat => {
-                    let Some(w) = app.world.as_ref() else { break };
-                    let mut who: Vec<String> = w
-                        .bout
-                        .fighters
-                        .iter()
-                        .map(|f| {
-                            // The state, and the attack kind when there is one:
-                            // `Attack:chop`, `Guard:block`, so a trace shows which
-                            // of the eight the direction chose.
-                            let state = match f.attack {
-                                Some(a) if matches!(f.state, State::Attack | State::Guard) => {
-                                    format!("{:?}:{}", f.state, a.name())
-                                }
-                                _ => format!("{:?}", f.state),
-                            };
-                            // `--scripts` adds the script each task is on, which
-                            // is how a death variant is told from another.
-                            let script = if scripts {
-                                f.task.as_ref().map_or(String::new(), |t| format!(" {}", t.pc.script))
-                            } else {
-                                String::new()
-                            };
-                            // The facing, as the record's `+8` would read: `>`
-                            // is 1 and `<` is 3. Which way a creature faces is
-                            // decided by its controller and nothing else, so a
-                            // trace is the place to see it turn.
-                            let face = if f.facing < 0 { '<' } else { '>' };
-                            format!("{:<6} {:<12}{:>4} @{:>3},{:>3}{}{}", f.actor, state, f.health, f.x, f.y, face, script)
-                        })
-                        .collect();
-                    // A dagger in the air is a line of its own, and a blow
-                    // stopped is said so, since nothing else would show it.
-                    for m in &w.bout.missiles {
-                        if m.attack.is_some() {
-                            who.push(format!("knife @{:>3},{:>3}", m.task.x, m.depth));
+                    }
+                    Mode::Place => {
+                        let Some(s) = app.visiting.as_ref() else {
+                            break;
+                        };
+                        let Some(def) = app.places.get(&s.visit.place) else {
+                            break;
+                        };
+                        // The tune, when the room has one. Five of the original's
+                        // rooms do and nothing else in the game does, so a trace is
+                        // the way to check that the right one is on and that it
+                        // stops at the door.
+                        let tune = match app.audio.music() {
+                            Some(id) => format!("  [{id}]"),
+                            None => String::new(),
+                        };
+                        format!(
+                            "{:>5}  PLACE   day {:<3} hp{:>4}  gold{:>5} {:<12} {:<34} {}{}",
+                            t,
+                            app.run.day,
+                            app.run.health,
+                            app.run.gold,
+                            carrying(&app.run),
+                            place::describe(def, &s.visit, &app.items),
+                            s.visit.said,
+                            tune
+                        )
+                    }
+                    Mode::Combat => {
+                        let Some(w) = app.world.as_ref() else { break };
+                        let mut who: Vec<String> = w
+                            .bout
+                            .fighters
+                            .iter()
+                            .map(|f| {
+                                // The state, and the attack kind when there is one:
+                                // `Attack:chop`, `Guard:block`, so a trace shows which
+                                // of the eight the direction chose.
+                                let state = match f.attack {
+                                    Some(a) if matches!(f.state, State::Attack | State::Guard) => {
+                                        format!("{:?}:{}", f.state, a.name())
+                                    }
+                                    _ => format!("{:?}", f.state),
+                                };
+                                // `--scripts` adds the script each task is on, which
+                                // is how a death variant is told from another.
+                                let script = if scripts {
+                                    f.task
+                                        .as_ref()
+                                        .map_or(String::new(), |t| format!(" {}", t.pc.script))
+                                } else {
+                                    String::new()
+                                };
+                                // The facing, as the record's `+8` would read: `>`
+                                // is 1 and `<` is 3. Which way a creature faces is
+                                // decided by its controller and nothing else, so a
+                                // trace is the place to see it turn.
+                                let face = if f.facing < 0 { '<' } else { '>' };
+                                format!(
+                                    "{:<6} {:<12}{:>4} @{:>3},{:>3}{}{}",
+                                    f.actor, state, f.health, f.x, f.y, face, script
+                                )
+                            })
+                            .collect();
+                        // A dagger in the air is a line of its own, and a blow
+                        // stopped is said so, since nothing else would show it.
+                        for m in &w.bout.missiles {
+                            if m.attack.is_some() {
+                                who.push(format!("knife @{:>3},{:>3}", m.task.x, m.depth));
+                            }
                         }
+                        for p in &w.bout.parries {
+                            who.push(format!(
+                                "{} blocked {} with {}",
+                                p.target,
+                                p.attacker,
+                                p.with.name()
+                            ));
+                        }
+                        // How many more the fight owes and how many it holds at
+                        // once, which is `TotalMonsters`, `MaxMonsters` and
+                        // `NumberInCombat`: a wave arriving is only checkable if
+                        // the three counts are on the line.
+                        let wave = &w.bout.wave;
+                        let owing = if wave.max > 0 {
+                            format!(
+                                " owed{:>3} max{} in{} ",
+                                wave.total, wave.max, wave.in_combat
+                            )
+                        } else {
+                            String::new()
+                        };
+                        // The arena's own name as well as its family, because which of
+                        // the eight a family rotates to is now a thing worth seeing.
+                        format!(
+                            "{:>5}  COMBAT  {:<5} {:<8}{} {}",
+                            t,
+                            w.name(),
+                            w.family(),
+                            owing,
+                            who.join(" | ")
+                        )
                     }
-                    for p in &w.bout.parries {
-                        who.push(format!("{} blocked {} with {}", p.target, p.attacker, p.with.name()));
-                    }
-                    // How many more the fight owes and how many it holds at
-                    // once, which is `TotalMonsters`, `MaxMonsters` and
-                    // `NumberInCombat`: a wave arriving is only checkable if
-                    // the three counts are on the line.
-                    let wave = &w.bout.wave;
-                    let owing = if wave.max > 0 {
-                        format!(" owed{:>3} max{} in{} ", wave.total, wave.max, wave.in_combat)
-                    } else {
-                        String::new()
-                    };
-                    // The arena's own name as well as its family, because which of
-                    // the eight a family rotates to is now a thing worth seeing.
-                    format!(
-                        "{:>5}  COMBAT  {:<5} {:<8}{} {}",
-                        t,
-                        w.name(),
-                        w.family(),
-                        owing,
-                        who.join(" | ")
-                    )
                 }
-            } };
+            };
             let key = line[7..].to_string();
-            if key != last { println!("{line}"); last = key; }
+            if key != last {
+                println!("{line}");
+                last = key;
+            }
         }
         return Ok(());
     }
@@ -486,7 +558,10 @@ fn main() -> anyhow::Result<()> {
     //   moonstone --screenshot out.png [ticks] [arena-index]
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--screenshot") {
-        let path = args.get(i + 1).cloned().unwrap_or_else(|| "shot.png".into());
+        let path = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "shot.png".into());
         let ticks: u64 = args.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(0);
         let arena: i32 = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(0);
         if let Some(w) = app.world.as_mut() {
@@ -497,7 +572,9 @@ fn main() -> anyhow::Result<()> {
         let script = Script::from_args(&args);
         app.peaceful = script.peaceful;
         prepare(&mut app, &args);
-        if let Some(id) = script.at.as_deref() { app.enter(id); }
+        if let Some(id) = script.at.as_deref() {
+            app.enter(id);
+        }
         let mut fed = 0usize;
         for _ in 0..ticks {
             if script.active() {
@@ -585,30 +662,46 @@ fn main() -> anyhow::Result<()> {
 
     event_loop.run(move |event, elwt| {
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => elwt.exit(),
             // A real mouse moves the pointer straight to where it is. The
             // stick still works; this is the same pointer either way.
-            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
                 let size = window.inner_size();
                 if let Some((x, y)) = Framebuffer::to_screen(
-                    size.width as usize, size.height as usize, position.x, position.y,
+                    size.width as usize,
+                    size.height as usize,
+                    position.x,
+                    position.y,
                 ) {
                     app.point_at(x, y);
                 }
             }
-            Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
-                if button == winit::event::MouseButton::Left {
-                    let down = state == ElementState::Pressed;
-                    // Straight onto seat two's fire, which is the button the
-                    // gadgets already read.
-                    if down && !app.keys[11] {
-                        app.pressed[11] = true;
-                    }
-                    app.keys[11] = down;
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state,
+                        button: winit::event::MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                let down = state == ElementState::Pressed;
+                // Straight onto seat two's fire, which is the button the
+                // gadgets already read.
+                if down && !app.keys[11] {
+                    app.pressed[11] = true;
                 }
+                app.keys[11] = down;
             }
             Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { event, .. }, ..
+                event: WindowEvent::KeyboardInput { event, .. },
+                ..
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let down = event.state == ElementState::Pressed;
@@ -643,7 +736,9 @@ fn main() -> anyhow::Result<()> {
                     owed -= TICK;
                     ticked = true;
                 }
-                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(last + (TICK - owed)));
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    last + (TICK - owed),
+                ));
                 if !ticked {
                     return;
                 }
@@ -681,8 +776,12 @@ fn main() -> anyhow::Result<()> {
 /// The other glow a fight installs is `KnightGlowOn`, which the combat loop
 /// calls every frame and which puts three glows on the knight's own entries
 /// once he is down to ten health; see [`App::knight_glow_tick`].
-const MUDMEN_GLOW: henge_assets::Glow =
-    henge_assets::Glow { index: 0x0e, target: 0x100, period: 2, repeat: 0 };
+const MUDMEN_GLOW: henge_assets::Glow = henge_assets::Glow {
+    index: 0x0e,
+    target: 0x100,
+    period: 2,
+    repeat: 0,
+};
 
 struct App {
     fb: Framebuffer,
@@ -820,7 +919,14 @@ struct App {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Mode { Intro, Title, Select, Map, Combat, Place }
+enum Mode {
+    Intro,
+    Title,
+    Select,
+    Map,
+    Combat,
+    Place,
+}
 
 /// A flight over the map, `EffectFLAG+2` and `+4` in `_MAP`: the gem's comes
 /// back to where it began, the hawk's lands where it is when fire is pressed.
@@ -892,7 +998,10 @@ fn open_audio(reg: &mut henge_assets::Registry) -> Box<dyn Sink> {
         ),
     }
     #[cfg(not(feature = "audio"))]
-    println!("audio: built without a backend; {loaded} clips and {} tunes go unheard", tunes.len());
+    println!(
+        "audio: built without a backend; {loaded} clips and {} tunes go unheard",
+        tunes.len()
+    );
     Box::new(henge_audio::Silent::default())
 }
 
@@ -972,6 +1081,9 @@ fn key_index(c: KeyCode) -> usize {
 ///
 /// The entries for 0x0e and 0x1c, backspace and Enter, are never reached:
 /// `ScanKEYS` tests both before it calls this.
+// Hand-aligned: the arms are grouped into the keyboard's own rows, which is the
+// shape of the scancode table this reproduces.
+#[rustfmt::skip]
 fn typed_char(c: KeyCode) -> Option<char> {
     use KeyCode::*;
     Some(match c {
@@ -1032,11 +1144,17 @@ impl App {
         }
         let map = match MapScene::load(&mut reg) {
             Ok(m) => Some(m),
-            Err(e) => { eprintln!("no overworld: {e:#}"); None }
+            Err(e) => {
+                eprintln!("no overworld: {e:#}");
+                None
+            }
         };
         let world = match World::load(&reg) {
             Ok(w) => Some(w),
-            Err(e) => { eprintln!("arena load failed: {e:#}"); None }
+            Err(e) => {
+                eprintln!("arena load failed: {e:#}");
+                None
+            }
         };
         let audio = open_audio(&mut reg);
         let fonts = text::load(&reg);
@@ -1108,8 +1226,13 @@ impl App {
             tick: 0,
             keys: [false; 256],
             pressed: [false; 256],
-            reg, world,
-            mode: if map.is_some() { Mode::Map } else { Mode::Combat },
+            reg,
+            world,
+            mode: if map.is_some() {
+                Mode::Map
+            } else {
+                Mode::Combat
+            },
             map,
             places,
             items,
@@ -1193,10 +1316,8 @@ impl App {
             }
         }
         let i = key_index(code);
-        if i < 256 {
-            if down && !self.keys[i] {
-                self.pressed[i] = true;
-            }
+        if i < 256 && down && !self.keys[i] {
+            self.pressed[i] = true;
         }
         // `ASCIIKEY`, for `TypeName`. A key that the table has no character for
         // types nothing, and the screens that do not read letters never look.
@@ -1205,21 +1326,21 @@ impl App {
                 self.typed = Some(c);
             }
         }
-        {
-            if down && self.world.is_some() {
+        if down {
+            if let Some(world) = self.world.as_mut() {
                 match code {
-                    KeyCode::BracketLeft => self.world.as_mut().unwrap().step_arena(-1),
-                    KeyCode::BracketRight => self.world.as_mut().unwrap().step_arena(1),
+                    KeyCode::BracketLeft => world.step_arena(-1),
+                    KeyCode::BracketRight => world.step_arena(1),
                     // Comma and period cycle which creature fills the
                     // opponents' seats, so each of the bestiary can be looked
                     // at in the arena browser.
-                    KeyCode::Comma => self.world.as_mut().unwrap().step_foe(-1),
-                    KeyCode::Period => self.world.as_mut().unwrap().step_foe(1),
-                    KeyCode::KeyR => self.world.as_mut().unwrap().reset(),
+                    KeyCode::Comma => world.step_foe(-1),
+                    KeyCode::Period => world.step_foe(1),
+                    KeyCode::KeyR => world.reset(),
                     // 1 and 2 set how many people are at the keyboard; the rest
                     // of the four seats are filled by opponents.
-                    KeyCode::Digit1 => self.world.as_mut().unwrap().set_players(1),
-                    KeyCode::Digit2 => self.world.as_mut().unwrap().set_players(2),
+                    KeyCode::Digit1 => world.set_players(1),
+                    KeyCode::Digit2 => world.set_players(2),
                     // Tab flips between the overworld and the arena, which is
                     // how the arena browser stays reachable.
                     KeyCode::Tab => {
@@ -1228,14 +1349,23 @@ impl App {
                             Mode::Combat => Mode::Map,
                             // Tab is also the way out of a place, so a broken
                             // menu can never trap you indoors.
-                            Mode::Place => { self.visiting = None; Mode::Map }
+                            Mode::Place => {
+                                self.visiting = None;
+                                Mode::Map
+                            }
                             // And the way out of the shell, so a pack with no
                             // knights in it cannot strand you on a select screen
                             // with nothing to select.
-                            Mode::Select => { self.select = None; Mode::Title }
+                            Mode::Select => {
+                                self.select = None;
+                                Mode::Title
+                            }
                             // Tab out of the intro too, so the sequence can
                             // never hold a player who wants to play.
-                            Mode::Intro => { self.intro.skip(); Mode::Title }
+                            Mode::Intro => {
+                                self.intro.skip();
+                                Mode::Title
+                            }
                             Mode::Title => Mode::Map,
                         };
                     }
@@ -1244,9 +1374,9 @@ impl App {
                     _ => {}
                 }
             }
-            if i < 256 {
-                self.keys[i] = down;
-            }
+        }
+        if i < 256 {
+            self.keys[i] = down;
         }
         #[cfg(feature = "research")]
         if let Some(v) = self.research.as_mut() {
@@ -1392,7 +1522,8 @@ impl App {
         if let Some(left) = leaving {
             let steps = henge_assets::palette::FADE_STEPS;
             if left <= steps as u32 {
-                self.fx.set_fade(henge_assets::Fade::Out(steps - left as u16));
+                self.fx
+                    .set_fade(henge_assets::Fade::Out(steps - left as u16));
             }
         }
     }
@@ -1454,7 +1585,8 @@ impl App {
                 for g in &glows {
                     self.fx.install_glow(*g, &base);
                 }
-                self.knight_glows.insert(seat, glows.iter().map(|g| g.index).collect());
+                self.knight_glows
+                    .insert(seat, glows.iter().map(|g| g.index).collect());
             } else if !low && on {
                 if let Some(entries) = self.knight_glows.remove(&seat) {
                     for e in entries {
@@ -1607,7 +1739,8 @@ impl App {
                     // the lot leaves the same marks on the same ground.
                     if let Some(m) = self.map.as_ref() {
                         let (x, y) = (m.state.x, m.state.y);
-                        self.overlaps.gather(&self.places, x, y, self.run.knight.seat);
+                        self.overlaps
+                            .gather(&self.places, x, y, self.run.knight.seat);
                     }
                     return;
                 }
@@ -1630,7 +1763,8 @@ impl App {
                 // `_MAP:FOLLOW` walks the whole overlap table once a frame and
                 // pushes what the token is standing on; nothing is opened here.
                 if let Some((x, y)) = at {
-                    self.overlaps.gather(&self.places, x, y, self.run.knight.seat);
+                    self.overlaps
+                        .gather(&self.places, x, y, self.run.knight.seat);
                 }
                 // Walking is how you mend, and also how you meet trouble. The
                 // same action both repairs and risks you.
@@ -1645,10 +1779,8 @@ impl App {
                                 self.notice(format!("{n} gold taken"));
                             }
                             Some(Loss::Item(id)) => {
-                                let what = self
-                                    .items
-                                    .get(&id)
-                                    .map_or(id.clone(), |d| d.name.clone());
+                                let what =
+                                    self.items.get(&id).map_or(id.clone(), |d| d.name.clone());
                                 self.notice(format!("{what} taken"));
                                 // A ring taken is twenty health gone with it.
                                 self.run.refresh(&self.items);
@@ -1738,10 +1870,21 @@ impl App {
                                 Answer::Left => leave = true,
                                 Answer::Stayed { days: d } => days = d,
                                 Answer::Went { place } => door = Some(place),
-                                Answer::Fight { lair, arena, family, guardian, count } => {
+                                Answer::Fight {
+                                    lair,
+                                    arena,
+                                    family,
+                                    guardian,
+                                    count,
+                                } => {
                                     raid = Some((lair, arena, family, guardian, count));
                                 }
-                                Answer::Guardian { arena, family, guardian, count } => {
+                                Answer::Guardian {
+                                    arena,
+                                    family,
+                                    guardian,
+                                    count,
+                                } => {
                                     quest = Some((arena, family, guardian, count));
                                 }
                             }
@@ -1827,7 +1970,11 @@ impl App {
             Mode::Combat => {
                 if let Some(w) = self.world.as_mut() {
                     let seats = [
-                        Intent { dx, dy, attack: self.keys[6] },
+                        Intent {
+                            dx,
+                            dy,
+                            attack: self.keys[6],
+                        },
                         Intent {
                             dx: self.keys[10] as i32 - self.keys[9] as i32,
                             dy: self.keys[8] as i32 - self.keys[7] as i32,
@@ -1849,7 +1996,8 @@ impl App {
                         // What the fallen were carrying, and what they were
                         // worth. The run decides whether it is collected; a
                         // corpse collects nothing.
-                        self.run.finished_fight_worth(health, won, w.purse(), w.experience());
+                        self.run
+                            .finished_fight_worth(health, won, w.purse(), w.experience());
                         w.set_player_cursed(false);
                         // And what was thrown is gone: the sheet's daggers are
                         // whatever is left on the belt.
@@ -1882,8 +2030,7 @@ impl App {
                                 let place = self.raid_place.clone();
                                 let beat = won && self.run.alive();
                                 if self.enter(&place) {
-                                    let mut visit =
-                                        self.visiting.as_ref().map(|s| s.visit.clone());
+                                    let mut visit = self.visiting.as_ref().map(|s| s.visit.clone());
                                     if let Some(v) = visit.as_mut() {
                                         if beat {
                                             v.won_valley(&self.items, &mut self.run);
@@ -1922,7 +2069,8 @@ impl App {
                                         if let Some(v) = visit.as_mut() {
                                             v.won_lair(lair, &self.items, &mut self.run);
                                         }
-                                        if let (Some(s), Some(v)) = (self.visiting.as_mut(), visit) {
+                                        if let (Some(s), Some(v)) = (self.visiting.as_mut(), visit)
+                                        {
                                             s.visit = v;
                                         }
                                     } else {
@@ -2033,7 +2181,10 @@ impl App {
             select.state.move_by(1);
         }
         if take {
-            let default = defaults.get(select.state.cursor).cloned().unwrap_or_default();
+            let default = defaults
+                .get(select.state.cursor)
+                .cloned()
+                .unwrap_or_default();
             select.state.take(&default);
         }
         if select.state.done() {
@@ -2075,7 +2226,11 @@ impl App {
     /// The quest proper. Seat zero is the person at this keyboard, so their
     /// knight is the one the run belongs to; the rest fill the other seats.
     fn begin_quest(&mut self) {
-        let chosen = self.select.as_ref().map(|s| s.state.chosen()).unwrap_or_default();
+        let chosen = self
+            .select
+            .as_ref()
+            .map(|s| s.state.chosen())
+            .unwrap_or_default();
         let mine = chosen.first().copied().unwrap_or(0);
         let mut roster = chosen.clone();
         for i in 0..henge_core::shell::SEATS {
@@ -2097,7 +2252,11 @@ impl App {
         }
         self.named.clear();
         self.select = None;
-        self.mode = if self.map.is_some() { Mode::Map } else { Mode::Combat };
+        self.mode = if self.map.is_some() {
+            Mode::Map
+        } else {
+            Mode::Combat
+        };
     }
 
     /// The four seats with a given knight in the first of them. Seat zero is the
@@ -2114,7 +2273,9 @@ impl App {
 
     /// Begin a run as one of the four, and put the arena in their colours.
     fn take_knight(&mut self, knight: usize, roster: Vec<usize>) {
-        let Some(def) = self.knights.get(knight) else { return };
+        let Some(def) = self.knights.get(knight) else {
+            return;
+        };
         self.run = Run::for_knight(def, knight, &self.items);
         // The original starts each knight in their own corner. Ours is clamped
         // into the walkable part of the map, because two of the four corners it
@@ -2197,7 +2358,11 @@ impl App {
             return false;
         };
         let save = Save::of(
-            &self.run, &m.state, self.title.state.players, self.title.state.gore, self.hint,
+            &self.run,
+            &m.state,
+            self.title.state.players,
+            self.title.state.gore,
+            self.hint,
         );
         let text = match serde_json::to_string_pretty(&save) {
             Ok(t) => t,
@@ -2368,7 +2533,9 @@ impl App {
         if !self.pointer.woken {
             return;
         }
-        let Some(over) = self.gadgets.hit_id(&self.pointer) else { return };
+        let Some(over) = self.gadgets.hit_id(&self.pointer) else {
+            return;
+        };
         // Being over a row is being on it, the way `GadgetHit` says the line
         // for whatever the pointer has reached.
         match self.mode {
@@ -2414,7 +2581,11 @@ impl App {
         let cost = self.run.level_cost();
         for a in [Ability::Strength, Ability::Endurance, Ability::Constitution] {
             let lit = self.run.can_level() && self.run.knight.ability(a) < MAX_ABILITY;
-            rows.push((format!("{} ({cost} xp)", a.increase_line()), lit, SheetAction::Raise(a)));
+            rows.push((
+                format!("{} ({cost} xp)", a.increase_line()),
+                lit,
+                SheetAction::Raise(a),
+            ));
         }
         for (id, n) in self.run.kit.iter() {
             // A key and a moonstone are carried, not cast: `MagicCast` has no
@@ -2481,9 +2652,16 @@ impl App {
             }
             Cast::Aloft { returns } => {
                 if let Some(m) = self.map.as_ref() {
-                    self.flight = Some(Flight { returns, from: (m.state.x, m.state.y) });
+                    self.flight = Some(Flight {
+                        returns,
+                        from: (m.state.x, m.state.y),
+                    });
                     self.sheet = false;
-                    self.notice(if returns { "Aloft on the gem" } else { "Aloft on the hawk" });
+                    self.notice(if returns {
+                        "Aloft on the gem"
+                    } else {
+                        "Aloft on the hawk"
+                    });
                 }
             }
             Cast::Astray { x, y } => {
@@ -2534,10 +2712,16 @@ impl App {
         let (x, y) = (m.state.x, m.state.y);
         let seat = self.run.knight.seat % 4;
         let frame = if fl.returns { 10 + seat } else { 15 + seat };
-        let Some(rect) = self.reg.sheet("bank.mi").and_then(|r| r.value.frames.get(frame).copied()) else {
+        let Some(rect) = self
+            .reg
+            .sheet("bank.mi")
+            .and_then(|r| r.value.frames.get(frame).copied())
+        else {
             return;
         };
-        let Ok(img) = self.reg.image("bank.mi") else { return };
+        let Ok(img) = self.reg.image("bank.mi") else {
+            return;
+        };
         let (w, h) = (rect.w as usize, rect.h as usize);
         let mut px = vec![0u8; w * h];
         for row in 0..h {
@@ -2657,7 +2841,9 @@ impl App {
             if !self.pressed[NUMBER_SLOT + n as usize - 1] {
                 continue;
             }
-            let Some(id) = self.overlaps.answer(n).map(str::to_string) else { continue };
+            let Some(id) = self.overlaps.answer(n).map(str::to_string) else {
+                continue;
+            };
             self.paper = false;
             self.enter(&id);
             return;
@@ -2681,7 +2867,11 @@ impl App {
             def.options.first().map(|o| &o.effect)
         {
             let (said, refused) = (said.clone(), refused.clone());
-            let line = if self.run.rest_at_village() { said } else { refused };
+            let line = if self.run.rest_at_village() {
+                said
+            } else {
+                refused
+            };
             self.notice(line);
             return true;
         }
@@ -2708,7 +2898,11 @@ impl App {
         // has one character per press and no modifiers, so while it is up an
         // uppercase letter or a digit is that character and `<` is the
         // backspace. Fire and Enter still end it, as `ScanKEYS` does.
-        if self.select.as_ref().is_some_and(|s| s.state.typing.is_some()) {
+        if self
+            .select
+            .as_ref()
+            .is_some_and(|s| s.state.typing.is_some())
+        {
             match c {
                 Some(ch @ ('A'..='Z' | '0'..='9')) => {
                     self.typed = Some(ch);
@@ -2726,7 +2920,10 @@ impl App {
             Some('d') => self.pressed[1] = true,
             // Fire is held as well as pressed, so that in an arena it swings
             // and in a menu it takes.
-            Some('s') => { self.keys[6] = true; self.pressed[6] = true; }
+            Some('s') => {
+                self.keys[6] = true;
+                self.pressed[6] = true;
+            }
             // The numpad chords: a direction held with fire. The same character
             // also presses the number key of that digit, which is what the map's
             // paper is answered with: a real keyboard has two keys for a digit
@@ -2736,8 +2933,8 @@ impl App {
             Some(c @ '1'..='9') => {
                 let n = c as u8 - b'0';
                 self.keys[6] = true;
-                self.keys[0] = matches!(n, 7 | 8 | 9);
-                self.keys[1] = matches!(n, 1 | 2 | 3);
+                self.keys[0] = matches!(n, 7..=9);
+                self.keys[1] = matches!(n, 1..=3);
                 self.keys[2] = matches!(n, 1 | 4 | 7);
                 self.keys[3] = matches!(n, 3 | 6 | 9);
                 self.pressed[NUMBER_SLOT + n as usize - 1] = true;
@@ -2746,17 +2943,36 @@ impl App {
             // option and not only that space does.
             Some('e') => self.pressed[12] = true,
             // Seat two's fire, which is the pointer's button: `p` for point.
-            Some('p') => { self.keys[11] = true; self.pressed[11] = true; }
+            Some('p') => {
+                self.keys[11] = true;
+                self.pressed[11] = true;
+            }
             // Save and load, so both can be driven with no keyboard: the same
             // two calls F5 and F9 make.
-            Some('S') => { self.save_game(); }
-            Some('L') => { self.load_game(); }
+            Some('S') => {
+                self.save_game();
+            }
+            Some('L') => {
+                self.load_game();
+            }
             // Held and pressed both: walking reads the key, a menu reads the
             // edge, and the same letter has to drive either.
-            Some('h') => { self.keys[2] = true; self.pressed[2] = true; }
-            Some('l') => { self.keys[3] = true; self.pressed[3] = true; }
-            Some('k') => { self.keys[0] = true; self.pressed[0] = true; }
-            Some('j') => { self.keys[1] = true; self.pressed[1] = true; }
+            Some('h') => {
+                self.keys[2] = true;
+                self.pressed[2] = true;
+            }
+            Some('l') => {
+                self.keys[3] = true;
+                self.pressed[3] = true;
+            }
+            Some('k') => {
+                self.keys[0] = true;
+                self.pressed[0] = true;
+            }
+            Some('j') => {
+                self.keys[1] = true;
+                self.pressed[1] = true;
+            }
             _ => {}
         }
     }
@@ -2780,7 +2996,9 @@ impl App {
     /// and there is no ending screen to draw. A page of seven counted lines over
     /// `bg8.piv` used to be here. `Tally::message` is the chain.
     fn draw_run_over(&mut self) {
-        let Some(tally) = self.run.tally() else { return };
+        let Some(tally) = self.run.tally() else {
+            return;
+        };
         let fonts = shell::Fonts {
             bold: self.fonts.get("bold"),
             small: self.fonts.get("small"),
@@ -2797,8 +3015,12 @@ impl App {
         let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
         let (mut dark, mut light) = (0usize, 0usize);
         for i in 1..32 {
-            if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) { dark = i; }
-            if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) { light = i; }
+            if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) {
+                dark = i;
+            }
+            if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) {
+                light = i;
+            }
         }
         let mut y = 30;
         for part in line.split('|') {
@@ -2812,7 +3034,9 @@ impl App {
     fn save_png(&self, path: &str) -> anyhow::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut enc = png::Encoder::new(
-            std::io::BufWriter::new(file), SCREEN_W as u32, SCREEN_H as u32,
+            std::io::BufWriter::new(file),
+            SCREEN_W as u32,
+            SCREEN_H as u32,
         );
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
@@ -2840,8 +3064,11 @@ impl App {
             let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
             // The menu is live on the map, where the sheet is modal; in an
             // arena the sheet is a card held up over the fight.
-            let rows: Vec<(String, bool)> =
-                self.sheet_rows().into_iter().map(|(l, lit, _)| (l, lit)).collect();
+            let rows: Vec<(String, bool)> = self
+                .sheet_rows()
+                .into_iter()
+                .map(|(l, lit, _)| (l, lit))
+                .collect();
             let cursor = (self.mode == Mode::Map && !rows.is_empty()).then_some(self.sheet_cursor);
             status::draw_sheet(&mut self.reg, &mut self.fb, font, &self.run, &rows, cursor);
         }
@@ -2920,7 +3147,14 @@ impl App {
                     // panels the original painted only a few pixels wide.
                     let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
                     if scene
-                        .render(&mut self.reg, &mut self.fb, def, font, &self.run, &self.items)
+                        .render(
+                            &mut self.reg,
+                            &mut self.fb,
+                            def,
+                            font,
+                            &self.run,
+                            &self.items,
+                        )
                         .is_ok()
                     {
                         return;
@@ -2971,7 +3205,8 @@ impl App {
         self.fb.clear(0);
         for y in 0..SCREEN_H {
             for x in 0..SCREEN_W {
-                self.fb.pixels[y * SCREEN_W + x] = ((x + y + (self.tick / 2) as usize) / 8 % 32) as u8;
+                self.fb.pixels[y * SCREEN_W + x] =
+                    ((x + y + (self.tick / 2) as usize) / 8 % 32) as u8;
             }
         }
     }
@@ -3014,16 +3249,32 @@ mod tests {
     #[test]
     fn the_developer_keys_are_not_in_the_binding_table() {
         let b = input::Bindings::default();
-        for code in [KeyCode::BracketLeft, KeyCode::Comma, KeyCode::Enter, KeyCode::Tab] {
-            assert!(slots_for(&b, code).is_empty(), "{code:?} is bound as a control");
+        for code in [
+            KeyCode::BracketLeft,
+            KeyCode::Comma,
+            KeyCode::Enter,
+            KeyCode::Tab,
+        ] {
+            assert!(
+                slots_for(&b, code).is_empty(),
+                "{code:?} is bound as a control"
+            );
         }
         assert_eq!(key_index(KeyCode::BracketLeft), 4);
         assert_eq!(key_index(KeyCode::Enter), 12);
         // And none of them is one of the ten seat slots.
-        for code in [KeyCode::BracketLeft, KeyCode::BracketRight, KeyCode::Enter,
-                     KeyCode::Comma, KeyCode::Period] {
+        for code in [
+            KeyCode::BracketLeft,
+            KeyCode::BracketRight,
+            KeyCode::Enter,
+            KeyCode::Comma,
+            KeyCode::Period,
+        ] {
             let i = key_index(code);
-            assert!(!(0..=3).contains(&i) && !(6..=11).contains(&i), "{code:?} took slot {i}");
+            assert!(
+                !(0..=3).contains(&i) && !(6..=11).contains(&i),
+                "{code:?} took slot {i}"
+            );
         }
     }
 
@@ -3035,15 +3286,27 @@ mod tests {
     fn the_number_keys_are_nine_slots_of_their_own() {
         let b = input::Bindings::default();
         let digits = [
-            KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4,
-            KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
             KeyCode::Digit9,
         ];
         for (n, code) in digits.iter().enumerate() {
             assert_eq!(key_index(*code), NUMBER_SLOT + n, "{code:?} lost its slot");
-            assert!(slots_for(&b, *code).is_empty(), "{code:?} is bound as a control");
+            assert!(
+                slots_for(&b, *code).is_empty(),
+                "{code:?} is bound as a control"
+            );
             let i = key_index(*code);
-            assert!(!(0..=3).contains(&i) && !(6..=11).contains(&i), "{code:?} took slot {i}");
+            assert!(
+                !(0..=3).contains(&i) && !(6..=11).contains(&i),
+                "{code:?} took slot {i}"
+            );
             assert!(i < 256, "and it has to be a slot that exists");
         }
     }

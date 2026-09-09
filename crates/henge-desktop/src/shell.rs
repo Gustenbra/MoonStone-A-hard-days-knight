@@ -239,13 +239,18 @@ impl TitleScene {
         // `OPT1h` and `GOREOPT`, the two records whose text `DisplaySelect`
         // rewrites before it walks the chain.
         bold.draw_own(reg, fb, &self.state.players.to_string(), VALUE_X, ROW_Y[0]);
-        bold.draw_own(reg, fb, if self.state.gore { GORE_ON } else { GORE_OFF }, VALUE_X, ROW_Y[1]);
+        bold.draw_own(
+            reg,
+            fb,
+            if self.state.gore { GORE_ON } else { GORE_OFF },
+            VALUE_X,
+            ROW_Y[1],
+        );
 
         // No credit lines. `0x890c` restores the picture the loader copied
         // before it blitted them, and `DisplaySelect` adds only the wordmark,
         // the arrow and the six records.
     }
-
 }
 
 /// Whichever fonts the packs happen to hold. Both are optional everywhere else
@@ -256,7 +261,10 @@ pub struct Fonts<'a> {
 }
 
 fn show(reg: &mut Registry, fb: &mut Framebuffer, scene: &str) {
-    if let Some(p) = reg.palette(&format!("palette.{scene}")).map(|r| r.value.clone()) {
+    if let Some(p) = reg
+        .palette(&format!("palette.{scene}"))
+        .map(|r| r.value.clone())
+    {
         fb.set_palette(&p);
     }
     match reg.image(scene) {
@@ -311,7 +319,10 @@ impl SelectScene {
             .or_else(|| reg.palette("palette.scene.ch"))
             .map(|r| r.value.clone())
             .unwrap_or_default();
-        SelectScene { state: Select::new(players), palette }
+        SelectScene {
+            state: Select::new(players),
+            palette,
+        }
     }
 
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts) {
@@ -334,8 +345,7 @@ impl SelectScene {
         // walks `CRText`, blits the portraits still free, blits the frame on
         // the chosen one, and draws the name being typed if `TypeFLAG` is set.
         // That is the whole routine: there is nothing else on this screen.
-        for i in 0..SEATS {
-            let x = PORTRAIT_X[i];
+        for (i, &x) in PORTRAIT_X.iter().enumerate() {
             if self.state.free(i) {
                 // In its own pixels. `ChooseRefresh` puts the cel number in
                 // `ax` and the corner in `bx` and `cx` and calls the same
@@ -441,7 +451,10 @@ pub const MESSAGE_PLATE: &str = "scene.message";
 pub const INSTRUCT_RAMP: [u32; 6] = [0x880000, 0x660000, 0x440000, 0x000000, 0x220000, 0x110000];
 
 pub fn draw_message(
-    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, msg: &henge_core::message::Message,
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    fonts: &Fonts,
+    msg: &henge_core::message::Message,
 ) {
     use henge_core::message::{Align, Kind};
     show(reg, fb, MESSAGE_PLATE);
@@ -461,7 +474,9 @@ pub fn draw_message(
     // of them in its own picture. Flattened to one colour the ring round each
     // letter and the face inside it become the same colour, every counter fills
     // in, and a line reads as a row of blobs.
-    let Some(font) = fonts.bold.or(fonts.small) else { return };
+    let Some(font) = fonts.bold.or(fonts.small) else {
+        return;
+    };
     for line in msg.shown() {
         match line.align {
             Align::Centre => font.draw_own_centred(reg, fb, &line.text, line.y),
@@ -479,7 +494,6 @@ pub fn draw_message(
 /// `TextRightBorder`, which the alignment is measured against.
 const TEXT_RIGHT: i32 = SCREEN_W as i32;
 
-
 /// The intro, as `INTR.EXE`'s own main module plays it.
 ///
 /// All of it is the original's now: the publisher's logo, the vertical pan
@@ -494,7 +508,10 @@ const TEXT_RIGHT: i32 = SCREEN_W as i32;
 /// landed; the recovered story cards are drawn over `MESSAGE.PIV`, which is
 /// what the original puts behind them.
 pub fn draw_intro(
-    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, intro: &henge_core::intro::Intro,
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    fonts: &Fonts,
+    intro: &henge_core::intro::Intro,
     cast: Option<&henge_core::content::IntroCast>,
 ) {
     use henge_core::intro::Backdrop;
@@ -514,8 +531,13 @@ pub fn draw_intro(
     // card, at the literal (9, 60) the registers are loaded with.
     if step.wordmark {
         sprite::draw(
-            reg, fb, TITLE_BANK, henge_core::intro::WORDMARK_CEL,
-            henge_core::intro::WORDMARK_AT.0, henge_core::intro::WORDMARK_AT.1, false,
+            reg,
+            fb,
+            TITLE_BANK,
+            henge_core::intro::WORDMARK_CEL,
+            henge_core::intro::WORDMARK_AT.0,
+            henge_core::intro::WORDMARK_AT.1,
+            false,
         );
     }
 
@@ -538,7 +560,9 @@ pub fn draw_intro(
         fb.palette[i as usize] = rgb;
     }
     // The intro sets its captions in the bold face, as the message system does.
-    let Some(font) = fonts.bold.or(fonts.small) else { return };
+    let Some(font) = fonts.bold.or(fonts.small) else {
+        return;
+    };
     for line in step.lines {
         font.draw_own_centred(reg, fb, line.text, line.y);
     }
@@ -556,7 +580,10 @@ const LOGO_PLATE: &str = "scene.mindscap";
 /// framebuffer this engine can blit from costs 384KB and a tile engine over
 /// mode X costs a mode X.
 fn draw_pan(reg: &mut Registry, fb: &mut Framebuffer, top: i32) {
-    if let Some(p) = reg.palette("palette.scene.intropan").map(|r| r.value.clone()) {
+    if let Some(p) = reg
+        .palette("palette.scene.intropan")
+        .map(|r| r.value.clone())
+    {
         fb.set_palette(&p);
     }
     let Ok(img) = reg.image(PAN_SHEET) else {
@@ -581,7 +608,9 @@ const PAN_SHEET: &str = "scene.intropan";
 /// or mirrored about it, and y from the task's y plus its z. The two starters
 /// differ only in x and facing, and their numbers are `henge_core::intro`'s.
 fn draw_cast(
-    reg: &mut Registry, fb: &mut Framebuffer, intro: &henge_core::intro::Intro,
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    intro: &henge_core::intro::Intro,
     cast: &henge_core::content::IntroCast,
 ) {
     use henge_core::intro::{SPAWN_LEFT_X, SPAWN_RIGHT_X, SPAWN_Y, SPAWN_Z};
@@ -591,11 +620,21 @@ fn draw_cast(
         if now < spawn.at {
             continue;
         }
-        let Some(frame) = cast.frame_at(spawn.script, now - spawn.at) else { continue };
-        let ox = if spawn.left { SPAWN_LEFT_X } else { SPAWN_RIGHT_X };
+        let Some(frame) = cast.frame_at(spawn.script, now - spawn.at) else {
+            continue;
+        };
+        let ox = if spawn.left {
+            SPAWN_LEFT_X
+        } else {
+            SPAWN_RIGHT_X
+        };
         for part in &frame.parts {
-            let Some(sheet) = cast.banks.get(part.bank as usize).cloned() else { continue };
-            let Some(cut) = sprite::cut(reg, &sheet, part.cel as usize) else { continue };
+            let Some(sheet) = cast.banks.get(part.bank as usize).cloned() else {
+                continue;
+            };
+            let Some(cut) = sprite::cut(reg, &sheet, part.cel as usize) else {
+                continue;
+            };
             let x = if spawn.left {
                 ox - (part.x as i32 + cut.w as i32)
             } else {
@@ -636,7 +675,10 @@ const MOON_AT: (i32, i32) = (119, 12);
 const HEADING_Y: i32 = 95;
 
 pub fn draw_interlude(
-    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, phase: henge_core::moon::Phase,
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    fonts: &Fonts,
+    phase: henge_core::moon::Phase,
 ) {
     show(reg, fb, "scene.ch");
     sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);

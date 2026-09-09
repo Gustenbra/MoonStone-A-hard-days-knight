@@ -36,8 +36,13 @@ pub fn cut(reg: &mut Registry, sheet: &str, index: usize) -> Option<Cut> {
 /// are the cases where the original hands the blitter a plain `x`, `y` pair and
 /// nothing has to be translated.
 pub fn draw(
-    reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
-    x: i32, y: i32, mirror: bool,
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    sheet: &str,
+    index: usize,
+    x: i32,
+    y: i32,
+    mirror: bool,
 ) {
     if let Some(c) = cut(reg, sheet, index) {
         fb.blit(&c.pixels, c.w, c.h, x, y, mirror);

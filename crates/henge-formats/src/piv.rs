@@ -49,7 +49,12 @@ impl Piv {
 
         let data_start = 6 + n_colours * 2;
         let raw = depack::fit(depack::unpack(d, data_start, packed_len), 8000 * planes);
-        Ok(Piv { kind, planes, palette, pixels: deplanar(&raw, planes) })
+        Ok(Piv {
+            kind,
+            planes,
+            palette,
+            pixels: deplanar(&raw, planes),
+        })
     }
 
     /// One cell of a CMP tile sheet.
@@ -63,7 +68,12 @@ impl Piv {
                 px[y * CELL_W..(y + 1) * CELL_W].copy_from_slice(&self.pixels[src..src + CELL_W]);
             }
         }
-        Sprite { width: CELL_W, height: CELL_H, real_width: CELL_W, pixels: px }
+        Sprite {
+            width: CELL_W,
+            height: CELL_H,
+            real_width: CELL_W,
+            pixels: px,
+        }
     }
 }
 
@@ -80,8 +90,8 @@ fn deplanar(raw: &[u8], planes: usize) -> Vec<u8> {
         }
         for bit in (0..8).rev() {
             let mut v = 0u8;
-            for p in 0..planes {
-                v |= ((b[p] >> bit) & 1) << p;
+            for (p, plane) in b.iter().enumerate().take(planes) {
+                v |= ((plane >> bit) & 1) << p;
             }
             out[o] = v;
             o += 1;

@@ -100,7 +100,10 @@ pub enum Virtue {
 impl Virtue {
     /// Is this something you wear or hold rather than something you spend?
     pub fn worn(&self) -> bool {
-        matches!(self, Virtue::Weapon { .. } | Virtue::Armour { .. } | Virtue::Ward { .. })
+        matches!(
+            self,
+            Virtue::Weapon { .. } | Virtue::Armour { .. } | Virtue::Ward { .. }
+        )
     }
 }
 
@@ -157,7 +160,9 @@ pub type Items = BTreeMap<String, ItemDef>;
 /// two different things, and the player needs to know which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purchase {
-    Bought { paid: u32 },
+    Bought {
+        paid: u32,
+    },
     /// The purse is short.
     TooDear,
     /// The pack is full.
@@ -195,7 +200,10 @@ impl Default for Inventory {
 
 impl Inventory {
     pub fn new(capacity: u32) -> Inventory {
-        Inventory { held: BTreeMap::new(), capacity }
+        Inventory {
+            held: BTreeMap::new(),
+            capacity,
+        }
     }
 
     /// How many of one thing you have.
@@ -321,7 +329,11 @@ mod tests {
         kit.take("potion", 2);
         assert_eq!(kit.lose("potion", 1), 1);
         assert_eq!(kit.count("potion"), 1);
-        assert_eq!(kit.lose("potion", 5), 1, "you cannot lose what you have not got");
+        assert_eq!(
+            kit.lose("potion", 5),
+            1,
+            "you cannot lose what you have not got"
+        );
         assert_eq!(kit.count("potion"), 0);
         assert_eq!(kit.lose("key", 1), 0, "nor something you never carried");
     }
@@ -362,7 +374,10 @@ mod tests {
         let p = potion();
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<ItemDef>(&json).unwrap(), p);
-        assert!(json.contains("\"does\":\"restore\""), "virtues are tagged in the data");
+        assert!(
+            json.contains("\"does\":\"restore\""),
+            "virtues are tagged in the data"
+        );
     }
 
     /// The original's own menu lines, `st5` and `st9`, come out of the name
@@ -375,20 +390,40 @@ mod tests {
             virtue,
             consumed: true,
         };
-        assert_eq!(scroll("Scroll of Haste", Virtue::Haste).action_line(), "Cast scroll of Haste");
+        assert_eq!(
+            scroll("Scroll of Haste", Virtue::Haste).action_line(),
+            "Cast scroll of Haste"
+        );
         assert_eq!(
             scroll("Scroll of Protection", Virtue::Protection { backfire: 11 }).action_line(),
             "Cast scroll of Protection"
         );
         assert_eq!(
-            scroll("Scroll of the Hawk", Virtue::Sight { astray: 16, returns: false }).action_line(),
+            scroll(
+                "Scroll of the Hawk",
+                Virtue::Sight {
+                    astray: 16,
+                    returns: false
+                }
+            )
+            .action_line(),
             "Cast scroll of the Hawk"
         );
         assert_eq!(
-            scroll("Gem of seeing", Virtue::Sight { astray: 0, returns: true }).action_line(),
+            scroll(
+                "Gem of seeing",
+                Virtue::Sight {
+                    astray: 0,
+                    returns: true
+                }
+            )
+            .action_line(),
             "Use Gem of seeing"
         );
-        assert_eq!(scroll("Ring of protection", Virtue::Ward { health: 20 }).action_line(), "Wear Ring of protection");
+        assert_eq!(
+            scroll("Ring of protection", Virtue::Ward { health: 20 }).action_line(),
+            "Wear Ring of protection"
+        );
         assert!(Virtue::Ward { health: 20 }.worn());
         assert!(!Virtue::Haste.worn());
     }
@@ -399,7 +434,13 @@ mod tests {
             (Virtue::Restore, "restore"),
             (Virtue::Ward { health: 20 }, "ward"),
             (Virtue::Haste, "haste"),
-            (Virtue::Sight { astray: 16, returns: false }, "sight"),
+            (
+                Virtue::Sight {
+                    astray: 16,
+                    returns: false,
+                },
+                "sight",
+            ),
             (Virtue::Seize, "seize"),
             (Virtue::Protection { backfire: 11 }, "protection"),
         ] {

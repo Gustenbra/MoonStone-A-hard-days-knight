@@ -83,9 +83,9 @@ impl SaveError {
     pub fn message(&self) -> String {
         match self {
             SaveError::NotASave => "that is not a saved game".to_string(),
-            SaveError::Version { found, expected } => format!(
-                "that save is version {found} and this build reads version {expected}"
-            ),
+            SaveError::Version { found, expected } => {
+                format!("that save is version {found} and this build reads version {expected}")
+            }
             SaveError::Corrupt => "that save is damaged".to_string(),
         }
     }
@@ -122,7 +122,13 @@ impl Save {
     /// mean carrying the whole task VM, every fighter's script pointer and the
     /// missiles in the air, for something nobody wants to resume mid-swing.
     /// The caller enforces that; this only records what it is given.
-    pub fn of(run: &Run, travel: &Overworld, players: usize, gore: bool, wait_count: usize) -> Save {
+    pub fn of(
+        run: &Run,
+        travel: &Overworld,
+        players: usize,
+        gore: bool,
+        wait_count: usize,
+    ) -> Save {
         let mut save = Save {
             magic: MAGIC.to_string(),
             format: FORMAT,
@@ -162,7 +168,10 @@ impl Save {
             return Err(SaveError::NotASave);
         }
         if self.format != FORMAT {
-            return Err(SaveError::Version { found: self.format, expected: FORMAT });
+            return Err(SaveError::Version {
+                found: self.format,
+                expected: FORMAT,
+            });
         }
         if self.fingerprint != self.contents_hash() {
             return Err(SaveError::Corrupt);
@@ -172,11 +181,18 @@ impl Save {
 
     /// A line for a slot list, or for a trace.
     pub fn summary(&self) -> String {
-        let who = if self.run.knight.named() { self.run.knight.name.as_str() } else { "nobody" };
+        let who = if self.run.knight.named() {
+            self.run.knight.name.as_str()
+        } else {
+            "nobody"
+        };
         format!(
             "{who}  day {}  hp {}  gold {}  won {} of {}",
-            self.run.day, self.run.health.max(0), self.run.gold,
-            self.run.victories, self.run.fights
+            self.run.day,
+            self.run.health.max(0),
+            self.run.gold,
+            self.run.victories,
+            self.run.fights
         )
     }
 }
@@ -222,7 +238,11 @@ mod tests {
         assert_eq!(back, save);
         assert_eq!(back.run, run, "every field of the run");
         assert_eq!(back.travel, travel, "and of the traveller");
-        assert_eq!(back.run.state_hash(), run.state_hash(), "fingerprint and all");
+        assert_eq!(
+            back.run.state_hash(),
+            run.state_hash(),
+            "fingerprint and all"
+        );
         assert_eq!(back.travel.state_hash(), travel.state_hash());
         assert_eq!((back.players, back.gore, back.wait_count), (2, false, 5));
     }
@@ -247,7 +267,11 @@ mod tests {
             restored.run.waylaid();
             restored.travel.travel(1, 1, &Default::default());
         }
-        assert_eq!(restored.run.state_hash(), kept.state_hash(), "same road, same losses");
+        assert_eq!(
+            restored.run.state_hash(),
+            kept.state_hash(),
+            "same road, same losses"
+        );
         assert_eq!(restored.travel.state_hash(), kept_travel.state_hash());
     }
 
@@ -258,7 +282,10 @@ mod tests {
         save.format = FORMAT - 1;
         assert_eq!(
             save.check(),
-            Err(SaveError::Version { found: FORMAT - 1, expected: FORMAT }),
+            Err(SaveError::Version {
+                found: FORMAT - 1,
+                expected: FORMAT
+            }),
             "refused, not read half way"
         );
         assert!(save.check().unwrap_err().message().contains("version"));
@@ -270,7 +297,11 @@ mod tests {
         let mut save = Save::of(&run, &travel, 1, true, 0);
         save.magic = "something else".into();
         save.format = FORMAT - 1;
-        assert_eq!(save.check(), Err(SaveError::NotASave), "the magic is asked first");
+        assert_eq!(
+            save.check(),
+            Err(SaveError::NotASave),
+            "the magic is asked first"
+        );
     }
 
     #[test]
@@ -291,7 +322,10 @@ mod tests {
         value["format"] = serde_json::json!(0);
         let text = serde_json::to_string(&value).unwrap();
         let old: Save = serde_json::from_str(&text).expect("it still parses as a Save");
-        assert!(matches!(old.check(), Err(SaveError::Version { found: 0, .. })));
+        assert!(matches!(
+            old.check(),
+            Err(SaveError::Version { found: 0, .. })
+        ));
     }
 
     #[test]

@@ -29,7 +29,11 @@ fn main() -> anyhow::Result<()> {
             Ok(p) => {
                 let path = out.join("backgrounds").join(format!("{name}.png"));
                 write_indexed(&path, piv::W, piv::H, &p.pixels, &p.palette, false)?;
-                report.push(format!("{name}: {} colours, {} planes", p.palette.len(), p.planes));
+                report.push(format!(
+                    "{name}: {} colours, {} planes",
+                    p.palette.len(),
+                    p.planes
+                ));
             }
             Err(e) => report.push(format!("{name}: SKIPPED ({e})")),
         }
@@ -39,20 +43,31 @@ fn main() -> anyhow::Result<()> {
         if let Ok(p) = lib.piv(name) {
             write_indexed(
                 &out.join("backgrounds").join(format!("{name}.png")),
-                piv::W, piv::H, &p.pixels, &p.palette, false,
+                piv::W,
+                piv::H,
+                &p.pixels,
+                &p.palette,
+                false,
             )?;
         }
     }
 
     // Sprite banks, laid out as contact sheets against a neutral palette.
-    let palette = lib.piv("WA1.CMP").map(|p| p.palette).unwrap_or_else(|_| grey_ramp());
+    let palette = lib
+        .piv("WA1.CMP")
+        .map(|p| p.palette)
+        .unwrap_or_else(|_| grey_ramp());
     for name in lib.with_extension(&["cel", "ob", "f", "fon"]) {
         match lib.cel(&name) {
             Ok(c) => {
                 let sheet = contact_sheet(&c.images, 8);
                 write_indexed(
                     &out.join("sprites").join(format!("{name}.png")),
-                    sheet.width, sheet.height, &sheet.pixels, &palette, true,
+                    sheet.width,
+                    sheet.height,
+                    &sheet.pixels,
+                    &palette,
+                    true,
                 )?;
                 report.push(format!("{name}: {} frames", c.images.len()));
             }
@@ -78,7 +93,10 @@ fn main() -> anyhow::Result<()> {
             arenas.insert(name.clone(), serde_json::to_value(&t)?);
         }
     }
-    fs::write(out.join("arenas/arenas.json"), serde_json::to_string_pretty(&arenas)?)?;
+    fs::write(
+        out.join("arenas/arenas.json"),
+        serde_json::to_string_pretty(&arenas)?,
+    )?;
 
     report.sort();
     fs::write(out.join("catalogue.txt"), report.join("\n"))?;
@@ -87,7 +105,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn grey_ramp() -> Vec<u32> {
-    (0..32).map(|i| { let v = (i * 8) as u32; v << 16 | v << 8 | v }).collect()
+    (0..32)
+        .map(|i| {
+            let v = (i * 8) as u32;
+            v << 16 | v << 8 | v
+        })
+        .collect()
 }
 
 fn contact_sheet(images: &[Sprite], cols: usize) -> Sprite {
@@ -107,11 +130,21 @@ fn contact_sheet(images: &[Sprite], cols: usize) -> Sprite {
             }
         }
     }
-    Sprite { width: w, height: h, real_width: w, pixels: px }
+    Sprite {
+        width: w,
+        height: h,
+        real_width: w,
+        pixels: px,
+    }
 }
 
 fn write_indexed(
-    path: &Path, w: usize, h: usize, pixels: &[u8], palette: &[u32], transparent0: bool,
+    path: &Path,
+    w: usize,
+    h: usize,
+    pixels: &[u8],
+    palette: &[u32],
+    transparent0: bool,
 ) -> anyhow::Result<()> {
     let file = fs::File::create(path)?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);

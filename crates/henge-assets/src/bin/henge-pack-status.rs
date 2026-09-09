@@ -37,7 +37,10 @@ fn main() -> anyhow::Result<()> {
     match reg.shippable() {
         Ok(()) => println!("SHIPPABLE. Nothing resolves to derived material."),
         Err(blocked) => {
-            println!("NOT SHIPPABLE. {} assets still come from the original game:\n", blocked.len());
+            println!(
+                "NOT SHIPPABLE. {} assets still come from the original game:\n",
+                blocked.len()
+            );
             for id in blocked.iter().take(25) {
                 println!("  {id}");
             }

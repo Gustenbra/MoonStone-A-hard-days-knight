@@ -100,7 +100,11 @@ mod tests {
             name: "test".into(),
             end,
             frames: (0..3)
-                .map(|i| Frame { sprite: i, ticks: 2, ..Frame::default() })
+                .map(|i| Frame {
+                    sprite: i,
+                    ticks: 2,
+                    ..Frame::default()
+                })
                 .collect(),
         }
     }
@@ -110,7 +114,10 @@ mod tests {
         let s = seq(EndBehaviour::Loop);
         let mut p = Player::default();
         p.advance(&s);
-        assert_eq!(p.frame, 0, "still on frame 0 after one tick of a two-tick frame");
+        assert_eq!(
+            p.frame, 0,
+            "still on frame 0 after one tick of a two-tick frame"
+        );
         p.advance(&s);
         assert_eq!(p.frame, 1);
     }

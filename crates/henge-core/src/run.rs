@@ -382,7 +382,7 @@ impl Run {
         if self.gold == 0 && self.kit.is_empty() {
             return None;
         }
-        if roll % self.theft_odds != 0 {
+        if !roll.is_multiple_of(self.theft_odds) {
             return None;
         }
         if self.gold > 0 {
@@ -419,7 +419,13 @@ impl Run {
     /// experience as well as coin. Both come off the actor definitions, so a
     /// dragon can be worth the original's two and a trogg whatever the pack
     /// says, without a table here.
-    pub fn finished_fight_worth(&mut self, health_left: i32, won: bool, purse: u32, xp: u32) -> bool {
+    pub fn finished_fight_worth(
+        &mut self,
+        health_left: i32,
+        won: bool,
+        purse: u32,
+        xp: u32,
+    ) -> bool {
         if self.over {
             return false;
         }
@@ -696,7 +702,11 @@ impl Run {
     /// point, doubled while hasted. `DistanceDONE` in full.
     pub fn day_steps(&self, items: &Items) -> u32 {
         let base = self.knight.steps_per_day(items).max(1);
-        if self.hasted { base * 2 } else { base }
+        if self.hasted {
+            base * 2
+        } else {
+            base
+        }
     }
 
     /// The cost of a point, `[0x718]`.
@@ -888,22 +898,42 @@ impl Run {
         }
         let h = &mut 0xcbf2_9ce4_8422_2325u64;
         for v in [
-            self.health as i64, self.max_health as i64, self.day as i64,
-            self.victories as i64, self.fights as i64, self.over as i64,
-            self.gold as i64, self.lives as i64, self.max_lives as i64,
-            self.experience as i64, self.xp_per_level as i64, self.hasted as i64,
-            self.warded as i64, self.ward_backfires as i64, self.cursed as i64,
-            self.toad as i64, self.moon.day as i64, self.moon.count as i64,
-            self.grudge as i64, self.bitten as i64, self.won as i64,
-            self.magic_last as i64, self.sword_out as i64, self.progress as i64,
-            self.steps_per_point as i64, self.theft_odds as i64, self.seed as i64,
+            self.health as i64,
+            self.max_health as i64,
+            self.day as i64,
+            self.victories as i64,
+            self.fights as i64,
+            self.over as i64,
+            self.gold as i64,
+            self.lives as i64,
+            self.max_lives as i64,
+            self.experience as i64,
+            self.xp_per_level as i64,
+            self.hasted as i64,
+            self.warded as i64,
+            self.ward_backfires as i64,
+            self.cursed as i64,
+            self.toad as i64,
+            self.moon.day as i64,
+            self.moon.count as i64,
+            self.grudge as i64,
+            self.bitten as i64,
+            self.won as i64,
+            self.magic_last as i64,
+            self.sword_out as i64,
+            self.progress as i64,
+            self.steps_per_point as i64,
+            self.theft_odds as i64,
+            self.seed as i64,
         ] {
             mix(h, v);
         }
         text(h, &self.knight.name);
         for v in [
-            self.knight.seat as i64, self.knight.strength as i64,
-            self.knight.constitution as i64, self.knight.endurance as i64,
+            self.knight.seat as i64,
+            self.knight.strength as i64,
+            self.knight.constitution as i64,
+            self.knight.endurance as i64,
             self.knight.daggers as i64,
         ] {
             mix(h, v);
@@ -950,8 +980,16 @@ mod arena_rotation_tests {
         let mut run = Run::new(100);
         run.next_arena("swamp", 8);
         run.next_arena("swamp", 8);
-        assert_eq!(run.next_arena("forest", 8), 0, "the forest has not been visited");
-        assert_eq!(run.next_arena("swamp", 8), 2, "and the swamp is where it was");
+        assert_eq!(
+            run.next_arena("forest", 8),
+            0,
+            "the forest has not been visited"
+        );
+        assert_eq!(
+            run.next_arena("swamp", 8),
+            2,
+            "and the swamp is where it was"
+        );
     }
 
     #[test]
@@ -960,7 +998,11 @@ mod arena_rotation_tests {
         for _ in 0..8 {
             assert!(run.next_arena("moors", 3) < 3);
         }
-        assert_eq!(run.next_arena("nothing", 0), 0, "an empty family answers rather than panics");
+        assert_eq!(
+            run.next_arena("nothing", 0),
+            0,
+            "an empty family answers rather than panics"
+        );
     }
 }
 
@@ -1034,7 +1076,10 @@ mod tests {
             ItemDef {
                 name: "Padded armour".into(),
                 price: 0,
-                virtue: Virtue::Armour { health: 0, stride: 0 },
+                virtue: Virtue::Armour {
+                    health: 0,
+                    stride: 0,
+                },
                 consumed: false,
             },
         );
@@ -1054,9 +1099,15 @@ mod tests {
         let mut r = Run::for_knight(&def, 0, &items);
         assert_eq!(r.lives, 5);
         for left in (1..5).rev() {
-            assert!(r.finished_fight(0, false, 0), "still up with {left} to come");
+            assert!(
+                r.finished_fight(0, false, 0),
+                "still up with {left} to come"
+            );
             assert_eq!(r.lives, left);
-            assert_eq!(r.health, r.max_health, "and whole again: WhoLived restores it");
+            assert_eq!(
+                r.health, r.max_health,
+                "and whole again: WhoLived restores it"
+            );
             assert!(r.alive());
         }
         assert!(!r.finished_fight(0, false, 0), "and the last one ends it");
@@ -1090,7 +1141,10 @@ mod tests {
             ItemDef {
                 name: "Padded armour".into(),
                 price: 0,
-                virtue: Virtue::Armour { health: 0, stride: 0 },
+                virtue: Virtue::Armour {
+                    health: 0,
+                    stride: 0,
+                },
                 consumed: false,
             },
         );
@@ -1148,7 +1202,10 @@ mod tests {
         r.finished_fight(20, false, 0);
         assert_eq!(r.experience, 1);
         r.finished_fight(0, true, 0);
-        assert_eq!(r.experience, 1, "and a corpse collects nothing, points included");
+        assert_eq!(
+            r.experience, 1,
+            "and a corpse collects nothing, points included"
+        );
     }
 
     #[test]
@@ -1187,8 +1244,15 @@ mod tests {
         assert_eq!(r.lives, 3);
         assert_eq!(r.day, day, "and a village costs no time");
         assert_eq!(r.gold, 0, "nor coin");
-        // A potion may still carry a man past it, to five.
-        assert!(VILLAGE_CEILING < LIFE_CEILING);
+        // A potion may still carry a man past it, to five, so the village's
+        // three is the village's ceiling and not the knight's.
+        r.kit.take("potion", 1);
+        assert_eq!(r.use_item("potion", &shop()), Used::Did);
+        assert_eq!(
+            r.lives,
+            VILLAGE_CEILING + 1,
+            "a potion goes past what the village will give"
+        );
     }
 
     #[test]
@@ -1263,7 +1327,10 @@ mod tests {
         r.kit.take("potion", 2);
         r.finished_fight(30, true, 0);
         assert_eq!(r.use_item("potion", &items), Used::Did);
-        assert_eq!(r.health, 100, "the two health words differ, so health becomes the maximum");
+        assert_eq!(
+            r.health, 100,
+            "the two health words differ, so health becomes the maximum"
+        );
         assert_eq!(r.kit.count("potion"), 1, "one potion emptied, not both");
     }
 
@@ -1375,6 +1442,9 @@ mod magic_tests {
     use crate::knight::Ability;
 
     /// Everything `_STATUS` stocks, at the prices its own `pu*` lines carry.
+    // Hand-aligned: a price list, one item per line, so name, price and virtue read
+    // as columns down the catalogue.
+    #[rustfmt::skip]
     fn magic() -> Items {
         let mut items = Items::new();
         let mut put = |id: &str, name: &str, price: u32, consumed: bool, virtue: Virtue| {
@@ -1439,7 +1509,11 @@ mod magic_tests {
         assert_eq!(r.lives, 4);
         assert_eq!(r.kit.count("healing_potion"), 1, "both drunk");
         r.lives = LIFE_CEILING;
-        assert_eq!(r.cast("healing_potion", &items), Cast::Pointless, "five and no more");
+        assert_eq!(
+            r.cast("healing_potion", &items),
+            Cast::Pointless,
+            "five and no more"
+        );
         assert_eq!(r.kit.count("healing_potion"), 1, "so it stays corked");
         assert_eq!(r.use_item("healing_potion", &items), Used::Pointless);
     }
@@ -1459,14 +1533,22 @@ mod magic_tests {
         r.buy("ring", &items);
         r.refresh(&items);
         assert_eq!(r.max_health, 60, "two rings, forty health");
-        assert_eq!(r.cast("ring", &items), Cast::Pointless, "already worn, by being carried");
+        assert_eq!(
+            r.cast("ring", &items),
+            Cast::Pointless,
+            "already worn, by being carried"
+        );
         assert_eq!(r.kit.count("ring"), 2, "and none of them is spent");
         // Losing one takes its health with it, and cannot leave a man on
         // more than he can carry.
         r.health = 60;
         r.kit.lose("ring", 1);
         r.refresh(&items);
-        assert_eq!((r.max_health, r.health), (40, 40), "health follows the ceiling down");
+        assert_eq!(
+            (r.max_health, r.health),
+            (40, 40),
+            "health follows the ceiling down"
+        );
     }
 
     /// A bought sword goes into the hand and the old one into the pack, and
@@ -1480,9 +1562,17 @@ mod magic_tests {
         assert_eq!(r.knight.damage_bonus(&items), 1, "still the long sword");
         assert_eq!(r.cast("claymore", &items), Cast::Worn);
         assert_eq!(r.knight.weapon, "claymore");
-        assert_eq!(r.knight.damage_bonus(&items), 4, "strength one and the claymore's three");
+        assert_eq!(
+            r.knight.damage_bonus(&items),
+            4,
+            "strength one and the claymore's three"
+        );
         assert_eq!(r.kit.count("claymore"), 0);
-        assert_eq!(r.kit.count("long_sword"), 1, "the old blade is carried, not lost");
+        assert_eq!(
+            r.kit.count("long_sword"),
+            1,
+            "the old blade is carried, not lost"
+        );
         assert_eq!(r.cast("claymore", &items), Cast::HaveNone);
         // Armour the same way, and the ceiling moves with it.
         r.kit.take("chain_mail", 1);
@@ -1502,7 +1592,11 @@ mod magic_tests {
         let mut r = knight_run(&items);
         assert_eq!(r.day_steps(&items), 96);
         r.earn(100);
-        assert_eq!(r.buy("haste", &items), Purchase::Bought { paid: 36 }, "the scroll costs what pu13 says");
+        assert_eq!(
+            r.buy("haste", &items),
+            Purchase::Bought { paid: 36 },
+            "the scroll costs what pu13 says"
+        );
         r.kit.take("haste", 1);
         assert_eq!(r.cast("haste", &items), Cast::Hastened);
         assert_eq!(r.day_steps(&items), 192);
@@ -1538,7 +1632,10 @@ mod magic_tests {
                 other => panic!("a hawk did {other:?}"),
             }
         }
-        assert!((30..100).contains(&astray), "one in eight, got {astray} of 512");
+        assert!(
+            (30..100).contains(&astray),
+            "one in eight, got {astray} of 512"
+        );
     }
 
     /// A scroll of protection: the roll is made when it is cast and read
@@ -1557,8 +1654,16 @@ mod magic_tests {
             // and a refusal for an empty pack would prove nothing.
             assert_eq!(r.kit.take("protection", 2), 2, "room for two scrolls");
             assert_eq!(r.cast("protection", &items), Cast::Warded);
-            assert_eq!(r.cast("protection", &items), Cast::Pointless, "one ward at a time");
-            assert_eq!(r.kit.count("protection"), 1, "and a refused cast spends nothing");
+            assert_eq!(
+                r.cast("protection", &items),
+                Cast::Pointless,
+                "one ward at a time"
+            );
+            assert_eq!(
+                r.kit.count("protection"),
+                1,
+                "and a refused cast spends nothing"
+            );
             r.kit.lose("protection", 1);
             match r.challenged() {
                 Challenge::Averted => averted += 1,
@@ -1573,7 +1678,10 @@ mod magic_tests {
             assert_eq!(r.challenged(), Challenge::Fight, "and the ward is spent");
         }
         assert_eq!(averted + backfired, 512);
-        assert!((20..80).contains(&backfired), "eleven in 128, got {backfired} of 512");
+        assert!(
+            (20..80).contains(&backfired),
+            "eleven in 128, got {backfired} of 512"
+        );
     }
 
     #[test]
@@ -1616,7 +1724,10 @@ mod magic_tests {
     fn the_mystic_takes_a_point_and_the_health_that_went_with_it() {
         let items = magic();
         let mut r = knight_run(&items);
-        assert!(!r.lower_ability(Ability::Strength, &items), "already at one");
+        assert!(
+            !r.lower_ability(Ability::Strength, &items),
+            "already at one"
+        );
         r.experience = 8;
         assert!(r.spend_experience(Ability::Constitution, &items));
         assert_eq!((r.max_health, r.health), (30, 30));
@@ -1659,9 +1770,16 @@ mod magic_tests {
         assert!(r.can_level());
         assert!(r.spend_experience(Ability::Strength, &items));
         assert_eq!(r.knight.strength, 2);
-        assert_eq!(r.knight.damage_bonus(&items), 2, "and the swing hits harder for it");
+        assert_eq!(
+            r.knight.damage_bonus(&items),
+            2,
+            "and the swing hits harder for it"
+        );
         assert_eq!(r.experience, 1);
-        assert!(!r.spend_experience(Ability::Strength, &items), "one point is not four");
+        assert!(
+            !r.spend_experience(Ability::Strength, &items),
+            "one point is not four"
+        );
         r.earned_experience(3);
         assert!(r.spend_experience(Ability::Endurance, &items));
         assert_eq!(r.day_steps(&items), 128, "endurance bought is road bought");
@@ -1677,7 +1795,10 @@ mod magic_tests {
         r.health = 12;
         assert!(r.spend_experience(Ability::Constitution, &items));
         assert_eq!(r.max_health, 30);
-        assert_eq!(r.health, 22, "the ten arrives in the man, not only in the number");
+        assert_eq!(
+            r.health, 22,
+            "the ten arrives in the man, not only in the number"
+        );
     }
 
     #[test]
@@ -1692,9 +1813,16 @@ mod magic_tests {
         }
         assert!(r.knight.maxed());
         assert_eq!(bought, 12, "four points each into three abilities");
-        assert!(!r.can_level(), "nothing left to buy, whatever the purse says");
+        assert!(
+            !r.can_level(),
+            "nothing left to buy, whatever the purse says"
+        );
         assert_eq!(r.experience, 1000 - 48);
-        assert_eq!(r.bestow_ability(&items), None, "and the wizard has nothing to give");
+        assert_eq!(
+            r.bestow_ability(&items),
+            None,
+            "and the wizard has nothing to give"
+        );
     }
 
     #[test]

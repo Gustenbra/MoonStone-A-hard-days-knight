@@ -174,7 +174,10 @@ impl Messages {
                     .map(|(i, text)| Line::new(text, 0, 75 + i as i32 * 20, FLAG_CENTRE))
                     .collect();
                 lines.push(loading());
-                Message { kind: Kind::Wait, lines }
+                Message {
+                    kind: Kind::Wait,
+                    lines,
+                }
             })
             .collect();
 
@@ -182,7 +185,10 @@ impl Messages {
         // `WelHigh1a`..`WelHigh1e`, whose fourth record's text is swapped
         // between `WEMES1E` and `WEMES1F` by the two callers in
         // `LoadWasteBack`: one city each, and everything else the same chain.
-        for (key, city) in [("welcome.highwood", "Highwood"), ("welcome.waterdeep", "Waterdeep")] {
+        for (key, city) in [
+            ("welcome.highwood", "Highwood"),
+            ("welcome.waterdeep", "Waterdeep"),
+        ] {
             named.insert(
                 key.to_string(),
                 Message {
@@ -276,6 +282,8 @@ impl Messages {
 /// The fourteen, in `WaitMES` pointer order, with the strings exactly as the
 /// image holds them. Every one of them is followed by `Loading...`, which
 /// [`Messages::recovered`] appends rather than repeating fourteen times.
+// Hand-aligned: one of the fourteen messages per line, in pointer order.
+#[rustfmt::skip]
 const WAIT: [&[&str]; 14] = [
     &["Prepare yourself, for the ", "season of the Moonstones is", "upon you!"],
     &["The Gods pause for a moment", "to contemplate your fate..."],
@@ -317,7 +325,11 @@ mod tests {
     fn the_wait_order_is_the_pointer_table_and_not_the_labels() {
         let m = Messages::recovered();
         assert_eq!(m.wait(0).lines[2].text, "upon you!", "WaitM3C");
-        assert_eq!(m.wait(1).lines[1].text, "to contemplate your fate...", "WaitM2B");
+        assert_eq!(
+            m.wait(1).lines[1].text,
+            "to contemplate your fate...",
+            "WaitM2B"
+        );
         assert_eq!(m.wait(2).lines[1].text, " ", "WaitM1B, a single space");
     }
 
@@ -342,7 +354,10 @@ mod tests {
         let w = m.wait(3);
         let ys: Vec<i32> = w.shown().map(|l| l.y).collect();
         assert_eq!(ys, vec![75, 95, 115, 135], "WaitM4A..WaitM4D");
-        assert!(w.shown().all(|l| l.align == Align::Centre), "flag 1 is centre");
+        assert!(
+            w.shown().all(|l| l.align == Align::Centre),
+            "flag 1 is centre"
+        );
     }
 
     /// The three kinds are the point of the exercise: the right routine for
@@ -359,17 +374,27 @@ mod tests {
         assert_eq!(deep.lines[0].text, "Welcome", "one chain, two cities");
 
         let henge = m.on_entering("stones").expect("the druids");
-        assert_eq!(henge.kind, Kind::Instruction, "INSTRUCTMESSAGE, in its own colour");
+        assert_eq!(
+            henge.kind,
+            Kind::Instruction,
+            "INSTRUCTMESSAGE, in its own colour"
+        );
         assert_eq!(henge.lines[0].text, "The druids prepare");
 
-        assert!(m.on_entering("highwood.tavern").is_none(), "nothing greets a tavern");
+        assert!(
+            m.on_entering("highwood.tavern").is_none(),
+            "nothing greets a tavern"
+        );
         assert!(m.on_entering("nowhere").is_none());
 
         // The wizard is the odd one: `LoadWizard` calls the argumentless
         // routine, so his tower shows whichever of the fourteen is next.
         assert!(m.waits_on_entering("wizard"));
         assert!(!m.waits_on_entering("highwood"));
-        assert!(m.on_entering("wizard").is_none(), "it has no chain of its own");
+        assert!(
+            m.on_entering("wizard").is_none(),
+            "it has no chain of its own"
+        );
     }
 
     #[test]

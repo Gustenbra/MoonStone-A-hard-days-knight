@@ -188,7 +188,11 @@ pub struct Effects {
 
 impl Default for Effects {
     fn default() -> Effects {
-        Effects { cycles: Vec::new(), glows: Vec::new(), fade: Fade::None }
+        Effects {
+            cycles: Vec::new(),
+            glows: Vec::new(),
+            fade: Fade::None,
+        }
     }
 }
 
@@ -210,7 +214,11 @@ impl Effects {
         if self.cycles.len() >= SLOTS || c.period == 0 || c.last <= c.first {
             return;
         }
-        self.cycles.push(CycleState { def: c, count: c.period, step: 0 });
+        self.cycles.push(CycleState {
+            def: c,
+            count: c.period,
+            step: 0,
+        });
     }
 
     /// `COLOURGLOW`. `base` is the live palette, which the original reads
@@ -334,7 +342,11 @@ impl Effects {
             let n = (last - first + 1) as u32;
             let k = c.step % n;
             for j in 0..n {
-                let from = if c.def.up { (j + n - k) % n } else { (j + k) % n };
+                let from = if c.def.up {
+                    (j + n - k) % n
+                } else {
+                    (j + k) % n
+                };
                 out[first + j as usize] = base[first + from as usize];
             }
         }
@@ -397,7 +409,12 @@ mod tests {
         let base = ramp();
         let mut fx = Effects::new();
         // The map's river: entries 0x15 to 0x17, upwards, every twelfth frame.
-        fx.install_cycle(Cycle { first: 0x15, last: 0x17, up: true, period: 12 });
+        fx.install_cycle(Cycle {
+            first: 0x15,
+            last: 0x17,
+            up: true,
+            period: 12,
+        });
         assert_eq!(fx.apply(&base), base);
         for _ in 0..12 {
             fx.tick();
@@ -420,8 +437,21 @@ mod tests {
     fn a_glow_can_be_taken_out_by_its_entry_and_the_rest_stay() {
         let base = ramp();
         let mut fx = Effects::new();
-        for (index, target, period) in [(6u8, 0xfa0u16, 2u16), (7, 0xe70, 1), (8, 0xc50, 1), (14, 0x100, 2)] {
-            fx.install_glow(Glow { index, target, period, repeat: 0 }, &base);
+        for (index, target, period) in [
+            (6u8, 0xfa0u16, 2u16),
+            (7, 0xe70, 1),
+            (8, 0xc50, 1),
+            (14, 0x100, 2),
+        ] {
+            fx.install_glow(
+                Glow {
+                    index,
+                    target,
+                    period,
+                    repeat: 0,
+                },
+                &base,
+            );
         }
         assert_eq!(fx.glows(), 4);
         for _ in 0..4 {
@@ -430,19 +460,31 @@ mod tests {
         fx.remove_glow(7);
         assert_eq!(fx.glows(), 3);
         let out = fx.apply(&base);
-        assert_eq!(out[7], base[7], "a freed slot leaves its entry as the palette has it");
+        assert_eq!(
+            out[7], base[7],
+            "a freed slot leaves its entry as the palette has it"
+        );
         assert_ne!(out[6], base[6], "the entries still installed keep walking");
         assert_ne!(out[8], base[8]);
         assert_ne!(out[14], base[14]);
         fx.remove_glow(7);
-        assert_eq!(fx.glows(), 3, "freeing an entry with no glow on it is nothing");
+        assert_eq!(
+            fx.glows(),
+            3,
+            "freeing an entry with no glow on it is nothing"
+        );
     }
 
     #[test]
     fn a_cycle_comes_back_to_where_it_started() {
         let base = ramp();
         let mut fx = Effects::new();
-        fx.install_cycle(Cycle { first: 4, last: 7, up: false, period: 1 });
+        fx.install_cycle(Cycle {
+            first: 4,
+            last: 7,
+            up: false,
+            period: 1,
+        });
         for _ in 0..4 {
             fx.tick();
         }
@@ -453,8 +495,18 @@ mod tests {
     fn the_two_directions_are_opposites() {
         let base = ramp();
         let (mut a, mut b) = (Effects::new(), Effects::new());
-        a.install_cycle(Cycle { first: 2, last: 6, up: false, period: 1 });
-        b.install_cycle(Cycle { first: 2, last: 6, up: true, period: 1 });
+        a.install_cycle(Cycle {
+            first: 2,
+            last: 6,
+            up: false,
+            period: 1,
+        });
+        b.install_cycle(Cycle {
+            first: 2,
+            last: 6,
+            up: true,
+            period: 1,
+        });
         a.tick();
         for _ in 0..4 {
             b.tick();
@@ -468,7 +520,15 @@ mod tests {
         base[14] = from12(0x000);
         let mut fx = Effects::new();
         // The mudmen's: entry 14 towards 0x100 every other frame, forever.
-        fx.install_glow(Glow { index: 14, target: 0x100, period: 2, repeat: 0 }, &base);
+        fx.install_glow(
+            Glow {
+                index: 14,
+                target: 0x100,
+                period: 2,
+                repeat: 0,
+            },
+            &base,
+        );
         assert_eq!(to12(fx.apply(&base)[14]), 0x000);
         fx.tick();
         fx.tick();
@@ -484,7 +544,15 @@ mod tests {
     fn a_glow_seeded_before_its_screen_loaded_is_seeded_again() {
         let base = ramp();
         let mut fx = Effects::new();
-        fx.install_glow(Glow { index: 5, target: 0xfff, period: 1, repeat: 0 }, &[0u32; ENTRIES]);
+        fx.install_glow(
+            Glow {
+                index: 5,
+                target: 0xfff,
+                period: 1,
+                repeat: 0,
+            },
+            &[0u32; ENTRIES],
+        );
         fx.tick();
         // Started from black, so one step towards white is 0x111.
         assert_eq!(to12(fx.apply(&[0u32; ENTRIES])[5]), 0x111);
@@ -499,7 +567,15 @@ mod tests {
         let mut base = ramp();
         base[3] = from12(0x000);
         let mut fx = Effects::new();
-        fx.install_glow(Glow { index: 3, target: 0x001, period: 1, repeat: 2 }, &base);
+        fx.install_glow(
+            Glow {
+                index: 3,
+                target: 0x001,
+                period: 1,
+                repeat: 2,
+            },
+            &base,
+        );
         for _ in 0..8 {
             fx.tick();
         }
@@ -512,8 +588,21 @@ mod tests {
         let base = ramp();
         let mut fx = Effects::new();
         for i in 0..10 {
-            fx.install_cycle(Cycle { first: 0, last: 4, up: false, period: 1 + i });
-            fx.install_glow(Glow { index: 1, target: 0xfff, period: 1, repeat: 0 }, &base);
+            fx.install_cycle(Cycle {
+                first: 0,
+                last: 4,
+                up: false,
+                period: 1 + i,
+            });
+            fx.install_glow(
+                Glow {
+                    index: 1,
+                    target: 0xfff,
+                    period: 1,
+                    repeat: 0,
+                },
+                &base,
+            );
         }
         assert_eq!(fx.cycles(), SLOTS);
         assert_eq!(fx.glows(), SLOTS);
@@ -558,7 +647,12 @@ mod tests {
     fn a_fade_and_a_cycle_compose_without_either_being_lost() {
         let base = ramp();
         let mut fx = Effects::new();
-        fx.install_cycle(Cycle { first: 0x15, last: 0x17, up: true, period: 1 });
+        fx.install_cycle(Cycle {
+            first: 0x15,
+            last: 0x17,
+            up: true,
+            period: 1,
+        });
         fx.set_fade(Fade::In(8));
         fx.tick();
         let out = fx.apply(&base);

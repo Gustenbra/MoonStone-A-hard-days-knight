@@ -41,7 +41,10 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Registry {
-        Registry { packs: Vec::new(), cache: BTreeMap::new() }
+        Registry {
+            packs: Vec::new(),
+            cache: BTreeMap::new(),
+        }
     }
 
     /// Adds a pack at lowest priority. Call with the fallback pack last.
@@ -92,7 +95,9 @@ impl Registry {
     }
 
     pub fn read_data<T: serde::de::DeserializeOwned>(&self, id: &str) -> anyhow::Result<T> {
-        let r = self.data(id).ok_or_else(|| anyhow::anyhow!("no data for id {id}"))?;
+        let r = self
+            .data(id)
+            .ok_or_else(|| anyhow::anyhow!("no data for id {id}"))?;
         let path = r.root.join(r.value);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
@@ -166,8 +171,7 @@ impl Default for Registry {
 }
 
 fn load_indexed_png(path: &Path) -> anyhow::Result<Image> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0; reader.output_buffer_size()];
@@ -178,7 +182,11 @@ fn load_indexed_png(path: &Path) -> anyhow::Result<Image> {
         path.display()
     );
     buf.truncate(info.buffer_size());
-    Ok(Image { width: info.width as usize, height: info.height as usize, pixels: buf })
+    Ok(Image {
+        width: info.width as usize,
+        height: info.height as usize,
+        pixels: buf,
+    })
 }
 
 #[cfg(test)]
@@ -194,11 +202,22 @@ mod tests {
                 id.to_string(),
                 Sheet {
                     file: format!("{id}.png"),
-                    frames: vec![FrameRect { x: 0, y: 0, w: 1, h: 1, ox: 0, oy: 0 }],
+                    frames: vec![FrameRect {
+                        x: 0,
+                        y: 0,
+                        w: 1,
+                        h: 1,
+                        ox: 0,
+                        oy: 0,
+                    }],
                 },
             );
         }
-        std::fs::write(dir.join("manifest.json"), serde_json::to_string(&m).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string(&m).unwrap(),
+        )
+        .unwrap();
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -210,9 +229,16 @@ mod tests {
     #[test]
     fn the_first_pack_wins() {
         let base = tmp("priority");
-        write_pack(&base.join("original"), "original", Provenance::OriginalWork, &["actor.knight.walk"]);
         write_pack(
-            &base.join("reference"), "reference", Provenance::DerivedFromOriginal,
+            &base.join("original"),
+            "original",
+            Provenance::OriginalWork,
+            &["actor.knight.walk"],
+        );
+        write_pack(
+            &base.join("reference"),
+            "reference",
+            Provenance::DerivedFromOriginal,
             &["actor.knight.walk", "actor.troll.walk"],
         );
 
@@ -227,23 +253,50 @@ mod tests {
     #[test]
     fn coverage_counts_what_has_been_replaced() {
         let base = tmp("coverage");
-        write_pack(&base.join("original"), "original", Provenance::OriginalWork, &["a"]);
-        write_pack(&base.join("reference"), "reference", Provenance::DerivedFromOriginal, &["a", "b", "c"]);
+        write_pack(
+            &base.join("original"),
+            "original",
+            Provenance::OriginalWork,
+            &["a"],
+        );
+        write_pack(
+            &base.join("reference"),
+            "reference",
+            Provenance::DerivedFromOriginal,
+            &["a", "b", "c"],
+        );
 
         let mut r = Registry::new();
         r.push_pack(base.join("original")).unwrap();
         r.push_pack(base.join("reference")).unwrap();
 
         let c = r.coverage();
-        assert_eq!(c, Coverage { total: 3, original: 1, derived: 2 });
+        assert_eq!(
+            c,
+            Coverage {
+                total: 3,
+                original: 1,
+                derived: 2
+            }
+        );
         assert!((c.percent() - 33.333).abs() < 0.01);
     }
 
     #[test]
     fn a_build_is_blocked_while_derived_assets_remain() {
         let base = tmp("ship");
-        write_pack(&base.join("original"), "original", Provenance::OriginalWork, &["a"]);
-        write_pack(&base.join("reference"), "reference", Provenance::DerivedFromOriginal, &["a", "b"]);
+        write_pack(
+            &base.join("original"),
+            "original",
+            Provenance::OriginalWork,
+            &["a"],
+        );
+        write_pack(
+            &base.join("reference"),
+            "reference",
+            Provenance::DerivedFromOriginal,
+            &["a", "b"],
+        );
 
         let mut r = Registry::new();
         r.push_pack(base.join("original")).unwrap();
@@ -251,7 +304,12 @@ mod tests {
         assert_eq!(r.shippable(), Err(vec!["b".to_string()]));
 
         // Replace the last one and the block clears.
-        write_pack(&base.join("original"), "original", Provenance::OriginalWork, &["a", "b"]);
+        write_pack(
+            &base.join("original"),
+            "original",
+            Provenance::OriginalWork,
+            &["a", "b"],
+        );
         let mut r = Registry::new();
         r.push_pack(base.join("original")).unwrap();
         r.push_pack(base.join("reference")).unwrap();

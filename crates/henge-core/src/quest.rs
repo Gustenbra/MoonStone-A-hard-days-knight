@@ -129,8 +129,11 @@ use crate::run::Run;
 use serde::{Deserialize, Serialize};
 
 /// `NoKeysMessage`, verbatim, in the original's own three lines.
-pub const NO_KEYS: [&str; 3] =
-    ["You must have all four keys", "to enter the", "Valley of the Gods"];
+pub const NO_KEYS: [&str; 3] = [
+    "You must have all four keys",
+    "to enter the",
+    "Valley of the Gods",
+];
 
 /// `ValleyEnter`, verbatim. Two spaces after the full stop are the original's.
 pub const VALLEY_ENTER: [&str; 4] = [
@@ -149,8 +152,7 @@ pub const VICTORY: [(&str, i32); 2] = [("You have completed", 75), ("the quest",
 /// The string `Player      ` sits nine bytes before `GOmes1` in the data and was
 /// once taken for a first line of this chain. Nothing in the image refers to its
 /// address; `GameOverMes`'s first record points at `GOmes1`.
-pub const GAME_OVER: [(&str, i32); 2] =
-    [("GAME OVER", 95), ("Press fire to continue", 180)];
+pub const GAME_OVER: [(&str, i32); 2] = [("GAME OVER", 95), ("Press fire to continue", 180)];
 
 /// All four key bits. `cmp byte ptr [si+0x14], 0xf`.
 pub const ALL_KEYS: u8 = 0xf;
@@ -219,7 +221,9 @@ impl Tally {
     /// A loss leaves nothing in it, because the loss path never reaches this
     /// routine: it jumps to `StartAgain` and the program keeps running.
     pub fn code(&self) -> Option<u8> {
-        let Ending::Won { phase, .. } = self.ending else { return None };
+        let Ending::Won { phase, .. } = self.ending else {
+            return None;
+        };
         let low = match phase {
             Phase::Gibbous => 2,
             Phase::Full => 4,
@@ -248,7 +252,10 @@ impl Tally {
         };
         Message {
             kind,
-            lines: chain.iter().map(|(t, y)| Line::new(t, 0, *y, FLAG_CENTRE)).collect(),
+            lines: chain
+                .iter()
+                .map(|(t, y)| Line::new(t, 0, *y, FLAG_CENTRE))
+                .collect(),
         }
     }
 }
@@ -258,17 +265,28 @@ impl Run {
     /// item record, which `_STATUS:StatCheckKeys` draws and `MOON:Valley`
     /// tests against 0xf.
     pub fn key_bits(&self) -> u8 {
-        Key::ALL.iter().filter(|k| self.kit.count(k.item()) > 0).map(|k| k.bit()).sum()
+        Key::ALL
+            .iter()
+            .filter(|k| self.kit.count(k.item()) > 0)
+            .map(|k| k.bit())
+            .sum()
     }
 
     /// The moonstone bits, byte `+0x16`.
     pub fn stone_bits(&self) -> u8 {
-        Moonstone::ALL.iter().filter(|m| self.kit.count(m.item()) > 0).map(|m| m.bit()).sum()
+        Moonstone::ALL
+            .iter()
+            .filter(|m| self.kit.count(m.item()) > 0)
+            .map(|m| m.bit())
+            .sum()
     }
 
     /// Which moonstones the run carries.
     pub fn stones_held(&self) -> Vec<Moonstone> {
-        Moonstone::ALL.into_iter().filter(|m| self.kit.count(m.item()) > 0).collect()
+        Moonstone::ALL
+            .into_iter()
+            .filter(|m| self.kit.count(m.item()) > 0)
+            .collect()
     }
 
     /// Walk up to the Valley of the Gods. `MOON:Valley`, its first four
@@ -338,7 +356,10 @@ impl Run {
     /// Which of the two endings is up, and the seat the exit byte is made from.
     /// `None` while the run is still going.
     pub fn tally(&self) -> Option<Tally> {
-        Some(Tally { seat: self.knight.seat, ending: self.ending()? })
+        Some(Tally {
+            seat: self.knight.seat,
+            ending: self.ending()?,
+        })
     }
 }
 
@@ -353,13 +374,27 @@ mod tests {
     fn goods() -> Items {
         let mut items = Items::new();
         let mut add = |id: &str, virtue: Virtue| {
-            items.insert(id.into(), ItemDef { name: id.into(), price: 0, virtue, consumed: false });
+            items.insert(
+                id.into(),
+                ItemDef {
+                    name: id.into(),
+                    price: 0,
+                    virtue,
+                    consumed: false,
+                },
+            );
         };
         for id in ["potion", "gem_of_seeing"] {
             add(id, Virtue::Inert);
         }
         add("long_sword", Virtue::Weapon { damage: 0 });
-        add("padded_armour", Virtue::Armour { health: 0, stride: 0 });
+        add(
+            "padded_armour",
+            Virtue::Armour {
+                health: 0,
+                stride: 0,
+            },
+        );
         for k in Key::ALL {
             add(k.item(), Virtue::Inert);
         }
@@ -412,7 +447,10 @@ mod tests {
         r.kit.take(Key::Glade.item(), 1);
         assert_eq!(r.key_bits(), ALL_KEYS);
         assert_eq!(r.valley(), Gate::Guardian);
-        assert_eq!(Gate::Barred.describe(), "You must have all four keys to enter the Valley of the Gods");
+        assert_eq!(
+            Gate::Barred.describe(),
+            "You must have all four keys to enter the Valley of the Gods"
+        );
     }
 
     /// The whole point of the keys: they are spent, and what they buy is a
@@ -494,9 +532,18 @@ mod tests {
         while r.moon.phase() != stone.phase() {
             r.moon.new_day();
         }
-        assert_eq!(r.rite_at_the_stones(None, &items), crate::service::Rite::Won(stone));
+        assert_eq!(
+            r.rite_at_the_stones(None, &items),
+            crate::service::Rite::Won(stone)
+        );
         let tally = r.tally().expect("the quest is done");
-        assert_eq!(tally.ending, Ending::Won { stone, phase: stone.phase() });
+        assert_eq!(
+            tally.ending,
+            Ending::Won {
+                stone,
+                phase: stone.phase()
+            }
+        );
         assert_eq!(r.knight.name, "SIR GODBER");
         assert_eq!(r.stones_held(), vec![stone]);
         assert!(r.keys_held().is_empty());
@@ -505,10 +552,16 @@ mod tests {
         let m = tally.message();
         assert_eq!(m.kind, Kind::Occurrence);
         assert_eq!(
-            m.lines.iter().map(|l| (l.text.as_str(), l.y)).collect::<Vec<_>>(),
+            m.lines
+                .iter()
+                .map(|l| (l.text.as_str(), l.y))
+                .collect::<Vec<_>>(),
             vec![("You have completed", 75), ("the quest", 95)],
         );
-        assert!(m.lines.iter().all(|l| l.align == crate::message::Align::Centre));
+        assert!(m
+            .lines
+            .iter()
+            .all(|l| l.align == crate::message::Align::Centre));
     }
 
     /// The exit byte `KnightWonGame` leaves for DOS, for each of the four
@@ -526,13 +579,26 @@ mod tests {
             t.seat = seat;
             assert_eq!(t.code(), Some(want | 4));
         }
-        t.ending = Ending::Won { stone: Moonstone::New, phase: Phase::New };
+        t.ending = Ending::Won {
+            stone: Moonstone::New,
+            phase: Phase::New,
+        };
         t.seat = 0;
         assert_eq!(t.code(), Some(0x23));
-        t.ending = Ending::Won { stone: Moonstone::Gibbous, phase: Phase::Gibbous };
+        t.ending = Ending::Won {
+            stone: Moonstone::Gibbous,
+            phase: Phase::Gibbous,
+        };
         assert_eq!(t.code(), Some(0x22));
-        t.ending = Ending::Won { stone: Moonstone::Half, phase: Phase::Half };
-        assert_eq!(t.code(), Some(0x21), "a moon the routine does not name leaves the 1");
+        t.ending = Ending::Won {
+            stone: Moonstone::Half,
+            phase: Phase::Half,
+        };
+        assert_eq!(
+            t.code(),
+            Some(0x21),
+            "a moon the routine does not name leaves the 1"
+        );
         t.ending = Ending::Slain;
         assert_eq!(t.code(), None, "the loss path never reaches that routine");
     }
@@ -567,15 +633,24 @@ mod tests {
         let m = tally.message();
         assert_eq!(m.kind, Kind::Instruction);
         assert_eq!(
-            m.lines.iter().map(|l| (l.text.as_str(), l.y)).collect::<Vec<_>>(),
+            m.lines
+                .iter()
+                .map(|l| (l.text.as_str(), l.y))
+                .collect::<Vec<_>>(),
             vec![("GAME OVER", 95), ("Press fire to continue", 180)],
         );
-        assert!(m.lines.iter().all(|l| l.align == crate::message::Align::Centre));
+        assert!(m
+            .lines
+            .iter()
+            .all(|l| l.align == crate::message::Align::Centre));
     }
 
     #[test]
     fn an_ending_survives_serialization() {
-        let e = Ending::Won { stone: Moonstone::Half, phase: Phase::Gibbous };
+        let e = Ending::Won {
+            stone: Moonstone::Half,
+            phase: Phase::Gibbous,
+        };
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<Ending>(&json).unwrap(), e);
     }

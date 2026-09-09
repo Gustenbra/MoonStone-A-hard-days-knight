@@ -174,7 +174,11 @@ pub enum Act {
     /// Stand. `[0x783a]` left at the stance, or at `0xffff` for "carry on".
     Idle,
     /// Walk, optionally on a named script rather than the walk cycle.
-    Walk { dx: i32, dy: i32, script: Option<String> },
+    Walk {
+        dx: i32,
+        dy: i32,
+        script: Option<String>,
+    },
     /// One of this actor's own attacks, by the kind its routine writes.
     /// `spawn` is the task the routine starts beside it: `AddDragonFIRE` is
     /// the only one, and the fire is a task of its own rather than a part of
@@ -193,7 +197,11 @@ pub enum Act {
     Seize { script: String, ticks: i32 },
     /// The blow a controller deals directly rather than through a weapon
     /// part: the demon's whip when it catches, the mudman's choke.
-    Strike { script: String, damage: i32, fatal: bool },
+    Strike {
+        script: String,
+        damage: i32,
+        fatal: bool,
+    },
     /// Held, and trying to get out of it. `MudmenEntangle` reads fire and
     /// down together off the joystick and nothing else, so this is that press
     /// rather than an order.
@@ -248,7 +256,11 @@ pub fn face_knight(me: &Fighter, foe: &Fighter) -> i32 {
 /// 03d54  mov ax, 1
 /// ```
 fn find_side(me: &Fighter, foe: &Fighter) -> i32 {
-    if me.x < foe.x { 1 } else { 3 }
+    if me.x < foe.x {
+        1
+    } else {
+        3
+    }
 }
 
 /// `CheckZ`, image 0x3c9b, as `CheckZAxis` (0x3c8b) calls it with `di` the
@@ -273,7 +285,7 @@ fn check_z(me: &Fighter, foe: &Fighter, def: &ActorDef) -> bool {
     if bx < 0 {
         bx = -bx;
     }
-    !(bx > def.depth_tolerance)
+    bx <= def.depth_tolerance
 }
 
 /// `CheckXAxis`, image 0x3cb3, with `bp` the range to test against. Answers
@@ -295,7 +307,7 @@ fn check_x_axis(me: &Fighter, foe: &Fighter, bp: i32) -> (bool, i32) {
     if bx < 0 {
         bx = -bx;
     }
-    (!(bx > bp), bx)
+    (bx <= bp, bx)
 }
 
 /// `FindDistance`, image 0x3cd6.
@@ -435,13 +447,25 @@ pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> T
             dx = -1;
         }
         // 0577f  mov ax, 1
-        return Track { dx, dy, plane, walking: true, distance };
+        return Track {
+            dx,
+            dy,
+            plane,
+            walking: true,
+            distance,
+        };
     }
     // 05739  mov bp, [si+0x52]; 0573c call CheckXAxis; 05741 je TrackOpponent
     let (inside_approach, distance) = check_x_axis(me, foe, def.approach);
     if inside_approach {
         // 05746  mov ax, [TrackFLAG]; 05749 ret
-        return Track { dx, dy, plane, walking: track_flag, distance };
+        return Track {
+            dx,
+            dy,
+            plane,
+            walking: track_flag,
+            distance,
+        };
     }
     // TrackOpponent:
     // 0574a  call FindSide; 05750 cmp ax, 1; 05753 je TrackRight
@@ -453,7 +477,13 @@ pub fn track(me: &Fighter, foe: &Fighter, def: &ActorDef, facing: &mut i32) -> T
         dx = -1;
     }
     // 0575f  mov ax, 1
-    Track { dx, dy, plane, walking: true, distance }
+    Track {
+        dx,
+        dy,
+        plane,
+        walking: true,
+        distance,
+    }
 }
 
 // ------------------------------------------------------------------- the roll
@@ -478,7 +508,11 @@ pub fn rnd(seed: u16) -> u16 {
 pub fn percent(seed: &mut u16) -> i32 {
     *seed = rnd(*seed);
     let v = (*seed & 0x7f) as i32;
-    if v >= 100 { v - 27 } else { v }
+    if v >= 100 {
+        v - 27
+    } else {
+        v
+    }
 }
 
 // -------------------------------------------------------------- the decisions
@@ -531,7 +565,11 @@ fn walk(t: Track) -> Act {
     if t.dx == 0 && t.dy == 0 {
         Act::Idle
     } else {
-        Act::Walk { dx: t.dx, dy: t.dy, script: None }
+        Act::Walk {
+            dx: t.dx,
+            dy: t.dy,
+            script: None,
+        }
     }
 }
 
@@ -594,10 +632,18 @@ pub fn move_back(facing: i32, dx: i32) -> i32 {
     }
     if facing == 1 {
         // 0579b  mov bp, 1; 0579e test byte [si+0x26], 1; 057a2 jne mm1$
-        if dx > 0 { 1 } else { -1 }
+        if dx > 0 {
+            1
+        } else {
+            -1
+        }
     } else {
         // 0578e  mov bp, 1; 05791 test byte [si+0x26], 2; 05795 jne m1$
-        if dx < 0 { 1 } else { -1 }
+        if dx < 0 {
+            1
+        } else {
+            -1
+        }
     }
 }
 
@@ -775,7 +821,12 @@ fn trogg(s: &Sight, brain: &mut Brain, seed: &mut u16, spear: bool, facing: &mut
 /// `TroggAttacks`, 0x2ea7. `bx` is the distance, `t` what `MonsterTrack` set
 /// in `+0x26`, for the `TroggMove` exits.
 fn trogg_attacks(
-    s: &Sight, brain: &mut Brain, seed: &mut u16, spear: bool, bx: i32, t: Track,
+    s: &Sight,
+    brain: &mut Brain,
+    seed: &mut u16,
+    spear: bool,
+    bx: i32,
+    t: Track,
 ) -> Act {
     // 02ea7  cmp byte [si+0x4a], 0; 02eab je 02eb4
     if brain.cooldown != 0 {
@@ -792,7 +843,10 @@ fn trogg_attacks(
         // 02ec2  mov byte [si+0x4a], 0x14
         brain.cooldown = 0x14;
         // 02ec6  mov word [si+0x28], 2; 02ecb mov ax, TroggSpear_Lunge; 02ed1 jmp 02d52
-        return Act::Attack { kind: Attack::Lunge, spawn: None };
+        return Act::Attack {
+            kind: Attack::Lunge,
+            spawn: None,
+        };
     }
     // 02ed4  cmp bx, 0x64; 02ed7 jg TroggChop
     if bx > 0x64 {
@@ -815,7 +869,10 @@ fn trogg_swing(brain: &mut Brain) -> Act {
     // 02eed  mov byte [si+0x4a], 0xa
     brain.cooldown = 0xa;
     // 02ef1  mov word [si+0x28], 4; 02ef6 mov ax, [di+4]; 02ef9 mov [0x783a], ax
-    Act::Attack { kind: Attack::Swing, spawn: None }
+    Act::Attack {
+        kind: Attack::Swing,
+        spawn: None,
+    }
 }
 
 /// `TroggChop`, 0x2eff.
@@ -827,7 +884,10 @@ fn trogg_chop(brain: &mut Brain, bx: i32, t: Track) -> Act {
     // 02f07  mov byte [si+0x4a], 0xa
     brain.cooldown = 0xa;
     // 02f0b  mov word [si+0x28], 0x10; 02f10 mov ax, [di+0x10]; 02f13 mov [0x783a], ax
-    Act::Attack { kind: Attack::Chop, spawn: None }
+    Act::Attack {
+        kind: Attack::Chop,
+        spawn: None,
+    }
 }
 
 /// `TroggMove`, 0x2e22: `cmp byte [si+0x26], 0; jne 02e2b; jmp 02d52`. No
@@ -875,12 +935,18 @@ fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         return walk(t);
     }
     let d = t.distance;
-    if d >= 100 && d < 150 && brain.phase != 1 {
+    if (100..150).contains(&d) && brain.phase != 1 {
         brain.phase = 1;
-        return Act::Attack { kind: Attack::Chop, spawn: None };
+        return Act::Attack {
+            kind: Attack::Chop,
+            spawn: None,
+        };
     }
     brain.phase = 0;
-    Act::Attack { kind: Attack::Swing, spawn: None }
+    Act::Attack {
+        kind: Attack::Swing,
+        spawn: None,
+    }
 }
 
 /// `ControlRatCollide`: it does not use the tracker at all. It slashes inside
@@ -916,11 +982,17 @@ fn ratman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     // 03183  cmp ax, 0x28; 03186 jg
     if d <= 40 {
         brain.cooldown = 15;
-        return Act::Attack { kind: Attack::Swing, spawn: None };
+        return Act::Attack {
+            kind: Attack::Swing,
+            spawn: None,
+        };
     }
     if d <= 50 {
         brain.cooldown = 15;
-        return Act::Attack { kind: Attack::Lunge, spawn: None };
+        return Act::Attack {
+            kind: Attack::Lunge,
+            spawn: None,
+        };
     }
     leap(0)
 }
@@ -943,7 +1015,11 @@ fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         if !s.foe.held() {
             // He tore free: `Mudmen_KnightSd`, and it costs the mudman a point.
             brain.flags &= !flag::ENTANGLING;
-            return Act::Strike { script: "Mudmen_Hit".into(), damage: 0, fatal: false };
+            return Act::Strike {
+                script: "Mudmen_Hit".into(),
+                damage: 0,
+                fatal: false,
+            };
         }
         return Act::Play("Mudmen_EntangleKnight".into());
     }
@@ -982,7 +1058,10 @@ fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     if !t.plane {
         return walk(t);
     }
-    Act::Attack { kind: Attack::Swing, spawn: None }
+    Act::Attack {
+        kind: Attack::Swing,
+        spawn: None,
+    }
 }
 
 /// `ControlBalok`: it closes in hops, uppercuts at arm's length, grabs from
@@ -992,7 +1071,11 @@ fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     let dy = s.foe.y - s.me.y;
     let d = (s.foe.x - s.me.x).abs();
     let toward = (s.foe.x - s.me.x).signum();
-    let hop = |dy: i32| Act::Walk { dx: toward, dy, script: None };
+    let hop = |dy: i32| Act::Walk {
+        dx: toward,
+        dy,
+        script: None,
+    };
     // 035e0  cmp word ptr [di + 0x38], 0; 035e4 jg; else the exit
     if !s.foe.alive() {
         return Act::Idle;
@@ -1014,14 +1097,23 @@ fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     if d <= 80 {
         if brain.phase == 1 {
             brain.phase = 0;
-            return Act::Attack { kind: Attack::Chop, spawn: None };
+            return Act::Attack {
+                kind: Attack::Chop,
+                spawn: None,
+            };
         }
         brain.phase = 1;
-        return Act::Attack { kind: Attack::Swing, spawn: None };
+        return Act::Attack {
+            kind: Attack::Swing,
+            spawn: None,
+        };
     }
     if d <= 120 {
         brain.phase = 0;
-        return Act::Attack { kind: Attack::Chop, spawn: None };
+        return Act::Attack {
+            kind: Attack::Chop,
+            spawn: None,
+        };
     }
     if s.foe.daggers() > 0 || d > 180 {
         return hop(0);
@@ -1081,7 +1173,11 @@ fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act 
     let dir = if *facing < 0 { -1 } else { 1 };
     let want = s.foe.y + brain.walk as i32;
     let dy = (want - s.me.y).signum();
-    Act::Walk { dx: dir, dy, script: None }
+    Act::Walk {
+        dx: dir,
+        dy,
+        script: None,
+    }
 }
 
 /// `ControlDemon` and `DemonAttack`: the slap inside a hundred, the zap out to
@@ -1115,18 +1211,29 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         };
         brain.phase = next;
         brain.cooldown = hold;
-        if brain.phase % 2 == 0 && caught {
+        if brain.phase.is_multiple_of(2) && caught {
             // The follow-through with the knight already caught: the original
             // hands him `Knight_SwSlapped` outright rather than waiting for a
             // weapon part to touch him.
             brain.flags &= !flag::CAUGHT;
-            let hit = if brain.phase == 0 { "Demon_UWhipHit" } else { "Demon_OWhipHit" };
-            return Act::Strike { script: hit.into(), damage: s.me.damage, fatal: false };
+            let hit = if brain.phase == 0 {
+                "Demon_UWhipHit"
+            } else {
+                "Demon_OWhipHit"
+            };
+            return Act::Strike {
+                script: hit.into(),
+                damage: s.me.damage,
+                fatal: false,
+            };
         }
         if d >= low && d <= high {
             brain.flags |= flag::CAUGHT;
-            let caught_script =
-                if brain.phase == 2 { "Demon_OWhipKnight" } else { "Demon_UWhipKnight" };
+            let caught_script = if brain.phase == 2 {
+                "Demon_OWhipKnight"
+            } else {
+                "Demon_UWhipKnight"
+            };
             return Act::Play(caught_script.into());
         }
         return Act::Play(script.into());
@@ -1155,16 +1262,25 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         }
         brain.timer = 2;
         brain.cooldown = 9;
-        return Act::Attack { kind: Attack::Chop, spawn: None };
+        return Act::Attack {
+            kind: Attack::Chop,
+            spawn: None,
+        };
     }
     if d <= 130 {
         brain.cooldown = 6;
-        return Act::Attack { kind: Attack::Swing, spawn: None };
+        return Act::Attack {
+            kind: Attack::Swing,
+            spawn: None,
+        };
     }
     if d <= 140 {
         brain.cooldown = 5;
         brain.phase = 1;
-        return Act::Attack { kind: Attack::Lunge, spawn: None };
+        return Act::Attack {
+            kind: Attack::Lunge,
+            spawn: None,
+        };
     }
     walk(t)
 }
@@ -1187,7 +1303,11 @@ fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         let n = s.def.scripts_for(row).len();
         let frame = (brain.walk as usize).min(n.saturating_sub(1));
         brain.walk += 1;
-        return Act::Walk { dx: 0, dy, script: s.def.scripts_for(row).get(frame).cloned() };
+        return Act::Walk {
+            dx: 0,
+            dy,
+            script: s.def.scripts_for(row).get(frame).cloned(),
+        };
     }
     // DragonMove+0xb (0x3877): `call TrackKnight`, before the range at
     // 0x3880 is looked at, so the head has faced right (`TrackKnight+0x37`,
@@ -1196,7 +1316,11 @@ fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     let t = track(s.me, s.foe, s.def, facing);
     *facing = 1;
     if !s.foe.alive() && brain.flags & flag::HEAD_MOVING == 0 {
-        return Act::Stand(if up { "Dragon_HighStance".into() } else { "Dragon_Stance".into() });
+        return Act::Stand(if up {
+            "Dragon_HighStance".into()
+        } else {
+            "Dragon_Stance".into()
+        });
     }
     // 0387a  call FindDistance; 03880 cmp ax, 0x8c; 03883 jge DragonMoveLow
     if d >= 140 && up {
@@ -1212,7 +1336,13 @@ fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         brain.walk = 0;
         return Act::Idle;
     }
-    let stance = || Act::Stand(if up { "Dragon_HighStance".into() } else { "Dragon_Stance".into() });
+    let stance = || {
+        Act::Stand(if up {
+            "Dragon_HighStance".into()
+        } else {
+            "Dragon_Stance".into()
+        })
+    };
     if !s.foe.alive() {
         return stance();
     }
@@ -1223,9 +1353,17 @@ fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     // `TrackKnight`, 0x3be8: `MonsterTrack` on the head's record (0x3c18),
     // and then, whatever `FaceKnight` wrote, `mov byte ptr [si + 8], 1` at
     // 0x3c1f. The head always faces right. `t` is what it answered above.
-    let dx = if s.me.x + t.dx * 5 < 30 || s.me.x + t.dx * 5 > 100 { 0 } else { t.dx };
+    let dx = if s.me.x + t.dx * 5 < 30 || s.me.x + t.dx * 5 > 100 {
+        0
+    } else {
+        t.dx
+    };
     if t.dy != 0 || dx != 0 {
-        return Act::Walk { dx, dy: t.dy, script: None };
+        return Act::Walk {
+            dx,
+            dy: t.dy,
+            script: None,
+        };
     }
     if cooling(brain) {
         return stance();
@@ -1238,14 +1376,23 @@ fn dragon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
             brain.flags &= !flag::STRUCK;
             brain.cooldown = 8;
             // `Dragon_HighBreath`, kind 0x10, with `AddDragonFIRE` beside it.
-            return Act::Attack { kind: Attack::Chop, spawn: Some("Dragon_Fire".into()) };
+            return Act::Attack {
+                kind: Attack::Chop,
+                spawn: Some("Dragon_Fire".into()),
+            };
         }
         brain.cooldown = 6;
-        return Act::Attack { kind: Attack::Lunge, spawn: None };
+        return Act::Attack {
+            kind: Attack::Lunge,
+            spawn: None,
+        };
     }
     brain.cooldown = 8;
     // `Dragon_LowBreath`, kind 4.
-    Act::Attack { kind: Attack::Swing, spawn: Some("Dragon_Fire".into()) }
+    Act::Attack {
+        kind: Attack::Swing,
+        spawn: Some("Dragon_Fire".into()),
+    }
 }
 
 /// `ControlClaw`: it never moves and never takes a blow. It slaps whatever
@@ -1263,7 +1410,10 @@ fn claw(s: &Sight, _brain: &mut Brain) -> Act {
     if s.foe.x > 100 {
         return Act::Idle;
     }
-    Act::Attack { kind: Attack::RThrust, spawn: None }
+    Act::Attack {
+        kind: Attack::RThrust,
+        spawn: None,
+    }
 }
 
 /// A knight, or anything with no controller of its own. Deliberately plain:
@@ -1284,7 +1434,10 @@ fn knight(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
             return Act::Idle;
         }
         brain.cooldown = 20;
-        return Act::Attack { kind: Attack::Swing, spawn: None };
+        return Act::Attack {
+            kind: Attack::Swing,
+            spawn: None,
+        };
     }
     if t.walking {
         return walk(t);
@@ -1293,7 +1446,10 @@ fn knight(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         return Act::Idle;
     }
     brain.cooldown = 20;
-    Act::Attack { kind: Attack::Swing, spawn: None }
+    Act::Attack {
+        kind: Attack::Swing,
+        spawn: None,
+    }
 }
 
 /// The state a fighter needs to answer a controller's questions, so this
@@ -1329,7 +1485,12 @@ mod tests {
     }
 
     fn ranged(approach: i32, back_off: i32) -> ActorDef {
-        ActorDef { approach, back_off, depth_tolerance: 5, ..scripted_def() }
+        ActorDef {
+            approach,
+            back_off,
+            depth_tolerance: 5,
+            ..scripted_def()
+        }
     }
 
     #[test]
@@ -1384,7 +1545,10 @@ mod tests {
         let mut facing = 1;
         let act = ask_facing(&def, &mut b, 200, 105, 0, &mut facing);
         assert_eq!(kind(&act), Some(Attack::Swing));
-        assert_eq!(facing, -1, "`TroggStart+10` runs `MonsterTrack`, which faces him first");
+        assert_eq!(
+            facing, -1,
+            "`TroggStart+10` runs `MonsterTrack`, which faces him first"
+        );
         // And inside the back-off it gives ground to the right, still facing
         // left at him.
         let mut b = Brain::default();
@@ -1398,7 +1562,16 @@ mod tests {
     /// facing of their own keep it.
     #[test]
     fn who_faces_the_knight_and_who_does_not() {
-        for name in ["trogg", "trogg_spear", "troll", "ratman", "mudman", "balok", "demon", "knight"] {
+        for name in [
+            "trogg",
+            "trogg_spear",
+            "troll",
+            "ratman",
+            "mudman",
+            "balok",
+            "demon",
+            "knight",
+        ] {
             let def = creature(name, 100, 90);
             let mut b = Brain::default();
             let mut facing = 1;
@@ -1438,7 +1611,12 @@ mod tests {
     /// with the creature facing `facing` on the way in; what `+8` holds on
     /// the way out is handed back through it.
     fn ask_facing(
-        def: &ActorDef, brain: &mut Brain, me_x: i32, foe_x: i32, dy: i32, facing: &mut i32,
+        def: &ActorDef,
+        brain: &mut Brain,
+        me_x: i32,
+        foe_x: i32,
+        dy: i32,
+        facing: &mut i32,
     ) -> Act {
         let me = at(me_x, 50);
         let foe = at(foe_x, 50 + dy);
@@ -1446,7 +1624,12 @@ mod tests {
             me: &me,
             foe: &foe,
             def,
-            bounds: Bounds { left: 0, right: 319, top: 10, bottom: 114 },
+            bounds: Bounds {
+                left: 0,
+                right: 319,
+                top: 10,
+                bottom: 114,
+            },
             gore: true,
             body: false,
             decapped: false,
@@ -1498,8 +1681,10 @@ mod tests {
             }
             out
         };
-        let seen: Vec<(&str, String)> =
-            ranges.iter().map(|(n, a, b)| (*n, profile(n, *a, *b))).collect();
+        let seen: Vec<(&str, String)> = ranges
+            .iter()
+            .map(|(n, a, b)| (*n, profile(n, *a, *b)))
+            .collect();
         let answers: BTreeSet<&String> = seen.iter().map(|(_, a)| a).collect();
         assert_eq!(
             answers.len(),
@@ -1510,9 +1695,21 @@ mod tests {
         // a controller and take different branches of it, and the beast is
         // the only one that never closes on him at all.
         let by = |n: &str| seen.iter().find(|(k, _)| *k == n).unwrap().1.clone();
-        assert_ne!(by("trogg"), by("trogg_spear"), "the spear takes its own branch");
-        assert!(!by("beast").contains("Attack"), "the beast has no swing: {}", by("beast"));
-        assert!(by("ratman").contains("Lunge"), "the ratman bites: {}", by("ratman"));
+        assert_ne!(
+            by("trogg"),
+            by("trogg_spear"),
+            "the spear takes its own branch"
+        );
+        assert!(
+            !by("beast").contains("Attack"),
+            "the beast has no swing: {}",
+            by("beast")
+        );
+        assert!(
+            by("ratman").contains("Lunge"),
+            "the ratman bites: {}",
+            by("ratman")
+        );
     }
 
     /// `TroggAttacks`: the overhead beyond a hundred, the swing inside it, and
@@ -1521,15 +1718,26 @@ mod tests {
     fn the_trogg_chops_at_arms_length_and_swings_up_close() {
         let def = creature("trogg", 100, 90);
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 110, 0)), Some(Attack::Chop), "110 is the chop");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 110, 0)),
+            Some(Attack::Chop),
+            "110 is the chop"
+        );
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 95, 0)), Some(Attack::Swing), "95 is the swing");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 95, 0)),
+            Some(Attack::Swing),
+            "95 is the swing"
+        );
         // Beyond a hundred and twenty `TroggChop` walks instead.
         let mut b = Brain::default();
         assert!(matches!(ask(&def, &mut b, 0, 125, 0), Act::Walk { .. }));
         // Inside the back-off range it gives ground rather than striking.
         let mut b = Brain::default();
-        assert!(matches!(ask(&def, &mut b, 0, 60, 0), Act::Walk { dx: -1, .. }));
+        assert!(matches!(
+            ask(&def, &mut b, 0, 60, 0),
+            Act::Walk { dx: -1, .. }
+        ));
         // And a blow is followed by ten frames of nothing.
         let mut b = Brain::default();
         ask(&def, &mut b, 0, 95, 0);
@@ -1556,27 +1764,48 @@ mod tests {
             );
             assert_eq!(b.cooldown, 10 - frame, "one off per controller run");
         }
-        assert_eq!(kind(&ask(&def, &mut b, 0, 110, 0)), Some(Attack::Chop), "the eleventh strikes");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 110, 0)),
+            Some(Attack::Chop),
+            "the eleventh strikes"
+        );
         // The finisher's count at TroggAttack+0x2e (0x2e92) has the same
         // shape: `je 02e9f; sub; jmp 02d52`.
-        let mut b = Brain { cooldown: 2, ..Brain::default() };
+        let mut b = Brain {
+            cooldown: 2,
+            ..Brain::default()
+        };
         // Ninety five away: past the back-off at 0x2e68, inside the hundred
         // at 0x2e86.
         let me = at(0, 50);
-        let foe = Fighter { health: 0, ..at(95, 50) };
+        let foe = Fighter {
+            health: 0,
+            ..at(95, 50)
+        };
         let sight = |body| Sight {
             me: &me,
             foe: &foe,
             def: &def,
-            bounds: Bounds { left: 0, right: 319, top: 10, bottom: 114 },
+            bounds: Bounds {
+                left: 0,
+                right: 319,
+                top: 10,
+                bottom: 114,
+            },
             gore: true,
             body,
             decapped: false,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
-        assert!(matches!(decide(&sight(true), &mut b, &mut seed, &mut facing), Act::Idle));
-        assert!(matches!(decide(&sight(true), &mut b, &mut seed, &mut facing), Act::Idle));
+        assert!(matches!(
+            decide(&sight(true), &mut b, &mut seed, &mut facing),
+            Act::Idle
+        ));
+        assert!(matches!(
+            decide(&sight(true), &mut b, &mut seed, &mut facing),
+            Act::Idle
+        ));
         assert_eq!(b.cooldown, 0);
         // And `TroggAttack` never asks whether the corpse still shows a body:
         // 0x2e86 is the distance, 0x2e8b the flag, 0x2e92 the count, and
@@ -1594,7 +1823,10 @@ mod tests {
     /// `FaceKnight`.
     #[test]
     fn a_blow_taken_forgets_the_cooldown_and_a_blow_landed_restarts_it() {
-        let mut b = Brain { cooldown: 7, ..Brain::default() };
+        let mut b = Brain {
+            cooldown: 7,
+            ..Brain::default()
+        };
         trogg_struck(&mut b);
         assert_eq!(b.cooldown, 0);
         trogg_hit(&mut b);
@@ -1622,14 +1854,23 @@ mod tests {
     fn the_trogg_chops_through_a_held_block_when_the_roll_is_low() {
         let def = creature("trogg", 100, 90);
         let me = at(0, 50);
-        let blocking = Fighter { attack: Some(Attack::Block), state: State::Guard, ..at(95, 50) };
+        let blocking = Fighter {
+            attack: Some(Attack::Block),
+            state: State::Guard,
+            ..at(95, 50)
+        };
         let open = at(95, 50);
         fn sight<'a>(me: &'a Fighter, foe: &'a Fighter, def: &'a ActorDef) -> Sight<'a> {
             Sight {
                 me,
                 foe,
                 def,
-                bounds: Bounds { left: 0, right: 319, top: 10, bottom: 114 },
+                bounds: Bounds {
+                    left: 0,
+                    right: 319,
+                    top: 10,
+                    bottom: 114,
+                },
                 gore: true,
                 body: false,
                 decapped: false,
@@ -1657,18 +1898,33 @@ mod tests {
         // 02edc  cmp ax, 0x1e; 02edf jg TroggSwing: over thirty never reads +0x28.
         let mut s = high;
         assert_eq!(
-            kind(&decide(&sight(&me, &blocking, &def), &mut Brain::default(), &mut s, &mut facing)),
+            kind(&decide(
+                &sight(&me, &blocking, &def),
+                &mut Brain::default(),
+                &mut s,
+                &mut facing
+            )),
             Some(Attack::Swing)
         );
         // 02ee6  cmp word [bx+0x28], 8; 02eeb je TroggChop.
         let mut s = low;
         assert_eq!(
-            kind(&decide(&sight(&me, &blocking, &def), &mut Brain::default(), &mut s, &mut facing)),
+            kind(&decide(
+                &sight(&me, &blocking, &def),
+                &mut Brain::default(),
+                &mut s,
+                &mut facing
+            )),
             Some(Attack::Chop)
         );
         let mut s = low;
         assert_eq!(
-            kind(&decide(&sight(&me, &open, &def), &mut Brain::default(), &mut s, &mut facing)),
+            kind(&decide(
+                &sight(&me, &open, &def),
+                &mut Brain::default(),
+                &mut s,
+                &mut facing
+            )),
             Some(Attack::Swing),
             "a low roll on an open knight is still the swing"
         );
@@ -1683,7 +1939,10 @@ mod tests {
         assert_eq!(kind(&ask(&def, &mut b, 0, 125, 0)), Some(Attack::Lunge));
         assert_eq!(b.cooldown, 20, "the spear waits twice as long as the axe");
         let mut b = Brain::default();
-        assert!(matches!(ask(&def, &mut b, 0, 135, 0), Act::Walk { .. }), "past the approach it walks");
+        assert!(
+            matches!(ask(&def, &mut b, 0, 135, 0), Act::Walk { .. }),
+            "past the approach it walks"
+        );
     }
 
     /// `TrollAttack` compares the current kind before it chops, so the troll
@@ -1707,11 +1966,22 @@ mod tests {
     fn the_ratman_slashes_bites_and_leaps_by_range() {
         let def = creature("ratman", 40, 30);
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 35, 0)), Some(Attack::Swing), "the slash");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 35, 0)),
+            Some(Attack::Swing),
+            "the slash"
+        );
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 45, 0)), Some(Attack::Lunge), "the bite");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 45, 0)),
+            Some(Attack::Lunge),
+            "the bite"
+        );
         let mut b = Brain::default();
-        assert!(matches!(ask(&def, &mut b, 0, 60, 0), Act::Walk { .. }), "the leap");
+        assert!(
+            matches!(ask(&def, &mut b, 0, 60, 0), Act::Walk { .. }),
+            "the leap"
+        );
         // A landed blow buys fifteen frames: `RatmanHit` sets `HitDelay`.
         let mut b = Brain::default();
         ask(&def, &mut b, 0, 35, 0);
@@ -1724,9 +1994,16 @@ mod tests {
     fn the_mudman_reaches_then_goes_under_the_ground() {
         let def = creature("mudman", 80, 75);
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 80, 0)), Some(Attack::Swing), "the arm at eighty");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 80, 0)),
+            Some(Attack::Swing),
+            "the arm at eighty"
+        );
         let mut b = Brain::default();
-        assert_eq!(ask(&def, &mut b, 0, 60, 0), Act::Play("Mudmen_IBury".into()));
+        assert_eq!(
+            ask(&def, &mut b, 0, 60, 0),
+            Act::Play("Mudmen_IBury".into())
+        );
         assert!(b.flags & flag::BURIED != 0);
         // It stays under until the timer runs out, then comes up beside him.
         let mut act = ask(&def, &mut b, 0, 60, 0);
@@ -1751,7 +2028,11 @@ mod tests {
     fn balok_stands_off_unless_you_throw_daggers() {
         let def = creature("balok", 80, 60);
         let mut b = Brain::default();
-        assert_eq!(ask(&def, &mut b, 0, 150, 0), Act::Idle, "it waits at a hundred and fifty");
+        assert_eq!(
+            ask(&def, &mut b, 0, 150, 0),
+            Act::Idle,
+            "it waits at a hundred and fifty"
+        );
         // The same position, with ten on his belt.
         let mut me = at(0, 50);
         let mut foe = at(150, 50);
@@ -1761,7 +2042,12 @@ mod tests {
             me: &me,
             foe: &foe,
             def: &def,
-            bounds: Bounds { left: 0, right: 319, top: 10, bottom: 114 },
+            bounds: Bounds {
+                left: 0,
+                right: 319,
+                top: 10,
+                bottom: 114,
+            },
             gore: true,
             body: false,
             decapped: false,
@@ -1770,7 +2056,10 @@ mod tests {
         let mut brain = Brain::default();
         let mut facing = -1;
         assert!(
-            matches!(decide(&s, &mut brain, &mut seed, &mut facing), Act::Walk { dx: 1, .. }),
+            matches!(
+                decide(&s, &mut brain, &mut seed, &mut facing),
+                Act::Walk { dx: 1, .. }
+            ),
             "a thrown dagger brings it in"
         );
         assert_eq!(facing, 1, "ControlBalok+107: me.x < foe.x writes 1 into +8");
@@ -1788,9 +2077,17 @@ mod tests {
         let def = creature("beast", 2, 1);
         let mut b = Brain::default();
         let mut facing = 1;
-        assert!(matches!(ask_facing(&def, &mut b, 100, 40, 0, &mut facing), Act::Walk { dx: 1, .. }),
-                "it charges away from him as readily as at him");
-        assert_eq!(facing, 1, "and `BeastCharge` leaves +8 alone short of the edge");
+        assert!(
+            matches!(
+                ask_facing(&def, &mut b, 100, 40, 0, &mut facing),
+                Act::Walk { dx: 1, .. }
+            ),
+            "it charges away from him as readily as at him"
+        );
+        assert_eq!(
+            facing, 1,
+            "and `BeastCharge` leaves +8 alone short of the edge"
+        );
         // At the right edge it turns and waits: `BeastCharge+18` writes 3
         // into `+8`, and nothing else about it changes.
         let mut b = Brain::default();
@@ -1804,7 +2101,10 @@ mod tests {
         assert_eq!(facing, -1, "and keeps facing left while it waits");
         // Off the edge and facing left, it charges left: `BeastMove+41`.
         b.timer = 0;
-        assert!(matches!(ask_facing(&def, &mut b, 319, 40, 0, &mut facing), Act::Walk { dx: -1, .. }));
+        assert!(matches!(
+            ask_facing(&def, &mut b, 319, 40, 0, &mut facing),
+            Act::Walk { dx: -1, .. }
+        ));
     }
 
     /// `DemonAttack`: the slap inside a hundred, the zap out to a hundred and
@@ -1815,15 +2115,33 @@ mod tests {
         let def = creature("demon", 95, 90);
         let mut b = Brain::default();
         b.flags |= flag::UNBORN;
-        assert_eq!(ask(&def, &mut b, 0, 90, 0), Act::Play("Demon_Evolve".into()));
-        assert_eq!(kind(&ask(&def, &mut b, 0, 90, 0)), Some(Attack::Chop), "the slap");
+        assert_eq!(
+            ask(&def, &mut b, 0, 90, 0),
+            Act::Play("Demon_Evolve".into())
+        );
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 90, 0)),
+            Some(Attack::Chop),
+            "the slap"
+        );
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 120, 0)), Some(Attack::Swing), "the zap");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 120, 0)),
+            Some(Attack::Swing),
+            "the zap"
+        );
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 0, 138, 0)), Some(Attack::Lunge), "the whip");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 0, 138, 0)),
+            Some(Attack::Lunge),
+            "the whip"
+        );
         assert_eq!(b.phase, 1, "and the whip starts its follow-through");
         b.cooldown = 0;
-        assert_eq!(ask(&def, &mut b, 0, 130, 0), Act::Play("Demon_OWhipKnight".into()));
+        assert_eq!(
+            ask(&def, &mut b, 0, 130, 0),
+            Act::Play("Demon_OWhipKnight".into())
+        );
         assert!(b.flags & flag::CAUGHT != 0);
     }
 
@@ -1835,7 +2153,11 @@ mod tests {
         // The head sits at the far end of its own corridor, which is where
         // `TrackKnight` clamps it: thirty to a hundred and no further.
         let mut b = Brain::default();
-        assert_eq!(kind(&ask(&def, &mut b, 100, 250, 0)), Some(Attack::Swing), "the low breath");
+        assert_eq!(
+            kind(&ask(&def, &mut b, 100, 250, 0)),
+            Some(Attack::Swing),
+            "the low breath"
+        );
         // Inside a hundred and forty the head comes up, over thirteen frames.
         let mut b = Brain::default();
         assert_eq!(ask(&def, &mut b, 100, 200, 0), Act::Idle);
@@ -1851,10 +2173,18 @@ mod tests {
         // Head up and far out: the breath. Head up and close: the bite.
         let mut up = b;
         up.cooldown = 0;
-        assert_eq!(kind(&ask(&def, &mut up, 100, 200, 0)), Some(Attack::Chop), "the high breath");
+        assert_eq!(
+            kind(&ask(&def, &mut up, 100, 200, 0)),
+            Some(Attack::Chop),
+            "the high breath"
+        );
         let mut up = b;
         up.cooldown = 0;
-        assert_eq!(kind(&ask(&def, &mut up, 100, 170, 0)), Some(Attack::Lunge), "the bite");
+        assert_eq!(
+            kind(&ask(&def, &mut up, 100, 170, 0)),
+            Some(Attack::Lunge),
+            "the bite"
+        );
         // Once a blow has landed on it, it breathes rather than bites.
         let mut up = b;
         up.cooldown = 0;
@@ -1875,7 +2205,11 @@ mod tests {
         let def = creature("claw", 0, 0);
         let mut b = Brain::default();
         assert_eq!(kind(&ask(&def, &mut b, 5, 90, 0)), Some(Attack::RThrust));
-        assert_eq!(ask(&def, &mut b, 5, 150, 0), Act::Idle, "and nothing beyond it");
+        assert_eq!(
+            ask(&def, &mut b, 5, 150, 0),
+            Act::Idle,
+            "and nothing beyond it"
+        );
         assert_eq!(ask(&def, &mut b, 5, 90, 40), Act::Idle, "nor off its plane");
     }
 
@@ -1888,6 +2222,9 @@ mod tests {
         let two: Vec<i32> = (0..8).map(|_| percent(&mut b)).collect();
         assert_eq!(one, two);
         assert!(one.iter().all(|v| (0..100).contains(v)), "{one:?}");
-        assert!(one.windows(2).any(|w| w[0] != w[1]), "the register is stuck: {one:?}");
+        assert!(
+            one.windows(2).any(|w| w[0] != w[1]),
+            "the register is stuck: {one:?}"
+        );
     }
 }

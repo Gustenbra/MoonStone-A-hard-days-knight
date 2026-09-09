@@ -50,7 +50,9 @@ use crate::piv::Sprite;
 /// that do are `0x00`, which is the forty-two placeholder entries, and `0x11`,
 /// which is `TROLL1.CEL` frame 46 and `MUDMEN2.CEL` frame 15. Those two frames
 /// draw nothing in the original, so they draw nothing here.
-const NO_ROUTINE: [u8; 11] = [0x00, 0x02, 0x08, 0x11, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1a, 0x1d];
+const NO_ROUTINE: [u8; 11] = [
+    0x00, 0x02, 0x08, 0x11, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1a, 0x1d,
+];
 
 pub struct Cel {
     pub images: Vec<Sprite>,
@@ -82,7 +84,7 @@ impl Cel {
 }
 
 fn decode(data: &[u8], addr: usize, w: usize, h: usize, blit: u8) -> Sprite {
-    let packed_w = (w + 15) / 16 * 2;
+    let packed_w = w.div_ceil(16) * 2;
     // Which output bit each stored plane feeds, lowest set bit of the mask
     // first. `do_17` loads four planes and rolls them into bits 0, 1, 2 and 4,
     // which is the mask's set bits in order; every other routine does the same
@@ -108,7 +110,12 @@ fn decode(data: &[u8], addr: usize, w: usize, h: usize, blit: u8) -> Sprite {
     let uw = packed_w * 8;
     let mut px = vec![0u8; uw * h];
     if uw == 0 || h == 0 {
-        return Sprite { width: uw, height: h, real_width: w, pixels: px };
+        return Sprite {
+            width: uw,
+            height: h,
+            real_width: w,
+            pixels: px,
+        };
     }
 
     let at = |i: usize| -> u8 { data.get(i).copied().unwrap_or(0) };
@@ -117,8 +124,7 @@ fn decode(data: &[u8], addr: usize, w: usize, h: usize, blit: u8) -> Sprite {
         for (p, slot) in b.iter_mut().enumerate().take(n_planes) {
             *slot = at(addr + p * plane_len + i);
         }
-        let mut o = i * 8;
-        for bit in (0..8).rev() {
+        for (o, bit) in (i * 8..).zip((0..8).rev()) {
             let mut v = 0u8;
             if blit == 32 {
                 v = ((b[0] >> bit) & 1) | (((b[1] >> bit) & 1) << 1);
@@ -131,10 +137,14 @@ fn decode(data: &[u8], addr: usize, w: usize, h: usize, blit: u8) -> Sprite {
             if o < px.len() {
                 px[o] = v;
             }
-            o += 1;
         }
     }
-    Sprite { width: uw, height: h, real_width: w, pixels: px }
+    Sprite {
+        width: uw,
+        height: h,
+        real_width: w,
+        pixels: px,
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +171,10 @@ mod tests {
         assert_eq!(s.pixels[0], 1, "plane 0 is bit 0");
         assert_eq!(s.pixels[1], 2, "plane 1 is bit 1");
         assert_eq!(s.pixels[2], 4, "plane 2 is bit 2");
-        assert_eq!(s.pixels[3], 16, "plane 3 is bit 4, the mask's fourth set bit");
+        assert_eq!(
+            s.pixels[3], 16,
+            "plane 3 is bit 4, the mask's fourth set bit"
+        );
         assert!(
             s.pixels[4..8].iter().all(|p| *p == 0),
             "nothing past the four stored planes is read: {:?}",

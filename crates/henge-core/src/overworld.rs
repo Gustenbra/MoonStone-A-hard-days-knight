@@ -195,7 +195,10 @@ pub struct Overworld {
 impl Overworld {
     pub fn new(x: i32, y: i32) -> Overworld {
         Overworld {
-            x, y, day: 1, steps: 0,
+            x,
+            y,
+            day: 1,
+            steps: 0,
             steps_per_day: 220,
             encounter_odds: 90,
             going_counter: 0,
@@ -224,9 +227,14 @@ impl Overworld {
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for v in [
-            self.x as i64, self.y as i64, self.day as i64, self.steps as i64,
-            self.steps_per_day as i64, self.encounter_odds as i64,
-            self.going_counter as i64, self.seed as i64,
+            self.x as i64,
+            self.y as i64,
+            self.day as i64,
+            self.steps as i64,
+            self.steps_per_day as i64,
+            self.encounter_odds as i64,
+            self.going_counter as i64,
+            self.seed as i64,
         ] {
             h ^= v as u64;
             h = h.wrapping_mul(0x1000_0000_01b3);
@@ -267,10 +275,7 @@ impl Overworld {
         if dx == 0 && dy == 0 {
             return Step::default();
         }
-        let (x, y) = (
-            (self.x + dx).clamp(0, MAX_X),
-            (self.y + dy).clamp(0, MAX_Y),
-        );
+        let (x, y) = ((self.x + dx).clamp(0, MAX_X), (self.y + dy).clamp(0, MAX_Y));
         if x == self.x && y == self.y {
             return Step::default();
         }
@@ -281,14 +286,18 @@ impl Overworld {
             self.day += 1;
         }
         if bogged {
-            return Step { moved: false, bogged: true, encounter: false };
+            return Step {
+                moved: false,
+                bogged: true,
+                encounter: false,
+            };
         }
         self.x = x;
         self.y = y;
         Step {
             moved: true,
             bogged: false,
-            encounter: self.next_random() % self.encounter_odds == 0,
+            encounter: self.next_random().is_multiple_of(self.encounter_odds),
         }
     }
 }
@@ -308,11 +317,21 @@ mod tests {
         assert_eq!(Terrain::Forest.code(), 2);
         assert_eq!(Terrain::Swamp.code(), 4);
         assert_eq!(Terrain::Waste.code(), 6);
-        for t in [Terrain::Glade, Terrain::Forest, Terrain::Swamp, Terrain::Waste] {
+        for t in [
+            Terrain::Glade,
+            Terrain::Forest,
+            Terrain::Swamp,
+            Terrain::Waste,
+        ] {
             assert_eq!(Terrain::from_code(t.code()), t);
         }
     }
 
+    // The `1 *` is kept: every line below reads `row * GRID_COLS + col`, so the
+    // row and the column of each expected cell can be checked against the
+    // comment beside it. Folding the first two to a bare `GRID_COLS` would hide
+    // which row they are in.
+    #[allow(clippy::identity_op)]
     #[test]
     fn the_grid_index_is_the_middle_of_the_feet() {
         // CalcKnGrid: (x + 8/2) >> 3 and (y + 10) >> 3.
@@ -329,7 +348,10 @@ mod tests {
     fn the_bottom_of_the_map_needs_the_twenty_sixth_row() {
         // HawkBorders lets y reach 190, and (190 + 10) >> 3 is 25.
         assert_eq!(Landscape::index(0, MAX_Y) / GRID_COLS, 25);
-        assert!(GRID_ROWS > 25, "a 25 row grid could not hold that cell");
+        // And row 25 has to be a row the grid really allocates, which is asked
+        // of the grid rather than of the constant it was built from.
+        let rows = Landscape::open().terrain.len() / GRID_COLS;
+        assert!(rows > 25, "a {rows} row grid could not hold that cell");
     }
 
     #[test]
@@ -342,7 +364,12 @@ mod tests {
 
     #[test]
     fn every_terrain_names_a_real_arena_family() {
-        for t in [Terrain::Forest, Terrain::Glade, Terrain::Swamp, Terrain::Waste] {
+        for t in [
+            Terrain::Forest,
+            Terrain::Glade,
+            Terrain::Swamp,
+            Terrain::Waste,
+        ] {
             assert!(["forest", "glade", "swamp", "waste"].contains(&t.family()));
         }
     }
@@ -433,7 +460,10 @@ mod tests {
                 hits += 1;
             }
         }
-        assert!(hits > 40 && hits < 160, "expected roughly 1 in 20, got {hits} in 2000");
+        assert!(
+            hits > 40 && hits < 160,
+            "expected roughly 1 in 20, got {hits} in 2000"
+        );
     }
 
     #[test]
@@ -442,7 +472,10 @@ mod tests {
             let mut w = Overworld::new(0, 100);
             w.set_seed(7);
             (0..500)
-                .filter(|i| w.travel(if (i / 50) % 2 == 0 { 1 } else { -1 }, 0, &glade()).encounter)
+                .filter(|i| {
+                    w.travel(if (i / 50) % 2 == 0 { 1 } else { -1 }, 0, &glade())
+                        .encounter
+                })
                 .count()
         };
         assert_eq!(run(), run());

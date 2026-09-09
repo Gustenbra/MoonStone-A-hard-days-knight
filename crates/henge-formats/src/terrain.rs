@@ -78,7 +78,10 @@ impl Terrain {
 
         let i16at = |o: usize| i32::from(i16::from_be_bytes([d[o], d[o + 1]]));
         let count = u16::from_be_bytes([d[0], d[1]]) as usize;
-        anyhow::ensure!(count <= MAX_BORDERS, "{count} border records is not a layout");
+        anyhow::ensure!(
+            count <= MAX_BORDERS,
+            "{count} border records is not a layout"
+        );
         anyhow::ensure!(2 + count * 8 <= d.len(), "border list runs past the end");
 
         let borders: Vec<Border> = (0..count)
@@ -113,6 +116,9 @@ impl Terrain {
             placements.push(p);
             o += 6;
         }
-        Ok(Terrain { borders, placements })
+        Ok(Terrain {
+            borders,
+            placements,
+        })
     }
 }

@@ -82,7 +82,12 @@ impl Pointer {
     /// Start in the middle, which is where a pointer with nothing to say
     /// belongs. The original leaves it wherever the last screen left it.
     pub fn centred() -> Pointer {
-        Pointer { x: MAX_X / 2, y: MAX_Y / 2, fire: false, woken: false }
+        Pointer {
+            x: MAX_X / 2,
+            y: MAX_Y / 2,
+            fire: false,
+            woken: false,
+        }
     }
 
     /// One tick of `MovePointer`: two pixels a direction, then the clamp.
@@ -171,7 +176,14 @@ impl Gadgets {
 
     /// Convenience for a screen laying out a list of rows.
     pub fn add_box(&mut self, id: usize, x: i32, y: i32, w: i32, h: i32, label: &str) -> bool {
-        self.add(Gadget { id, x, y, w, h, label: label.to_string() })
+        self.add(Gadget {
+            id,
+            x,
+            y,
+            w,
+            h,
+            label: label.to_string(),
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -206,7 +218,12 @@ mod tests {
 
     #[test]
     fn the_pointer_moves_two_pixels_a_tick() {
-        let mut p = Pointer { x: 10, y: 10, fire: false, woken: false };
+        let mut p = Pointer {
+            x: 10,
+            y: 10,
+            fire: false,
+            woken: false,
+        };
         p.steer(1, 0, false);
         assert_eq!((p.x, p.y), (12, 10));
         p.steer(0, -1, false);
@@ -217,7 +234,12 @@ mod tests {
     /// The clamps are literals in `MovePointer` and worth pinning.
     #[test]
     fn the_pointer_stops_at_the_recovered_bounds() {
-        let mut p = Pointer { x: 0, y: 0, fire: false, woken: false };
+        let mut p = Pointer {
+            x: 0,
+            y: 0,
+            fire: false,
+            woken: false,
+        };
         for _ in 0..400 {
             p.steer(-1, -1, false);
         }
@@ -239,7 +261,14 @@ mod tests {
 
     #[test]
     fn a_gadget_is_hit_by_the_pointers_own_corner() {
-        let g = Gadget { id: 3, x: 10, y: 20, w: 30, h: 8, label: "Buy".into() };
+        let g = Gadget {
+            id: 3,
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 8,
+            label: "Buy".into(),
+        };
         assert!(g.covers(10, 20), "the top left corner is inside");
         assert!(g.covers(39, 27), "and the last pixel of it");
         assert!(!g.covers(40, 27), "the pixel past its width is not");
@@ -253,7 +282,11 @@ mod tests {
         let mut g = Gadgets::default();
         g.add_box(0, 0, 0, 100, 100, "under");
         g.add_box(1, 10, 10, 10, 10, "over");
-        assert_eq!(g.hit(15, 15).map(|h| h.id), Some(0), "the table is walked in order");
+        assert_eq!(
+            g.hit(15, 15).map(|h| h.id),
+            Some(0),
+            "the table is walked in order"
+        );
     }
 
     #[test]
@@ -273,9 +306,19 @@ mod tests {
         for i in 0..4 {
             g.add_box(i, 20, 100 + i as i32 * 9, 120, 9, "row");
         }
-        let p = Pointer { x: 30, y: 118, fire: false, woken: true };
+        let p = Pointer {
+            x: 30,
+            y: 118,
+            fire: false,
+            woken: true,
+        };
         assert_eq!(g.hit_id(&p), Some(2));
-        let off = Pointer { x: 300, y: 10, fire: false, woken: true };
+        let off = Pointer {
+            x: 300,
+            y: 10,
+            fire: false,
+            woken: true,
+        };
         assert_eq!(g.hit_id(&off), None);
     }
 }

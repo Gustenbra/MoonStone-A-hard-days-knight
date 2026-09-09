@@ -153,8 +153,7 @@ fn width(op: u8) -> Option<usize> {
 /// `au1`, `li1`, `ha1`, `dw1`, `da1`, at four bytes a slot. The ending, which
 /// is the same executable run with an argument, fills it with a different set;
 /// only the intro's is built here.
-const CAST_BANKS: [&str; 5] =
-    ["bank.au1", "bank.li1", "bank.ha1", "bank.dw1", "bank.da1"];
+const CAST_BANKS: [&str; 5] = ["bank.au1", "bank.li1", "bank.ha1", "bank.dw1", "bank.da1"];
 
 /// Flatten one script into frames, and say where it rejoins itself.
 ///
@@ -178,16 +177,27 @@ const CAST_BANKS: [&str; 5] =
 pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, Option<usize>)> {
     let mut p = DS_BASE + off as usize;
     let mut frames: Vec<Frame> = Vec::new();
-    let mut cur = Frame { hold: 1, parts: Vec::new() };
+    let mut cur = Frame {
+        hold: 1,
+        parts: Vec::new(),
+    };
     let mut pending: Option<u16> = None;
     // Where each frame started, so a script that comes back to one is known to
     // loop and known to loop from there.
     let mut starts: Vec<usize> = vec![p];
     while frames.len() < cap {
-        let b = *img.get(p).ok_or_else(|| anyhow::anyhow!("script {off:04x} runs off the image"))?;
+        let b = *img
+            .get(p)
+            .ok_or_else(|| anyhow::anyhow!("script {off:04x} runs off the image"))?;
         if b == 0xff {
             let end = img[p + 1];
-            frames.push(std::mem::replace(&mut cur, Frame { hold: 1, parts: Vec::new() }));
+            frames.push(std::mem::replace(
+                &mut cur,
+                Frame {
+                    hold: 1,
+                    parts: Vec::new(),
+                },
+            ));
             p += 2;
             if let Some(t) = pending.take() {
                 p = DS_BASE + t as usize;
@@ -218,7 +228,10 @@ pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, 
             p += w;
             continue;
         }
-        anyhow::ensure!(b % 4 == 0 && b < 0x20, "script {off:04x}: bad bank selector {b:#04x}");
+        anyhow::ensure!(
+            b % 4 == 0 && b < 0x20,
+            "script {off:04x}: bad bank selector {b:#04x}"
+        );
         cur.parts.push(Part {
             table: 1,
             bank: b / 4,
@@ -239,8 +252,8 @@ pub fn flatten(img: &[u8], off: u16, cap: usize) -> anyhow::Result<(Vec<Frame>, 
 /// The list is the `mov si, imm16` operands of the calls to the two task
 /// starters at `0x1ef` and `0x207`, read out of the intro's main module.
 pub const SCRIPTS: [u16; 18] = [
-    0x1583, 0x1739, 0x1e29, 0x2669, 0x26e3, 0x2927, 0x2ce5, 0x2dc5, 0x2e51, 0x2e75, 0x2e99,
-    0x2ec3, 0x309f, 0x30c3, 0x3221, 0x338f, 0x348f, 0x349b,
+    0x1583, 0x1739, 0x1e29, 0x2669, 0x26e3, 0x2927, 0x2ce5, 0x2dc5, 0x2e51, 0x2e75, 0x2e99, 0x2ec3,
+    0x309f, 0x30c3, 0x3221, 0x338f, 0x348f, 0x349b,
 ];
 
 pub fn cast(img: &[u8]) -> anyhow::Result<Cast> {
@@ -258,7 +271,11 @@ pub fn cast(img: &[u8]) -> anyhow::Result<Cast> {
         }
         scripts.insert(name, frames);
     }
-    Ok(Cast { banks: CAST_BANKS.iter().map(|s| s.to_string()).collect(), scripts, loops })
+    Ok(Cast {
+        banks: CAST_BANKS.iter().map(|s| s.to_string()).collect(),
+        scripts,
+        loops,
+    })
 }
 
 // ------------------------------------------------------------------ the check
@@ -270,9 +287,8 @@ pub fn cast(img: &[u8]) -> anyhow::Result<Cast> {
 /// own speed table is eleven ascending thresholds at `DS:0x124` with eleven
 /// speeds beside them at `DS:0x13a`.
 pub fn check(img: &[u8]) -> anyhow::Result<()> {
-    let w = |off: usize| -> u16 {
-        u16::from_le_bytes([img[DS_BASE + off], img[DS_BASE + off + 1]])
-    };
+    let w =
+        |off: usize| -> u16 { u16::from_le_bytes([img[DS_BASE + off], img[DS_BASE + off + 1]]) };
     let ascii = &img[DS_BASE + 0x413a..DS_BASE + 0x413a + 95];
     anyhow::ensure!(
         ascii[33..59] == (0u8..26).collect::<Vec<u8>>()[..],
@@ -282,7 +298,11 @@ pub fn check(img: &[u8]) -> anyhow::Result<()> {
     let speeds: Vec<u16> = (0..11).map(|i| w(0x13a + i * 2)).collect();
     anyhow::ensure!(
         thresholds == henge_core::intro::PAN_STOPS.to_vec()
-            && speeds == henge_core::intro::PAN_SPEEDS.iter().map(|s| *s as u16).collect::<Vec<_>>(),
+            && speeds
+                == henge_core::intro::PAN_SPEEDS
+                    .iter()
+                    .map(|s| *s as u16)
+                    .collect::<Vec<_>>(),
         "the pan tables in the image are {thresholds:?} / {speeds:?}, not the recovered ones"
     );
     Ok(())
@@ -313,7 +333,11 @@ pub struct Panorama {
 
 /// Composite a `.STI` tile map over its sheets.
 pub fn panorama(sti: &[u8], sheets: &[&crate::Piv]) -> anyhow::Result<Panorama> {
-    anyhow::ensure!(sti.len() % (MAP_W * 2) == 0 && !sti.is_empty(), "not a tile map: {} bytes", sti.len());
+    anyhow::ensure!(
+        sti.len().is_multiple_of(MAP_W * 2) && !sti.is_empty(),
+        "not a tile map: {} bytes",
+        sti.len()
+    );
     let rows = sti.len() / (MAP_W * 2);
     let (width, height) = (MAP_W * TILE_W, rows * TILE_H);
     let mut pixels = vec![0u8; width * height];
@@ -322,10 +346,14 @@ pub fn panorama(sti: &[u8], sheets: &[&crate::Piv]) -> anyhow::Result<Panorama> 
         for col in 0..MAP_W {
             let i = (row * MAP_W + col) * 2;
             let tile = u16::from_be_bytes([sti[i], sti[i + 1]]) as usize;
-            let Some(sheet) = sheets.get(tile / per_sheet) else { continue };
+            let Some(sheet) = sheets.get(tile / per_sheet) else {
+                continue;
+            };
             let cell = tile % per_sheet;
-            let (sx, sy) = ((cell % (crate::piv::W / TILE_W)) * TILE_W,
-                            (cell / (crate::piv::W / TILE_W)) * TILE_H);
+            let (sx, sy) = (
+                (cell % (crate::piv::W / TILE_W)) * TILE_W,
+                (cell / (crate::piv::W / TILE_W)) * TILE_H,
+            );
             for y in 0..TILE_H {
                 for x in 0..TILE_W {
                     let src = (sy + y) * crate::piv::W + sx + x;
@@ -335,7 +363,11 @@ pub fn panorama(sti: &[u8], sheets: &[&crate::Piv]) -> anyhow::Result<Panorama> 
             }
         }
     }
-    Ok(Panorama { width, height, pixels })
+    Ok(Panorama {
+        width,
+        height,
+        pixels,
+    })
 }
 
 #[cfg(test)]
@@ -365,7 +397,10 @@ mod tests {
     fn a_copy_block_comes_back_verbatim_and_a_fill_expands() {
         // Commands are given innermost first, which is the order they are
         // written: the terminator is the lowest one in the file.
-        let packed = stream(&[], &[(false, b"hello"), (true, &[0x41, 3]), (false, b"world")]);
+        let packed = stream(
+            &[],
+            &[(false, b"hello"), (true, &[0x41, 3]), (false, b"world")],
+        );
         let (head, out) = walk(&packed, packed.len() - 1).expect("decodes");
         assert_eq!(head, 0);
         assert_eq!(out, b"helloAAAworld");
@@ -426,8 +461,7 @@ mod tests {
         let mut img = vec![0u8; DS_BASE + 0x100];
         // Two frames of one part each, then `ff ff`.
         let stops: Vec<u8> = vec![
-            0x0c, 1, 0, 0, 0, 0, 0xff, 0x00,
-            0x0c, 2, 0, 0, 0, 0, 0xff, 0xff,
+            0x0c, 1, 0, 0, 0, 0, 0xff, 0x00, 0x0c, 2, 0, 0, 0, 0, 0xff, 0xff,
         ];
         img[DS_BASE + 0x10..DS_BASE + 0x10 + stops.len()].copy_from_slice(&stops);
         let (frames, from) = flatten(&img, 0x10, 64).expect("it decodes");
@@ -437,9 +471,8 @@ mod tests {
         // Three frames, the last arming a jump back to the second. The jump is
         // taken at the end of the frame it is read in, not where it stands.
         let goes: Vec<u8> = vec![
-            0x0c, 1, 0, 0, 0, 0, 0xff, 0x00,
-            0x0c, 2, 0, 0, 0, 0, 0xff, 0x00,
-            0x0c, 3, 0, 0, 0, 0, 0x82, 0x00, 0x58, 0x00, 0xff, 0x00,
+            0x0c, 1, 0, 0, 0, 0, 0xff, 0x00, 0x0c, 2, 0, 0, 0, 0, 0xff, 0x00, 0x0c, 3, 0, 0, 0, 0,
+            0x82, 0x00, 0x58, 0x00, 0xff, 0x00,
         ];
         img[DS_BASE + 0x50..DS_BASE + 0x50 + goes.len()].copy_from_slice(&goes);
         let (frames, from) = flatten(&img, 0x50, 64).expect("it decodes");

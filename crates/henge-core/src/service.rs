@@ -99,9 +99,15 @@ impl Throw {
     /// `BETWINPOT`, `BETLOSTPOT` and `GOLDTOTAL` filled in.
     pub fn describe(&self, purse: u32) -> String {
         if self.winner() {
-            format!("You won {} gold pieces. You now have {} gold pieces.", self.won, purse)
+            format!(
+                "You won {} gold pieces. You now have {} gold pieces.",
+                self.won, purse
+            )
         } else {
-            format!("You lost {} gold pieces. You now have {} gold pieces.", self.stake, purse)
+            format!(
+                "You lost {} gold pieces. You now have {} gold pieces.",
+                self.stake, purse
+            )
         }
     }
 }
@@ -175,7 +181,9 @@ pub const HEALER_LIFE: i32 = 15;
 /// right once, into a purse that saturates at a hundred and fifty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sale {
-    Sold { paid: u32 },
+    Sold {
+        paid: u32,
+    },
     /// You are carrying none.
     HaveNone,
     /// The temple deals in magic, not in keys, moonstones, or what you wear.
@@ -403,7 +411,10 @@ pub fn magic_item(slot: u8) -> Option<&'static str> {
 
 /// The slot an item id names, if it is one of the ten.
 pub fn magic_slot(id: &str) -> Option<u8> {
-    MAGIC_TABLE.iter().map(|(_, s)| *s).find(|s| magic_item(*s) == Some(id))
+    MAGIC_TABLE
+        .iter()
+        .map(|(_, s)| *s)
+        .find(|s| magic_item(*s) == Some(id))
 }
 
 /// The gold the wizard gives, and the gold a lair holds.
@@ -447,9 +458,14 @@ impl Rite {
     /// is the one recovered string, `_TAVERN:HengeWait`.
     pub fn describe(&self, items: &Items) -> String {
         match self {
-            Rite::Won(stone) => format!("The druids prepare for the ritual. The {} blazes in your hand. The quest is done.", stone.name()),
+            Rite::Won(stone) => format!(
+                "The druids prepare for the ritual. The {} blazes in your hand. The quest is done.",
+                stone.name()
+            ),
             Rite::Blessed { offered, life } => {
-                let name = items.get(offered).map_or(offered.clone(), |d| d.name.clone());
+                let name = items
+                    .get(offered)
+                    .map_or(offered.clone(), |d| d.name.clone());
                 if *life {
                     format!("The druids prepare for the ritual. Danu accepts the {name}, and grants you a longer life.")
                 } else {
@@ -518,7 +534,10 @@ impl Run {
             return None;
         }
         let mut pot = gold as i32;
-        let mut got = Healing { gave: gold, ..Healing::default() };
+        let mut got = Healing {
+            gave: gold,
+            ..Healing::default()
+        };
         while pot >= HEALER_MEND {
             if self.bitten {
                 self.bitten = false;
@@ -546,8 +565,13 @@ impl Run {
     /// hundred and fifty, and a sword sold out of the hand leaves a long
     /// sword in it (`mov word ptr [bp+0x40], 0x16`).
     pub fn sell_to_temple(&mut self, id: &str, items: &Items) -> Sale {
-        let Some(def) = items.get(id) else { return Sale::Unknown };
-        if is_token(id) || matches!(def.virtue, Virtue::Weapon { .. } | Virtue::Armour { .. }) && magic_slot(id).is_none() {
+        let Some(def) = items.get(id) else {
+            return Sale::Unknown;
+        };
+        if is_token(id)
+            || matches!(def.virtue, Virtue::Weapon { .. } | Virtue::Armour { .. })
+                && magic_slot(id).is_none()
+        {
             return Sale::NotWanted;
         }
         if self.kit.lose(id, 1) == 0 {
@@ -697,15 +721,24 @@ impl Run {
 
     /// The wizard's magic gift: a slot off `MagicRND`, into your own pack.
     fn wizard_magic(&mut self, items: &Items) -> Gift {
-        let Some(slot) = self.known_magic_slot(items) else { return Gift::Nothing };
-        let Some(id) = magic_item(slot) else { return Gift::Nothing };
+        let Some(slot) = self.known_magic_slot(items) else {
+            return Gift::Nothing;
+        };
+        let Some(id) = magic_item(slot) else {
+            return Gift::Nothing;
+        };
         if self.kit.take(id, 1) == 0 {
             return Gift::Nothing;
         }
         // `mov word ptr [di+0x40], 0x19`: the sword goes straight into the
         // hand rather than waiting to be equipped, and `add word ptr
         // [si+0x38], 0x14`: a ring is twenty health on the spot.
-        if slot == 0x04 && matches!(items.get(id).map(|d| &d.virtue), Some(Virtue::Weapon { .. })) {
+        if slot == 0x04
+            && matches!(
+                items.get(id).map(|d| &d.virtue),
+                Some(Virtue::Weapon { .. })
+            )
+        {
             self.knight.weapon = id.to_string();
         }
         if slot == 0x06 {
@@ -740,7 +773,9 @@ impl Run {
             return Rite::Won(stone);
         }
         let chosen = match offer {
-            Some(id) if self.kit.count(id) > 0 && Self::offerable(id, items) => Some(id.to_string()),
+            Some(id) if self.kit.count(id) > 0 && Self::offerable(id, items) => {
+                Some(id.to_string())
+            }
             Some(_) => None,
             None => self
                 .kit
@@ -749,7 +784,9 @@ impl Run {
                 .min_by_key(|(id, _)| (items.get(*id).map_or(0, |d| d.price), id.to_string()))
                 .map(|(id, _)| id.to_string()),
         };
-        let Some(id) = chosen else { return Rite::NothingToOffer };
+        let Some(id) = chosen else {
+            return Rite::NothingToOffer;
+        };
         self.kit.lose(&id, 1);
         let life = self.lives < LIFE_CEILING;
         if life {
@@ -783,7 +820,9 @@ impl Run {
     /// name.
     pub fn moonstruck(&self) -> Option<Moonstone> {
         let phase = self.moon.phase();
-        Moonstone::ALL.into_iter().find(|m| m.phase() == phase && self.kit.count(m.item()) > 0)
+        Moonstone::ALL
+            .into_iter()
+            .find(|m| m.phase() == phase && self.kit.count(m.item()) > 0)
     }
 }
 
@@ -795,6 +834,9 @@ mod tests {
     use crate::moon::Phase;
     use crate::run::NEVER_MET;
 
+    // Hand-aligned: a price list, one item per line, so name, price and virtue read
+    // as columns down the catalogue.
+    #[rustfmt::skip]
     fn goods() -> Items {
         let mut items = Items::new();
         let mut add = |id: &str, name: &str, price: u32, virtue: Virtue, consumed: bool| {
@@ -850,10 +892,22 @@ mod tests {
     fn the_odds_table_is_the_one_in_the_executable() {
         let by = |d: [u8; 3]| ODDS.iter().find(|(p, _)| *p == d).map(|(_, m)| *m);
         assert_eq!(by([0, 0, 0]), Some(30), "three of the first face");
-        assert_eq!(by([1, 1, 1]), Some(20), "three of the second beat three of the sixth");
+        assert_eq!(
+            by([1, 1, 1]),
+            Some(20),
+            "three of the second beat three of the sixth"
+        );
         assert_eq!(by([5, 5, 5]), Some(18));
-        assert_eq!(by([2, 2, 2]), Some(12), "and three of the third pay least of the triples");
-        assert_eq!(by([0, 0, 5]), Some(10), "a pair of the first face and a sixth");
+        assert_eq!(
+            by([2, 2, 2]),
+            Some(12),
+            "and three of the third pay least of the triples"
+        );
+        assert_eq!(
+            by([0, 0, 5]),
+            Some(10),
+            "a pair of the first face and a sixth"
+        );
         assert_eq!(by([1, 1, 5]), None, "no other pair pays at all");
         assert_eq!(ODDS.len(), 11);
     }
@@ -863,9 +917,14 @@ mod tests {
         let (mut r, _) = run();
         r.earn(100);
         let before = r.gold;
-        let Wager::Threw(t) = r.throw_dice(5) else { panic!("should have thrown") };
+        let Wager::Threw(t) = r.throw_dice(5) else {
+            panic!("should have thrown")
+        };
         assert_eq!(t.stake, 5);
-        assert!(t.dice.windows(2).all(|w| w[0] <= w[1]), "DiceSort leaves them ascending");
+        assert!(
+            t.dice.windows(2).all(|w| w[0] <= w[1]),
+            "DiceSort leaves them ascending"
+        );
         assert!(t.dice.iter().all(|d| (*d as u32) < FACES));
         if t.winner() {
             assert_eq!(t.won, 5 * t.odds().unwrap());
@@ -873,7 +932,13 @@ mod tests {
             assert!(t.describe(r.gold).starts_with("You won"));
         } else {
             assert_eq!(r.gold, before - 5);
-            assert_eq!(t.describe(r.gold), format!("You lost 5 gold pieces. You now have {} gold pieces.", r.gold));
+            assert_eq!(
+                t.describe(r.gold),
+                format!(
+                    "You lost 5 gold pieces. You now have {} gold pieces.",
+                    r.gold
+                )
+            );
         }
     }
 
@@ -884,7 +949,11 @@ mod tests {
         assert_eq!(r.throw_dice(25), Wager::TooPoor);
         assert_eq!(r.gold, 10, "and nothing left the purse");
         r.spend(10);
-        assert_eq!(r.throw_dice(5), Wager::Skint, "the tavern turns out an empty purse");
+        assert_eq!(
+            r.throw_dice(5),
+            Wager::Skint,
+            "the tavern turns out an empty purse"
+        );
     }
 
     /// The whole point of taking the roll from the run's own seed: two
@@ -930,7 +999,10 @@ mod tests {
         for _ in 0..200 {
             r.gold = r.gold.max(5);
             let _ = r.throw_dice(5);
-            assert!(r.gold <= PURSE_CEILING, "a win is capped at a hundred and fifty");
+            assert!(
+                r.gold <= PURSE_CEILING,
+                "a win is capped at a hundred and fifty"
+            );
         }
     }
 
@@ -957,7 +1029,10 @@ mod tests {
         r.health = 1;
         let got = r.donate_to_healer(40).expect("covered");
         assert!(got.healed, "the wound is mended first, for ten");
-        assert_eq!(got.lives, 2, "and thirty of the remaining pot buys two lives");
+        assert_eq!(
+            got.lives, 2,
+            "and thirty of the remaining pot buys two lives"
+        );
         assert_eq!(r.lives, 3);
         assert_eq!(got.unspent, 0);
     }
@@ -1015,7 +1090,10 @@ mod tests {
         r.kit.take("gem_of_seeing", 1);
         r.kit.take("long_sword", 1);
         r.kit.take("moonstone.full", 1);
-        assert_eq!(r.sell_to_temple("gem_of_seeing", &items), Sale::Sold { paid: 16 });
+        assert_eq!(
+            r.sell_to_temple("gem_of_seeing", &items),
+            Sale::Sold { paid: 16 }
+        );
         assert_eq!(r.gold, 26);
         assert_eq!(r.kit.count("gem_of_seeing"), 0);
         assert_eq!(r.sell_to_temple("gem_of_seeing", &items), Sale::HaveNone);
@@ -1029,14 +1107,25 @@ mod tests {
         let (mut r, items) = run();
         r.kit.take("sword_of_sharpness", 1);
         r.knight.weapon = "sword_of_sharpness".into();
-        assert_eq!(r.sell_to_temple("sword_of_sharpness", &items), Sale::Sold { paid: 50 });
+        assert_eq!(
+            r.sell_to_temple("sword_of_sharpness", &items),
+            Sale::Sold { paid: 50 }
+        );
         assert_eq!(r.knight.weapon, "long_sword");
     }
 
     #[test]
     fn the_temples_prices_are_the_panels_own_lines() {
-        assert_eq!(MAGIC_PRICES.iter().find(|(s, _)| *s == 0x04).unwrap().1, 100, "Sword of Sharpness for 100 GP");
-        assert_eq!(MAGIC_PRICES.iter().find(|(s, _)| *s == 0x00).unwrap().1, 20, "Potion of healing for 20 GP");
+        assert_eq!(
+            MAGIC_PRICES.iter().find(|(s, _)| *s == 0x04).unwrap().1,
+            100,
+            "Sword of Sharpness for 100 GP"
+        );
+        assert_eq!(
+            MAGIC_PRICES.iter().find(|(s, _)| *s == 0x00).unwrap().1,
+            20,
+            "Potion of healing for 20 GP"
+        );
         assert_eq!(magic_slot("scroll_of_protection"), Some(0x12));
         assert_eq!(magic_slot("elixir"), None);
     }
@@ -1066,8 +1155,14 @@ mod tests {
         };
         let mean = count(5);
         let generous = count(60);
-        assert!(generous > mean + 40, "sixty coins ({generous}) beats five ({mean})");
-        assert!(mean > 20 && mean < 120, "a small donation is still a gamble: {mean}");
+        assert!(
+            generous > mean + 40,
+            "sixty coins ({generous}) beats five ({mean})"
+        );
+        assert!(
+            mean > 20 && mean < 120,
+            "a small donation is still a gamble: {mean}"
+        );
     }
 
     #[test]
@@ -1098,7 +1193,10 @@ mod tests {
             assert!((after - before).abs() == 1, "exactly one point moves");
             assert_eq!(r.gold, 390, "and the donation is gone either way");
         }
-        assert!(seen_good && seen_bad, "both halves of the roll are reachable");
+        assert!(
+            seen_good && seen_bad,
+            "both halves of the roll are reachable"
+        );
     }
 
     #[test]
@@ -1112,7 +1210,9 @@ mod tests {
             if r.consult_the_mystic(5, &items) == Reading::Weak {
                 weak += 1;
             }
-            assert!(r.knight.strength >= 1 && r.knight.constitution >= 1 && r.knight.endurance >= 1);
+            assert!(
+                r.knight.strength >= 1 && r.knight.constitution >= 1 && r.knight.endurance >= 1
+            );
         }
         assert!(weak > 0, "a new knight is refused rather than hollowed out");
     }
@@ -1156,8 +1256,14 @@ mod tests {
             }
             assert_eq!(r.grudge, WIZARD_GRUDGE, "he remembers you on the way out");
         }
-        assert!(tally.iter().all(|n| *n > 20), "all four outcomes come up: {tally:?}");
-        assert!(tally[1] > tally[3], "an ability is likelier than a toad: {tally:?}");
+        assert!(
+            tally.iter().all(|n| *n > 20),
+            "all four outcomes come up: {tally:?}"
+        );
+        assert!(
+            tally[1] > tally[3],
+            "an ability is likelier than a toad: {tally:?}"
+        );
     }
 
     /// `SetKnightEquipment` writes 0xff and the wizard rolls again on it: the
@@ -1167,7 +1273,7 @@ mod tests {
         let items = goods();
         for seed in 0..300u32 {
             let mut r = Run::for_knight(&knight(), 0, &items);
-            r.reseed(seed.wrapping_mul(0x8088_405).wrapping_add(1));
+            r.reseed(seed.wrapping_mul(0x8088405).wrapping_add(1));
             assert_eq!(r.grudge, NEVER_MET);
             assert_ne!(r.visit_the_wizard(&items), Gift::Toad);
             assert!(!r.is_toad());
@@ -1182,14 +1288,17 @@ mod tests {
         let mut toads = 0;
         for seed in 0..200u32 {
             let mut r = Run::for_knight(&knight(), 0, &items);
-            r.reseed(seed.wrapping_mul(0x8088_405).wrapping_add(1));
+            r.reseed(seed.wrapping_mul(0x8088405).wrapping_add(1));
             r.visit_the_wizard(&items);
             if r.visit_the_wizard(&items) == Gift::Toad {
                 toads += 1;
                 assert!(r.is_toad());
             }
         }
-        assert!(toads > 130, "a second visit the same day is mostly toads: {toads}");
+        assert!(
+            toads > 130,
+            "a second visit the same day is mostly toads: {toads}"
+        );
     }
 
     #[test]
@@ -1205,7 +1314,10 @@ mod tests {
         assert_eq!(r.grudge, 0, "and the seventh clears it");
         let (mut fresh, _) = run();
         fresh.new_day();
-        assert_eq!(fresh.grudge, NEVER_MET, "and a knight he has never met stays never met");
+        assert_eq!(
+            fresh.grudge, NEVER_MET,
+            "and a knight he has never met stays never met"
+        );
     }
 
     /// One Sword of Sharpness exists, `[0x6f06]` is a global, and the same
@@ -1222,9 +1334,19 @@ mod tests {
                 last = Some(id);
             }
         }
-        assert_eq!(r.kit.count("sword_of_sharpness"), 1, "exactly one sword in four hundred visits");
-        assert_eq!(r.knight.weapon, "sword_of_sharpness", "and it went straight into the hand");
-        assert!(r.kit.count("potion") > 20, "the potion is a quarter of all magic");
+        assert_eq!(
+            r.kit.count("sword_of_sharpness"),
+            1,
+            "exactly one sword in four hundred visits"
+        );
+        assert_eq!(
+            r.knight.weapon, "sword_of_sharpness",
+            "and it went straight into the hand"
+        );
+        assert!(
+            r.kit.count("potion") > 20,
+            "the potion is a quarter of all magic"
+        );
     }
 
     /// A pack that declares only the potion gets only the potion, and a pack
@@ -1264,17 +1386,27 @@ mod tests {
         }
         assert_eq!(gold_from(0), 10);
         assert_eq!(gold_from(21), 31);
-        assert_eq!(gold_from(22), 22, "twenty two folds down by ten and back up by ten");
+        assert_eq!(
+            gold_from(22),
+            22,
+            "twenty two folds down by ten and back up by ten"
+        );
         assert_eq!(gold_from(31), 31);
     }
 
     #[test]
     fn the_wizard_speaks_in_his_own_words() {
         let items = goods();
-        assert!(Gift::Ability(Ability::Strength).speech(0).contains("gift of strength"));
+        assert!(Gift::Ability(Ability::Strength)
+            .speech(0)
+            .contains("gift of strength"));
         assert!(Gift::Toad.speech(0).starts_with("You insulant"));
-        assert!(Gift::Gold(17).aftermath(&items).ends_with("filled with 17 gold."));
-        assert!(Gift::Magic("potion".into()).aftermath(&items).ends_with("reveals a Potion of healing."));
+        assert!(Gift::Gold(17)
+            .aftermath(&items)
+            .ends_with("filled with 17 gold."));
+        assert!(Gift::Magic("potion".into())
+            .aftermath(&items)
+            .ends_with("reveals a Potion of healing."));
     }
 
     // The stones.
@@ -1288,7 +1420,14 @@ mod tests {
         r.lives = 2;
         r.bitten = true;
         let rite = r.rite_at_the_stones(None, &items);
-        assert_eq!(rite, Rite::Blessed { offered: "potion".into(), life: true }, "the cheapest thing on you");
+        assert_eq!(
+            rite,
+            Rite::Blessed {
+                offered: "potion".into(),
+                life: true
+            },
+            "the cheapest thing on you"
+        );
         assert_eq!(r.health, r.max_health);
         assert_eq!(r.lives, 3);
         assert!(!r.bitten);
@@ -1306,9 +1445,15 @@ mod tests {
         r.kit.take("long_sword", 1);
         assert_eq!(
             r.rite_at_the_stones(Some("gem_of_seeing"), &items),
-            Rite::Blessed { offered: "gem_of_seeing".into(), life: false }
+            Rite::Blessed {
+                offered: "gem_of_seeing".into(),
+                life: false
+            }
         );
-        assert_eq!(r.rite_at_the_stones(Some("long_sword"), &items), Rite::NothingToOffer);
+        assert_eq!(
+            r.rite_at_the_stones(Some("long_sword"), &items),
+            Rite::NothingToOffer
+        );
         r.kit.lose("potion", 1);
         assert_eq!(r.rite_at_the_stones(None, &items), Rite::NothingToOffer);
     }
@@ -1318,9 +1463,16 @@ mod tests {
         let (mut r, items) = run();
         r.kit.take(Moonstone::Full.item(), 1);
         assert_eq!(r.moon.phase(), Phase::Full, "day one is the full moon");
-        assert_eq!(r.rite_at_the_stones(None, &items), Rite::Won(Moonstone::Full));
+        assert_eq!(
+            r.rite_at_the_stones(None, &items),
+            Rite::Won(Moonstone::Full)
+        );
         assert!(r.won);
-        assert_eq!(r.kit.count(Moonstone::Full.item()), 1, "the stone is not consumed by the check");
+        assert_eq!(
+            r.kit.count(Moonstone::Full.item()),
+            1,
+            "the stone is not consumed by the check"
+        );
     }
 
     #[test]
@@ -1328,14 +1480,24 @@ mod tests {
         let (mut r, items) = run();
         r.kit.take(Moonstone::New.item(), 1);
         r.kit.take("potion", 1);
-        assert!(matches!(r.rite_at_the_stones(None, &items), Rite::Blessed { .. }));
+        assert!(matches!(
+            r.rite_at_the_stones(None, &items),
+            Rite::Blessed { .. }
+        ));
         assert!(!r.won);
-        assert_eq!(r.kit.count(Moonstone::New.item()), 1, "a moonstone is never an offering");
+        assert_eq!(
+            r.kit.count(Moonstone::New.item()),
+            1,
+            "a moonstone is never an offering"
+        );
         // Walk the moon round to the new one and try again.
         while r.moon.phase() != Phase::New {
             r.moon.new_day();
         }
-        assert_eq!(r.rite_at_the_stones(None, &items), Rite::Won(Moonstone::New));
+        assert_eq!(
+            r.rite_at_the_stones(None, &items),
+            Rite::Won(Moonstone::New)
+        );
     }
 
     /// The one thing the moon does that you feel without going anywhere.
@@ -1344,7 +1506,11 @@ mod tests {
         let (mut r, _) = run();
         assert_eq!(r.moonstruck(), None, "carrying nothing");
         r.kit.take(Moonstone::Full.item(), 1);
-        assert_eq!(r.moonstruck(), Some(Moonstone::Full), "full moon, full stone");
+        assert_eq!(
+            r.moonstruck(),
+            Some(Moonstone::Full),
+            "full moon, full stone"
+        );
         for _ in 0..4 {
             r.moon.new_day();
         }

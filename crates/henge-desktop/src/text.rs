@@ -35,8 +35,12 @@ pub struct Font {
 
 impl Font {
     pub fn new(def: &FontDef) -> Font {
-        let mut glyph: BTreeMap<char, usize> =
-            def.glyphs.chars().enumerate().map(|(i, c)| (c, i)).collect();
+        let mut glyph: BTreeMap<char, usize> = def
+            .glyphs
+            .chars()
+            .enumerate()
+            .map(|(i, c)| (c, i))
+            .collect();
         // `TextASCII` maps characters to glyphs and `FontDef::glyphs` is its
         // inverse, so the two characters the table sends to a glyph another
         // character already names cannot be written in it. Both are added here:
@@ -65,7 +69,9 @@ impl Font {
         if c == ' ' {
             return self.space_width;
         }
-        let Some(g) = self.glyph.get(&c) else { return 0 };
+        let Some(g) = self.glyph.get(&c) else {
+            return 0;
+        };
         reg.sheet(&self.sheet)
             .and_then(|r| r.value.frames.get(*g).map(|f| f.w as i32 + self.tracking))
             .unwrap_or(0)
@@ -75,8 +81,15 @@ impl Font {
         s.chars().map(|c| self.advance(reg, c)).sum()
     }
 
-    pub fn draw(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
-                x: i32, y: i32, colour: u8) -> i32 {
+    pub fn draw(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        s: &str,
+        x: i32,
+        y: i32,
+        colour: u8,
+    ) -> i32 {
         self.render(reg, fb, s, x, y, Some(colour))
     }
 
@@ -89,23 +102,44 @@ impl Font {
     /// letter shapes, and it is legible wherever the screen's palette carries
     /// the font's own five entries: `MESSAGE.PIV` has them already, and
     /// `henge_core::intro::CAPTION_INK` is the intro writing them itself.
-    pub fn draw_own(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
-                    x: i32, y: i32) -> i32 {
+    pub fn draw_own(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        s: &str,
+        x: i32,
+        y: i32,
+    ) -> i32 {
         self.render(reg, fb, s, x, y, None)
     }
 
-    fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
-              x: i32, y: i32, colour: Option<u8>) -> i32 {
+    fn render(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        s: &str,
+        x: i32,
+        y: i32,
+        colour: Option<u8>,
+    ) -> i32 {
         let mut cx = x;
         for c in s.chars() {
             if c == ' ' {
                 cx += self.space_width;
                 continue;
             }
-            let Some(g) = self.glyph.get(&c).copied() else { continue };
-            let Some(rect) = reg.sheet(&self.sheet).and_then(|r| r.value.frames.get(g).copied())
-            else { continue };
-            let Ok(img) = reg.image(&self.sheet) else { continue };
+            let Some(g) = self.glyph.get(&c).copied() else {
+                continue;
+            };
+            let Some(rect) = reg
+                .sheet(&self.sheet)
+                .and_then(|r| r.value.frames.get(g).copied())
+            else {
+                continue;
+            };
+            let Ok(img) = reg.image(&self.sheet) else {
+                continue;
+            };
 
             let (w, h) = (rect.w as usize, rect.h as usize);
             let mut px = vec![0u8; w * h];
@@ -124,8 +158,14 @@ impl Font {
         cx - x
     }
 
-    pub fn draw_centred(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str,
-                        y: i32, colour: u8) {
+    pub fn draw_centred(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        s: &str,
+        y: i32,
+        colour: u8,
+    ) {
         let w = self.width(reg, s);
         self.draw(reg, fb, s, (henge_core::SCREEN_W as i32 - w) / 2, y, colour);
     }
@@ -145,5 +185,7 @@ pub fn load(reg: &Registry) -> BTreeMap<String, Font> {
         Ok(d) => d,
         Err(_) => return BTreeMap::new(),
     };
-    defs.iter().map(|(k, d)| (k.clone(), Font::new(d))).collect()
+    defs.iter()
+        .map(|(k, d)| (k.clone(), Font::new(d)))
+        .collect()
 }

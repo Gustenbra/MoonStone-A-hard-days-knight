@@ -202,12 +202,12 @@ impl Voice {
             return Voice::Percussion;
         }
         match program {
-            0..=31 => Voice::Plucked,      // piano, chromatic percussion, organ, guitar
+            0..=31 => Voice::Plucked, // piano, chromatic percussion, organ, guitar
             32..=39 => Voice::Bass,
-            40..=55 => Voice::Sustained,   // strings and ensembles
-            56..=87 => Voice::Reed,        // brass, reed, pipe, lead
-            88..=103 => Voice::Sustained,  // pads and effects
-            _ => Voice::Plucked,           // ethnic, percussive, sound effects
+            40..=55 => Voice::Sustained,  // strings and ensembles
+            56..=87 => Voice::Reed,       // brass, reed, pipe, lead
+            88..=103 => Voice::Sustained, // pads and effects
+            _ => Voice::Plucked,          // ethnic, percussive, sound effects
         }
     }
 
@@ -244,7 +244,9 @@ fn wavetable(voice: Voice) -> Vec<f32> {
     // Harmonic amplitudes. A saw is 1/k, a square is 1/k over odd k only, and
     // a bass is most of the way to a sine.
     let harmonics: Vec<f32> = match voice {
-        Voice::Bass => (1..=4).map(|k| if k == 1 { 1.0 } else { 0.12 / k as f32 }).collect(),
+        Voice::Bass => (1..=4)
+            .map(|k| if k == 1 { 1.0 } else { 0.12 / k as f32 })
+            .collect(),
         Voice::Plucked => (1..=12).map(|k| 1.0 / k as f32).collect(),
         Voice::Sustained => (1..=10).map(|k| 1.0 / k as f32).collect(),
         Voice::Reed => (1..=11)
@@ -298,7 +300,11 @@ pub fn render_at(score: &Score, rate: u32) -> Vec<i16> {
     }
     let mut buf = vec![0f32; total];
     let tables: Vec<Vec<f32>> = [
-        Voice::Plucked, Voice::Bass, Voice::Sustained, Voice::Reed, Voice::Percussion,
+        Voice::Plucked,
+        Voice::Bass,
+        Voice::Sustained,
+        Voice::Reed,
+        Voice::Percussion,
     ]
     .iter()
     .map(|v| wavetable(*v))
@@ -323,7 +329,10 @@ pub fn render_at(score: &Score, rate: u32) -> Vec<i16> {
         let step = n.hz() / rate as f32 * TABLE as f32;
         let table = &tables[table_of(voice)];
         let mut phase = 0f32;
-        let (a, d) = ((attack * rate as f32) as usize, (decay * rate as f32) as usize);
+        let (a, d) = (
+            (attack * rate as f32) as usize,
+            (decay * rate as f32) as usize,
+        );
 
         for i in 0..held + tail {
             let env = if i < a {
@@ -392,8 +401,7 @@ fn program_at(score: &Score, channel: u8, tick: u32) -> u8 {
     score
         .programs
         .iter()
-        .filter(|p| p.1 == channel && p.0 <= tick)
-        .next_back()
+        .rfind(|p| p.1 == channel && p.0 <= tick)
         .map_or(0, |p| p.2)
 }
 
@@ -513,7 +521,11 @@ mod tests {
             ..Default::default()
         };
         let pcm = render(&s);
-        let head: i32 = pcm[..200].iter().map(|v| (*v as i32).abs()).max().unwrap_or(0);
+        let head: i32 = pcm[..200]
+            .iter()
+            .map(|v| (*v as i32).abs())
+            .max()
+            .unwrap_or(0);
         assert!(head > 100, "the wrapped tail did not land at the start");
     }
 
@@ -569,10 +581,19 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let peak = |s: &Score| render(s).iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
+        let peak = |s: &Score| {
+            render(s)
+                .iter()
+                .map(|v| v.unsigned_abs())
+                .max()
+                .unwrap_or(0)
+        };
         let (q, l) = (peak(&chord(56)), peak(&chord(120)));
         assert!(q > 15_000 && l > 15_000, "quiet {q}, loud {l}");
-        assert!(q.max(l) as f32 / (q.min(l) as f32) < 1.1, "quiet {q}, loud {l}");
+        assert!(
+            q.max(l) as f32 / (q.min(l) as f32) < 1.1,
+            "quiet {q}, loud {l}"
+        );
         // And neither of them anywhere near the top of the scale.
         assert!(q.max(l) < 28_000, "levelled to {}", q.max(l));
     }
@@ -583,13 +604,20 @@ mod tests {
         // almost silence rather than being pulled up to full scale.
         let mut faint = one(60, 0, 200);
         faint.notes[0].4 = 3;
-        let peak = render(&faint).iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
+        let peak = render(&faint)
+            .iter()
+            .map(|v| v.unsigned_abs())
+            .max()
+            .unwrap_or(0);
         assert!(peak < 4_000, "a whisper came out at {peak}");
     }
 
     #[test]
     fn an_empty_tune_renders_to_its_own_length_of_silence() {
-        let s = Score { loop_ticks: 55, ..Default::default() };
+        let s = Score {
+            loop_ticks: 55,
+            ..Default::default()
+        };
         let pcm = render(&s);
         assert!(!pcm.is_empty());
         assert!(pcm.iter().all(|v| *v == 0));

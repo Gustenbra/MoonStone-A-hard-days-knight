@@ -76,8 +76,13 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Phase; 5] =
-        [Phase::Full, Phase::Gibbous, Phase::Half, Phase::Crescent, Phase::New];
+    pub const ALL: [Phase; 5] = [
+        Phase::Full,
+        Phase::Gibbous,
+        Phase::Half,
+        Phase::Crescent,
+        Phase::New,
+    ];
 
     /// The cel of `KI.CEL` that draws this phase, which is also the value the
     /// original stores and compares.
@@ -273,8 +278,12 @@ pub enum Moonstone {
 }
 
 impl Moonstone {
-    pub const ALL: [Moonstone; 4] =
-        [Moonstone::New, Moonstone::Full, Moonstone::Half, Moonstone::Gibbous];
+    pub const ALL: [Moonstone; 4] = [
+        Moonstone::New,
+        Moonstone::Full,
+        Moonstone::Half,
+        Moonstone::Gibbous,
+    ];
 
     pub fn bit(self) -> u8 {
         match self {
@@ -362,7 +371,10 @@ mod tests {
     #[test]
     fn every_night_a_moonstone_wants_comes_round() {
         for stone in Moonstone::ALL {
-            assert!(CYCLE.contains(&stone.phase()), "{stone:?} waits for a moon that never rises");
+            assert!(
+                CYCLE.contains(&stone.phase()),
+                "{stone:?} waits for a moon that never rises"
+            );
         }
         assert_eq!(CYCLE.iter().filter(|p| **p == Phase::Full).count(), 1);
         assert_eq!(CYCLE.iter().filter(|p| **p == Phase::New).count(), 1);

@@ -40,7 +40,11 @@ impl Library {
 
         let mut index = HashMap::new();
         for p in files {
-            let key = p.file_name().unwrap_or_default().to_string_lossy().to_uppercase();
+            let key = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_uppercase();
             index.entry(key).or_insert(p);
         }
         anyhow::ensure!(
@@ -86,7 +90,10 @@ impl Library {
         let mut v: Vec<String> = self
             .index
             .keys()
-            .filter(|n| exts.iter().any(|e| n.ends_with(&format!(".{}", e.to_uppercase()))))
+            .filter(|n| {
+                exts.iter()
+                    .any(|e| n.ends_with(&format!(".{}", e.to_uppercase())))
+            })
             .cloned()
             .collect();
         v.sort();

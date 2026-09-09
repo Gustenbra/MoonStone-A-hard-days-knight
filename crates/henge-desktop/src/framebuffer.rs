@@ -17,7 +17,10 @@ pub struct Framebuffer {
 
 impl Default for Framebuffer {
     fn default() -> Self {
-        Framebuffer { pixels: vec![0; SCREEN_W * SCREEN_H], palette: [0; 32] }
+        Framebuffer {
+            pixels: vec![0; SCREEN_W * SCREEN_H],
+            palette: [0; 32],
+        }
     }
 }
 
@@ -69,7 +72,11 @@ impl Framebuffer {
             let row = sy * sw;
             let drow = dy as usize * SCREEN_W;
             for sx in 0..sw {
-                let dx = if flip { x + (sw - 1 - sx) as i32 } else { x + sx as i32 };
+                let dx = if flip {
+                    x + (sw - 1 - sx) as i32
+                } else {
+                    x + sx as i32
+                };
                 if dx < 0 || dx >= SCREEN_W as i32 {
                     continue;
                 }
@@ -83,9 +90,13 @@ impl Framebuffer {
 
     pub fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, index: u8) {
         for yy in y..y + h {
-            if yy < 0 || yy >= SCREEN_H as i32 { continue; }
+            if yy < 0 || yy >= SCREEN_H as i32 {
+                continue;
+            }
             for xx in x..x + w {
-                if xx < 0 || xx >= SCREEN_W as i32 { continue; }
+                if xx < 0 || xx >= SCREEN_W as i32 {
+                    continue;
+                }
                 self.pixels[yy as usize * SCREEN_W + xx as usize] = index;
             }
         }
@@ -111,7 +122,10 @@ impl Framebuffer {
         if x < 0 || y < 0 || x >= vw as i64 || y >= vh as i64 {
             return None;
         }
-        Some(((x as usize * SCREEN_W / vw) as i32, (y as usize * SCREEN_H / vh) as i32))
+        Some((
+            (x as usize * SCREEN_W / vw) as i32,
+            (y as usize * SCREEN_H / vh) as i32,
+        ))
     }
 
     pub fn present_into(&self, dst: &mut [u32], dw: usize, dh: usize, palette: &[u32; 32]) {

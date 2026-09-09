@@ -70,8 +70,13 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 5] =
-        [Action::Up, Action::Down, Action::Left, Action::Right, Action::Fire];
+    pub const ALL: [Action; 5] = [
+        Action::Up,
+        Action::Down,
+        Action::Left,
+        Action::Right,
+        Action::Fire,
+    ];
 
     /// The bit this action sets in the original's word.
     pub fn bit(self) -> u8 {
@@ -106,7 +111,10 @@ impl Source {
         Source::Button { name: name.into() }
     }
     pub fn axis(name: &str, positive: bool) -> Source {
-        Source::Axis { name: name.into(), positive }
+        Source::Axis {
+            name: name.into(),
+            positive,
+        }
     }
 }
 
@@ -125,7 +133,10 @@ pub struct Seat {
 
 impl Seat {
     fn of(pad: usize, rows: [(Action, Vec<Source>); 5]) -> Seat {
-        Seat { pad, actions: rows.into_iter().collect() }
+        Seat {
+            pad,
+            actions: rows.into_iter().collect(),
+        }
     }
 }
 
@@ -148,22 +159,55 @@ impl Default for Bindings {
             Seat::of(
                 pad,
                 [
-                    (Action::Up, vec![Source::key(keys[0]), Source::button("DPadUp"),
-                                      Source::axis("LeftStickY", true)]),
-                    (Action::Down, vec![Source::key(keys[1]), Source::button("DPadDown"),
-                                        Source::axis("LeftStickY", false)]),
-                    (Action::Left, vec![Source::key(keys[2]), Source::button("DPadLeft"),
-                                        Source::axis("LeftStickX", false)]),
-                    (Action::Right, vec![Source::key(keys[3]), Source::button("DPadRight"),
-                                         Source::axis("LeftStickX", true)]),
-                    (Action::Fire, vec![Source::key(keys[4]), Source::button("South"),
-                                        Source::button("East")]),
+                    (
+                        Action::Up,
+                        vec![
+                            Source::key(keys[0]),
+                            Source::button("DPadUp"),
+                            Source::axis("LeftStickY", true),
+                        ],
+                    ),
+                    (
+                        Action::Down,
+                        vec![
+                            Source::key(keys[1]),
+                            Source::button("DPadDown"),
+                            Source::axis("LeftStickY", false),
+                        ],
+                    ),
+                    (
+                        Action::Left,
+                        vec![
+                            Source::key(keys[2]),
+                            Source::button("DPadLeft"),
+                            Source::axis("LeftStickX", false),
+                        ],
+                    ),
+                    (
+                        Action::Right,
+                        vec![
+                            Source::key(keys[3]),
+                            Source::button("DPadRight"),
+                            Source::axis("LeftStickX", true),
+                        ],
+                    ),
+                    (
+                        Action::Fire,
+                        vec![
+                            Source::key(keys[4]),
+                            Source::button("South"),
+                            Source::button("East"),
+                        ],
+                    ),
                 ],
             )
         };
         Bindings {
             seats: vec![
-                pad_dirs(0, ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"]),
+                pad_dirs(
+                    0,
+                    ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"],
+                ),
                 pad_dirs(1, ["KeyW", "KeyS", "KeyA", "KeyD", "KeyF"]),
             ],
             calibration: vec![Calibration::default(), Calibration::default()],
@@ -177,15 +221,20 @@ impl Bindings {
     pub fn as_the_original_had_them() -> Bindings {
         let mut b = Bindings::default();
         let set = |seat: &mut Seat, keys: [&str; 5]| {
-            for (a, k) in Action::ALL.iter().zip(
-                [keys[0], keys[1], keys[2], keys[3], keys[4]]) {
+            for (a, k) in Action::ALL
+                .iter()
+                .zip([keys[0], keys[1], keys[2], keys[3], keys[4]])
+            {
                 let list = seat.actions.entry(*a).or_default();
                 list.retain(|s| !matches!(s, Source::Key { .. }));
                 list.insert(0, Source::key(k));
             }
         };
         // Action::ALL is up, down, left, right, fire.
-        set(&mut b.seats[0], ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"]);
+        set(
+            &mut b.seats[0],
+            ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"],
+        );
         set(&mut b.seats[1], ["KeyW", "KeyX", "KeyA", "KeyD", "Tab"]);
         b
     }
@@ -207,7 +256,9 @@ impl Bindings {
     /// on the same seat had it. Rebinding is only useful if it cannot leave two
     /// actions fighting over one key.
     pub fn bind(&mut self, seat: usize, action: Action, src: Source) {
-        let Some(s) = self.seats.get_mut(seat) else { return };
+        let Some(s) = self.seats.get_mut(seat) else {
+            return;
+        };
         for (_, list) in s.actions.iter_mut() {
             list.retain(|x| x != &src);
         }
@@ -331,7 +382,12 @@ impl Calibration {
         xmax -= ex;
         ymin += ey;
         ymax -= ey;
-        Calibration { xmin, xmax, ymin, ymax }
+        Calibration {
+            xmin,
+            xmax,
+            ymin,
+            ymax,
+        }
     }
 
     /// One axis of a modern pad, as -1.0 to 1.0, on the counts' own scale.
@@ -472,14 +528,22 @@ impl Pads {
     #[cfg(feature = "gamepad")]
     pub fn open() -> Pads {
         match gilrs::Gilrs::new() {
-            Ok(g) => Pads { inner: Some(g), note: None },
-            Err(e) => Pads { inner: None, note: Some(format!("no gamepads: {e}")) },
+            Ok(g) => Pads {
+                inner: Some(g),
+                note: None,
+            },
+            Err(e) => Pads {
+                inner: None,
+                note: Some(format!("no gamepads: {e}")),
+            },
         }
     }
 
     #[cfg(not(feature = "gamepad"))]
     pub fn open() -> Pads {
-        Pads { note: Some("built without gamepad support".into()) }
+        Pads {
+            note: Some("built without gamepad support".into()),
+        }
     }
 
     /// Drains the event queue, which is how the library learns a pad was
@@ -510,8 +574,12 @@ impl Pads {
     #[cfg(feature = "gamepad")]
     pub fn word(&self, seat: &Seat, cal: &Calibration) -> u8 {
         use gilrs::{Axis, Button};
-        let Some(g) = self.inner.as_ref() else { return 0 };
-        let Some((_, pad)) = g.gamepads().nth(seat.pad) else { return 0 };
+        let Some(g) = self.inner.as_ref() else {
+            return 0;
+        };
+        let Some((_, pad)) = g.gamepads().nth(seat.pad) else {
+            return 0;
+        };
         // The stick, read the way `JOY0` reads one. gilrs points Y up and the
         // gameport counts down the screen, so the axis is negated to put the
         // two on the same footing.
@@ -521,8 +589,9 @@ impl Pads {
         for (action, sources) in &seat.actions {
             for s in sources {
                 let on = match s {
-                    Source::Button { name } => button_named(name)
-                        .is_some_and(|b: Button| pad.is_pressed(b)),
+                    Source::Button { name } => {
+                        button_named(name).is_some_and(|b: Button| pad.is_pressed(b))
+                    }
                     Source::Axis { name, positive } => axis_named(name).is_some_and(|a: Axis| {
                         let v = pad.value(a);
                         let c = Calibration::from_axis(if *positive { -v } else { v });
@@ -610,7 +679,10 @@ mod tests {
 
     #[test]
     fn the_word_is_the_originals_five_bits() {
-        assert_eq!((RIGHT, LEFT, DOWN, UP, FIRE), (0x01, 0x02, 0x04, 0x08, 0x10));
+        assert_eq!(
+            (RIGHT, LEFT, DOWN, UP, FIRE),
+            (0x01, 0x02, 0x04, 0x08, 0x10)
+        );
         assert_eq!(Action::Up.bit() | Action::Fire.bit(), 0x18);
     }
 
@@ -739,7 +811,10 @@ mod tests {
         b.bind(0, Action::Fire, Source::key("ArrowUp"));
         assert!(!b.seats[0].actions[&Action::Up].contains(&Source::key("ArrowUp")));
         assert!(b.seats[0].actions[&Action::Fire].contains(&Source::key("ArrowUp")));
-        assert_eq!(b.raised_by(&Source::key("ArrowUp")), vec![(0, Action::Fire)]);
+        assert_eq!(
+            b.raised_by(&Source::key("ArrowUp")),
+            vec![(0, Action::Fire)]
+        );
         // The other seat is a different set of controls and is left alone.
         assert!(b.seats[1].actions[&Action::Up].contains(&Source::key("KeyW")));
     }
@@ -764,7 +839,10 @@ mod tests {
         let back: Bindings = serde_json::from_str(&text).expect("bindings deserialise");
         assert_eq!(back.calibration(1), b.calibration(1));
         assert!(back.seats[1].actions[&Action::Fire].contains(&Source::button("North")));
-        assert_eq!(back.seats[0].actions[&Action::Left], b.seats[0].actions[&Action::Left]);
+        assert_eq!(
+            back.seats[0].actions[&Action::Left],
+            b.seats[0].actions[&Action::Left]
+        );
     }
 
     #[test]
@@ -803,10 +881,14 @@ mod tests {
         // Fire not pressed: nothing moves on, however far the stick is pushed.
         c = c.step((30, 40), false).expect("still asking");
         assert_eq!(c, Calibrating::TopLeft);
-        c = c.step((30, 40), true).expect("now asking for the other corner");
+        c = c
+            .step((30, 40), true)
+            .expect("now asking for the other corner");
         assert_eq!(c.prompt()[1], "the bottom right");
         c = c.step((910, 880), false).expect("still asking");
-        let done = c.step((910, 880), true).expect_err("that was the second answer");
+        let done = c
+            .step((910, 880), true)
+            .expect_err("that was the second answer");
         assert_eq!(done, Calibration::from_corners((30, 40), (910, 880)));
         // And that is the calibration `AdjustJoy` would have produced.
         assert_eq!((done.xmin, done.xmax), (30 + 110, 910 - 110));
@@ -817,7 +899,15 @@ mod tests {
         // Drive it the way a player would, through the debounce.
         let mut d = Debounce::default();
         let mut c = Ok(Calibrating::TopLeft);
-        let script = [(0, 0), (0, 0), (60, 70), (60, 70), (500, 500), (940, 930), (940, 930)];
+        let script = [
+            (0, 0),
+            (0, 0),
+            (60, 70),
+            (60, 70),
+            (500, 500),
+            (940, 930),
+            (940, 930),
+        ];
         let fires = [false, true, true, false, false, false, true];
         for (raw, held) in script.into_iter().zip(fires) {
             let edge = d.edge(if held { FIRE } else { 0 });
@@ -840,7 +930,10 @@ mod tests {
         let mut pads = Pads::open();
         pads.poll();
         let b = Bindings::default();
-        let far = Seat { pad: 99, ..Default::default() };
+        let far = Seat {
+            pad: 99,
+            ..Default::default()
+        };
         assert_eq!(pads.word(&far, &b.calibration(0)), 0);
         assert!(pads.raw(99).is_none());
     }

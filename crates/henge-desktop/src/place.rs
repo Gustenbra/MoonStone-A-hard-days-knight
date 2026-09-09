@@ -62,9 +62,16 @@ impl PlaceScene {
         let img = reg.image(&def.scene)?;
         anyhow::ensure!(
             img.width == SCREEN_W && img.height == SCREEN_H,
-            "{} is {}x{}, expected a full screen", def.scene, img.width, img.height
+            "{} is {}x{}, expected a full screen",
+            def.scene,
+            img.width,
+            img.height
         );
-        Ok(PlaceScene { visit: Visit::open_at(place, def), palette, pixels: img.pixels.clone() })
+        Ok(PlaceScene {
+            visit: Visit::open_at(place, def),
+            palette,
+            pixels: img.pixels.clone(),
+        })
     }
 
     /// The colour the backdrop uses most inside a box, and what to write on it.
@@ -94,12 +101,21 @@ impl PlaceScene {
         let faint = (0..32)
             .min_by_key(|i| (luma(fb.palette[*i]) - midpoint).abs())
             .unwrap_or(0);
-        Ink { ground, text: text as u8, faint: faint as u8 }
+        Ink {
+            ground,
+            text: text as u8,
+            faint: faint as u8,
+        }
     }
 
     pub fn render(
-        &self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef,
-        font: Option<&Font>, run: &Run, items: &Items,
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        def: &PlaceDef,
+        font: Option<&Font>,
+        run: &Run,
+        items: &Items,
     ) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
@@ -127,7 +143,9 @@ impl PlaceScene {
         const AT: [(i32, i32); 3] = [(115, 15), (49, 38), (75, 88)];
         let Some(dice) = self.visit.dice else { return };
         for (n, (x, y)) in AT.iter().enumerate() {
-            let Some(face) = dice.get(n).copied() else { continue };
+            let Some(face) = dice.get(n).copied() else {
+                continue;
+            };
             crate::sprite::draw(reg, fb, DICE_SHEET, face as usize, *x, *y, false);
         }
     }
@@ -158,8 +176,15 @@ impl PlaceScene {
         }
     }
 
-    fn draw_menu(&self, reg: &mut Registry, fb: &mut Framebuffer, def: &PlaceDef,
-                 font: &Font, run: &Run, items: &Items) {
+    fn draw_menu(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        def: &PlaceDef,
+        font: &Font,
+        run: &Run,
+        items: &Items,
+    ) {
         let [x, y, w, h] = def.menu;
         let ink = self.ink_for(fb, x, y, w, h);
         fb.rect(x, y, w, h, ink.ground);
@@ -222,8 +247,12 @@ impl PlaceScene {
     fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer, font: &Font, run: &Run) {
         let (mut dark, mut light) = (0usize, 0usize);
         for i in 1..32 {
-            if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
-            if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
+            if luma(fb.palette[i]) < luma(fb.palette[dark]) {
+                dark = i;
+            }
+            if luma(fb.palette[i]) > luma(fb.palette[light]) {
+                light = i;
+            }
         }
         fb.rect(0, 188, 320, 12, dark as u8);
         let left = format!("Day {}", run.day);
@@ -236,7 +265,14 @@ impl PlaceScene {
         // on the screen you buy things on.
         let purse = format!("{} gold", run.gold);
         let pw = font.width(reg, &purse);
-        font.draw(reg, fb, &purse, (SCREEN_W as i32 - pw) / 2, 191, light as u8);
+        font.draw(
+            reg,
+            fb,
+            &purse,
+            (SCREEN_W as i32 - pw) / 2,
+            191,
+            light as u8,
+        );
     }
 }
 
@@ -261,7 +297,11 @@ fn wrap(reg: &Registry, font: &Font, text: &str, width: i32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
         if font.width(reg, &candidate) <= width || line.is_empty() {
             line = candidate;
         } else {
@@ -285,5 +325,11 @@ pub fn describe(def: &PlaceDef, visit: &Visit, items: &Items) -> String {
         .selected(def)
         .and_then(|c| c.effect.cost(items))
         .map_or(String::new(), |p| format!(" [{p}]"));
-    format!("{:<12} > {}{}{}", def.name, label, price, if shut { " (shut)" } else { "" })
+    format!(
+        "{:<12} > {}{}{}",
+        def.name,
+        label,
+        price,
+        if shut { " (shut)" } else { "" }
+    )
 }

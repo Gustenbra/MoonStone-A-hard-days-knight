@@ -123,7 +123,7 @@ pub struct Arrivals(pub i32);
 impl Arrivals {
     /// One arrival: step the counter as `AddKnight` does, and say which of the
     /// three standing places this one takes, in quarters.
-    pub fn next(&mut self) -> i32 {
+    pub fn next_place(&mut self) -> i32 {
         loop {
             self.0 = (self.0 + 1) & 3;
             if self.0 != 0 {
@@ -328,7 +328,12 @@ impl Field {
             // the original's, and both are all but always true, which is why a
             // fighter on the ground is never stopped sideways by the tree line
             // that runs across the whole screen.
-            if overlaps(limit::BAND_TOP, b.bottom, step.box_bottom, step.box_bottom + 1) {
+            if overlaps(
+                limit::BAND_TOP,
+                b.bottom,
+                step.box_bottom,
+                step.box_bottom + 1,
+            ) {
                 if step.facing < 0 {
                     if br >= step.box_left {
                         ok &= !dir::LEFT;
@@ -380,12 +385,26 @@ mod tests {
 
     /// `FO1.T`: one rectangle across the whole screen, the tree line at 119.
     fn fo1() -> Field {
-        Field::new(vec![Border { left: 0, right: 319, bottom: 119, top: 10 }])
+        Field::new(vec![Border {
+            left: 0,
+            right: 319,
+            bottom: 119,
+            top: 10,
+        }])
     }
 
     /// A knight, whose body box is eighteen wide and stands on his feet.
     fn knight_step(x: i32, y: i32, facing: i32, dx: i32, dy: i32) -> Step {
-        Step { x, y, facing, dx, dy, box_left: x - 9, box_right: x + 9, box_bottom: y }
+        Step {
+            x,
+            y,
+            facing,
+            dx,
+            dy,
+            box_left: x - 9,
+            box_right: x + 9,
+            box_bottom: y,
+        }
     }
 
     #[test]
@@ -457,8 +476,18 @@ mod tests {
     #[test]
     fn a_second_rectangle_bites_only_in_its_own_columns() {
         let f = Field::new(vec![
-            Border { left: 0, right: 319, bottom: 91, top: 10 },
-            Border { left: 66, right: 164, bottom: 103, top: 10 },
+            Border {
+                left: 0,
+                right: 319,
+                bottom: 91,
+                top: 10,
+            },
+            Border {
+                left: 66,
+                right: 164,
+                bottom: 103,
+                top: 10,
+            },
         ]);
         // Out on the right, on ground only the tree line covers: free, and
         // free to walk up as far as row 97.
@@ -478,7 +507,12 @@ mod tests {
     /// inside the rectangle's own band. Nothing on the ground ever is.
     #[test]
     fn a_rectangle_refuses_the_step_that_would_carry_a_box_further_into_it() {
-        let f = Field::new(vec![Border { left: 66, right: 164, bottom: 103, top: 10 }]);
+        let f = Field::new(vec![Border {
+            left: 66,
+            right: 164,
+            bottom: 103,
+            top: 10,
+        }]);
         // Standing in the canopy at the deeper rectangle's left edge, walking
         // left, box bottom inside the band 30..103.
         let mut s = knight_step(70, 80, -1, -2, 0);
@@ -509,7 +543,7 @@ mod tests {
     #[test]
     fn add_knight_rotates_three_quarters_one_quarter_one_half_and_never_rests_on_zero() {
         let mut a = Arrivals::default();
-        let picked: Vec<i32> = (0..7).map(|_| a.next()).collect();
+        let picked: Vec<i32> = (0..7).map(|_| a.next_place()).collect();
         assert_eq!(picked, vec![3, 1, 2, 3, 1, 2, 3]);
         // `and [AddCNT], 3` then `je AddKnight`: the counter itself is only
         // ever 1, 2 or 3, so no arrival keeps the depth it was built with.
@@ -519,14 +553,24 @@ mod tests {
     #[test]
     fn the_demon_narrows_the_list_rather_than_adding_to_it() {
         let mut f = fo1();
-        f.narrow_to(Border { left: 0, right: 309, bottom: 99, top: 10 });
+        f.narrow_to(Border {
+            left: 0,
+            right: 309,
+            bottom: 99,
+            top: 10,
+        });
         assert_eq!(f.borders.len(), 1);
         assert_eq!(f.floor(), 99);
     }
 
     #[test]
     fn clamping_keeps_actors_inside_the_walkable_band() {
-        let b = Bounds { left: 0, right: 319, top: 10, bottom: 114 };
+        let b = Bounds {
+            left: 0,
+            right: 319,
+            top: 10,
+            bottom: 114,
+        };
         assert_eq!(b.clamp(-40, 200), (0, 114));
         assert_eq!(b.clamp(400, 0), (319, 10));
         assert!(b.contains(160, 60));
@@ -535,7 +579,12 @@ mod tests {
 
     #[test]
     fn inverted_bounds_do_not_panic() {
-        let b = Bounds { left: 35584, right: 0, top: 0, bottom: 0 };
+        let b = Bounds {
+            left: 35584,
+            right: 0,
+            top: 0,
+            bottom: 0,
+        };
         assert_eq!(b.clamp(100, 100), (100, 0));
         assert!(!b.is_sane());
     }
@@ -546,10 +595,25 @@ mod tests {
             name: "t".into(),
             backdrop: "b".into(),
             sheets: vec![],
-            borders: vec![Border { left: 0, right: 319, bottom: 114, top: 10 }],
+            borders: vec![Border {
+                left: 0,
+                right: 319,
+                bottom: 114,
+                top: 10,
+            }],
             props: vec![
-                Prop { sheet: 0, cell: 0, x: 0, y: 90 },
-                Prop { sheet: 0, cell: 1, x: 0, y: 30 },
+                Prop {
+                    sheet: 0,
+                    cell: 0,
+                    x: 0,
+                    y: 90,
+                },
+                Prop {
+                    sheet: 0,
+                    cell: 1,
+                    x: 0,
+                    y: 30,
+                },
             ],
         };
         assert_eq!(a.draw_order(), vec![1, 0]);

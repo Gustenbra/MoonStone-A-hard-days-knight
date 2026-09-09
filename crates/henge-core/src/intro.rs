@@ -98,10 +98,18 @@ pub struct Spawn {
 }
 
 const fn r(script: &'static str, at: u32) -> Spawn {
-    Spawn { script, at, left: false }
+    Spawn {
+        script,
+        at,
+        left: false,
+    }
 }
 const fn lf(script: &'static str, at: u32) -> Spawn {
-    Spawn { script, at, left: true }
+    Spawn {
+        script,
+        at,
+        left: true,
+    }
 }
 
 /// Where a task starts. `0x1ef` and `0x207` differ only in x and facing.
@@ -153,6 +161,8 @@ pub const PRESENTS: &[Line] = &[l("MINDSCAPE PRESENTS", 20), l("copyright 1992",
 
 /// The seven credit screens, in the order the table at `DS:0x152` steps
 /// through them, one per file the opening loads.
+// Hand-aligned: one credit screen per line.
+#[rustfmt::skip]
 pub const CREDITS: [&[Line]; 7] = [
     &[l("conversion by", 85), l("Images Software Ltd", 105)],
     &[l("created by", 85), l("Rob Anderson", 105)],
@@ -270,6 +280,10 @@ pub const MESSAGE_TICKS: u32 = 360;
 /// then the story card. Which plate a scene shows is which of the eight screen
 /// slots it hands to the blitter, and the three `CopyPals3` does at `0x0095`
 /// are what moves `bg4`, `bg5a` and `bg3` into the slots the pan was using.
+// Hand-aligned: one scene per line where it fits, so the seven identical credit
+// steps read as seven rows differing only in which card they carry, and a scene's
+// cast is grouped the way the original's own tables group it.
+#[rustfmt::skip]
 pub const STEPS: &[Step] = &[
     // The publisher's logo, its own screen, before anything else is loaded.
     Step { back: Backdrop::Logo, wordmark: false, lines: NO_LINES, cast: NO_CAST, frames: 0 },
@@ -523,7 +537,12 @@ mod tests {
         assert_eq!(
             plates,
             vec![
-                "scene.bg2", "scene.bg3", "scene.bg4", "scene.bg5a", "scene.bg2a", "scene.bg3",
+                "scene.bg2",
+                "scene.bg3",
+                "scene.bg4",
+                "scene.bg5a",
+                "scene.bg2a",
+                "scene.bg3",
                 "scene.bg5a"
             ]
         );
@@ -583,9 +602,9 @@ mod tests {
     #[test]
     fn every_step_walks_forward_one_at_a_time() {
         let mut i = Intro::new();
-        for n in 0..STEPS.len() {
+        for (n, step) in STEPS.iter().enumerate() {
             assert_eq!(i.card, n);
-            assert_eq!(i.showing().map(|s| s.back), Some(STEPS[n].back));
+            assert_eq!(i.showing().map(|s| s.back), Some(step.back));
             i.next();
         }
         assert!(i.done);

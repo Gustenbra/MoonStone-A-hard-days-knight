@@ -80,7 +80,10 @@ pub struct Pc {
 
 impl Pc {
     pub fn start(script: impl Into<String>) -> Pc {
-        Pc { script: script.into(), at: 0 }
+        Pc {
+            script: script.into(),
+            at: 0,
+        }
     }
 
     pub fn is_unset(&self) -> bool {
@@ -141,7 +144,9 @@ pub enum End {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Instr {
     Part(Part),
-    EndFrame { end: End },
+    EndFrame {
+        end: End,
+    },
     /// `0xfd`: resume where `TASKJUMP` left off. No shipped script contains one
     /// as an opcode; it is here so the machine is complete.
     ResumeJump,
@@ -149,12 +154,19 @@ pub enum Instr {
     ResumeLoop,
     /// `TASK_FLIP`. 0xff toggles the mirror bit, which is the only form any
     /// shipped script uses.
-    Flip { facing: u8 },
+    Flip {
+        facing: u8,
+    },
     /// `TASKGOTO`. Mode 3 jumps at once; any other mode arms the jump and takes
     /// it at the next end of frame.
-    Goto { mode: u8, target: String },
+    Goto {
+        mode: u8,
+        target: String,
+    },
     /// `TASKHOLD`. Show the following frame this many times; 0 means once.
-    Hold { count: u8 },
+    Hold {
+        count: u8,
+    },
     /// `TASKJUMP`. Ballistic motion for a number of ticks. One script in the
     /// whole game uses it.
     Jump {
@@ -167,34 +179,68 @@ pub enum Instr {
         x_limit: u8,
     },
     /// `TASKLOOP`. Repeat up to the next `ff fe` this many times.
-    Loop { count: u8 },
+    Loop {
+        count: u8,
+    },
     /// `TASKSKIP`. Branch in bloodless mode.
-    Skip { target: String },
+    Skip {
+        target: String,
+    },
     /// `TASKTIME`. The handler is a bare `RET` that does not advance the script
     /// pointer, so the original would spin on it. No script emits one.
     Time,
-    Sound { sample: u8 },
+    Sound {
+        sample: u8,
+    },
     /// `TASKMOVE`. With bit 0x40 the position is set outright; otherwise each
     /// axis is added, with the signs the handler applies.
-    Move { flags: u8, x: i16, y: i16, z: i16 },
+    Move {
+        flags: u8,
+        x: i16,
+        y: i16,
+        z: i16,
+    },
     /// `TASKSHADOW`. An empty target is the "off" form.
-    Shadow { on: bool, script: String },
+    Shadow {
+        on: bool,
+        script: String,
+    },
     /// `TASKSAVE`. Stores into the actor record; mode bit 0 stores a byte.
-    Save { mode: u8, field: i16, value: u16 },
+    Save {
+        mode: u8,
+        field: i16,
+        value: u16,
+    },
     /// `TASKGOSUB`. A near call into the game's own code, which is why this is
     /// an effect and not an operation.
-    Gosub { routine: String },
+    Gosub {
+        routine: String,
+    },
     /// `TASKDEAD`. Branch when the actor's hit points are not above zero.
-    Dead { target: String },
+    Dead {
+        target: String,
+    },
     /// `TASKADDTASK`. Spawn a second task on that script.
-    AddTask { target: String },
+    AddTask {
+        target: String,
+    },
     KillTask,
     /// `TASKCELBUF`. Choose which of the four bank tables the parts index.
-    CelBuf { table: u8 },
+    CelBuf {
+        table: u8,
+    },
     /// `TASKTESTEQ`. Branch if the field is zero; mode bit 0 tests a byte.
-    TestEq { mode: u8, field: i16, target: String },
+    TestEq {
+        mode: u8,
+        field: i16,
+        target: String,
+    },
     /// `TASKTESTNE`. Branch if the field is non-zero. No shipped script uses it.
-    TestNe { mode: u8, field: i16, target: String },
+    TestNe {
+        mode: u8,
+        field: i16,
+        target: String,
+    },
     /// `TASKANIMCLR`. Zero the VM state, keeping the shadow.
     AnimClr,
 }
@@ -282,7 +328,15 @@ pub fn place(part: &Part, bank: &Bank, task: (i32, i32, i32), mirror: bool) -> O
     } else {
         tx + part.x as i32
     };
-    Some(Placed { frame, w, h, x, y: ty + tz + part.y as i32, flags: part.flags, mirror })
+    Some(Placed {
+        frame,
+        w,
+        h,
+        x,
+        y: ty + tz + part.y as i32,
+        flags: part.flags,
+        mirror,
+    })
 }
 
 // -------------------------------------------------------------------- effects
@@ -602,7 +656,9 @@ impl Task {
             budget -= 1;
 
             let Some(script) = set.get(&self.pc.script) else {
-                frame.effects.push(Effect::MissingScript { name: self.pc.script.clone() });
+                frame.effects.push(Effect::MissingScript {
+                    name: self.pc.script.clone(),
+                });
                 frame.stalled = true;
                 self.active = false;
                 self.running = false;
@@ -620,7 +676,10 @@ impl Task {
             match instr.clone() {
                 Instr::Part(p) => {
                     if !(bloodless && p.is(part_flags::GATED)) {
-                        frame.parts.push(Part { table: self.table, ..p });
+                        frame.parts.push(Part {
+                            table: self.table,
+                            ..p
+                        });
                     }
                     self.pc.at += 1;
                 }
@@ -654,7 +713,15 @@ impl Task {
                     self.pc.at += 1;
                     self.vm.hold_resume = self.pc.clone();
                 }
-                Instr::Jump { arg, ticks, flags, y_speed, y_limit, x_speed, x_limit } => {
+                Instr::Jump {
+                    arg,
+                    ticks,
+                    flags,
+                    y_speed,
+                    y_limit,
+                    x_speed,
+                    x_limit,
+                } => {
                     self.vm.jump_running = true;
                     self.vm.jump_arg = arg;
                     self.vm.jump_flags = flags;
@@ -742,14 +809,22 @@ impl Task {
                     self.table = table;
                     self.pc.at += 1;
                 }
-                Instr::TestEq { mode, field, target } => {
+                Instr::TestEq {
+                    mode,
+                    field,
+                    target,
+                } => {
                     if is_zero(actor.get(field), mode) {
                         self.pc = Pc::start(target);
                     } else {
                         self.pc.at += 1;
                     }
                 }
-                Instr::TestNe { mode, field, target } => {
+                Instr::TestNe {
+                    mode,
+                    field,
+                    target,
+                } => {
                     if !is_zero(actor.get(field), mode) {
                         self.pc = Pc::start(target);
                     } else {
@@ -983,7 +1058,14 @@ mod tests {
     use super::*;
 
     fn part(cel: u8) -> Instr {
-        Instr::Part(Part { table: 1, bank: 0, cel, x: 0, y: 0, flags: 0 })
+        Instr::Part(Part {
+            table: 1,
+            bank: 0,
+            cel,
+            x: 0,
+            y: 0,
+            flags: 0,
+        })
     }
 
     fn frame_of(cel: u8) -> Vec<Instr> {
@@ -1045,10 +1127,14 @@ mod tests {
         assert_eq!(
             cels(&mut t, &s, &mut a, 8),
             vec![
-                Some(1), Some(2), // pass one
-                Some(1), Some(2), // pass two
-                Some(1), Some(2), // pass three
-                Some(9), Some(9), // out of the loop, then held
+                Some(1),
+                Some(2), // pass one
+                Some(1),
+                Some(2), // pass two
+                Some(1),
+                Some(2), // pass three
+                Some(9),
+                Some(9), // out of the loop, then held
             ]
         );
         assert!(!t.running, "the animation ended");
@@ -1084,7 +1170,10 @@ mod tests {
             (
                 "a",
                 vec![
-                    Instr::Goto { mode: 0, target: "b".into() },
+                    Instr::Goto {
+                        mode: 0,
+                        target: "b".into(),
+                    },
                     part(1),
                     Instr::EndFrame { end: End::Stop },
                 ],
@@ -1103,7 +1192,13 @@ mod tests {
         let s = set(&[
             (
                 "a",
-                vec![part(1), Instr::Goto { mode: 3, target: "b".into() }],
+                vec![
+                    part(1),
+                    Instr::Goto {
+                        mode: 3,
+                        target: "b".into(),
+                    },
+                ],
             ),
             ("b", frame_of(7)),
         ]);
@@ -1122,7 +1217,9 @@ mod tests {
             (
                 "hurt",
                 vec![
-                    Instr::Dead { target: "death".into() },
+                    Instr::Dead {
+                        target: "death".into(),
+                    },
                     part(1),
                     Instr::EndFrame { end: End::Stop },
                 ],
@@ -1135,7 +1232,11 @@ mod tests {
 
         let mut dead = Task::new("hurt", 0, 0, FACING_RIGHT);
         let mut d = TaskActor::with_health(0);
-        assert_eq!(dead.step(&s, &mut d, false).parts[0].cel, 9, "zero counts as dead");
+        assert_eq!(
+            dead.step(&s, &mut d, false).parts[0].cel,
+            9,
+            "zero counts as dead"
+        );
         d.set_health(-5);
         let mut below = Task::new("hurt", 0, 0, FACING_RIGHT);
         assert_eq!(below.step(&s, &mut d, false).parts[0].cel, 9);
@@ -1152,7 +1253,9 @@ mod tests {
                     Instr::Loop { count: 9 },
                     part(1),
                     Instr::EndFrame { end: End::Next },
-                    Instr::Dead { target: "death".into() },
+                    Instr::Dead {
+                        target: "death".into(),
+                    },
                     part(2),
                     Instr::EndFrame { end: End::Loop },
                 ],
@@ -1162,12 +1265,18 @@ mod tests {
         let mut t = Task::new("hurt", 0, 0, FACING_RIGHT);
         let mut a = TaskActor::with_health(10);
         t.step(&s, &mut a, false);
-        assert!(t.vm.loop_running, "the loop is armed while the knight is alive");
+        assert!(
+            t.vm.loop_running,
+            "the loop is armed while the knight is alive"
+        );
         a.set_health(0);
         let f = t.step(&s, &mut a, false);
         assert_eq!(t.pc.script, "death");
         assert_eq!(f.parts[0].cel, 9);
-        assert!(!t.vm.loop_running, "and the interrupted loop did not survive");
+        assert!(
+            !t.vm.loop_running,
+            "and the interrupted loop did not survive"
+        );
     }
 
     #[test]
@@ -1175,8 +1284,12 @@ mod tests {
         let s = set(&[(
             "a",
             vec![
-                Instr::Gosub { routine: "KnightGruntSound".into() },
-                Instr::Gosub { routine: "NoSuchRoutine".into() },
+                Instr::Gosub {
+                    routine: "KnightGruntSound".into(),
+                },
+                Instr::Gosub {
+                    routine: "NoSuchRoutine".into(),
+                },
                 part(1),
                 Instr::EndFrame { end: End::Stop },
             ],
@@ -1187,8 +1300,14 @@ mod tests {
         assert_eq!(
             f.effects,
             vec![
-                Effect::Gosub { routine: "KnightGruntSound".into(), kind: GosubKind::Sound },
-                Effect::Gosub { routine: "NoSuchRoutine".into(), kind: GosubKind::Unknown },
+                Effect::Gosub {
+                    routine: "KnightGruntSound".into(),
+                    kind: GosubKind::Sound
+                },
+                Effect::Gosub {
+                    routine: "NoSuchRoutine".into(),
+                    kind: GosubKind::Unknown
+                },
             ],
             "an unimplemented target is a recorded no-op, not a silent skip"
         );
@@ -1197,7 +1316,11 @@ mod tests {
 
     #[test]
     fn every_gosub_target_the_shipped_scripts_call_is_named() {
-        assert_eq!(GOSUB_TARGETS.len(), 41, "the 41 distinct targets in the data");
+        assert_eq!(
+            GOSUB_TARGETS.len(),
+            41,
+            "the 41 distinct targets in the data"
+        );
         let mut names: Vec<&str> = GOSUB_TARGETS.iter().map(|(n, _)| *n).collect();
         let before = names.len();
         names.sort_unstable();
@@ -1211,11 +1334,18 @@ mod tests {
     fn a_sound_is_a_cue_and_not_a_sound() {
         let s = set(&[(
             "a",
-            vec![Instr::Sound { sample: 0x0b }, part(1), Instr::EndFrame { end: End::Stop }],
+            vec![
+                Instr::Sound { sample: 0x0b },
+                part(1),
+                Instr::EndFrame { end: End::Stop },
+            ],
         )]);
         let mut t = Task::new("a", 0, 0, FACING_RIGHT);
         let mut a = TaskActor::with_health(10);
-        assert_eq!(t.step(&s, &mut a, false).effects, vec![Effect::Sound { sample: 0x0b }]);
+        assert_eq!(
+            t.step(&s, &mut a, false).effects,
+            vec![Effect::Sound { sample: 0x0b }]
+        );
     }
 
     /// Bloodless mode does two things, and this checks both: `TASKSKIP` is
@@ -1223,13 +1353,22 @@ mod tests {
     #[test]
     fn bloodless_mode_skips_and_drops() {
         let gore = Instr::Part(Part {
-            table: 1, bank: 0, cel: 5, x: 0, y: 0, flags: part_flags::GATED,
+            table: 1,
+            bank: 0,
+            cel: 5,
+            x: 0,
+            y: 0,
+            flags: part_flags::GATED,
         });
         let s = set(&[
             ("a", vec![part(1), gore, Instr::EndFrame { end: End::Stop }]),
             (
                 "b",
-                vec![Instr::Skip { target: "c".into() }, part(1), Instr::EndFrame { end: End::Stop }],
+                vec![
+                    Instr::Skip { target: "c".into() },
+                    part(1),
+                    Instr::EndFrame { end: End::Stop },
+                ],
             ),
             ("c", frame_of(9)),
         ]);
@@ -1250,7 +1389,11 @@ mod tests {
     fn flipping_toggles_the_mirror_bit_and_tells_the_actor() {
         let s = set(&[(
             "a",
-            vec![Instr::Flip { facing: 0xff }, part(1), Instr::EndFrame { end: End::Stop }],
+            vec![
+                Instr::Flip { facing: 0xff },
+                part(1),
+                Instr::EndFrame { end: End::Stop },
+            ],
         )]);
         let mut t = Task::new("a", 0, 0, FACING_RIGHT);
         let mut a = TaskActor::with_health(10);
@@ -1268,7 +1411,12 @@ mod tests {
             let s = set(&[(
                 "a",
                 vec![
-                    Instr::Move { flags, x: 10, y: 3, z: 2 },
+                    Instr::Move {
+                        flags,
+                        x: 10,
+                        y: 3,
+                        z: 2,
+                    },
                     Instr::EndFrame { end: End::Stop },
                 ],
             )]);
@@ -1276,10 +1424,26 @@ mod tests {
             t.step(&s, &mut TaskActor::with_health(10), false);
             (t.x, t.y, t.z)
         };
-        assert_eq!(run(FACING_RIGHT, 0x00).0, 90, "facing right, bit 0 clear: x -= v");
-        assert_eq!(run(FACING_RIGHT, 0x01).0, 110, "facing right, bit 0 set: x += v");
-        assert_eq!(run(FACING_LEFT, 0x00).0, 110, "facing left, bit 0 clear: x += v");
-        assert_eq!(run(FACING_LEFT, 0x01).0, 90, "facing left, bit 0 set: x -= v");
+        assert_eq!(
+            run(FACING_RIGHT, 0x00).0,
+            90,
+            "facing right, bit 0 clear: x -= v"
+        );
+        assert_eq!(
+            run(FACING_RIGHT, 0x01).0,
+            110,
+            "facing right, bit 0 set: x += v"
+        );
+        assert_eq!(
+            run(FACING_LEFT, 0x00).0,
+            110,
+            "facing left, bit 0 clear: x += v"
+        );
+        assert_eq!(
+            run(FACING_LEFT, 0x01).0,
+            90,
+            "facing left, bit 0 set: x -= v"
+        );
         assert_eq!(run(FACING_RIGHT, 0x08).1, 97, "bit 3 set: y -= v");
         assert_eq!(run(FACING_RIGHT, 0x00).1, 103, "bit 3 clear: y += v");
         assert_eq!(run(FACING_RIGHT, 0x20).2, -2, "bit 5 set: z -= v");
@@ -1288,13 +1452,22 @@ mod tests {
         let s = set(&[(
             "a",
             vec![
-                Instr::Move { flags: 0x40, x: 7, y: 8, z: 9 },
+                Instr::Move {
+                    flags: 0x40,
+                    x: 7,
+                    y: 8,
+                    z: 9,
+                },
                 Instr::EndFrame { end: End::Stop },
             ],
         )]);
         let mut t = Task::new("a", 100, 100, FACING_RIGHT);
         t.step(&s, &mut a, false);
-        assert_eq!((t.x, t.y, t.z), (7, 8, 9), "bit 0x40 sets the position outright");
+        assert_eq!(
+            (t.x, t.y, t.z),
+            (7, 8, 9),
+            "bit 0x40 sets the position outright"
+        );
     }
 
     #[test]
@@ -1313,19 +1486,33 @@ mod tests {
     fn a_missing_script_stops_the_task_rather_than_running_on() {
         let s = set(&[(
             "a",
-            vec![Instr::Goto { mode: 3, target: "gone".into() }],
+            vec![Instr::Goto {
+                mode: 3,
+                target: "gone".into(),
+            }],
         )]);
         let mut t = Task::new("a", 0, 0, FACING_RIGHT);
         let mut a = TaskActor::with_health(10);
         let f = t.step(&s, &mut a, false);
         assert!(f.stalled);
-        assert_eq!(f.effects, vec![Effect::MissingScript { name: "gone".into() }]);
+        assert_eq!(
+            f.effects,
+            vec![Effect::MissingScript {
+                name: "gone".into()
+            }]
+        );
         assert!(!t.active);
     }
 
     #[test]
     fn a_script_that_loops_forever_gives_up_instead_of_hanging() {
-        let s = set(&[("a", vec![Instr::Goto { mode: 3, target: "a".into() }])]);
+        let s = set(&[(
+            "a",
+            vec![Instr::Goto {
+                mode: 3,
+                target: "a".into(),
+            }],
+        )]);
         let mut t = Task::new("a", 0, 0, FACING_RIGHT);
         let mut a = TaskActor::with_health(10);
         assert!(t.step(&s, &mut a, false).stalled);
@@ -1341,7 +1528,10 @@ mod tests {
         assert!(f.effects.contains(&Effect::Killed));
         assert!(!t.active);
         assert_eq!(a.get(0), 0);
-        assert!(t.step(&s, &mut a, false).parts.is_empty(), "an inactive task does nothing");
+        assert!(
+            t.step(&s, &mut a, false).parts.is_empty(),
+            "an inactive task does nothing"
+        );
     }
 
     #[test]
@@ -1350,7 +1540,11 @@ mod tests {
             (
                 "w",
                 vec![
-                    Instr::TestEq { mode: 0, field: 4, target: "z".into() },
+                    Instr::TestEq {
+                        mode: 0,
+                        field: 4,
+                        target: "z".into(),
+                    },
                     part(1),
                     Instr::EndFrame { end: End::Stop },
                 ],
@@ -1358,7 +1552,11 @@ mod tests {
             (
                 "b",
                 vec![
-                    Instr::TestEq { mode: 1, field: 4, target: "z".into() },
+                    Instr::TestEq {
+                        mode: 1,
+                        field: 4,
+                        target: "z".into(),
+                    },
                     part(1),
                     Instr::EndFrame { end: End::Stop },
                 ],
@@ -1369,7 +1567,11 @@ mod tests {
         let mut a = TaskActor::default();
         a.set(4, 0x100);
         let mut w = Task::new("w", 0, 0, FACING_RIGHT);
-        assert_eq!(w.step(&s, &mut a, false).parts[0].cel, 1, "non-zero as a word");
+        assert_eq!(
+            w.step(&s, &mut a, false).parts[0].cel,
+            1,
+            "non-zero as a word"
+        );
         let mut b = Task::new("b", 0, 0, FACING_RIGHT);
         assert_eq!(b.step(&s, &mut a, false).parts[0].cel, 9, "zero as a byte");
     }
@@ -1379,7 +1581,10 @@ mod tests {
         let s = set(&[(
             "a",
             vec![
-                Instr::Shadow { on: true, script: "Ratman_Shadow".into() },
+                Instr::Shadow {
+                    on: true,
+                    script: "Ratman_Shadow".into(),
+                },
                 Instr::Hold { count: 9 },
                 Instr::AnimClr,
                 part(1),
@@ -1398,8 +1603,19 @@ mod tests {
 
     #[test]
     fn a_part_is_placed_with_the_mirror_term() {
-        let bank = Bank { sheet: "s".into(), base: 100, cels: vec![[20, 30], [8, 8]] };
-        let p = Part { table: 1, bank: 0, cel: 0, x: 5, y: -9, flags: 0 };
+        let bank = Bank {
+            sheet: "s".into(),
+            base: 100,
+            cels: vec![[20, 30], [8, 8]],
+        };
+        let p = Part {
+            table: 1,
+            bank: 0,
+            cel: 0,
+            x: 5,
+            y: -9,
+            flags: 0,
+        };
         let right = place(&p, &bank, (100, 50, 3), false).unwrap();
         assert_eq!((right.x, right.y, right.frame), (105, 44, 100));
         let left = place(&p, &bank, (100, 50, 3), true).unwrap();
@@ -1423,7 +1639,10 @@ mod tests {
                     Instr::Sound { sample: 3 },
                     part(2),
                     Instr::EndFrame { end: End::Loop },
-                    Instr::Goto { mode: 0, target: "b".into() },
+                    Instr::Goto {
+                        mode: 0,
+                        target: "b".into(),
+                    },
                     part(3),
                     Instr::EndFrame { end: End::Stop },
                 ],
@@ -1448,13 +1667,21 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let mut restored: Task = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, t);
-        assert_eq!(hash(&restored), hash(&t), "the fingerprint survives a reload");
+        assert_eq!(
+            hash(&restored),
+            hash(&t),
+            "the fingerprint survives a reload"
+        );
 
         let mut b = a.clone();
         for _ in 0..40 {
             t.step(&s, &mut a, false);
             restored.step(&s, &mut b, false);
-            assert_eq!(hash(&restored), hash(&t), "and keeps agreeing tick for tick");
+            assert_eq!(
+                hash(&restored),
+                hash(&t),
+                "and keeps agreeing tick for tick"
+            );
         }
         assert_eq!(a, b);
     }

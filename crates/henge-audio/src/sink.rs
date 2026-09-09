@@ -129,8 +129,7 @@ mod native {
         /// Fails rather than panics when no device is available, which is the
         /// normal state in a container, over a bare SSH session, and in CI.
         pub fn new(clips: Clips) -> Result<Native, String> {
-            let (stream, handle) =
-                rodio::OutputStream::try_default().map_err(|e| e.to_string())?;
+            let (stream, handle) = rodio::OutputStream::try_default().map_err(|e| e.to_string())?;
             Ok(Native {
                 clips,
                 scores: BTreeMap::new(),
@@ -155,11 +154,15 @@ mod native {
 
     impl Sink for Native {
         fn play(&mut self, id: &str) {
-            let Some(bytes) = self.clips.get(id) else { return };
+            let Some(bytes) = self.clips.get(id) else {
+                return;
+            };
             // A fresh sink per clip, so sounds overlap instead of cutting each
             // other off. A four way fight is meant to be noisy.
             if let Ok(decoder) = rodio::Decoder::new(Cursor::new(bytes.clone())) {
-                let _ = self.handle.play_raw(rodio::source::Source::convert_samples(decoder));
+                let _ = self
+                    .handle
+                    .play_raw(rodio::source::Source::convert_samples(decoder));
             }
         }
 
@@ -167,7 +170,9 @@ mod native {
             if self.playing.as_ref().is_some_and(|(cur, _)| cur == id) {
                 return;
             }
-            let Some(score) = self.scores.get(id) else { return };
+            let Some(score) = self.scores.get(id) else {
+                return;
+            };
             let pcm = match self.rendered.get(id) {
                 Some(p) => p.clone(),
                 None => {
@@ -177,7 +182,9 @@ mod native {
                 }
             };
             self.stop_music();
-            let Ok(sink) = rodio::Sink::try_new(&self.handle) else { return };
+            let Ok(sink) = rodio::Sink::try_new(&self.handle) else {
+                return;
+            };
             let buf = rodio::buffer::SamplesBuffer::new(1, music::RATE, pcm.as_slice().to_vec());
             sink.append(rodio::source::Source::repeat_infinite(buf));
             self.playing = Some((id.to_string(), sink));
@@ -243,7 +250,10 @@ mod tests {
         s.play_music("music.tune4");
         s.stop_music();
         s.stop_music();
-        assert_eq!(s.0, vec!["music:music.tune2", "music:music.tune4", "music:stop"]);
+        assert_eq!(
+            s.0,
+            vec!["music:music.tune2", "music:music.tune4", "music:stop"]
+        );
         assert_eq!(s.music(), None);
     }
 

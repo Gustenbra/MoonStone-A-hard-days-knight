@@ -94,9 +94,19 @@ const PIP_LIFE: usize = 18;
 const PIP_TOAD: usize = 20;
 const PIP_DAGGER: usize = 21;
 /// `+0x40` holds 0x16 to 0x19; `+0x42` holds 0x1b to 0x1e.
-const SWORDS: [&str; 4] = ["long_sword", "broad_sword", "claymore", "sword_of_sharpness"];
+const SWORDS: [&str; 4] = [
+    "long_sword",
+    "broad_sword",
+    "claymore",
+    "sword_of_sharpness",
+];
 const SWORD_CEL: usize = 0x16;
-const ARMOURS: [&str; 4] = ["padded_armour", "chain_mail", "plate_armour", "battle_armour"];
+const ARMOURS: [&str; 4] = [
+    "padded_armour",
+    "chain_mail",
+    "plate_armour",
+    "battle_armour",
+];
 const ARMOUR_CEL: usize = 0x1b;
 
 /// The four keys of the Valley, and where they go.
@@ -119,6 +129,8 @@ const KEY_Y: i32 = 0x6f;
 /// `_STATUS:STAPAL`, twenty eight words, and `STAKNP`, the four after it.
 /// Amiga `0RGB` expanded the way every other palette in the game is, four bits
 /// a channel times seventeen.
+// Hand-aligned: four rows of eight, which is how the thirty-two entries are banked.
+#[rustfmt::skip]
 const STATUS_PALETTE: [u32; 32] = [
     0x000000, 0xffffff, 0xcccccc, 0xaaaaaa, 0x888888, 0x555555, 0x333333, 0xdd0000,
     0x552211, 0x884433, 0xcc7755, 0xffbb88, 0x555588, 0x7777aa, 0x88aadd, 0xaaddff,
@@ -178,27 +190,6 @@ const COLUMN_X: i32 = 112;
 const ROW_TOP: i32 = 35;
 const ROW_STEP: i32 = 7;
 
-fn luma(c: u32) -> i32 {
-    (((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff)) as i32
-}
-
-/// The darkest and brightest entries of whatever palette is loaded.
-///
-/// Every screen in this game brings its own 32 colours, so a panel that named
-/// its ink would be legible in one arena and invisible in the next.
-pub fn extremes(fb: &Framebuffer) -> (u8, u8) {
-    let (mut dark, mut light) = (0usize, 0usize);
-    for i in 1..32 {
-        if luma(fb.palette[i]) < luma(fb.palette[dark]) {
-            dark = i;
-        }
-        if luma(fb.palette[i]) > luma(fb.palette[light]) {
-            light = i;
-        }
-    }
-    (dark as u8, light as u8)
-}
-
 /// The original's whole status screen, and in the right hand arch the menu
 /// this project puts there: the `Increase` gadgets and a line for each thing
 /// carried, which is where a scroll is cast.
@@ -207,8 +198,12 @@ pub fn extremes(fb: &Framebuffer) -> (u8, u8) {
 /// `menu` is each line and whether it is lit; `cursor` the highlighted one,
 /// or none when the sheet is only being shown.
 pub fn draw_sheet(
-    reg: &mut Registry, fb: &mut Framebuffer, font: Option<&Font>, run: &Run,
-    menu: &[(String, bool)], cursor: Option<usize>,
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    font: Option<&Font>,
+    run: &Run,
+    menu: &[(String, bool)],
+    cursor: Option<usize>,
 ) {
     // `DisplayPillars` clears the screen and `ColourStatus` colours it. The
     // sheet owns the screen the way the original's does; nothing behind it is
@@ -252,14 +247,26 @@ pub fn draw_sheet(
     // slot and the forest's the right.
     for key in run.keys_held() {
         let slot = key.bit().trailing_zeros() as i32;
-        sprite::draw(reg, fb, UI, KEY_CEL + slot as usize, KEY_X + slot * KEY_STEP, KEY_Y, false);
+        sprite::draw(
+            reg,
+            fb,
+            UI,
+            KEY_CEL + slot as usize,
+            KEY_X + slot * KEY_STEP,
+            KEY_Y,
+            false,
+        );
     }
 
     let Some(font) = font else { return };
     // Every line in its own indices. `TextP` hands a glyph to the same blitter
     // every cel above goes through, and `SMALL.FON` is one plane in index 1,
     // which `STAPAL` has as white.
-    let name = if run.knight.named() { run.knight.name.clone() } else { "No knight".to_string() };
+    let name = if run.knight.named() {
+        run.knight.name.clone()
+    } else {
+        "No knight".to_string()
+    };
     font.draw_own(reg, fb, &name, NAME_AT.0, NAME_AT.1);
 
     for (i, value) in [k.strength, k.constitution, k.endurance].iter().enumerate() {
@@ -300,11 +307,19 @@ pub fn sheet_menu_rects(len: usize, cursor: Option<usize>) -> Vec<(usize, i32, i
         return Vec::new();
     }
     let at = cursor.unwrap_or(0);
-    let first = at.saturating_sub(MENU_ROWS - 1).min(len.saturating_sub(MENU_ROWS));
+    let first = at
+        .saturating_sub(MENU_ROWS - 1)
+        .min(len.saturating_sub(MENU_ROWS));
     (first..len.min(first + MENU_ROWS))
         .enumerate()
         .map(|(row, i)| {
-            (i, MENU_X - 8, MENU_TOP + row as i32 * MENU_STEP - 1, 296 - (MENU_X - 8), MENU_STEP)
+            (
+                i,
+                MENU_X - 8,
+                MENU_TOP + row as i32 * MENU_STEP - 1,
+                296 - (MENU_X - 8),
+                MENU_STEP,
+            )
         })
         .collect()
 }
@@ -315,15 +330,26 @@ pub fn sheet_menu_rects(len: usize, cursor: Option<usize>) -> Vec<(usize, i32, i
 const MENU_SHUT: u8 = 5;
 
 fn draw_menu(
-    reg: &mut Registry, fb: &mut Framebuffer, font: &Font, menu: &[(String, bool)],
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    font: &Font,
+    menu: &[(String, bool)],
     cursor: Option<usize>,
 ) {
     if menu.is_empty() {
         return;
     }
     let at = cursor.unwrap_or(0);
-    let first = at.saturating_sub(MENU_ROWS - 1).min(menu.len().saturating_sub(MENU_ROWS));
-    for (row, (i, (line, lit))) in menu.iter().enumerate().skip(first).take(MENU_ROWS).enumerate() {
+    let first = at
+        .saturating_sub(MENU_ROWS - 1)
+        .min(menu.len().saturating_sub(MENU_ROWS));
+    for (row, (i, (line, lit))) in menu
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(MENU_ROWS)
+        .enumerate()
+    {
         let y = MENU_TOP + row as i32 * MENU_STEP;
         if cursor == Some(i) {
             fb.rect(MENU_X - 8, y + 2, 4, 3, KNIGHT_SLOT);
@@ -338,6 +364,13 @@ fn draw_menu(
     }
     // Eleven rows is a lot of sheet; say when there is more below than fits.
     if first + MENU_ROWS < menu.len() {
-        font.draw(reg, fb, "...", MENU_X, MENU_TOP + MENU_ROWS as i32 * MENU_STEP, MENU_SHUT);
+        font.draw(
+            reg,
+            fb,
+            "...",
+            MENU_X,
+            MENU_TOP + MENU_ROWS as i32 * MENU_STEP,
+            MENU_SHUT,
+        );
     }
 }

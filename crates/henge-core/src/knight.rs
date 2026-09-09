@@ -123,8 +123,11 @@ impl Ability {
 /// index by eight where the entries are four bytes long, so as shipped only
 /// the even entries can be reached and the odd folds read past the table. The
 /// table's own contents are taken as the intent.
-pub const ABILITY_WEIGHTS: [(Ability, u32); 3] =
-    [(Ability::Strength, 5), (Ability::Constitution, 6), (Ability::Endurance, 5)];
+pub const ABILITY_WEIGHTS: [(Ability, u32); 3] = [
+    (Ability::Strength, 5),
+    (Ability::Constitution, 6),
+    (Ability::Endurance, 5),
+];
 
 /// One of the four, as the pack declares them.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -310,11 +313,15 @@ impl Knight {
     /// What to call the weapon and armour on a status panel. Falls back to the
     /// id, so a pack that is missing an item still says something true.
     pub fn weapon_name(&self, items: &Items) -> String {
-        items.get(&self.weapon).map_or_else(|| self.weapon.clone(), |d| d.name.clone())
+        items
+            .get(&self.weapon)
+            .map_or_else(|| self.weapon.clone(), |d| d.name.clone())
     }
 
     pub fn armour_name(&self, items: &Items) -> String {
-        items.get(&self.armour).map_or_else(|| self.armour.clone(), |d| d.name.clone())
+        items
+            .get(&self.armour)
+            .map_or_else(|| self.armour.clone(), |d| d.name.clone())
     }
 }
 
@@ -323,6 +330,9 @@ mod tests {
     use super::*;
     use crate::item::ItemDef;
 
+    // Hand-aligned: a price list, one item per line, so name, price and virtue read
+    // as columns down the catalogue.
+    #[rustfmt::skip]
     fn kit() -> Items {
         let mut items = Items::new();
         let mut put = |id: &str, name: &str, price: u32, virtue: Virtue| {
@@ -420,7 +430,11 @@ mod tests {
             while k.raise(a) {}
         }
         assert!(k.maxed());
-        assert_eq!(k.rolled_ability(3), None, "and the roll has nothing to pick");
+        assert_eq!(
+            k.rolled_ability(3),
+            None,
+            "and the roll has nothing to pick"
+        );
     }
 
     /// `MysticAbility`: a point comes off, and never the last one.
@@ -460,7 +474,11 @@ mod tests {
         k.endurance = 5;
         assert_eq!(k.steps_per_day(&items), 224);
         k.armour = "chain_mail".into();
-        assert_eq!(k.steps_per_day(&items), 256, "and mail is worth another two");
+        assert_eq!(
+            k.steps_per_day(&items),
+            256,
+            "and mail is worth another two"
+        );
     }
 
     #[test]

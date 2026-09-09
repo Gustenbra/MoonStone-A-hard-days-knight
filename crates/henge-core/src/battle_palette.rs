@@ -85,7 +85,9 @@ pub struct CreatureColours {
 impl CreatureColours {
     /// The writes this creature makes on a family's ground.
     pub fn on(&self, family: &str) -> &[Write] {
-        self.by_family.get(family).map_or(&self.writes, Vec::as_slice)
+        self.by_family
+            .get(family)
+            .map_or(&self.writes, Vec::as_slice)
     }
 }
 
@@ -127,7 +129,10 @@ impl BattleColours {
     /// entry, which is what `ColourKnight`'s final unguarded branch does with
     /// anything that is not 0 to 3.
     pub fn knight(&self, index: usize) -> Option<[u16; SHADES]> {
-        self.knights.get(index).or_else(|| self.knights.last()).copied()
+        self.knights
+            .get(index)
+            .or_else(|| self.knights.last())
+            .copied()
     }
 
     pub fn glow_for(&self, index: usize) -> Option<[u16; SHADES]> {
@@ -150,13 +155,21 @@ impl BattleColours {
             }
             (None, Some(index)) => {
                 if let Some(shades) = self.knight(index) {
-                    Write { at: SECOND_AT as u8, words: shades.to_vec() }.apply(&mut pal);
+                    Write {
+                        at: SECOND_AT as u8,
+                        words: shades.to_vec(),
+                    }
+                    .apply(&mut pal);
                 }
             }
             (None, None) => {}
         }
         if let Some(shades) = self.knight(sides.main_knight) {
-            Write { at: MAIN_KNIGHT_AT as u8, words: shades.to_vec() }.apply(&mut pal);
+            Write {
+                at: MAIN_KNIGHT_AT as u8,
+                words: shades.to_vec(),
+            }
+            .apply(&mut pal);
         }
         if !creature.is_some_and(|c| c.keeps_ground) {
             if let Some(ground) = self.ground.get(sides.family) {
@@ -208,15 +221,24 @@ mod tests {
     /// The recovered tables, as the baker writes them, enough of them to
     /// exercise every branch of the order.
     fn colours() -> BattleColours {
-        let w = |at: u8, words: &[u16]| Write { at, words: words.to_vec() };
+        let w = |at: u8, words: &[u16]| Write {
+            at,
+            words: words.to_vec(),
+        };
         let mut creatures = BTreeMap::new();
         creatures.insert(
             "trogg_axe".to_string(),
             CreatureColours {
                 writes: vec![w(9, &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00])],
                 by_family: BTreeMap::from([
-                    ("waste".to_string(), vec![w(9, &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00])]),
-                    ("glade".to_string(), vec![w(9, &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00])]),
+                    (
+                        "waste".to_string(),
+                        vec![w(9, &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00])],
+                    ),
+                    (
+                        "glade".to_string(),
+                        vec![w(9, &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00])],
+                    ),
                 ]),
                 ..Default::default()
             },
@@ -264,7 +286,10 @@ mod tests {
             ],
             ground: BTreeMap::from([
                 ("forest".to_string(), vec![w(16, &[0x210, 0x321, 0x532])]),
-                ("waste".to_string(), vec![w(1, &[0xffd, 0x998, 0x776, 0x443]), w(16, &[0x322, 0x432])]),
+                (
+                    "waste".to_string(),
+                    vec![w(1, &[0xffd, 0x998, 0x776, 0x443]), w(16, &[0x322, 0x432])],
+                ),
             ]),
             creatures,
         }
@@ -280,8 +305,18 @@ mod tests {
         b
     }
 
-    fn sides<'a>(main: usize, second: Option<usize>, creature: Option<&'a str>, family: &'a str) -> Sides<'a> {
-        Sides { main_knight: main, second_knight: second, creature, family }
+    fn sides<'a>(
+        main: usize,
+        second: Option<usize>,
+        creature: Option<&'a str>,
+        family: &'a str,
+    ) -> Sides<'a> {
+        Sides {
+            main_knight: main,
+            second_knight: second,
+            creature,
+            family,
+        }
     }
 
     /// The gold knight is `0xf80`, `0xc50`, `0xa30` at 6, 7 and 8 on every
@@ -330,10 +365,22 @@ mod tests {
     fn a_trogg_is_coloured_by_the_ground_it_stands_on() {
         let c = colours();
         let on = |family| c.compose(&backdrop(), &sides(1, None, Some("trogg_axe"), family));
-        assert_eq!(&on("forest")[9..16], &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00]);
-        assert_eq!(&on("swamp")[9..16], &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00]);
-        assert_eq!(&on("waste")[9..16], &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00]);
-        assert_eq!(&on("glade")[9..16], &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00]);
+        assert_eq!(
+            &on("forest")[9..16],
+            &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00]
+        );
+        assert_eq!(
+            &on("swamp")[9..16],
+            &[0x500, 0x200, 0x000, 0xb40, 0x610, 0x895, 0xc00]
+        );
+        assert_eq!(
+            &on("waste")[9..16],
+            &[0x025, 0x004, 0x001, 0x830, 0x400, 0xf80, 0xc00]
+        );
+        assert_eq!(
+            &on("glade")[9..16],
+            &[0x104, 0x102, 0x000, 0x600, 0x300, 0x693, 0xc00]
+        );
     }
 
     /// The creature's block wins over a second knight: `COLOURS` holds one
@@ -368,7 +415,11 @@ mod tests {
         }
         for creature in [None, Some("trogg_axe"), Some("troll")] {
             let pal = c.compose(&base, &sides(1, None, creature, "forest"));
-            assert_eq!(&pal[29..32], &base[29..32], "{creature:?} touched the top three");
+            assert_eq!(
+                &pal[29..32],
+                &base[29..32],
+                "{creature:?} touched the top three"
+            );
         }
         let pal = c.compose(&base, &sides(1, None, Some("dragon"), "forest"));
         assert_eq!(pal[0], 0);
@@ -386,12 +437,26 @@ mod tests {
         let pal = c.compose(&base, &sides(1, None, None, "waste"));
         assert_eq!(&pal[1..5], &[0xffd, 0x998, 0x776, 0x443]);
         assert_eq!(&pal[16..18], &[0x322, 0x432]);
-        assert_eq!(pal[18], base[18], "the waste writes two words here, not three");
+        assert_eq!(
+            pal[18], base[18],
+            "the waste writes two words here, not three"
+        );
         let pal = c.compose(&base, &sides(1, None, Some("demon"), "waste"));
         assert_eq!(&pal[9..15], &[0x0ef; 6]);
-        assert_eq!(pal[15], BLOOD, "the red at 15 is written even over the demon's own");
-        assert_eq!(&pal[16..32], &[0x0ef; 16], "the demon's ground reaches to the top entry");
-        assert_eq!(&pal[1..5], &base[1..5], "the demon's fight skips ColourBackdrop");
+        assert_eq!(
+            pal[15], BLOOD,
+            "the red at 15 is written even over the demon's own"
+        );
+        assert_eq!(
+            &pal[16..32],
+            &[0x0ef; 16],
+            "the demon's ground reaches to the top entry"
+        );
+        assert_eq!(
+            &pal[1..5],
+            &base[1..5],
+            "the demon's fight skips ColourBackdrop"
+        );
     }
 
     /// A family the table does not know writes no ground, and the backdrop's
@@ -408,8 +473,14 @@ mod tests {
     #[test]
     fn the_creatures_own_entries_are_named_by_ground() {
         let c = colours();
-        assert_eq!(c.creature_entries("trogg_axe", "forest"), (9..16).collect::<Vec<_>>());
-        assert_eq!(c.creature_entries("troll", "forest"), (9..15).collect::<Vec<_>>());
+        assert_eq!(
+            c.creature_entries("trogg_axe", "forest"),
+            (9..16).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            c.creature_entries("troll", "forest"),
+            (9..15).collect::<Vec<_>>()
+        );
         let mut dragon = (9..16).collect::<Vec<_>>();
         dragon.extend(29..32);
         assert_eq!(c.creature_entries("dragon", "forest"), dragon);

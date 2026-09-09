@@ -21,7 +21,12 @@ pub fn parse(d: &[u8]) -> anyhow::Result<Sample> {
     );
     let header_size = u16::from_le_bytes([d[20], d[21]]) as usize;
     let mut o = header_size;
-    let mut out = Sample { rate: 11025, channels: 1, bits: 8, data: Vec::new() };
+    let mut out = Sample {
+        rate: 11025,
+        channels: 1,
+        bits: 8,
+        data: Vec::new(),
+    };
     let mut seen_rate = false;
 
     while o + 4 <= d.len() {

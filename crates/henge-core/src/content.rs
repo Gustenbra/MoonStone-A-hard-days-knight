@@ -410,7 +410,11 @@ impl ActorDef {
 
     /// The name a plate prints: the one given, or the id it was filed under.
     pub fn display_name<'a>(&'a self, id: &'a str) -> &'a str {
-        if self.name.is_empty() { id } else { &self.name }
+        if self.name.is_empty() {
+            id
+        } else {
+            &self.name
+        }
     }
 
     /// Check that a scripted actor is whole, and say what is wrong if not.
@@ -450,7 +454,9 @@ impl ActorDef {
         for (state, names) in &self.scripts {
             for n in names {
                 if !self.animation.contains_key(n) {
-                    return Err(format!("state {state} names {n}, which is not in the script set"));
+                    return Err(format!(
+                        "state {state} names {n}, which is not in the script set"
+                    ));
                 }
                 pending.push((n.clone(), self.bank_table));
             }
@@ -461,22 +467,37 @@ impl ActorDef {
             .attacks
             .iter()
             .map(|(k, a)| (format!("attack {k}"), &a.script))
-            .chain(self.hurt_by.iter().map(|(k, s)| (format!("hurt_by {k}"), s)))
-            .chain(self.finishes.iter().map(|(k, s)| (format!("finish {k}"), s)))
+            .chain(
+                self.hurt_by
+                    .iter()
+                    .map(|(k, s)| (format!("hurt_by {k}"), s)),
+            )
+            .chain(
+                self.finishes
+                    .iter()
+                    .map(|(k, s)| (format!("finish {k}"), s)),
+            )
         {
             if !self.animation.contains_key(name) {
-                return Err(format!("{what} names {name}, which is not in the script set"));
+                return Err(format!(
+                    "{what} names {name}, which is not in the script set"
+                ));
             }
             pending.push((name.clone(), self.bank_table));
         }
         if !self.attack.is_empty() && !self.attacks.contains_key(&self.attack) {
-            return Err(format!("the default attack {} is not in the attack table", self.attack));
+            return Err(format!(
+                "the default attack {} is not in the attack table",
+                self.attack
+            ));
         }
         for (k, g) in &self.blocks {
             if crate::combat::Attack::from_name(k).is_none()
-                || crate::combat::Attack::from_name(g).map_or(true, |a| !a.is_guard())
+                || crate::combat::Attack::from_name(g).is_none_or(|a| !a.is_guard())
             {
-                return Err(format!("block table entry {k}: {g} is not an attack kind and a guard"));
+                return Err(format!(
+                    "block table entry {k}: {g} is not an attack kind and a guard"
+                ));
             }
         }
         let mut seen: BTreeSet<(String, u8)> = BTreeSet::new();
@@ -524,7 +545,9 @@ impl ActorDef {
                     continue;
                 }
                 if !self.animation.contains_key(branch) {
-                    return Err(format!("{name} branches to {branch}, which is not in the set"));
+                    return Err(format!(
+                        "{name} branches to {branch}, which is not in the set"
+                    ));
                 }
                 pending.push((branch.clone(), table));
             }
@@ -541,7 +564,12 @@ impl ActorDef {
 
     /// The rectangle this actor narrows a fight to, if it has one.
     pub fn ground(&self) -> Option<Border> {
-        self.border.map(|[left, right, top, bottom]| Border { left, right, top, bottom })
+        self.border.map(|[left, right, top, bottom]| Border {
+            left,
+            right,
+            top,
+            bottom,
+        })
     }
 
     /// Where the `n`th of this actor to arrive stands, as `(x, facing)` with
@@ -585,7 +613,10 @@ impl ActorDef {
 
     /// The bank a part names, through the table `TASKCELBUF` last selected.
     pub fn bank(&self, table: u8, slot: u8) -> Option<&crate::taskvm::Bank> {
-        self.banks.get(&table)?.get(slot as usize).filter(|b| !b.cels.is_empty())
+        self.banks
+            .get(&table)?
+            .get(slot as usize)
+            .filter(|b| !b.cels.is_empty())
     }
 
     /// The script and kind an attack resolves to, the way `KnightAttack`
@@ -595,7 +626,10 @@ impl ActorDef {
     ///
     /// The fallback is what lets the plain opponent, which only ever asks for
     /// a swing, fight with a creature whose one attack is a lunge or a bite.
-    pub fn attack_for(&self, wanted: crate::combat::Attack) -> Option<(String, crate::combat::Attack)> {
+    pub fn attack_for(
+        &self,
+        wanted: crate::combat::Attack,
+    ) -> Option<(String, crate::combat::Attack)> {
         use crate::combat::Attack;
         if let Some(a) = self.attacks.get(wanted.name()) {
             return Some((a.script.clone(), wanted));
@@ -604,7 +638,9 @@ impl ActorDef {
             let kind = Attack::from_name(&self.attack).unwrap_or(Attack::Swing);
             return Some((a.script.clone(), kind));
         }
-        self.scripts_for("attack").first().map(|s| (s.clone(), Attack::Swing))
+        self.scripts_for("attack")
+            .first()
+            .map(|s| (s.clone(), Attack::Swing))
     }
 
     /// The blow-taken script for a blow of that kind, or the one for any blow.
@@ -619,7 +655,9 @@ impl ActorDef {
     /// The hit points and blow this actor has under a given moon: the entry
     /// for that phase, or its everyday numbers.
     pub fn under_moon(&self, phase: &str) -> (i32, i32) {
-        self.moon.get(phase).map_or((self.health, self.damage), |m| (m.health, m.damage))
+        self.moon
+            .get(phase)
+            .map_or((self.health, self.damage), |m| (m.health, m.damage))
     }
 
     /// One to one when the actor has no table to say otherwise.
@@ -701,7 +739,14 @@ mod tests {
         d.animation.insert(
             "stance".into(),
             Script::new(vec![
-                Instr::Part(Part { table: 1, bank: 0, cel: 200, x: 0, y: 0, flags: 0 }),
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 200,
+                    x: 0,
+                    y: 0,
+                    flags: 0,
+                }),
                 Instr::EndFrame { end: End::Stop },
             ]),
         );
@@ -712,7 +757,14 @@ mod tests {
         d.animation.insert(
             "stance".into(),
             Script::new(vec![
-                Instr::Part(Part { table: 1, bank: 3, cel: 0, x: 0, y: 0, flags: 0 }),
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 3,
+                    cel: 0,
+                    x: 0,
+                    y: 0,
+                    flags: 0,
+                }),
                 Instr::EndFrame { end: End::Stop },
             ]),
         );
@@ -735,8 +787,18 @@ mod tests {
             "stance".into(),
             Script::new(vec![
                 Instr::CelBuf { table: 1 },
-                Instr::Part(Part { table: 1, bank: 0, cel: 0, x: 0, y: 0, flags: 0 }),
-                Instr::Goto { mode: 0, target: "walk1".into() },
+                Instr::Part(Part {
+                    table: 1,
+                    bank: 0,
+                    cel: 0,
+                    x: 0,
+                    y: 0,
+                    flags: 0,
+                }),
+                Instr::Goto {
+                    mode: 0,
+                    target: "walk1".into(),
+                },
                 Instr::EndFrame { end: End::Stop },
             ]),
         );
@@ -758,9 +820,16 @@ mod tests {
     /// the facing, with the original's 1 and 3 turned into 1 and -1.
     #[test]
     fn a_seat_gives_the_column_and_the_facing_the_original_wrote() {
-        let mut d = super::ActorDef::default();
-        // `TroggTABLE`, DS:0x97a.
-        d.seats = vec![[-50, 0, 100, 1], [360, 0, 150, 3], [340, 0, 50, 3], [-80, 0, 120, 1]];
+        let mut d = super::ActorDef {
+            // `TroggTABLE`, DS:0x97a.
+            seats: vec![
+                [-50, 0, 100, 1],
+                [360, 0, 150, 3],
+                [340, 0, 50, 3],
+                [-80, 0, 120, 1],
+            ],
+            ..Default::default()
+        };
         assert_eq!(d.seat(0), Some((-50, 1)));
         assert_eq!(d.seat(1), Some((360, -1)));
         // Past the end it comes round again, which is ours: the original never
@@ -851,7 +920,14 @@ mod intro_cast_tests {
     fn frame(cel: u8, hold: u8) -> IntroFrame {
         IntroFrame {
             hold,
-            parts: vec![Part { table: 1, bank: 3, cel, y: 0, flags: 0, x: 0 }],
+            parts: vec![Part {
+                table: 1,
+                bank: 3,
+                cel,
+                y: 0,
+                flags: 0,
+                x: 0,
+            }],
         }
     }
 
@@ -862,7 +938,11 @@ mod intro_cast_tests {
         if let Some(from) = loops {
             l.insert("2927".to_string(), from);
         }
-        IntroCast { banks: vec!["bank.dw1".into()], scripts, loops: l }
+        IntroCast {
+            banks: vec!["bank.dw1".into()],
+            scripts,
+            loops: l,
+        }
     }
 
     /// A script that finishes on `ff ff` is not drawn once it has run out. The

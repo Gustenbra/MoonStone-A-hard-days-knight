@@ -72,10 +72,19 @@ impl Missile {
     /// The blow of the frame being shown: the weapon parts, as rectangles.
     fn hit_line(&self, def: &ActorDef) -> Vec<(i32, i32)> {
         let mut out = Vec::new();
-        for p in self.task.shown.iter().filter(|p| p.is(taskvm::part_flags::WEAPON)) {
-            let Some(bank) = def.bank(p.table, p.bank) else { continue };
+        for p in self
+            .task
+            .shown
+            .iter()
+            .filter(|p| p.is(taskvm::part_flags::WEAPON))
+        {
+            let Some(bank) = def.bank(p.table, p.bank) else {
+                continue;
+            };
             let t = &self.task;
-            let Some(r) = taskvm::place(p, bank, (t.x, t.y, t.z), t.mirror()) else { continue };
+            let Some(r) = taskvm::place(p, bank, (t.x, t.y, t.z), t.mirror()) else {
+                continue;
+            };
             let (l, top) = (r.x, r.y);
             let (rr, b) = (r.x + r.w as i32, r.y + r.h as i32);
             out.extend([(l, top), (rr, top), (rr, b), (l, b), (l, top)]);
@@ -252,7 +261,7 @@ impl Bout {
         self.wave.arrived();
         let (x, facing) = def.seat_at(seat).unwrap_or((GLOBAL.left + 50, 1));
         // 029b6  mov word [di+6], ax: the rotation's depth over the record's own.
-        let y = self.field.standing_row(self.arrivals.next());
+        let y = self.field.standing_row(self.arrivals.next_place());
         let mut f = Fighter::new(actor, def, x, y, facing);
         if self.wave.health > 0 {
             f.max_health = self.wave.health;
@@ -300,7 +309,7 @@ impl Bout {
         self.fighters.iter().any(|f| {
             f.state == State::Dead
                 && def_of(&f.actor).finishes.values().any(|s| *s == f.script)
-                && f.task.as_ref().map_or(false, |t| t.active && t.running)
+                && f.task.as_ref().is_some_and(|t| t.active && t.running)
         })
     }
 
@@ -326,7 +335,11 @@ impl Bout {
             d => d,
         };
         let (num, den) = def.blow_ratio(attack);
-        let bonus = if attack == Attack::Chop { f.bonus * 2 } else { f.bonus };
+        let bonus = if attack == Attack::Chop {
+            f.bonus * 2
+        } else {
+            f.bonus
+        };
         (base * num / den + bonus).max(1)
     }
 
@@ -429,7 +442,11 @@ impl Bout {
         if !def.animation.contains_key("Blood1") || !def.banks.contains_key(&4) {
             return;
         }
-        let facing = if self.fighters[owner].facing < 0 { FACING_LEFT } else { FACING_RIGHT };
+        let facing = if self.fighters[owner].facing < 0 {
+            FACING_LEFT
+        } else {
+            FACING_RIGHT
+        };
         let mut blood = Task::new("Blood1", at.0, at.1, facing);
         blood.table = 4;
         let mut m = Missile {
@@ -519,7 +536,13 @@ impl Bout {
     /// on the tick a script frame ended, which is when the original's task
     /// loop calls a controller at all, so a cooldown of ten is ten frames
     /// rather than ten sixtieths of a second.
-    pub fn monster_intent<'a, F>(&mut self, me: usize, target: usize, def_of: F, gore: bool) -> Intent
+    pub fn monster_intent<'a, F>(
+        &mut self,
+        me: usize,
+        target: usize,
+        def_of: F,
+        gore: bool,
+    ) -> Intent
     where
         F: Fn(&str) -> &'a ActorDef,
     {
@@ -599,7 +622,13 @@ impl Bout {
             self.rng = seed;
             (act, Intent::default())
         };
-        let order = |state, script: String, attack| Some(Order { state, script, attack });
+        let order = |state, script: String, attack| {
+            Some(Order {
+                state,
+                script,
+                attack,
+            })
+        };
         self.fighters[me].ordered = match act {
             Act::Idle => order(State::Idle, String::new(), None),
             Act::Walk { dx, dy, script } => {
@@ -616,7 +645,11 @@ impl Bout {
                 }
                 match def.attack_for(kind) {
                     Some((script, k)) => {
-                        let state = if k.is_guard() { State::Guard } else { State::Attack };
+                        let state = if k.is_guard() {
+                            State::Guard
+                        } else {
+                            State::Attack
+                        };
                         order(state, script, Some(k))
                     }
                     None => order(State::Attack, String::new(), Some(kind)),
@@ -645,7 +678,11 @@ impl Bout {
                 intent.attack = true;
                 None
             }
-            Act::Strike { script, damage, fatal } => {
+            Act::Strike {
+                script,
+                damage,
+                fatal,
+            } => {
                 let t_def = def_of(&self.fighters[target].actor);
                 self.fighters[target].holder = None;
                 self.fighters[target].hidden = false;
@@ -661,7 +698,10 @@ impl Bout {
         // The standing order is the walk, never the press: a struggle is
         // read on the frame it is made and not held down for six ticks.
         self.fighters[me].brain.rest = def_of(&self.fighters[me].actor).script_ticks.max(1) as i32;
-        self.fighters[me].drive = Intent { attack: false, ..intent };
+        self.fighters[me].drive = Intent {
+            attack: false,
+            ..intent
+        };
         intent
     }
 
@@ -700,7 +740,13 @@ impl Bout {
             let line = self.fighters[i].step_gated(def, intent, &self.field, bloodless);
             if !line.is_empty() {
                 let f = &self.fighters[i];
-                blows.push(Blow { attacker: i, missile: None, line, attack: f.attack, depth: f.y });
+                blows.push(Blow {
+                    attacker: i,
+                    missile: None,
+                    line,
+                    attack: f.attack,
+                    depth: f.y,
+                });
             }
             // What the script asked the game to do this tick. `KnifeThrow` is
             // the one call the knight's own scripts make that puts something
@@ -810,7 +856,10 @@ impl Bout {
             if self.missiles[k].follow {
                 let owner = self.missiles[k].owner;
                 let (alive, at) = match self.fighters.get(owner) {
-                    Some(f) => (f.alive(), f.task.as_ref().map(|t| (t.x, t.y, t.z, t.facing))),
+                    Some(f) => (
+                        f.alive(),
+                        f.task.as_ref().map(|t| (t.x, t.y, t.z, t.facing)),
+                    ),
                     None => (false, None),
                 };
                 let m = &mut self.missiles[k];
@@ -871,7 +920,10 @@ impl Bout {
             let damage = blow.attack.map_or_else(
                 || {
                     let f = &self.fighters[attacker];
-                    (match f.damage { 0 => self.damage, d => d }) + f.bonus
+                    (match f.damage {
+                        0 => self.damage,
+                        d => d,
+                    }) + f.bonus
                 },
                 |a| self.blow(attacker, a_def, a),
             );
@@ -905,7 +957,11 @@ impl Bout {
                     if let (true, Some(a)) = (checked, blow.attack) {
                         if self.fighters[target].blocks(t_def, a_facing, a) {
                             let with = self.fighters[target].guarding().unwrap_or(a);
-                            self.parries.push(Parry { attacker, target, with });
+                            self.parries.push(Parry {
+                                attacker,
+                                target,
+                                with,
+                            });
                             self.fighters[attacker].recover(a_def);
                             self.hit_something(attacker, a_def);
                             break;
@@ -919,7 +975,12 @@ impl Bout {
                     // breathes rather than bites. Nothing else reads the bit.
                     self.fighters[target].brain.flags |= crate::monster::flag::STRUCK;
                     let fatal = !self.fighters[target].alive();
-                    events.push(HitEvent { attacker, target, damage, fatal });
+                    events.push(HitEvent {
+                        attacker,
+                        target,
+                        damage,
+                        fatal,
+                    });
                     if t_def.bleeds {
                         let at = strike_point(&blow.line, body);
                         let depth = self.fighters[target].y;
@@ -959,7 +1020,9 @@ impl Bout {
                     break;
                 }
                 // Down, but still a body while the kneel lasts.
-                let Some(body) = self.fighters[target].corpse_body(t_def) else { continue };
+                let Some(body) = self.fighters[target].corpse_body(t_def) else {
+                    continue;
+                };
                 if !self.fighters[target].finishable(t_def) || !line_hits_body(&blow.line, body) {
                     continue;
                 }
@@ -1005,13 +1068,20 @@ impl Bout {
         F: Fn(&str) -> &'a ActorDef,
     {
         let girth_of = |def: &ActorDef| {
-            if def.girth > 0 { def.girth } else { (def.body[2] - def.body[0]) as i32 }
+            if def.girth > 0 {
+                def.girth
+            } else {
+                (def.body[2] - def.body[0]) as i32
+            }
         };
         let living: Vec<usize> = self.alive().collect();
         for a in 0..living.len() {
             for b in a + 1..living.len() {
                 let (i, j) = (living[a], living[b]);
-                let (di, dj) = (def_of(&self.fighters[i].actor), def_of(&self.fighters[j].actor));
+                let (di, dj) = (
+                    def_of(&self.fighters[i].actor),
+                    def_of(&self.fighters[j].actor),
+                );
                 if (self.fighters[i].y - self.fighters[j].y).abs()
                     > di.depth_tolerance.max(dj.depth_tolerance)
                 {
@@ -1143,11 +1213,22 @@ mod tests {
                 .map(|s| Frame {
                     sprite: *s,
                     ticks: 1,
-                    hit: if hits { vec![[10, 30], [40, 30]] } else { vec![] },
+                    hit: if hits {
+                        vec![[10, 30], [40, 30]]
+                    } else {
+                        vec![]
+                    },
                     ..Frame::default()
                 })
                 .collect();
-            (name.to_string(), Sequence { name: name.into(), frames, end })
+            (
+                name.to_string(),
+                Sequence {
+                    name: name.into(),
+                    frames,
+                    end,
+                },
+            )
         };
         let mut sequences = BTreeMap::new();
         for (k, v) in [
@@ -1160,11 +1241,17 @@ mod tests {
             sequences.insert(k, v);
         }
         ActorDef {
-            sheet: "test".into(), health: 100, speed_x: 2, speed_y: 1,
-            reach: 40, depth_tolerance: 6, attack_cooldown: 30,
+            sheet: "test".into(),
+            health: 100,
+            speed_x: 2,
+            speed_y: 1,
+            reach: 40,
+            depth_tolerance: 6,
+            attack_cooldown: 30,
             bounty: 0,
             girth: 0,
-            body: [-9, 0, 9, 52], sequences,
+            body: [-9, 0, 9, 52],
+            sequences,
             ..ActorDef::default()
         }
     }
@@ -1172,7 +1259,12 @@ mod tests {
     /// One arena's ground. The tree line is put high enough that every
     /// fighter in these tests stands below it and is free to walk.
     fn arena_field() -> Field {
-        Field::new(vec![Border { left: 0, right: 319, bottom: 60, top: 10 }])
+        Field::new(vec![Border {
+            left: 0,
+            right: 319,
+            bottom: 60,
+            top: 10,
+        }])
     }
 
     fn four() -> Bout {
@@ -1210,7 +1302,10 @@ mod tests {
         };
         let mut b = Bout::new(
             arena_field(),
-            vec![Fighter::new("k", &def, 200, 100, -1), Fighter::new("m", &def, -50, 100, 1)],
+            vec![
+                Fighter::new("k", &def, 200, 100, -1),
+                Fighter::new("m", &def, -50, 100, 1),
+            ],
         );
         b.wave = Wave::open(&wave_def, None, &crate::wave::Level::default());
         b.wave.arrived();
@@ -1260,10 +1355,17 @@ mod tests {
         let d = def();
         let mut b = Bout::new(
             arena_field(),
-            vec![Fighter::new("k", &d, 200, 100, -1), Fighter::new("m", &d, 40, 100, 1)],
+            vec![
+                Fighter::new("k", &d, 200, 100, -1),
+                Fighter::new("m", &d, 40, 100, 1),
+            ],
         );
-        let wave_def =
-            WaveDef { max: 1, heads: 10, reinforced: true, ..WaveDef::default() };
+        let wave_def = WaveDef {
+            max: 1,
+            heads: 10,
+            reinforced: true,
+            ..WaveDef::default()
+        };
         b.wave = Wave::open(&wave_def, None, &crate::wave::Level::default());
         b.wave.arrived();
         assert!(!b.settled(), "ten owed, so nothing about this is over");
@@ -1296,23 +1398,41 @@ mod tests {
 
         let mut b = Bout::new(arena.clone(), vec![Fighter::new("k", &plain, 40, 100, 1)]);
         b.apply_actor_borders(pick);
-        assert_eq!(b.field, arena, "an ordinary fight is fought on the arena's own ground");
+        assert_eq!(
+            b.field, arena,
+            "an ordinary fight is fought on the arena's own ground"
+        );
 
         let mut b = Bout::new(
             arena.clone(),
-            vec![Fighter::new("k", &plain, 40, 100, 1), Fighter::new("demon", &demon, 200, 100, -1)],
+            vec![
+                Fighter::new("k", &plain, 40, 100, 1),
+                Fighter::new("demon", &demon, 200, 100, -1),
+            ],
         );
         b.apply_actor_borders(pick);
         assert_eq!(
             b.field.borders,
-            vec![Border { left: 0, right: 309, bottom: 99, top: 10 }],
+            vec![Border {
+                left: 0,
+                right: 309,
+                bottom: 99,
+                top: 10
+            }],
             "the demon's record replaces the arena's list rather than joining it"
         );
-        assert_eq!(b.field.floor(), 99, "and the ground begins fifteen rows higher");
+        assert_eq!(
+            b.field.floor(),
+            99,
+            "and the ground begins fifteen rows higher"
+        );
 
         let mut b = Bout::new(
             arena.clone(),
-            vec![Fighter::new("k", &plain, 40, 100, 1), Fighter::new("ugly", &ugly, 200, 100, -1)],
+            vec![
+                Fighter::new("k", &plain, 40, 100, 1),
+                Fighter::new("ugly", &ugly, 200, 100, -1),
+            ],
         );
         b.apply_actor_borders(pick);
         assert_eq!(b.field, arena, "an inverted border is refused");
@@ -1346,8 +1466,14 @@ mod tests {
         // A hundred and ten away is `TroggChop`'s range, and it is the chop
         // the controller hands over, not the swing the one button would give.
         let intent = b.monster_intent(1, 0, pick, true);
-        assert!(!intent.attack, "the order carries the attack, not the intent");
-        let order = b.fighters[1].ordered.clone().expect("the controller said nothing");
+        assert!(
+            !intent.attack,
+            "the order carries the attack, not the intent"
+        );
+        let order = b.fighters[1]
+            .ordered
+            .clone()
+            .expect("the controller said nothing");
         assert_eq!(order.attack, Some(Attack::Chop));
         assert_eq!(order.script, "chop");
         b.step_with(pick, &[Intent::default(), intent]);
@@ -1393,14 +1519,27 @@ mod tests {
         // The knight swings and connects: the trogg is struck.
         let mut hits = 0;
         for _ in 0..40 {
-            let ev = b.step_with(pick, &[Intent { dx: 0, dy: 0, attack: true }, Intent::default()]);
+            let ev = b.step_with(
+                pick,
+                &[
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                    Intent::default(),
+                ],
+            );
             hits += ev.len();
             if hits > 0 {
                 break;
             }
         }
         assert!(hits > 0, "the swing landed");
-        assert_eq!(b.fighters[1].brain.cooldown, 0, "TroggStruck+3: mov byte [di+0x4a], 0");
+        assert_eq!(
+            b.fighters[1].brain.cooldown, 0,
+            "TroggStruck+3: mov byte [di+0x4a], 0"
+        );
         assert_eq!(b.fighters[1].facing, -1, "TroggStruck never turns it");
 
         // And the other way round: the trogg's blow lands on the knight.
@@ -1414,14 +1553,27 @@ mod tests {
         b.fighters[1].brain.cooldown = 3;
         let mut hits = 0;
         for _ in 0..40 {
-            let ev = b.step_with(pick, &[Intent::default(), Intent { dx: 0, dy: 0, attack: true }]);
+            let ev = b.step_with(
+                pick,
+                &[
+                    Intent::default(),
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                ],
+            );
             hits += ev.len();
             if hits > 0 {
                 break;
             }
         }
         assert!(hits > 0, "the trogg's swing landed");
-        assert_eq!(b.fighters[1].brain.cooldown, 10, "TroggHit+8: mov byte [di+0x4a], 0xa");
+        assert_eq!(
+            b.fighters[1].brain.cooldown, 10,
+            "TroggHit+8: mov byte [di+0x4a], 0xa"
+        );
     }
 
     /// `DeCapFLAG` is a word of the bout's, not a reading off the corpse.
@@ -1456,7 +1608,11 @@ mod tests {
         assert!(!b.decap, "InitCombat (0x307) zeroes it");
         b.monster_intent(1, 0, pick, true);
         let first = b.fighters[1].ordered.clone().expect("an order");
-        assert_eq!(first.attack, Some(Attack::Swing), "TroggAttack+0x41: jmp TroggSwing");
+        assert_eq!(
+            first.attack,
+            Some(Attack::Swing),
+            "TroggAttack+0x41: jmp TroggSwing"
+        );
         assert!(b.decap, "TroggAttack+0x3b: mov word ptr [DeCapFLAG], 1");
         // The second trogg, inside a hundred with its count at zero, is
         // refused by the flag alone.
@@ -1501,7 +1657,15 @@ mod tests {
         );
         let mut hits = Vec::new();
         for _ in 0..8 {
-            let intents = [Intent { dx: 0, dy: 0, attack: true }, Intent::default(), Intent::default()];
+            let intents = [
+                Intent {
+                    dx: 0,
+                    dy: 0,
+                    attack: true,
+                },
+                Intent::default(),
+                Intent::default(),
+            ];
             hits.extend(b.step(&d, &intents));
             if b.fighters[0].player.finished {
                 break;
@@ -1540,9 +1704,9 @@ mod tests {
     fn identical_inputs_produce_identical_simulations() {
         let d = def();
         let script = |t: usize, i: usize| Intent {
-            dx: if (t / 7 + i) % 3 == 0 { 1 } else { -1 },
-            dy: if (t / 11 + i) % 4 == 0 { 1 } else { 0 },
-            attack: (t / 5 + i) % 4 == 0,
+            dx: if (t / 7 + i).is_multiple_of(3) { 1 } else { -1 },
+            dy: if (t / 11 + i).is_multiple_of(4) { 1 } else { 0 },
+            attack: (t / 5 + i).is_multiple_of(4),
         };
         let run = || {
             let mut b = four();
@@ -1565,7 +1729,11 @@ mod tests {
         let mut b = four();
         for t in 0..90 {
             let intents: Vec<Intent> = (0..4)
-                .map(|i| Intent { dx: 1, dy: 0, attack: (t + i) % 6 == 0 })
+                .map(|i| Intent {
+                    dx: 1,
+                    dy: 0,
+                    attack: (t + i) % 6 == 0,
+                })
                 .collect();
             b.step(&d, &intents);
         }
@@ -1578,7 +1746,11 @@ mod tests {
         // And it must keep agreeing once both are simulated onward.
         for t in 0..120 {
             let intents: Vec<Intent> = (0..4)
-                .map(|i| Intent { dx: -1, dy: 0, attack: (t + i) % 5 == 0 })
+                .map(|i| Intent {
+                    dx: -1,
+                    dy: 0,
+                    attack: (t + i) % 5 == 0,
+                })
                 .collect();
             b.step(&d, &intents);
             restored.step(&d, &intents);
@@ -1601,9 +1773,9 @@ mod tests {
             ],
         );
         let script = |t: usize, i: usize| Intent {
-            dx: if (t / 5 + i) % 3 == 0 { 1 } else { -1 },
+            dx: if (t / 5 + i).is_multiple_of(3) { 1 } else { -1 },
             dy: 0,
-            attack: (t / 4 + i) % 3 == 0,
+            attack: (t / 4 + i).is_multiple_of(3),
         };
         let mut hits = 0;
         for t in 0..60 {
@@ -1634,24 +1806,40 @@ mod depth {
     /// One arena's ground. The tree line is put high enough that every
     /// fighter in these tests stands below it and is free to walk.
     fn arena_field() -> Field {
-        Field::new(vec![Border { left: 0, right: 319, bottom: 60, top: 10 }])
+        Field::new(vec![Border {
+            left: 0,
+            right: 319,
+            bottom: 60,
+            top: 10,
+        }])
     }
 
     /// Two knights thirty pixels apart, facing each other.
     fn pair(d: &ActorDef) -> Bout {
         Bout::new(
             arena_field(),
-            vec![Fighter::new("k", d, 100, 100, 1), Fighter::new("k", d, 130, 100, -1)],
+            vec![
+                Fighter::new("k", d, 100, 100, 1),
+                Fighter::new("k", d, 130, 100, -1),
+            ],
         )
     }
 
     fn swing() -> Intent {
-        Intent { dx: 0, dy: 0, attack: true }
+        Intent {
+            dx: 0,
+            dy: 0,
+            attack: true,
+        }
     }
 
     /// Down and back, for a knight facing left, is right and down.
     fn block_for(f: &Fighter) -> Intent {
-        Intent { dx: -f.facing, dy: 1, attack: true }
+        Intent {
+            dx: -f.facing,
+            dy: 1,
+            attack: true,
+        }
     }
 
     /// `CheckBlock`: a block held against a swing from the front stops it.
@@ -1701,8 +1889,16 @@ mod depth {
     #[test]
     fn the_block_table_and_the_evades_one_use() {
         let d = depth_def();
-        let chop = Intent { dx: 0, dy: -1, attack: true };
-        let evade = Intent { dx: 0, dy: 1, attack: true };
+        let chop = Intent {
+            dx: 0,
+            dy: -1,
+            attack: true,
+        };
+        let evade = Intent {
+            dx: 0,
+            dy: 1,
+            attack: true,
+        };
 
         let mut b = pair(&d);
         let mut hits = 0;
@@ -1718,8 +1914,20 @@ mod depth {
         // Three chops, spaced so the defender is on his feet for each, with
         // a step to the side between the second and third.
         for t in 0..40 {
-            let attacker = if matches!(t, 0 | 12 | 30) { chop } else { Intent::default() };
-            let defender = if t == 22 { Intent { dx: 0, dy: 1, attack: false } } else { evade };
+            let attacker = if matches!(t, 0 | 12 | 30) {
+                chop
+            } else {
+                Intent::default()
+            };
+            let defender = if t == 22 {
+                Intent {
+                    dx: 0,
+                    dy: 1,
+                    attack: false,
+                }
+            } else {
+                evade
+            };
             let intents = [attacker, defender];
             let hits = b.step(&d, &intents);
             if !hits.is_empty() {
@@ -1756,12 +1964,24 @@ mod depth {
             }
             dealt.expect("the blow landed")
         };
-        let chop = Intent { dx: 0, dy: -1, attack: true };
+        let chop = Intent {
+            dx: 0,
+            dy: -1,
+            attack: true,
+        };
         assert_eq!(land(0, swing()), 4, "the table alone");
-        assert_eq!(land(1, swing()), 5, "a new knight: four and his strength of one");
+        assert_eq!(
+            land(1, swing()),
+            5,
+            "a new knight: four and his strength of one"
+        );
         assert_eq!(land(3, swing()), 7);
         assert_eq!(land(0, chop), 8, "the chop is twice the swing");
-        assert_eq!(land(1, chop), 10, "(4 + 1) * 2, as CalcDamage doubles after adding");
+        assert_eq!(
+            land(1, chop),
+            10,
+            "(4 + 1) * 2, as CalcDamage doubles after adding"
+        );
         assert_eq!(land(3, chop), 14);
     }
 
@@ -1787,7 +2007,11 @@ mod depth {
         let d = depth_def();
         let mut b = pair(&d);
         b.fighters[1].cursed = true;
-        let away = Intent { dx: 1, dy: 0, attack: false };
+        let away = Intent {
+            dx: 1,
+            dy: 0,
+            attack: false,
+        };
         let before = b.fighters[1].x;
         b.step(&d, &[Intent::default(), away]);
         assert!(b.fighters[1].x < before, "told right, went left");
@@ -1797,13 +2021,25 @@ mod depth {
         // down, the block.
         let mut b = pair(&d);
         b.fighters[1].cursed = true;
-        let up_thrust = Intent { dx: b.fighters[1].facing, dy: -1, attack: true };
+        let up_thrust = Intent {
+            dx: b.fighters[1].facing,
+            dy: -1,
+            attack: true,
+        };
         b.step(&d, &[Intent::default(), up_thrust]);
-        assert_eq!(b.fighters[1].attack, Some(Attack::Block), "forward and up came out back and down");
+        assert_eq!(
+            b.fighters[1].attack,
+            Some(Attack::Block),
+            "forward and up came out back and down"
+        );
         assert_eq!(b.fighters[1].state, State::Guard);
         let mut sound = pair(&d);
         sound.step(&d, &[Intent::default(), up_thrust]);
-        assert_ne!(sound.fighters[1].state, State::Guard, "an uncursed knight does not");
+        assert_ne!(
+            sound.fighters[1].state,
+            State::Guard,
+            "an uncursed knight does not"
+        );
     }
 
     /// The thrown dagger: `KnifeThrow` takes one off the belt and spawns a
@@ -1815,10 +2051,17 @@ mod depth {
         let d = depth_def();
         let mut b = Bout::new(
             arena_field(),
-            vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 220, 100, -1)],
+            vec![
+                Fighter::new("k", &d, 100, 100, 1),
+                Fighter::new("k", &d, 220, 100, -1),
+            ],
         );
         b.fighters[0].record.set(field::DAGGERS, 2);
-        let throw = Intent { dx: -1, dy: -1, attack: true };
+        let throw = Intent {
+            dx: -1,
+            dy: -1,
+            attack: true,
+        };
         let mut hits = Vec::new();
         let mut flew = Vec::new();
         for t in 0..20 {
@@ -1831,10 +2074,16 @@ mod depth {
             }
         }
         assert_eq!(b.fighters[0].record.get(field::DAGGERS), 1, "one thrown");
-        assert_eq!(flew.len() > 2, true, "it was in the air for a while: {flew:?}");
-        assert!(flew.windows(2).all(|w| w[1] > w[0]), "and moving forward: {flew:?}");
+        assert!(flew.len() > 2, "it was in the air for a while: {flew:?}");
+        assert!(
+            flew.windows(2).all(|w| w[1] > w[0]),
+            "and moving forward: {flew:?}"
+        );
         assert_eq!(hits.len(), 1, "it connected once: {hits:?}");
-        assert_eq!(hits[0].damage, 18, "the knife's 3 against the swing's 4, of 25");
+        assert_eq!(
+            hits[0].damage, 18,
+            "the knife's 3 against the swing's 4, of 25"
+        );
         assert_eq!(hits[0].attacker, 0, "and the blow is the thrower's");
         assert!(b.missiles.is_empty(), "and is gone once it has");
         assert_eq!(b.fighters[1].health, 82);
@@ -1856,10 +2105,17 @@ mod depth {
         let d = depth_def();
         let mut b = Bout::new(
             arena_field(),
-            vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 200, 100, -1)],
+            vec![
+                Fighter::new("k", &d, 100, 100, 1),
+                Fighter::new("k", &d, 200, 100, -1),
+            ],
         );
         b.fighters[0].record.set(field::DAGGERS, 1);
-        let throw = Intent { dx: -1, dy: -1, attack: true };
+        let throw = Intent {
+            dx: -1,
+            dy: -1,
+            attack: true,
+        };
         let mut hits = 0;
         for _ in 0..20 {
             let intents = [throw, block_for(&b.fighters[1])];
@@ -1887,21 +2143,29 @@ mod depth {
     /// `TASKSKIP` turns it into the collapse.
     #[test]
     fn gore_parts_are_gated_by_the_switch() {
-        let d = depth_def();
         let gory = kneel_and_strike(false);
         let body = &gory.fighters[1];
         assert_eq!(body.state, State::Dead);
         assert!(!body.alive());
-        assert_eq!(body.script, "decap", "a swing on the kneeling body takes the head");
+        assert_eq!(
+            body.script, "decap",
+            "a swing on the kneeling body takes the head"
+        );
         let shown = &body.task.as_ref().unwrap().shown;
-        assert!(shown.iter().any(|p| p.is(part_flags::GATED)), "the gore is drawn: {shown:?}");
+        assert!(
+            shown.iter().any(|p| p.is(part_flags::GATED)),
+            "the gore is drawn: {shown:?}"
+        );
 
         let clean = kneel_and_strike(true);
         let body = &clean.fighters[1];
         assert_eq!(body.state, State::Dead);
         let t = body.task.as_ref().unwrap();
         assert_eq!(t.pc.script, "collapse", "TASKSKIP diverts the decapitation");
-        assert!(t.shown.iter().all(|p| !p.is(part_flags::GATED)), "and nothing gated is drawn");
+        assert!(
+            t.shown.iter().all(|p| !p.is(part_flags::GATED)),
+            "and nothing gated is drawn"
+        );
     }
 
     /// `AddBlood`: a blow on a creature that bleeds spawns `Blood1` at the
@@ -1923,7 +2187,12 @@ mod depth {
             let m = spawned.expect("a spray");
             assert_eq!(m.task.table, 4, "on the blood bank");
             assert_eq!(m.task.pc.script, "Blood1");
-            assert_eq!(!m.task.shown.is_empty(), !bloodless, "bloodless {bloodless}: {:?}", m.task.shown);
+            assert_eq!(
+                !m.task.shown.is_empty(),
+                !bloodless,
+                "bloodless {bloodless}: {:?}",
+                m.task.shown
+            );
             assert!(b.missiles.is_empty(), "and it killed itself");
         }
     }
@@ -1950,10 +2219,17 @@ mod depth {
         let d = depth_def();
         let mut b = Bout::new(
             arena_field(),
-            vec![Fighter::new("k", &d, 60, 100, 1), Fighter::new("k", &d, 260, 100, -1)],
+            vec![
+                Fighter::new("k", &d, 60, 100, 1),
+                Fighter::new("k", &d, 260, 100, -1),
+            ],
         );
         b.fighters[0].record.set(field::DAGGERS, 3);
-        let throw = Intent { dx: -1, dy: -1, attack: true };
+        let throw = Intent {
+            dx: -1,
+            dy: -1,
+            attack: true,
+        };
         for _ in 0..4 {
             b.step(&d, &[throw, Intent::default()]);
         }
@@ -1963,7 +2239,14 @@ mod depth {
         assert_eq!(restored, b);
         assert_eq!(restored.state_hash(), b.state_hash());
         for t in 0..30 {
-            let intents = [throw, Intent { dx: -1, dy: 0, attack: false }];
+            let intents = [
+                throw,
+                Intent {
+                    dx: -1,
+                    dy: 0,
+                    attack: false,
+                },
+            ];
             b.step(&d, &intents);
             restored.step(&d, &intents);
             assert_eq!(restored.state_hash(), b.state_hash(), "tick {t}");
@@ -1979,7 +2262,12 @@ mod mixed {
     /// One arena's ground. The tree line is put high enough that every
     /// fighter in these tests stands below it and is free to walk.
     fn arena_field() -> Field {
-        Field::new(vec![Border { left: 0, right: 319, bottom: 60, top: 10 }])
+        Field::new(vec![Border {
+            left: 0,
+            right: 319,
+            bottom: 60,
+            top: 10,
+        }])
     }
 
     /// A troll and a knight in one bout: each fighter is stepped and struck by
@@ -2001,12 +2289,19 @@ mod mixed {
                 Fighter::new("troll", &troll, 130, 100, -1),
             ],
         );
-        assert_eq!(b.fighters[1].max_health, 300, "built from its own definition");
+        assert_eq!(
+            b.fighters[1].max_health, 300,
+            "built from its own definition"
+        );
         assert_eq!(b.fighters[1].damage, 7);
 
         let mut dealt = std::collections::BTreeMap::new();
         for _ in 0..40 {
-            let both = [Intent { dx: 0, dy: 0, attack: true }; 2];
+            let both = [Intent {
+                dx: 0,
+                dy: 0,
+                attack: true,
+            }; 2];
             for e in b.step_with(def_of, &both) {
                 dealt.insert(e.attacker, e.damage);
             }
@@ -2023,12 +2318,19 @@ mod mixed {
         let mk = || {
             Bout::new(
                 arena_field(),
-                vec![Fighter::new("k", &d, 100, 100, 1), Fighter::new("k", &d, 130, 100, -1)],
+                vec![
+                    Fighter::new("k", &d, 100, 100, 1),
+                    Fighter::new("k", &d, 130, 100, -1),
+                ],
             )
         };
         let (mut a, mut b) = (mk(), mk());
         for t in 0..80 {
-            let intents = [Intent { dx: 0, dy: 0, attack: t % 3 == 0 }; 2];
+            let intents = [Intent {
+                dx: 0,
+                dy: 0,
+                attack: t % 3 == 0,
+            }; 2];
             a.step(&d, &intents);
             b.step_with(|_| &d, &intents);
             assert_eq!(a.state_hash(), b.state_hash(), "tick {t}");

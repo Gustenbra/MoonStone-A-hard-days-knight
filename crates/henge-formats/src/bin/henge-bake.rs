@@ -23,6 +23,8 @@ use std::fs;
 use std::path::Path;
 
 /// Sprite banks grouped into the actors they actually belong to.
+// Hand-aligned: one actor per line, so the banks an actor owns read as a row.
+#[rustfmt::skip]
 const ACTORS: &[(&str, &[&str])] = &[
     ("knight", &["KN1.OB", "KN2.OB", "KN3.OB", "KN4.OB", "KN5.OB"]),
     ("hero", &["HE1.OB", "HE2.OB", "HE3.OB"]),
@@ -46,6 +48,9 @@ const ACTORS: &[(&str, &[&str])] = &[
 /// sheet comes from `TileTable`, four words indexed by the landscape code,
 /// which reads `FO1` for both plain and forest, `SW1` for swamp and `WA1` for
 /// waste. The names below are those tables, in their order.
+// Hand-aligned: the eight arena names sit under the family's four fields, so the
+// four families read as four records of the original's own tables.
+#[rustfmt::skip]
 const ARENAS: &[(&str, &str, &str, &str, [&str; 8])] = &[
     ("waste", "wa", "WA1.CMP", "WAB1.CMP",
      ["wa1", "wa2", "wa3", "wa4", "wa5", "wa6", "wa7", "wa8"]),
@@ -108,6 +113,8 @@ const DRAGON_FLIGHT_BANKS: &[&str] = &["MI.C", "MI.C", "MI.C", "MI.C", "MI.C"];
 
 /// Table 2, one creature at a time, read out of the creature loaders. An empty
 /// name is a slot that loader leaves alone.
+// Hand-aligned: one loader per line, so the slots of table 2 line up across rows.
+#[rustfmt::skip]
 const CREATURE_BANKS: &[(&str, &[&str])] = &[
     ("knight", KNIGHT_BANKS),
     ("hero", &["HE1.OB", "HE2.OB", "HE3.OB", "KN4.OB", "KN5.OB"]),
@@ -136,6 +143,8 @@ const CREATURE_BANKS: &[(&str, &[&str])] = &[
 /// shoulder hit it was checked against when the VM landed. The walk's shape is
 /// the original's: four single-frame scripts, each ending on `ff ff`, the
 /// controller handing over the next each time the last has ended.
+// Hand-aligned: one state per line, so the five states read as a table.
+#[rustfmt::skip]
 const KNIGHT_SCRIPTS: &[(&str, &[&str])] = &[
     ("idle", &["Knight_SwStance"]),
     ("walk", &[
@@ -211,17 +220,31 @@ const BLOOD: &str = "Blood1";
 /// `TroggTABLE`, DS:0x97a, four eight-byte `[x][y][z][facing]` records and a
 /// zero word. The troggs take it from the front and the troll from record one.
 /// Every x is off the side of the screen and every facing points into it.
-const TROGG_SEATS: &[[i32; 4]] =
-    &[[-50, 0, 100, 1], [360, 0, 150, 3], [340, 0, 50, 3], [-80, 0, 120, 1]];
+const TROGG_SEATS: &[[i32; 4]] = &[
+    [-50, 0, 100, 1],
+    [360, 0, 150, 3],
+    [340, 0, 50, 3],
+    [-80, 0, 120, 1],
+];
 /// `BeastTABLE`, DS:0x99c, three records.
 const BEAST_SEATS: &[[i32; 4]] = &[[-60, 0, 50, 1], [360, 0, 140, 3], [370, 0, 120, 3]];
 /// `RatmanTABLE`, DS:0x9b6, five records. Record three is the only one in the
 /// bestiary that starts on screen, at x 30.
-const RATMAN_SEATS: &[[i32; 4]] =
-    &[[-50, 0, 50, 1], [340, 0, 100, 3], [360, 0, 50, 3], [30, 0, 90, 1], [-50, 0, 50, 1]];
+const RATMAN_SEATS: &[[i32; 4]] = &[
+    [-50, 0, 50, 1],
+    [340, 0, 100, 3],
+    [360, 0, 50, 3],
+    [30, 0, 90, 1],
+    [-50, 0, 50, 1],
+];
 /// `MudmanTABLE`, DS:0x9e0, five records.
-const MUDMAN_SEATS: &[[i32; 4]] =
-    &[[-80, 0, 50, 1], [380, 0, 100, 3], [380, 0, 50, 3], [-80, 0, 90, 1], [-80, 0, 50, 1]];
+const MUDMAN_SEATS: &[[i32; 4]] = &[
+    [-80, 0, 50, 1],
+    [380, 0, 100, 3],
+    [380, 0, 50, 3],
+    [-80, 0, 90, 1],
+    [-80, 0, 50, 1],
+];
 /// `BalokTABLE`, DS:0xa5c, one record.
 const BALOK_SEATS: &[[i32; 4]] = &[[-60, 0, 0, 1]];
 
@@ -265,7 +288,14 @@ const fn wave(
     opens_with_side: bool,
     level: &'static [i32],
 ) -> WaveSpec {
-    WaveSpec { max, heads, cap, alternates, opens_with_side, level }
+    WaveSpec {
+        max,
+        heads,
+        cap,
+        alternates,
+        opens_with_side,
+        level,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -392,6 +422,11 @@ struct Creature {
 /// crosses the body; `speed`, read off the `*WALKR` offset tables where the
 /// creature has one and chosen otherwise; and `bounty`, which the original
 /// keeps no table for.
+// Hand-aligned: the bestiary. Fields are grouped several to a line (identity, then
+// the numbers, then the seats) so one creature is a handful of lines and the whole
+// bestiary can be scanned and compared row against row. One field per line would
+// make each creature forty lines and the table unreadable.
+#[rustfmt::skip]
 const CREATURES: &[Creature] = &[
     Creature {
         id: "troll", name: "Troll", banks: "troll", sheet: "actor.troll",
@@ -876,18 +911,26 @@ fn main() -> anyhow::Result<()> {
     // the game. Research only, like the rest of this crate.
     let argv: Vec<String> = std::env::args().collect();
     if let Some(i) = argv.iter().position(|a| a == "--render-music") {
-        let dir = argv.get(i + 1).cloned().unwrap_or_else(|| "research/music".into());
-        let text = fs::read_to_string("research/tunes.json")
-            .context("reading research/tunes.json")?;
+        let dir = argv
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "research/music".into());
+        let text =
+            fs::read_to_string("research/tunes.json").context("reading research/tunes.json")?;
         let tunes: henge_audio::music::Tunes = serde_json::from_str(&text)?;
         fs::create_dir_all(&dir)?;
         for (name, score) in tunes.split() {
             let pcm = henge_audio::music::render(&score);
             let path = Path::new(&dir).join(format!("{name}.wav"));
-            fs::write(&path, henge_audio::music::wav(&pcm, henge_audio::music::RATE))?;
+            fs::write(
+                &path,
+                henge_audio::music::wav(&pcm, henge_audio::music::RATE),
+            )?;
             println!(
                 "{}: {} notes, {:.1}s, {}",
-                path.display(), score.notes.len(), score.seconds(),
+                path.display(),
+                score.notes.len(),
+                score.seconds(),
                 if score.looping { "loops" } else { "runs once" }
             );
         }
@@ -919,7 +962,9 @@ fn main() -> anyhow::Result<()> {
                 let same_recipe = old.get("recipe").and_then(|r| r.as_u64()) == Some(RECIPE as u64);
                 let same_image = old.get("image").and_then(|r| r.as_str()) == Some(image.as_str());
                 if same_recipe && same_image {
-                    println!("pack is already baked to recipe {RECIPE} from this image; nothing to do");
+                    println!(
+                        "pack is already baked to recipe {RECIPE} from this image; nothing to do"
+                    );
                     return Ok(());
                 }
                 if same_recipe {
@@ -944,12 +989,11 @@ fn main() -> anyhow::Result<()> {
             m.palettes.insert(format!("palette.{name}"), p.palette);
         }
     }
-    let fallback = m
-        .palettes
-        .values()
-        .next()
-        .cloned()
-        .unwrap_or_else(|| (0..32).map(|i: u32| (i * 8) << 16 | (i * 8) << 8 | i * 8).collect());
+    let fallback = m.palettes.values().next().cloned().unwrap_or_else(|| {
+        (0..32)
+            .map(|i: u32| (i * 8) << 16 | (i * 8) << 8 | (i * 8))
+            .collect()
+    });
 
     // One sheet per actor, all its banks packed together in bank order.
     for (actor, banks) in ACTORS {
@@ -965,8 +1009,20 @@ fn main() -> anyhow::Result<()> {
         let id = format!("actor.{actor}");
         let file = format!("sheets/{actor}.png");
         let sheet = pack_sheet(&frames);
-        write_indexed(&out.join(&file), sheet.width, sheet.height, &sheet.pixels, &fallback)?;
-        m.sheets.insert(id, Sheet { file, frames: sheet.rects });
+        write_indexed(
+            &out.join(&file),
+            sheet.width,
+            sheet.height,
+            &sheet.pixels,
+            &fallback,
+        )?;
+        m.sheets.insert(
+            id,
+            Sheet {
+                file,
+                frames: sheet.rects,
+            },
+        );
     }
 
     // Everything else that is a sprite bank, so nothing is silently dropped.
@@ -986,8 +1042,20 @@ fn main() -> anyhow::Result<()> {
         let stem = name.split('.').next().unwrap_or(&name).to_lowercase();
         let file = format!("sheets/bank_{stem}.png");
         let sheet = pack_sheet(&c.images);
-        write_indexed(&out.join(&file), sheet.width, sheet.height, &sheet.pixels, &fallback)?;
-        m.sheets.insert(format!("bank.{stem}"), Sheet { file, frames: sheet.rects });
+        write_indexed(
+            &out.join(&file),
+            sheet.width,
+            sheet.height,
+            &sheet.pixels,
+            &fallback,
+        )?;
+        m.sheets.insert(
+            format!("bank.{stem}"),
+            Sheet {
+                file,
+                frames: sheet.rects,
+            },
+        );
     }
 
     // Full-screen images: towns, the map, intro art. .P files are PIVs too.
@@ -1001,18 +1069,26 @@ fn main() -> anyhow::Result<()> {
                 Sheet {
                     file,
                     frames: vec![FrameRect {
-                        x: 0, y: 0, w: piv::W as u32, h: piv::H as u32, ox: 0, oy: 0,
+                        x: 0,
+                        y: 0,
+                        w: piv::W as u32,
+                        h: piv::H as u32,
+                        ox: 0,
+                        oy: 0,
                     }],
                 },
             );
-            m.palettes.insert(format!("palette.scene.{stem}"), p.palette);
+            m.palettes
+                .insert(format!("palette.scene.{stem}"), p.palette);
         }
     }
 
     // Samples, converted to plain WAV so the engine never learns about VOC.
     let mut sounds = 0;
     for name in lib.names() {
-        let Ok(bytes) = lib.bytes(&name) else { continue };
+        let Ok(bytes) = lib.bytes(&name) else {
+            continue;
+        };
         if bytes.len() < 20 || &bytes[..19] != b"Creative Voice File" {
             continue;
         }
@@ -1039,9 +1115,9 @@ fn main() -> anyhow::Result<()> {
         // purpose. Dropping it left the fourteenth lair with no layout to
         // fight in.
         let sane = !t.borders.is_empty()
-            && t.borders.iter().all(|b| {
-                b.left < b.right && b.top < b.bottom && b.right < 640 && b.bottom < 400
-            });
+            && t.borders
+                .iter()
+                .all(|b| b.left < b.right && b.top < b.bottom && b.right < 640 && b.bottom < 400);
         if !sane {
             continue;
         }
@@ -1058,13 +1134,18 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or("forest");
         arenas.insert(stem, serde_json::json!({ "family": family, "terrain": t }));
     }
-    fs::write(out.join("data/arenas.json"), serde_json::to_string(&arenas)?)?;
-    m.data.insert("data.arenas".into(), "data/arenas.json".into());
+    fs::write(
+        out.join("data/arenas.json"),
+        serde_json::to_string(&arenas)?,
+    )?;
+    m.data
+        .insert("data.arenas".into(), "data/arenas.json".into());
 
     if let Ok(bytes) = lib.bytes("COLLIDE.HIT") {
         let c = Collide::parse(&bytes)?;
         fs::write(out.join("data/hitlines.json"), serde_json::to_string(&c)?)?;
-        m.data.insert("data.hitlines".into(), "data/hitlines.json".into());
+        m.data
+            .insert("data.hitlines".into(), "data/hitlines.json".into());
     }
 
     // Which sheets each arena family draws from, and the eight arenas its
@@ -1073,19 +1154,28 @@ fn main() -> anyhow::Result<()> {
     let families: BTreeMap<&str, serde_json::Value> = ARENAS
         .iter()
         .map(|(name, _, sheet, backdrop, rotation)| {
-            let creatures: &[&str] =
-                AMBUSHES.iter().find(|(f, _)| f == name).map_or(&[], |(_, c)| *c);
-            (*name, serde_json::json!({
-                "sheet": key(sheet),
-                "backdrop": key(backdrop),
-                "tiles": { "4": key(SHARED_TILES) },
-                "arenas": rotation,
-                "creatures": creatures,
-            }))
+            let creatures: &[&str] = AMBUSHES
+                .iter()
+                .find(|(f, _)| f == name)
+                .map_or(&[], |(_, c)| *c);
+            (
+                *name,
+                serde_json::json!({
+                    "sheet": key(sheet),
+                    "backdrop": key(backdrop),
+                    "tiles": { "4": key(SHARED_TILES) },
+                    "arenas": rotation,
+                    "creatures": creatures,
+                }),
+            )
         })
         .collect();
-    fs::write(out.join("data/families.json"), serde_json::to_string(&families)?)?;
-    m.data.insert("data.families".into(), "data/families.json".into());
+    fs::write(
+        out.join("data/families.json"),
+        serde_json::to_string(&families)?,
+    )?;
+    m.data
+        .insert("data.families".into(), "data/families.json".into());
 
     // The animation task VM: every actor's bank tables, and every script.
     let banks = bank_tables(&lib);
@@ -1099,10 +1189,13 @@ fn main() -> anyhow::Result<()> {
                 "task VM: {} scripts, {} part records, {} commands",
                 set.len(),
                 all().filter(|i| matches!(i, Instr::Part(_))).count(),
-                all().filter(|i| !matches!(i, Instr::Part(_) | Instr::EndFrame { .. })).count(),
+                all()
+                    .filter(|i| !matches!(i, Instr::Part(_) | Instr::EndFrame { .. }))
+                    .count(),
             );
             fs::write(out.join("data/scripts.json"), serde_json::to_string(&set)?)?;
-            m.data.insert("data.scripts".into(), "data/scripts.json".into());
+            m.data
+                .insert("data.scripts".into(), "data/scripts.json".into());
             set
         }
         // `check_image` has already found the image, so what is missing is
@@ -1115,8 +1208,12 @@ fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.context("animation scripts")),
     };
 
-    fs::write(out.join("data/actors.json"), actor_definitions(&scripts, &banks)?)?;
-    m.data.insert("data.actors".into(), "data/actors.json".into());
+    fs::write(
+        out.join("data/actors.json"),
+        actor_definitions(&scripts, &banks)?,
+    )?;
+    m.data
+        .insert("data.actors".into(), "data/actors.json".into());
 
     fs::write(out.join("data/fonts.json"), font_definitions())?;
     m.data.insert("data.fonts".into(), "data/fonts.json".into());
@@ -1124,7 +1221,7 @@ fn main() -> anyhow::Result<()> {
     // The intro. `MINDSCAP` is a PIV with no extension, so nothing had picked
     // it up; `INTRO.STI` is the tile map behind the opening pan, and the cast
     // comes out of `INTR.EXE` once its image is expanded.
-    match bake_intro(&lib, &out, &mut m) {
+    match bake_intro(&lib, out, &mut m) {
         Ok(what) => println!("intro: {what}"),
         Err(e) => eprintln!("intro: {e:#}"),
     }
@@ -1136,8 +1233,12 @@ fn main() -> anyhow::Result<()> {
     match overworld_tables(&src) {
         Ok(Some((terrain, going))) => {
             let land = serde_json::json!({ "terrain": terrain, "going": going });
-            fs::write(out.join("data/overworld.json"), serde_json::to_string(&land)?)?;
-            m.data.insert("data.overworld".into(), "data/overworld.json".into());
+            fs::write(
+                out.join("data/overworld.json"),
+                serde_json::to_string(&land)?,
+            )?;
+            m.data
+                .insert("data.overworld".into(), "data/overworld.json".into());
         }
         Ok(None) => anyhow::bail!("overworld tables: the image vanished during the bake"),
         Err(e) => return Err(e.context("overworld tables")),
@@ -1182,36 +1283,51 @@ fn main() -> anyhow::Result<()> {
     };
     let lairs = match lair_table(&src) {
         Ok(Some(l)) => {
-            println!("lairs: {} read out of ForestLairs, LairLocation and LairType", l.len());
+            println!(
+                "lairs: {} read out of ForestLairs, LairLocation and LairType",
+                l.len()
+            );
             l
         }
         Ok(None) => anyhow::bail!("lair tables: the image vanished during the bake"),
         Err(e) => return Err(e.context("lair tables")),
     };
-    fs::write(out.join("data/places.json"), place_definitions(&icons, &marks, &lairs))?;
-    m.data.insert("data.places".into(), "data/places.json".into());
+    fs::write(
+        out.join("data/places.json"),
+        place_definitions(&icons, &marks, &lairs),
+    )?;
+    m.data
+        .insert("data.places".into(), "data/places.json".into());
 
     fs::write(out.join("data/items.json"), item_definitions())?;
     m.data.insert("data.items".into(), "data/items.json".into());
 
     fs::write(out.join("data/knights.json"), knight_definitions())?;
-    m.data.insert("data.knights".into(), "data/knights.json".into());
+    m.data
+        .insert("data.knights".into(), "data/knights.json".into());
 
     fs::write(out.join("data/palette-effects.json"), palette_effects())?;
-    m.data.insert("data.palette.effects".into(), "data/palette-effects.json".into());
+    m.data.insert(
+        "data.palette.effects".into(),
+        "data/palette-effects.json".into(),
+    );
 
     fs::write(out.join("data/battle-palette.json"), battle_palette(&src)?)?;
-    m.data.insert("data.battle_palette".into(), "data/battle-palette.json".into());
+    m.data.insert(
+        "data.battle_palette".into(),
+        "data/battle-palette.json".into(),
+    );
 
     fs::write(out.join("data/music-places.json"), music_places())?;
-    m.data.insert("data.music.places".into(), "data/music-places.json".into());
+    m.data
+        .insert("data.music.places".into(), "data/music-places.json".into());
 
     // The tunes, if `tools/tunes.py` has been run. Music is derived data like
     // everything else here, so it goes in the pack and never into the tree.
     match bake_music(out, &mut m) {
-        Ok(0) => println!(
-            "no music: run `python3 tools/tunes.py \"{src}\" research/tunes.json` first"
-        ),
+        Ok(0) => {
+            println!("no music: run `python3 tools/tunes.py \"{src}\" research/tunes.json` first")
+        }
         Ok(n) => println!("music: {n} tunes"),
         Err(e) => eprintln!("music: {e:#}"),
     }
@@ -1219,7 +1335,11 @@ fn main() -> anyhow::Result<()> {
     fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&m)?)?;
     println!(
         "baked {} sheets, {} sounds, {} palettes, {} data blobs into {}",
-        m.sheets.len(), sounds, m.palettes.len(), m.data.len(), out.display()
+        m.sheets.len(),
+        sounds,
+        m.palettes.len(),
+        m.data.len(),
+        out.display()
     );
     println!("marked derived-from-original: a release build will refuse to ship it.");
     Ok(())
@@ -1248,9 +1368,13 @@ fn pack_sheet(frames: &[Sprite]) -> Packed {
             row_h = 0;
         }
         rects.push(FrameRect {
-            x: x as u32, y: y as u32, w: w as u32, h: h as u32,
+            x: x as u32,
+            y: y as u32,
+            w: w as u32,
+            h: h as u32,
             // Anchor at the bottom centre: this game positions everything by feet.
-            ox: -((w / 2) as i32), oy: -(h as i32),
+            ox: -((w / 2) as i32),
+            oy: -(h as i32),
         });
         x += w + GAP;
         row_h = row_h.max(h);
@@ -1269,11 +1393,20 @@ fn pack_sheet(frames: &[Sprite]) -> Packed {
             }
         }
     }
-    Packed { width, height, pixels, rects }
+    Packed {
+        width,
+        height,
+        pixels,
+        rects,
+    }
 }
 
 fn write_indexed(
-    path: &Path, w: usize, h: usize, pixels: &[u8], palette: &[u32],
+    path: &Path,
+    w: usize,
+    h: usize,
+    pixels: &[u8],
+    palette: &[u32],
 ) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -1308,7 +1441,12 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
     let mut out = BTreeMap::new();
     for (creature, slots) in CREATURE_BANKS {
         let mut tables = BankTables::new();
-        for (n, files) in [(1u8, KNIGHT_BANKS), (2, *slots), (3, TABLE3_BANKS), (4, TABLE4_BANKS)] {
+        for (n, files) in [
+            (1u8, KNIGHT_BANKS),
+            (2, *slots),
+            (3, TABLE3_BANKS),
+            (4, TABLE4_BANKS),
+        ] {
             let banks: Vec<Bank> = files.iter().map(|f| bank_of(lib, f, &mut cache)).collect();
             if banks.iter().any(|b| !b.cels.is_empty()) {
                 tables.insert(n, banks);
@@ -1323,8 +1461,10 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
         // address it keeps a second copy of is the map icons and not the moon.
         // Cels 34 to 41 of `MI.C` are the eight frames of a beating wing.
         if *creature == "dragon" {
-            let banks: Vec<Bank> =
-                DRAGON_FLIGHT_BANKS.iter().map(|f| bank_of(lib, f, &mut cache)).collect();
+            let banks: Vec<Bank> = DRAGON_FLIGHT_BANKS
+                .iter()
+                .map(|f| bank_of(lib, f, &mut cache))
+                .collect();
             if banks.iter().any(|b| !b.cels.is_empty()) {
                 tables.insert(5, banks);
             }
@@ -1368,11 +1508,19 @@ fn bank_of(lib: &Library, file: &str, cache: &mut BTreeMap<String, Bank>) -> Ban
                 }
                 base += c.len() as u32;
             }
-            Bank { sheet: format!("actor.{actor}"), base, cels }
+            Bank {
+                sheet: format!("actor.{actor}"),
+                base,
+                cels,
+            }
         }
         None => {
             let stem = file.split('.').next().unwrap_or(file).to_lowercase();
-            Bank { sheet: format!("bank.{stem}"), base: 0, cels: sizes(file).unwrap_or_default() }
+            Bank {
+                sheet: format!("bank.{stem}"),
+                base: 0,
+                cels: sizes(file).unwrap_or_default(),
+            }
         }
     };
     cache.insert(file.to_string(), bank.clone());
@@ -1397,7 +1545,11 @@ fn animation_scripts(src: &str) -> anyhow::Result<Option<ScriptSet>> {
         "research/symbols.json".into(),
         format!("{src}/symbols.json"),
     ];
-    let find = |c: &[String]| c.iter().filter(|p| !p.is_empty()).find_map(|p| fs::read(p).ok());
+    let find = |c: &[String]| {
+        c.iter()
+            .filter(|p| !p.is_empty())
+            .find_map(|p| fs::read(p).ok())
+    };
     let (Some(img), Some(sym)) = (find(&images), find(&symbols)) else {
         return Ok(None);
     };
@@ -1428,7 +1580,9 @@ fn closure_of(all: &ScriptSet, roots: &[&str]) -> ScriptSet {
     let mut queue: Vec<String> = roots.iter().map(|r| r.to_string()).collect();
     let mut seen: BTreeSet<String> = queue.iter().cloned().collect();
     while let Some(name) = queue.pop() {
-        let Some(script) = all.get(&name) else { continue };
+        let Some(script) = all.get(&name) else {
+            continue;
+        };
         for i in &script.code {
             let target = match i {
                 Instr::Goto { target, .. }
@@ -1456,7 +1610,9 @@ fn closure_of(all: &ScriptSet, roots: &[&str]) -> ScriptSet {
 /// pixel of the parts that frame is made of.
 fn origin_of(scripts: &ScriptSet, banks: &BankTables, table: u8, standing: &str) -> [i16; 2] {
     let mut lowest = 0i32;
-    let Some(script) = scripts.get(standing) else { return [0, 0] };
+    let Some(script) = scripts.get(standing) else {
+        return [0, 0];
+    };
     for i in &script.code {
         let Instr::Part(p) = i else { continue };
         let Some([_, h]) = banks
@@ -1478,7 +1634,12 @@ fn origin_of(scripts: &ScriptSet, banks: &BankTables, table: u8, standing: &str)
 /// walks, so this is the figure as the original sees it, not as it is drawn:
 /// a trogg's spear held out in front is not `BODY` and a blow through it
 /// touches nothing.
-fn body_extent(scripts: &ScriptSet, banks: &BankTables, table: u8, standing: &str) -> Option<[i32; 4]> {
+fn body_extent(
+    scripts: &ScriptSet,
+    banks: &BankTables,
+    table: u8,
+    standing: &str,
+) -> Option<[i32; 4]> {
     let script = scripts.get(standing)?;
     let mut out: Option<[i32; 4]> = None;
     for i in &script.code {
@@ -1568,15 +1729,33 @@ fn actor_definitions(
         ..ActorDef::default()
     };
     for (state, names) in KNIGHT_SCRIPTS {
-        def.scripts.insert(state.to_string(), names.iter().map(|n| n.to_string()).collect());
+        def.scripts.insert(
+            state.to_string(),
+            names.iter().map(|n| n.to_string()).collect(),
+        );
     }
     for (kind, script, damage) in KNIGHT_ATTACKS {
-        def.attacks.insert(kind.to_string(), AttackDef { script: script.to_string(), damage: *damage });
+        def.attacks.insert(
+            kind.to_string(),
+            AttackDef {
+                script: script.to_string(),
+                damage: *damage,
+            },
+        );
     }
     def.attack = "swing".into();
-    def.hurt_by = KNIGHT_HURT.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
-    def.blocks = KNIGHT_BLOCKS.iter().map(|(k, g)| (k.to_string(), g.to_string())).collect();
-    def.finishes = KNIGHT_FINISHES.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
+    def.hurt_by = KNIGHT_HURT
+        .iter()
+        .map(|(k, s)| (k.to_string(), s.to_string()))
+        .collect();
+    def.blocks = KNIGHT_BLOCKS
+        .iter()
+        .map(|(k, g)| (k.to_string(), g.to_string()))
+        .collect();
+    def.finishes = KNIGHT_FINISHES
+        .iter()
+        .map(|(k, s)| (k.to_string(), s.to_string()))
+        .collect();
     def.blockable = true;
     // `CONTROLTABLE[6]` is `ControlKnight`, which reads a joystick. A knight
     // in a seat the machine plays gets the plain opponent, which closes and
@@ -1651,8 +1830,9 @@ fn creature_definition(
     // middle half the way the knight's was authored (his stance is 36 wide
     // and his box is 18), and as tall as those parts. The girth is three
     // quarters of the drawn width, which is the knight's 28 against 36.
-    let extent = body_extent(&animation, &tables, table, stance)
-        .ok_or_else(|| anyhow::anyhow!("{}: {stance} has no BODY parts to size a box from", c.id))?;
+    let extent = body_extent(&animation, &tables, table, stance).ok_or_else(|| {
+        anyhow::anyhow!("{}: {stance} has no BODY parts to size a box from", c.id)
+    })?;
     let [l, t, r, b] = extent;
     let (w, mid) = (r - l, (l + r) / 2);
     let feet = -(origin[1] as i32);
@@ -1697,10 +1877,13 @@ fn creature_definition(
             .moon
             .iter()
             .map(|(phase, health, damage)| {
-                ((*phase).to_string(), henge_core::content::MoonStat {
-                    health: *health,
-                    damage: *damage,
-                })
+                (
+                    (*phase).to_string(),
+                    henge_core::content::MoonStat {
+                        health: *health,
+                        damage: *damage,
+                    },
+                )
             })
             .collect(),
         ..ActorDef::default()
@@ -1712,19 +1895,34 @@ fn creature_definition(
         ("hurt", c.hurt),
         ("death", c.death),
     ] {
-        def.scripts.insert(state.to_string(), names.iter().map(|n| n.to_string()).collect());
+        def.scripts.insert(
+            state.to_string(),
+            names.iter().map(|n| n.to_string()).collect(),
+        );
     }
-    def.scripts.insert("recover".into(), vec![recover.to_string()]);
+    def.scripts
+        .insert("recover".into(), vec![recover.to_string()]);
     def.attacks.insert(
         c.kind.to_string(),
-        AttackDef { script: c.attack[0].to_string(), damage: c.damage },
+        AttackDef {
+            script: c.attack[0].to_string(),
+            damage: c.damage,
+        },
     );
     for (kind, script, damage) in c.alternates {
-        def.attacks
-            .insert(kind.to_string(), AttackDef { script: script.to_string(), damage: *damage });
+        def.attacks.insert(
+            kind.to_string(),
+            AttackDef {
+                script: script.to_string(),
+                damage: *damage,
+            },
+        );
     }
     for (row, names) in c.rows {
-        def.scripts.insert(row.to_string(), names.iter().map(|n| n.to_string()).collect());
+        def.scripts.insert(
+            row.to_string(),
+            names.iter().map(|n| n.to_string()).collect(),
+        );
     }
     def.controller = c.controller.to_string();
     def.border = c.border;
@@ -1742,10 +1940,15 @@ fn creature_definition(
         level: c.wave.level.to_vec(),
     };
     def.attack = c.kind.to_string();
-    def.hurt_by = c.hurt_by.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
+    def.hurt_by = c
+        .hurt_by
+        .iter()
+        .map(|(k, s)| (k.to_string(), s.to_string()))
+        .collect();
     def.blockable = c.blockable;
     def.bleeds = c.bleeds;
-    def.validate().map_err(|e| anyhow::anyhow!("{}: {e}", c.id))?;
+    def.validate()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", c.id))?;
     Ok(def)
 }
 
@@ -1897,7 +2100,9 @@ fn overworld_tables(src: &str) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
 /// gold, emerald and red arriving independently, which is the check that these
 /// are the right sixty four bytes.
 fn select_palette(src: &str) -> anyhow::Result<Option<Vec<u32>>> {
-    let Some(bytes) = unpacked_image(src) else { return Ok(None) };
+    let Some(bytes) = unpacked_image(src) else {
+        return Ok(None);
+    };
     anyhow::ensure!(
         bytes.len() == IMAGE_LEN,
         "the unpacked image is {} bytes, expected {IMAGE_LEN}",
@@ -2085,7 +2290,9 @@ struct LairPlace {
 /// coordinate has to be on the map; and no two lairs may stand on one spot.
 /// A stale image fails these rather than baking a plausible lie.
 fn lair_table(src: &str) -> anyhow::Result<Option<Vec<LairPlace>>> {
-    let Some(bytes) = unpacked_image(src) else { return Ok(None) };
+    let Some(bytes) = unpacked_image(src) else {
+        return Ok(None);
+    };
     anyhow::ensure!(
         bytes.len() == IMAGE_LEN,
         "the unpacked image is {} bytes, expected {IMAGE_LEN}",
@@ -2099,7 +2306,10 @@ fn lair_table(src: &str) -> anyhow::Result<Option<Vec<LairPlace>>> {
         let x = word(LAIRLOCATION_AT + n * 4) as i32;
         let y = word(LAIRLOCATION_AT + n * 4 + 2) as i32;
         let code = word(LAIRTYPE_AT + n * 2);
-        let guardian = GUARDIANS.iter().find(|(s, _)| *s == slot).map(|(_, id)| *id);
+        let guardian = GUARDIANS
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, id)| *id);
         let guardian = guardian.with_context(|| {
             format!("lair {n} wants CombatTable entry {slot}, which InitGameStart never fills")
         })?;
@@ -2126,12 +2336,20 @@ fn lair_table(src: &str) -> anyhow::Result<Option<Vec<LairPlace>>> {
             (0..=320 - LAIR_W).contains(&x) && (0..=200 - LAIR_H).contains(&y),
             "lair {n} stands at ({x}, {y}), which is off the map"
         );
-        lairs.push(LairPlace { guardian, count: count as u32, x, y, code: code as u8 });
+        lairs.push(LairPlace {
+            guardian,
+            count: count as u32,
+            x,
+            y,
+            code: code as u8,
+        });
     }
     for (n, a) in lairs.iter().enumerate() {
         anyhow::ensure!(
             !lairs[n + 1..].iter().any(|b| b.x == a.x && b.y == a.y),
-            "two lairs stand at ({}, {})", a.x, a.y
+            "two lairs stand at ({}, {})",
+            a.x,
+            a.y
         );
     }
     Ok(Some(lairs))
@@ -2183,7 +2401,9 @@ fn lair_arena(family: &str, n: usize) -> String {
 /// `_MAP:KnightGoesToTown` carries their walk-to points as literals and they
 /// are the one cross-check the map has on itself.
 fn map_marks(src: &str) -> anyhow::Result<Option<BTreeMap<u8, (i32, i32)>>> {
-    let Some(bytes) = unpacked_image(src) else { return Ok(None) };
+    let Some(bytes) = unpacked_image(src) else {
+        return Ok(None);
+    };
     anyhow::ensure!(
         bytes.len() == IMAGE_LEN,
         "the unpacked image is {} bytes, expected {IMAGE_LEN}",
@@ -2297,16 +2517,20 @@ fn place_definitions(
     // that before the icon is centred on it. Only the two towns still need it,
     // and only when `MapIconsTABLE` is not there to be read.
     let at = |goal: (i32, i32), size: (i32, i32)| {
-        (goal.0 + 4 - size.0 / 2, goal.1 + 5 - size.1 / 2, size.0, size.1)
+        (
+            goal.0 + 4 - size.0 / 2,
+            goal.1 + 5 - size.1 / 2,
+            size.0,
+            size.1,
+        )
     };
     // A place whose corner `MapIconsTABLE` gives and whose size `MI.C` does.
-    let mark = |frame: u8, size: (i32, i32)| {
-        marks.get(&frame).map(|(x, y)| (*x, *y, size.0, size.1))
-    };
-    let highwood = mark(0x19, icon(0x19, (25, 32)))
-        .unwrap_or_else(|| at((94, 47), icon(0x19, (25, 32))));
-    let waterdeep = mark(0x1a, icon(0x1a, (32, 28)))
-        .unwrap_or_else(|| at((297, 157), icon(0x1a, (32, 28))));
+    let mark =
+        |frame: u8, size: (i32, i32)| marks.get(&frame).map(|(x, y)| (*x, *y, size.0, size.1));
+    let highwood =
+        mark(0x19, icon(0x19, (25, 32))).unwrap_or_else(|| at((94, 47), icon(0x19, (25, 32))));
+    let waterdeep =
+        mark(0x1a, icon(0x1a, (32, 28))).unwrap_or_else(|| at((297, 157), icon(0x1a, (32, 28))));
     let stones = mark(0x1b, icon(0x1b, (18, 12)));
     let valley = mark(0x1c, icon(0x1c, (13, 10)));
     let wizard = mark(0x1e, icon(0x1e, (7, 20)));
@@ -2315,9 +2539,7 @@ fn place_definitions(
     // on. `MI.C` gives each its size the way it gives a town one.
     let villages: Vec<(usize, (i32, i32, i32, i32))> = (0x15u8..=0x18)
         .enumerate()
-        .filter_map(|(whose, frame)| {
-            mark(frame, icon(frame, (8, 10))).map(|box_| (whose, box_))
-        })
+        .filter_map(|(whose, frame)| mark(frame, icon(frame, (8, 10))).map(|box_| (whose, box_)))
         .collect();
 
     // `ForestVillage` (0x112a): one life point, and three is as high as it goes.
@@ -2348,9 +2570,8 @@ fn place_definitions(
     let sell = |item: &str| serde_json::json!({ "do": "sell", "item": item });
     let donate = |gold: u32| serde_json::json!({ "do": "donate", "gold": gold });
     let consult = |gold: u32| serde_json::json!({ "do": "consult", "gold": gold });
-    let wager = |stake: u32, room: &str| {
-        serde_json::json!({ "do": "wager", "stake": stake, "room": room })
-    };
+    let wager =
+        |stake: u32, room: &str| serde_json::json!({ "do": "wager", "stake": stake, "room": room });
 
     let mut places = serde_json::Map::new();
 
@@ -2454,8 +2675,16 @@ fn place_definitions(
     };
 
     for (town, scene, stall_menu) in [
-        ("highwood", "scene.highwood", serde_json::json!([140, 0, 178, 200])),
-        ("waterdeep", "scene.waterdee", serde_json::json!([2, 0, 178, 200])),
+        (
+            "highwood",
+            "scene.highwood",
+            serde_json::json!([140, 0, 178, 200]),
+        ),
+        (
+            "waterdeep",
+            "scene.waterdee",
+            serde_json::json!([2, 0, 178, 200]),
+        ),
     ] {
         places.insert(
             format!("{town}.merchant"),
@@ -2986,7 +3215,7 @@ fn knight_definitions() -> String {
     // 12-bit RGB, as the original stores it, widened by the usual nibble * 17.
     let knight = |name: &str, shades: [u32; 3], home: [i32; 2]| {
         let widen = |v: u32| {
-            (((v >> 8) & 0xf) * 17) << 16 | (((v >> 4) & 0xf) * 17) << 8 | (v & 0xf) * 17
+            (((v >> 8) & 0xf) * 17) << 16 | (((v >> 4) & 0xf) * 17) << 8 | ((v & 0xf) * 17)
         };
         serde_json::json!({
             "name": name,
@@ -3006,10 +3235,10 @@ fn knight_definitions() -> String {
         // `BNAME`, `GNAME`, `ENAME`, `RNAME`, in the colour index order
         // `InitKnights` and `ChooseFIRE` both branch on. The underscore each
         // one carries is the blank glyph, so it is written as a space.
-        knight("SIR GODBER",  [0x00c, 0x009, 0x006], [10, 10]),
+        knight("SIR GODBER", [0x00c, 0x009, 0x006], [10, 10]),
         knight("SIR RICHARD", [0xfa0, 0xe70, 0xc50], [300, 5]),
         knight("SIR JEFFREY", [0xae8, 0x6b5, 0x473], [26, 180]),
-        knight("SIR EDWARD",  [0xd00, 0x900, 0x500], [300, 185]),
+        knight("SIR EDWARD", [0xd00, 0x900, 0x500], [300, 185]),
     ])
     .to_string()
 }
@@ -3137,7 +3366,9 @@ fn battle_palette(src: &str) -> anyhow::Result<String> {
         anyhow::bail!("the battle palette is read out of MAIN.EXE, and there is no image");
     };
     let words = |at: usize, n: usize| -> Vec<u16> {
-        (0..n).map(|i| u16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]])).collect()
+        (0..n)
+            .map(|i| u16::from_le_bytes([bytes[at + i * 2], bytes[at + i * 2 + 1]]))
+            .collect()
     };
     const DGROUP: usize = 0x123b0;
     let ground_table = |ds: usize| words(DGROUP + ds, 13);
@@ -3146,7 +3377,13 @@ fn battle_palette(src: &str) -> anyhow::Result<String> {
     let waste = ground_table(0x790a);
     let swamp = ground_table(0x7924);
     let blue_demon = words(DGROUP + 0x7992, 23);
-    for (name, table) in [("PlainsCOLOUR", &plains), ("ForestCOLOUR", &forest), ("WasteCOLOUR", &waste), ("SwampCOLOUR", &swamp), ("BlueDemon", &blue_demon)] {
+    for (name, table) in [
+        ("PlainsCOLOUR", &plains),
+        ("ForestCOLOUR", &forest),
+        ("WasteCOLOUR", &waste),
+        ("SwampCOLOUR", &swamp),
+        ("BlueDemon", &blue_demon),
+    ] {
         anyhow::ensure!(
             table.iter().all(|w| *w <= 0x0fff) && table.iter().any(|w| *w != 0),
             "{name} does not read as twelve bit colour words: the image is not the one the \
@@ -3275,6 +3512,116 @@ fn palette_effects() -> String {
     .to_string()
 }
 
+// ------------------------------------------------------------------- the intro
+
+/// The publisher's logo, the opening panorama and the cast.
+///
+/// **`MINDSCAP` has no extension**, which is the only reason it was never
+/// baked: the loop that turns full-screen images into sheets asks for `.piv`,
+/// `.cmp` and `.p`. It is an ordinary five-plane PIV.
+///
+/// **`INTRO.STI` is a tile map.** `FindTile` cuts tile *n* out of a 320x200
+/// sheet at `((n % 10) * 32, (n / 10) * 25)` and the routine that walks the map
+/// reads ten big-endian words to a row, dividing each by 80 to pick which of
+/// three loaded sheets it comes from. `panfile1..3` are `bg1a`, `bg1c` and
+/// `bg1b`, and the 960 bytes are 48 rows: one 320 by 1200 panorama, which the
+/// intro pans a 200-tall window down. Only `bg1a`'s palette is copied to the
+/// live one, so all three sheets are composited in it, as the original does.
+///
+/// **The cast** is the intro's own animation scripts, flattened to frames.
+fn bake_intro(lib: &Library, out: &std::path::Path, m: &mut Manifest) -> anyhow::Result<String> {
+    use henge_formats::introexe;
+    let mut done: Vec<String> = Vec::new();
+
+    if let Ok(bytes) = lib.bytes("mindscap") {
+        let p = piv::Piv::parse(&bytes)?;
+        let file = "sheets/scene_mindscap.png".to_string();
+        write_indexed(&out.join(&file), piv::W, piv::H, &p.pixels, &p.palette)?;
+        m.sheets.insert(
+            "scene.mindscap".into(),
+            Sheet {
+                file,
+                frames: vec![FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: piv::W as u32,
+                    h: piv::H as u32,
+                    ox: 0,
+                    oy: 0,
+                }],
+            },
+        );
+        m.palettes
+            .insert("palette.scene.mindscap".into(), p.palette);
+        done.push("the Mindscape logo".into());
+    }
+
+    if let Ok(sti) = lib.bytes("intro.sti") {
+        let a = lib.piv("bg1a.piv")?;
+        let c = lib.piv("bg1c.piv")?;
+        let b = lib.piv("bg1b.piv")?;
+        let pan = introexe::panorama(&sti, &[&a, &c, &b])?;
+        anyhow::ensure!(
+            pan.width == henge_core::intro::PAN_W as usize
+                && pan.height == henge_core::intro::PAN_H as usize,
+            "the panorama came out {}x{}, not the 320x1200 the map describes",
+            pan.width,
+            pan.height
+        );
+        let file = "sheets/scene_intropan.png".to_string();
+        write_indexed(
+            &out.join(&file),
+            pan.width,
+            pan.height,
+            &pan.pixels,
+            &a.palette,
+        )?;
+        m.sheets.insert(
+            "scene.intropan".into(),
+            Sheet {
+                file,
+                frames: vec![FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: pan.width as u32,
+                    h: pan.height as u32,
+                    ox: 0,
+                    oy: 0,
+                }],
+            },
+        );
+        m.palettes
+            .insert("palette.scene.intropan".into(), a.palette);
+        done.push(format!("a {}x{} panorama", pan.width, pan.height));
+    }
+
+    match intro_cast() {
+        Ok(Some(cast)) => {
+            let n = cast.scripts.len();
+            fs::write(out.join("data/intro.json"), serde_json::to_string(&cast)?)?;
+            m.data.insert("data.intro".into(), "data/intro.json".into());
+            done.push(format!("{n} animation scripts"));
+        }
+        Ok(None) => done.push("no cast (no unpacked INTR.EXE image)".into()),
+        Err(e) => done.push(format!("no cast ({e:#})")),
+    }
+
+    anyhow::ensure!(!done.is_empty(), "nothing of the intro could be baked");
+    Ok(done.join(", "))
+}
+
+/// The intro's cast, if the unpacked `INTR.EXE` image is to hand.
+fn intro_cast() -> anyhow::Result<Option<henge_core::content::IntroCast>> {
+    use henge_formats::introexe;
+    let candidates = ["research/intro.final.bin"];
+    let Some(raw) = candidates.iter().find_map(|p| fs::read(p).ok()) else {
+        return Ok(None);
+    };
+    let img = introexe::expand(&raw)?;
+    introexe::check(&img)?;
+    Ok(Some(introexe::cast(&img)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3286,7 +3633,10 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/reference/data");
         let scripts = fs::read_to_string(root.join("scripts.json")).ok()?;
         let banks = fs::read_to_string(root.join("banks.json")).ok()?;
-        Some((serde_json::from_str(&scripts).ok()?, serde_json::from_str(&banks).ok()?))
+        Some((
+            serde_json::from_str(&scripts).ok()?,
+            serde_json::from_str(&banks).ok()?,
+        ))
     }
 
     /// The ground tables read out of the image are the ones the backdrop
@@ -3318,9 +3668,16 @@ mod tests {
             let stem = backdrop.split('.').next().unwrap().to_lowercase();
             let pic = palette(&format!("palette.scene.{stem}"));
             let ground = &colours.ground[*family];
-            let table = ground.iter().find(|w| w.at == 16).expect("thirteen words at 16");
+            let table = ground
+                .iter()
+                .find(|w| w.at == 16)
+                .expect("thirteen words at 16");
             assert_eq!(table.words.len(), 13, "{family}");
-            assert_eq!(&pic[16..29], &table.words[..], "{family}: {backdrop} was not saved with its ground table");
+            assert_eq!(
+                &pic[16..29],
+                &table.words[..],
+                "{family}: {backdrop} was not saved with its ground table"
+            );
             if let Some(greys) = ground.iter().find(|w| w.at == 1) {
                 assert_eq!(&pic[1..5], &greys.words[..], "{family}: the four greys");
             }
@@ -3332,16 +3689,26 @@ mod tests {
             if c.id == "dragon_claw" {
                 continue;
             }
-            let block = colours.creatures.get(c.id).unwrap_or_else(|| panic!("{}: no colour block", c.id));
+            let block = colours
+                .creatures
+                .get(c.id)
+                .unwrap_or_else(|| panic!("{}: no colour block", c.id));
             for family in ["glade", "forest", "swamp", "waste"] {
-                let first = block.on(family).first().unwrap_or_else(|| panic!("{}: nothing written", c.id));
+                let first = block
+                    .on(family)
+                    .first()
+                    .unwrap_or_else(|| panic!("{}: nothing written", c.id));
                 assert_eq!(first.at, 9, "{}: a creature begins at entry 9", c.id);
             }
         }
         // The demon's twenty three words are `WasteCOLOUR`'s browns with blues
         // for its greens, which is how it was known to be fought over `WAB1`.
         let demon = &colours.creatures["demon"].writes[0].words;
-        let waste = &colours.ground["waste"].iter().find(|w| w.at == 16).unwrap().words;
+        let waste = &colours.ground["waste"]
+            .iter()
+            .find(|w| w.at == 16)
+            .unwrap()
+            .words;
         assert_eq!(&demon[7..12], &waste[..5]);
     }
 
@@ -3355,18 +3722,40 @@ mod tests {
             eprintln!("no baked pack under packs/reference: bestiary check skipped");
             return;
         };
-        assert!(scripts.len() >= 236, "the pack has {} scripts, expected the full 236", scripts.len());
+        assert!(
+            scripts.len() >= 236,
+            "the pack has {} scripts, expected the full 236",
+            scripts.len()
+        );
         let mut ids = Vec::new();
         for c in CREATURES {
             let def = creature_definition(c, &scripts, &banks)
                 .unwrap_or_else(|e| panic!("{}: {e:#}", c.id));
             assert!(def.scripted(), "{}: not scripted", c.id);
-            assert_eq!(def.bank_table, 2, "{}: creatures draw through table 2", c.id);
+            assert_eq!(
+                def.bank_table, 2,
+                "{}: creatures draw through table 2",
+                c.id
+            );
             assert!(def.health > 0 && def.damage > 0, "{}: no stat block", c.id);
-            assert!(def.origin[1] < 0, "{}: the origin sits above the feet", c.id);
+            assert!(
+                def.origin[1] < 0,
+                "{}: the origin sits above the feet",
+                c.id
+            );
             ids.push(c.id);
         }
-        for want in ["troll", "trogg_axe", "trogg_spear", "ratmen", "mudmen", "demon", "beast", "balok", "dragon"] {
+        for want in [
+            "troll",
+            "trogg_axe",
+            "trogg_spear",
+            "ratmen",
+            "mudmen",
+            "demon",
+            "beast",
+            "balok",
+            "dragon",
+        ] {
             assert!(ids.contains(&want), "the bestiary is missing {want}");
         }
         let mut sorted = ids.clone();
@@ -3395,9 +3784,16 @@ mod tests {
         for (name, a) in &arenas {
             assert!(!a.terrain.borders.is_empty(), "{name}: no border list");
             let first = a.terrain.borders[0];
-            assert_eq!((first.left, first.right, first.top), (0, 319, 10),
-                "{name}: the first record is the tree line across the whole screen");
-            assert!((80..=159).contains(&first.bottom), "{name}: tree line at {}", first.bottom);
+            assert_eq!(
+                (first.left, first.right, first.top),
+                (0, 319, 10),
+                "{name}: the first record is the tree line across the whole screen"
+            );
+            assert!(
+                (80..=159).contains(&first.bottom),
+                "{name}: tree line at {}",
+                first.bottom
+            );
         }
         let counts = |n: &str| arenas[n].terrain.borders.len();
         assert_eq!(counts("fo7"), 2);
@@ -3408,15 +3804,19 @@ mod tests {
             if counts(name) == 1 {
                 continue;
             }
-            assert!(a.terrain.placements.len() > 30,
+            assert!(
+                a.terrain.placements.len() > 30,
                 "{name}: {} placements, so the walk went out of step again",
-                a.terrain.placements.len());
+                a.terrain.placements.len()
+            );
         }
         // `FO7`'s second record is the root mass in the middle of the screen.
         assert_eq!(
-            (arenas["fo7"].terrain.borders[1].left,
-             arenas["fo7"].terrain.borders[1].right,
-             arenas["fo7"].terrain.borders[1].bottom),
+            (
+                arenas["fo7"].terrain.borders[1].left,
+                arenas["fo7"].terrain.borders[1].right,
+                arenas["fo7"].terrain.borders[1].bottom
+            ),
             (66, 164, 103)
         );
         // And the deepest of a layout's records is the row its fighters stand
@@ -3433,7 +3833,12 @@ mod tests {
         let mut used: BTreeSet<&str> = BTreeSet::new();
         for c in CREATURES {
             let known = Controller::from_name(c.controller);
-            assert!(known.is_some(), "{}: no controller called {}", c.id, c.controller);
+            assert!(
+                known.is_some(),
+                "{}: no controller called {}",
+                c.id,
+                c.controller
+            );
             assert_ne!(
                 known,
                 Some(Controller::Knight),
@@ -3443,8 +3848,16 @@ mod tests {
             used.insert(c.controller);
         }
         for want in [
-            "trogg", "trogg_spear", "troll", "ratman", "mudman", "balok", "beast", "demon",
-            "dragon", "claw",
+            "trogg",
+            "trogg_spear",
+            "troll",
+            "ratman",
+            "mudman",
+            "balok",
+            "beast",
+            "demon",
+            "dragon",
+            "claw",
         ] {
             assert!(used.contains(want), "nothing in the bestiary runs {want}");
         }
@@ -3465,7 +3878,11 @@ mod tests {
                 c.seats.len()
             );
             for [x, _y, _z, facing] in c.seats {
-                assert!(*facing == 1 || *facing == 3, "{}: facing {facing} is not 1 or 3", c.id);
+                assert!(
+                    *facing == 1 || *facing == 3,
+                    "{}: facing {facing} is not 1 or 3",
+                    c.id
+                );
                 // Every creature but the demon and the dragon comes on from
                 // beyond the screen's own columns, which is why the tables
                 // hold numbers `CheckBorder` would never allow.
@@ -3478,7 +3895,12 @@ mod tests {
         assert_eq!(trogg.first_seat, 0);
         assert_eq!(
             TROGG_SEATS,
-            &[[-50, 0, 100, 1], [360, 0, 150, 3], [340, 0, 50, 3], [-80, 0, 120, 1]]
+            &[
+                [-50, 0, 100, 1],
+                [360, 0, 150, 3],
+                [340, 0, 50, 3],
+                [-80, 0, 120, 1]
+            ]
         );
         // `SetUpDKL` zeroes `SIDE` and `InitTrogg`/`InitMudmen` then xor it, so
         // these two open on record one and come in from the right.
@@ -3487,7 +3909,10 @@ mod tests {
             assert_eq!(c.first_seat, 1, "{id} should open on the second record");
             assert_eq!(c.seats[1][3], 3, "{id}'s second record faces left");
         }
-        assert_eq!(CREATURES.iter().find(|c| c.id == "troll").unwrap().seats, TROGG_SEATS);
+        assert_eq!(
+            CREATURES.iter().find(|c| c.id == "troll").unwrap().seats,
+            TROGG_SEATS
+        );
     }
 
     /// The counts every `InitKnightvs*` writes, and the `lev_adjust` row
@@ -3512,12 +3937,24 @@ mod tests {
             // what makes a strong knight meet more of a creature than a weak
             // one. It is not strictly monotonic, so this is the shape and not
             // the order: it starts at or above nothing and ends at or below it.
-            assert!(w.level[0] >= 0 && w.level[7] <= 0, "{}: lev_adjust runs the wrong way", c.id);
+            assert!(
+                w.level[0] >= 0 && w.level[7] <= 0,
+                "{}: lev_adjust runs the wrong way",
+                c.id
+            );
             for v in w.level {
-                assert!((-8..=8).contains(v), "{}: lev_adjust entry {v} is not a signed byte", c.id);
+                assert!(
+                    (-8..=8).contains(v),
+                    "{}: lev_adjust entry {v} is not a signed byte",
+                    c.id
+                );
             }
             if w.cap > 0 {
-                assert!(w.cap <= 2, "{}: AdjustLevel's three ceilings are 1, 1 and 2", c.id);
+                assert!(
+                    w.cap <= 2,
+                    "{}: AdjustLevel's three ceilings are 1, 1 and 2",
+                    c.id
+                );
             }
         }
         // The three the ceilings belong to, and what they are: `mov
@@ -3548,8 +3985,15 @@ mod tests {
         // two fights that open through `INITMO` instead of `SetMonsterCombat`.
         let w = |id: &str| CREATURES.iter().find(|c| c.id == id).unwrap().wave;
         assert!(!w("balok").alternates);
-        for id in ["trogg_axe", "trogg_hammer", "trogg_spear", "beast", "ratmen", "mudmen", "troll"]
-        {
+        for id in [
+            "trogg_axe",
+            "trogg_hammer",
+            "trogg_spear",
+            "beast",
+            "ratmen",
+            "mudmen",
+            "troll",
+        ] {
             assert!(w(id).alternates, "{id} should flip SIDE");
         }
         for c in CREATURES.iter().filter(|c| c.wave.opens_with_side) {
@@ -3558,7 +4002,11 @@ mod tests {
                 "{} does not open through INITMO",
                 c.id
             );
-            assert_eq!(c.first_seat, 1, "{}: and SIDE puts the first one on record one", c.id);
+            assert_eq!(
+                c.first_seat, 1,
+                "{}: and SIDE puts the first one on record one",
+                c.id
+            );
         }
     }
 
@@ -3585,7 +4033,11 @@ mod tests {
             whose.push(def["knight"].as_u64().unwrap());
         }
         whose.sort();
-        assert_eq!(whose, vec![0, 1, 2, 3], "one village to each of the four knights");
+        assert_eq!(
+            whose,
+            vec![0, 1, 2, 3],
+            "one village to each of the four knights"
+        );
     }
 
     /// The hermit, a second healer this project invented and stood in the
@@ -3599,11 +4051,16 @@ mod tests {
                 continue;
             }
             let (x, y) = (def["x"].as_i64().unwrap(), def["y"].as_i64().unwrap());
-            let known = marks.values().any(|(mx, my)| *mx as i64 == x && *my as i64 == y)
+            let known = marks
+                .values()
+                .any(|(mx, my)| *mx as i64 == x && *my as i64 == y)
                 || lairs().iter().any(|l| l.x as i64 == x && l.y as i64 == y);
             assert!(known, "{id} stands at ({x}, {y}), which no table names");
         }
-        assert!(places.get("healer").is_none(), "the hermit is not in the original");
+        assert!(
+            places.get("healer").is_none(),
+            "the hermit is not in the original"
+        );
     }
 
     /// **Item 59.** The moors is landscape code 0, whose generator loads
@@ -3615,7 +4072,10 @@ mod tests {
     fn every_family_owns_the_layouts_its_own_prefix_claims() {
         let mut prefixes: BTreeSet<&str> = BTreeSet::new();
         for (name, prefix, _, _, rotation) in ARENAS {
-            assert!(prefixes.insert(prefix), "{name}: two families claim {prefix}");
+            assert!(
+                prefixes.insert(prefix),
+                "{name}: two families claim {prefix}"
+            );
             for arena in rotation {
                 assert!(
                     arena.starts_with(prefix),
@@ -3626,7 +4086,10 @@ mod tests {
         assert_eq!(prefixes.len(), 4, "four generators, four families");
         // And the moors keeps its own backdrop, which is the one thing that
         // tells it apart from the forest it shares a scenery sheet with.
-        let moors = ARENAS.iter().find(|(n, ..)| *n == "glade").expect("no moors family");
+        let moors = ARENAS
+            .iter()
+            .find(|(n, ..)| *n == "glade")
+            .expect("no moors family");
         assert_eq!(moors.1, "gl");
         assert_eq!(moors.3, "GLB1.CMP");
     }
@@ -3635,11 +4098,18 @@ mod tests {
     /// with the state and the name in the message.
     #[test]
     fn a_misspelt_creature_script_is_refused_by_name() {
-        let Some((scripts, banks)) = baked() else { return };
+        let Some((scripts, banks)) = baked() else {
+            return;
+        };
         let mut c = Creature { ..CREATURES[0] };
         c.attack = &["Troll_Chopp"];
-        let err = creature_definition(&c, &scripts, &banks).unwrap_err().to_string();
-        assert!(err.contains("Troll_Chopp") && err.contains("attack"), "{err}");
+        let err = creature_definition(&c, &scripts, &banks)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Troll_Chopp") && err.contains("attack"),
+            "{err}"
+        );
     }
 
     /// Every family's ambush list names creatures the bestiary has.
@@ -3648,7 +4118,10 @@ mod tests {
         for (family, list) in AMBUSHES {
             assert!(!list.is_empty(), "{family} lists nothing");
             for id in *list {
-                assert!(CREATURES.iter().any(|c| c.id == *id), "{family} names {id}, which is not in the bestiary");
+                assert!(
+                    CREATURES.iter().any(|c| c.id == *id),
+                    "{family} names {id}, which is not in the bestiary"
+                );
             }
         }
     }
@@ -3658,9 +4131,15 @@ mod tests {
     /// are the real ones; the corners are not, and are only spread out enough
     /// that nothing lands on anything.
     fn marks() -> BTreeMap<u8, (i32, i32)> {
-        [(0x19u8, (10, 10)), (0x1a, (200, 10)), (0x1b, (100, 10)), (0x1c, (150, 40)), (0x1e, (250, 40))]
-            .into_iter()
-            .collect()
+        [
+            (0x19u8, (10, 10)),
+            (0x1a, (200, 10)),
+            (0x1b, (100, 10)),
+            (0x1c, (150, 40)),
+            (0x1e, (250, 40)),
+        ]
+        .into_iter()
+        .collect()
     }
 
     /// A stand-in for the four lair tables, in the same shape `lair_table`
@@ -3672,7 +4151,11 @@ mod tests {
         const SLOTS: [u16; 6] = [0, 1, 6, 7, 9, 16];
         (0..LAIR_COUNT)
             .map(|i| LairPlace {
-                guardian: GUARDIANS.iter().find(|(s, _)| *s == SLOTS[i % 6]).unwrap().1,
+                guardian: GUARDIANS
+                    .iter()
+                    .find(|(s, _)| *s == SLOTS[i % 6])
+                    .unwrap()
+                    .1,
                 count: i as u32 + 1,
                 x: 4 + (i % 6) as i32 * 50,
                 y: 100 + (i / 6) as i32 * 20,
@@ -3692,7 +4175,10 @@ mod tests {
     fn every_combat_table_slot_names_a_creature() {
         let mut seen = BTreeSet::new();
         for (slot, id) in GUARDIANS {
-            assert!(seen.insert(*slot), "CombatTable slot {slot} is listed twice");
+            assert!(
+                seen.insert(*slot),
+                "CombatTable slot {slot} is listed twice"
+            );
             assert!(
                 guardian_is_known(id),
                 "CombatTable slot {slot} is {id}, which the pack has nobody for"
@@ -3733,8 +4219,9 @@ mod tests {
             .collect();
         assert_eq!(want.len(), 24);
         for (n, arena) in want.iter().enumerate() {
-            let (got, family, guardian, count) =
-                seen.get(&n).unwrap_or_else(|| panic!("no lair numbered {n}"));
+            let (got, family, guardian, count) = seen
+                .get(&n)
+                .unwrap_or_else(|| panic!("no lair numbered {n}"));
             assert_eq!(got, arena, "lair {n} is fought on the wrong layout");
             // `LairFile` order is forest, waste, swamp, glade, which is also
             // `moon::Key::ALL`, which is what puts each key in its own ground.
@@ -3753,7 +4240,11 @@ mod tests {
             // The recovered `TotalMonsters` runs from three to fourteen, so
             // the bound was a statement about the invention and not about the
             // game; what belongs here is that the table is copied faithfully.
-            assert_eq!(*count, n as u64 + 1, "lair {n} was given another lair's head count");
+            assert_eq!(
+                *count,
+                n as u64 + 1,
+                "lair {n} was given another lair's head count"
+            );
         }
     }
 
@@ -3770,10 +4261,16 @@ mod tests {
             for choice in def["options"].as_array().unwrap() {
                 let e = &choice["effect"];
                 if let Some(to) = e.get("place").and_then(|p| p.as_str()) {
-                    assert!(places.contains_key(to), "{id} has a door to {to}, which does not exist");
+                    assert!(
+                        places.contains_key(to),
+                        "{id} has a door to {to}, which does not exist"
+                    );
                 }
                 if let Some(item) = e.get("item").and_then(|p| p.as_str()) {
-                    assert!(items.contains_key(item), "{id} deals in {item}, which the pack has not got");
+                    assert!(
+                        items.contains_key(item),
+                        "{id} deals in {item}, which the pack has not got"
+                    );
                 }
             }
         }
@@ -3789,11 +4286,18 @@ mod tests {
         for (_, slot) in henge_core::service::MAGIC_TABLE {
             let id = henge_core::service::magic_item(slot)
                 .unwrap_or_else(|| panic!("slot {slot:#x} names nothing"));
-            assert!(items.contains_key(id), "the pack has no {id}, which is magic slot {slot:#x}");
+            assert!(
+                items.contains_key(id),
+                "the pack has no {id}, which is magic slot {slot:#x}"
+            );
         }
         // And the four keys, so one carried out of a lair has a name.
         for key in henge_core::moon::Key::ALL {
-            assert!(items.contains_key(key.item()), "the pack has no {}", key.item());
+            assert!(
+                items.contains_key(key.item()),
+                "the pack has no {}",
+                key.item()
+            );
         }
     }
 
@@ -3812,111 +4316,19 @@ mod tests {
                 (id.clone(), n("x"), n("y"), n("w"), n("h"))
             })
             .collect();
-        assert!(boxes.len() >= 24 + 5, "only {} places on the map", boxes.len());
+        assert!(
+            boxes.len() >= 24 + 5,
+            "only {} places on the map",
+            boxes.len()
+        );
         for (i, a) in boxes.iter().enumerate() {
             assert!(a.1 >= 0 && a.1 + a.3 <= 320, "{} is off the map", a.0);
             assert!(a.2 >= 0 && a.2 + a.4 <= 200, "{} is off the map", a.0);
             for b in &boxes[i + 1..] {
-                let apart = a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1
-                    || a.2 + a.4 <= b.2 || b.2 + b.4 <= a.2;
+                let apart =
+                    a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1 || a.2 + a.4 <= b.2 || b.2 + b.4 <= a.2;
                 assert!(apart, "{} and {} stand on the same ground", a.0, b.0);
             }
         }
     }
-}
-
-// ------------------------------------------------------------------- the intro
-
-/// The publisher's logo, the opening panorama and the cast.
-///
-/// **`MINDSCAP` has no extension**, which is the only reason it was never
-/// baked: the loop that turns full-screen images into sheets asks for `.piv`,
-/// `.cmp` and `.p`. It is an ordinary five-plane PIV.
-///
-/// **`INTRO.STI` is a tile map.** `FindTile` cuts tile *n* out of a 320x200
-/// sheet at `((n % 10) * 32, (n / 10) * 25)` and the routine that walks the map
-/// reads ten big-endian words to a row, dividing each by 80 to pick which of
-/// three loaded sheets it comes from. `panfile1..3` are `bg1a`, `bg1c` and
-/// `bg1b`, and the 960 bytes are 48 rows: one 320 by 1200 panorama, which the
-/// intro pans a 200-tall window down. Only `bg1a`'s palette is copied to the
-/// live one, so all three sheets are composited in it, as the original does.
-///
-/// **The cast** is the intro's own animation scripts, flattened to frames.
-fn bake_intro(
-    lib: &Library,
-    out: &std::path::Path,
-    m: &mut Manifest,
-) -> anyhow::Result<String> {
-    use henge_formats::introexe;
-    let mut done: Vec<String> = Vec::new();
-
-    if let Ok(bytes) = lib.bytes("mindscap") {
-        let p = piv::Piv::parse(&bytes)?;
-        let file = "sheets/scene_mindscap.png".to_string();
-        write_indexed(&out.join(&file), piv::W, piv::H, &p.pixels, &p.palette)?;
-        m.sheets.insert(
-            "scene.mindscap".into(),
-            Sheet {
-                file,
-                frames: vec![FrameRect {
-                    x: 0, y: 0, w: piv::W as u32, h: piv::H as u32, ox: 0, oy: 0,
-                }],
-            },
-        );
-        m.palettes.insert("palette.scene.mindscap".into(), p.palette);
-        done.push("the Mindscape logo".into());
-    }
-
-    if let Ok(sti) = lib.bytes("intro.sti") {
-        let a = lib.piv("bg1a.piv")?;
-        let c = lib.piv("bg1c.piv")?;
-        let b = lib.piv("bg1b.piv")?;
-        let pan = introexe::panorama(&sti, &[&a, &c, &b])?;
-        anyhow::ensure!(
-            pan.width == henge_core::intro::PAN_W as usize
-                && pan.height == henge_core::intro::PAN_H as usize,
-            "the panorama came out {}x{}, not the 320x1200 the map describes",
-            pan.width,
-            pan.height
-        );
-        let file = "sheets/scene_intropan.png".to_string();
-        write_indexed(&out.join(&file), pan.width, pan.height, &pan.pixels, &a.palette)?;
-        m.sheets.insert(
-            "scene.intropan".into(),
-            Sheet {
-                file,
-                frames: vec![FrameRect {
-                    x: 0, y: 0, w: pan.width as u32, h: pan.height as u32, ox: 0, oy: 0,
-                }],
-            },
-        );
-        m.palettes.insert("palette.scene.intropan".into(), a.palette);
-        done.push(format!("a {}x{} panorama", pan.width, pan.height));
-    }
-
-    match intro_cast() {
-        Ok(Some(cast)) => {
-            let n = cast.scripts.len();
-            fs::write(out.join("data/intro.json"), serde_json::to_string(&cast)?)?;
-            m.data.insert("data.intro".into(), "data/intro.json".into());
-            done.push(format!("{n} animation scripts"));
-        }
-        Ok(None) => done.push("no cast (no unpacked INTR.EXE image)".into()),
-        Err(e) => done.push(format!("no cast ({e:#})")),
-    }
-
-    anyhow::ensure!(!done.is_empty(), "nothing of the intro could be baked");
-    Ok(done.join(", "))
-}
-
-/// The intro's cast, if the unpacked `INTR.EXE` image is to hand.
-fn intro_cast() -> anyhow::Result<Option<henge_core::content::IntroCast>> {
-    use henge_formats::introexe;
-    let candidates = ["research/intro.final.bin"];
-    let Some(raw) = candidates.iter().find_map(|p| fs::read(p).ok()) else {
-        return Ok(None);
-    };
-    let img = introexe::expand(&raw)?;
-    introexe::check(&img)?;
-    Ok(Some(introexe::cast(&img)?))
 }

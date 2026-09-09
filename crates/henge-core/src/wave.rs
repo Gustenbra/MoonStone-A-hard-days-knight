@@ -392,14 +392,24 @@ mod tests {
     /// A fresh knight: strength one, no experience, a four point swing plus the
     /// one his strength adds.
     fn fresh() -> Level {
-        Level { strength: 1, experience: 0, swing: 5, players: 1 }
+        Level {
+            strength: 1,
+            experience: 0,
+            swing: 5,
+            players: 1,
+        }
     }
 
     #[test]
     fn a_lair_head_count_replaces_everything_the_routine_decided() {
         // 0x287e: the lair record's own `+4` written straight over
         // `TotalMonsters`, after the experience has already added to it.
-        let k = Level { strength: 1, experience: 95, swing: 5, players: 4 };
+        let k = Level {
+            strength: 1,
+            experience: 95,
+            swing: 5,
+            players: 4,
+        };
         let w = Wave::open(&trogg(), Some(14), &k);
         // The level is (5 + 95/4) / 2 - 6 = 8, held under sixteen, then halved:
         // row entry 4, which is 0, so nothing comes off the fourteen.
@@ -418,7 +428,12 @@ mod tests {
         // A knight who swings for twenty with ninety experience: the level is
         // (20 + 22) / 2 - 6 = 15, held at fifteen, halved to 7, and row 2's
         // last entry is -4, so four more come.
-        let k = Level { strength: 5, experience: 90, swing: 20, players: 1 };
+        let k = Level {
+            strength: 5,
+            experience: 90,
+            swing: 20,
+            players: 1,
+        };
         let w = Wave::open(&trogg(), None, &k);
         // 3 owed, +1 at thirty, +1 at ninety, then -(-4).
         assert_eq!(w.total, 3 + 1 + 1 + 4);
@@ -429,9 +444,23 @@ mod tests {
     #[test]
     fn four_players_are_worth_one_more_creature() {
         let one = Wave::open(&trogg(), None, &fresh());
-        let four = Wave::open(&trogg(), None, &Level { players: 4, ..fresh() });
+        let four = Wave::open(
+            &trogg(),
+            None,
+            &Level {
+                players: 4,
+                ..fresh()
+            },
+        );
         // `cmp [0x91e], 4`: three players is not four.
-        let three = Wave::open(&trogg(), None, &Level { players: 3, ..fresh() });
+        let three = Wave::open(
+            &trogg(),
+            None,
+            &Level {
+                players: 3,
+                ..fresh()
+            },
+        );
         assert_eq!(one.total, three.total);
         // The fourth head is added before the row is subtracted, and row 2 at
         // level 0 is 5, which `jle` refuses against 4 as well.
@@ -440,14 +469,28 @@ mod tests {
 
     #[test]
     fn the_three_ceilings_hold_max_monsters_down() {
-        let strong = Level { strength: 5, experience: 60, swing: 8, players: 1 };
+        let strong = Level {
+            strength: 5,
+            experience: 60,
+            swing: 8,
+            players: 1,
+        };
         // Nothing capped: 1 + 1 + 1.
         assert_eq!(Wave::open(&trogg(), None, &strong).max, 3);
         // The troll's `cmp [MaxMonsters], 2 / jle` at 0x289e.
-        let troll = WaveDef { cap: 2, heads: 1, ..trogg() };
+        let troll = WaveDef {
+            cap: 2,
+            heads: 1,
+            ..trogg()
+        };
         assert_eq!(Wave::open(&troll, None, &strong).max, 2);
         // Balok's and the mudmen's `mov [MaxMonsters], 1` at 0x288a and 0x2898.
-        let balok = WaveDef { cap: 1, heads: 2, alternates: false, ..trogg() };
+        let balok = WaveDef {
+            cap: 1,
+            heads: 2,
+            alternates: false,
+            ..trogg()
+        };
         assert_eq!(Wave::open(&balok, None, &strong).max, 1);
     }
 
@@ -489,7 +532,10 @@ mod tests {
         assert_eq!(run(w), (9, 9));
         // A swing of 28 puts the level at (28 >> 1) - 6 = 8, halved to 4, and
         // row 2's fifth entry is nought, so the whole fourteen come.
-        let middling = Level { swing: 28, ..fresh() };
+        let middling = Level {
+            swing: 28,
+            ..fresh()
+        };
         let w = Wave::open(&trogg(), Some(14), &middling);
         assert_eq!((w.max, w.total), (1, 14));
         assert_eq!(run(w), (14, 14), "fourteen walked in and fourteen fell");
@@ -522,7 +568,12 @@ mod tests {
     fn a_fight_with_no_init_mo_never_tops_itself_up() {
         // The demon's, the dragon's and a knight's `INITMO` is the `ret` at
         // 0x2059.
-        let def = WaveDef { max: 1, heads: 1, reinforced: false, ..trogg() };
+        let def = WaveDef {
+            max: 1,
+            heads: 1,
+            reinforced: false,
+            ..trogg()
+        };
         let mut w = Wave::open(&def, Some(9), &fresh());
         assert!(!w.owed(), "nine owed and nothing to send them");
         w.arrived();
@@ -537,15 +588,31 @@ mod tests {
         // `SetUpDKL` leaves `SIDE` at nought, so the first flip gives one.
         let seats: Vec<usize> = (0..5).map(|_| w.next_seat(&t)).collect();
         assert_eq!(seats, vec![1, 0, 1, 0, 1]);
-        let balok = WaveDef { alternates: false, ..t.clone() };
+        let balok = WaveDef {
+            alternates: false,
+            ..t.clone()
+        };
         let mut w = Wave::default();
-        assert_eq!((0..3).map(|_| w.next_seat(&balok)).collect::<Vec<_>>(), vec![0, 0, 0]);
+        assert_eq!(
+            (0..3).map(|_| w.next_seat(&balok)).collect::<Vec<_>>(),
+            vec![0, 0, 0]
+        );
         // The opening walks the table from the front instead, unless the fight
         // opens through `INITMO`.
         let mut w = Wave::default();
-        assert_eq!((0..3).map(|i| w.opening_seat(&t, i)).collect::<Vec<_>>(), vec![0, 1, 2]);
-        let mud = WaveDef { opens_with_side: true, ..t };
+        assert_eq!(
+            (0..3).map(|i| w.opening_seat(&t, i)).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        let mud = WaveDef {
+            opens_with_side: true,
+            ..t
+        };
         let mut w = Wave::default();
-        assert_eq!(w.opening_seat(&mud, 0), 1, "the mudmen open on the far side");
+        assert_eq!(
+            w.opening_seat(&mud, 0),
+            1,
+            "the mudmen open on the far side"
+        );
     }
 }

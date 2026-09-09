@@ -37,9 +37,25 @@ const TASK_COM_TABLE: u16 = 0x9448;
 /// below depends on a name being right: the opcode numbers, the widths and the
 /// behaviour all come from the code.
 const HANDLER_NAMES: [&str; 19] = [
-    "TASK_FLIP", "TASKGOTO", "TASKHOLD", "TASKJUMP", "TASKLOOP", "TASKSKIP", "TASKTIME",
-    "TASKSOUND", "TASKMOVE", "TASKSHADOW", "TASKSAVE", "TASKGOSUB", "TASKDEAD", "TASKADDTASK",
-    "TASKKILLTASK", "TASKCELBUF", "TASKTESTEQ", "TASKTESTNE", "TASKANIMCLR",
+    "TASK_FLIP",
+    "TASKGOTO",
+    "TASKHOLD",
+    "TASKJUMP",
+    "TASKLOOP",
+    "TASKSKIP",
+    "TASKTIME",
+    "TASKSOUND",
+    "TASKMOVE",
+    "TASKSHADOW",
+    "TASKSAVE",
+    "TASKGOSUB",
+    "TASKDEAD",
+    "TASKADDTASK",
+    "TASKKILLTASK",
+    "TASKCELBUF",
+    "TASKTESTEQ",
+    "TASKTESTNE",
+    "TASKANIMCLR",
 ];
 
 /// What the opcode set has to come out as. Recovered once and written up in
@@ -92,7 +108,9 @@ fn is_script_name(name: &str) -> bool {
     if SPAWNED_SCRIPTS.contains(&name) {
         return true;
     }
-    let Some(head) = name.split('_').next() else { return false };
+    let Some(head) = name.split('_').next() else {
+        return false;
+    };
     if head.len() == name.len() {
         return false; // no underscore at all
     }
@@ -122,7 +140,9 @@ impl Symbols {
         );
         let mut shifts = Vec::new();
         for r in v["code_shift_map"].as_array().into_iter().flatten() {
-            let a = r.as_array().ok_or_else(|| anyhow::anyhow!("bad code_shift_map row"))?;
+            let a = r
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("bad code_shift_map row"))?;
             shifts.push((
                 a[0].as_i64().unwrap_or(0) as u32,
                 a[1].as_i64().unwrap_or(0) as u32,
@@ -134,7 +154,9 @@ impl Symbols {
         let mut code = BTreeMap::new();
         let mut data = BTreeMap::new();
         for s in v["symbols"].as_array().into_iter().flatten() {
-            let Some(name) = s["name"].as_str() else { continue };
+            let Some(name) = s["name"].as_str() else {
+                continue;
+            };
             let addr = s["addr"].as_i64().unwrap_or(-1);
             if addr < 0 {
                 continue;
@@ -146,12 +168,16 @@ impl Symbols {
                     code.entry(addr as u32).or_insert_with(|| name.to_string());
                 }
                 Some("data") if addr as u32 >= DS_BASE => {
-                    data.entry(addr as u32 - DS_BASE).or_insert_with(|| name.to_string());
+                    data.entry(addr as u32 - DS_BASE)
+                        .or_insert_with(|| name.to_string());
                 }
                 _ => {}
             }
         }
-        anyhow::ensure!(!code.is_empty() && !data.is_empty(), "the symbol table is empty");
+        anyhow::ensure!(
+            !code.is_empty() && !data.is_empty(),
+            "the symbol table is empty"
+        );
         Ok(Symbols { code, shifts, data })
     }
 
@@ -225,9 +251,11 @@ fn read_com_table(img: &[u8]) -> anyhow::Result<BTreeMap<u8, u16>> {
             // mov word ptr [di], imm16
             Some([0xc7, 0x05]) => (0u8, u16::from_le_bytes([img[p + 2], img[p + 3]]), p + 4),
             // mov word ptr [di+d8], imm16
-            Some([0xc7, 0x45]) => {
-                (img[p + 2], u16::from_le_bytes([img[p + 3], img[p + 4]]), p + 5)
-            }
+            Some([0xc7, 0x45]) => (
+                img[p + 2],
+                u16::from_le_bytes([img[p + 3], img[p + 4]]),
+                p + 5,
+            ),
             _ => break,
         };
         slots.insert(off, imm);
@@ -285,7 +313,11 @@ pub fn opcode_set(img: &[u8], syms: &Symbols) -> anyhow::Result<BTreeMap<u8, Com
         let handler = syms.to_image(raw);
         ops.insert(
             0x80 + off,
-            Command { name: named[&off], handler, len: advance(img, handler) },
+            Command {
+                name: named[&off],
+                handler,
+                len: advance(img, handler),
+            },
         );
     }
 
@@ -294,8 +326,7 @@ pub fn opcode_set(img: &[u8], syms: &Symbols) -> anyhow::Result<BTreeMap<u8, Com
     // handler's own `add word ptr [di+2], n`, so a wrong address reads a
     // different instruction and the widths come out as anything but these.
     // Uncorrected, the addresses are 473 bytes out and land mid-instruction.
-    let got: Vec<(u8, &str, usize)> =
-        ops.iter().map(|(op, c)| (*op, c.name, c.len)).collect();
+    let got: Vec<(u8, &str, usize)> = ops.iter().map(|(op, c)| (*op, c.name, c.len)).collect();
     let want: Vec<(u8, &str, usize)> = EXPECTED.iter().map(|(o, n, l)| (*o, *n, *l)).collect();
     anyhow::ensure!(
         got == want,
@@ -342,7 +373,10 @@ pub fn parse_script(
     let mut pc = off as u32;
     for _ in 0..4096 {
         let at = DS_BASE + pc;
-        anyhow::ensure!((at as usize) < img.len(), "{name}: script runs off the image");
+        anyhow::ensure!(
+            (at as usize) < img.len(),
+            "{name}: script runs off the image"
+        );
         let op = img[at as usize];
 
         if op == 0xff {
@@ -373,7 +407,7 @@ pub fn parse_script(
             // A six-byte sprite part: [u8 bank*4][u8 cel][i8 y][u8 flags][i16 x].
             let sel = op & 0x1f;
             anyhow::ensure!(
-                sel % 4 == 0,
+                sel.is_multiple_of(4),
                 "{name}: bank selector {sel:#04x} is not a multiple of four"
             );
             code.push(Instr::Part(Part {
@@ -427,7 +461,11 @@ pub fn parse_script(
                 on: a(1) != 0,
                 script: script_target(syms, w(2), "TASKSHADOW", name)?,
             },
-            "TASKSAVE" => Instr::Save { mode: a(1), field: i16_at(img, at + 2), value: w(4) },
+            "TASKSAVE" => Instr::Save {
+                mode: a(1),
+                field: i16_at(img, at + 2),
+                value: w(4),
+            },
             "TASKGOSUB" => Instr::Gosub {
                 routine: syms.routine(w(2)).map(str::to_string).ok_or_else(|| {
                     anyhow::anyhow!("{name}: TASKGOSUB {:#06x} is not a routine entry", w(2))
@@ -455,7 +493,11 @@ pub fn parse_script(
             other => anyhow::bail!("{name}: no reader for command {other}"),
         };
         code.push(instr);
-        anyhow::ensure!(cmd.len > 0, "{name}: {} consumes nothing and would spin", cmd.name);
+        anyhow::ensure!(
+            cmd.len > 0,
+            "{name}: {} consumes nothing and would spin",
+            cmd.name
+        );
         pc += cmd.len as u32;
     }
     anyhow::bail!("{name}: does not terminate on ff ff within 4096 instructions")
@@ -520,11 +562,20 @@ mod tests {
     #[test]
     fn script_names_are_the_ones_with_an_encounter_prefix() {
         assert!(is_script_name("Knight_SwSwing"));
-        assert!(is_script_name("TroggAxe_Walk1"), "Trogg* is a family of prefixes");
+        assert!(
+            is_script_name("TroggAxe_Walk1"),
+            "Trogg* is a family of prefixes"
+        );
         assert!(is_script_name("Balok_Blink"));
-        assert!(is_script_name("Mudmen_Stance"), "the mudmen are Mudmen, not Mudman");
+        assert!(
+            is_script_name("Mudmen_Stance"),
+            "the mudmen are Mudmen, not Mudman"
+        );
         assert!(is_script_name("Rat_TreeBrush"));
-        assert!(!is_script_name("KnightGruntSound"), "a routine, not a script");
+        assert!(
+            !is_script_name("KnightGruntSound"),
+            "a routine, not a script"
+        );
         assert!(!is_script_name("Knight"), "no underscore");
         assert!(!is_script_name("CelFile1"));
     }

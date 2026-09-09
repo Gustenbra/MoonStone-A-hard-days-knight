@@ -6,11 +6,13 @@
 
 use crate::framebuffer::Framebuffer;
 use henge_assets::Registry;
-use henge_core::arena::{Field, GLOBAL};
+use henge_core::arena::GLOBAL;
 use henge_core::battle_palette::{self, BattleColours, Sides};
 use henge_core::bout::{Bout, HitEvent};
 use henge_core::combat::{Fighter, Intent};
-use henge_core::content::{ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH};
+use henge_core::content::{
+    ActorData, ActorDef, ArenaData, Arenas, Families, ORIGINAL_KNIGHT_HEALTH,
+};
 use henge_core::taskvm::{field, Bank, BankTables, Task};
 use std::collections::BTreeMap;
 
@@ -134,7 +136,10 @@ impl World {
         let mut order: Vec<String> = arenas.keys().cloned().collect();
         order.sort();
         anyhow::ensure!(!order.is_empty(), "no arenas in the pack");
-        anyhow::ensure!(actors.contains_key("knight"), "no knight definition in the pack");
+        anyhow::ensure!(
+            actors.contains_key("knight"),
+            "no knight definition in the pack"
+        );
 
         let field = arenas[&order[0]].field();
         // Everyone the pack can field, the knight first so cycling from the
@@ -142,7 +147,11 @@ impl World {
         let mut bestiary: Vec<String> = vec!["knight".into()];
         bestiary.extend(actors.keys().filter(|k| k.as_str() != "knight").cloned());
         let mut w = World {
-            arenas, families, actors, order, index: 0,
+            arenas,
+            families,
+            actors,
+            order,
+            index: 0,
             bout: Bout::new(field, Vec::new()),
             control: Vec::new(),
             events: Vec::new(),
@@ -207,7 +216,10 @@ impl World {
     /// Is this seat a knight, and so drawn in a knight's colours and named
     /// off the roster, or a creature, drawn as its sheet has it?
     pub fn is_knight(&self, seat: usize) -> bool {
-        self.bout.fighters.get(seat).map_or(true, |f| f.actor == "knight")
+        self.bout
+            .fighters
+            .get(seat)
+            .is_none_or(|f| f.actor == "knight")
     }
 
     /// Field a particular actor as the opponent. An unknown id is refused and
@@ -215,7 +227,10 @@ impl World {
     pub fn set_foe(&mut self, actor: &str) -> bool {
         if !self.actors.contains_key(actor) {
             let known: Vec<&str> = self.bestiary.iter().map(String::as_str).collect();
-            eprintln!("no actor called {actor}. The pack has: {}", known.join(", "));
+            eprintln!(
+                "no actor called {actor}. The pack has: {}",
+                known.join(", ")
+            );
             return false;
         }
         self.foe = actor.to_string();
@@ -233,7 +248,11 @@ impl World {
         if n == 0 {
             return;
         }
-        let at = self.bestiary.iter().position(|b| *b == self.foe).unwrap_or(0) as i32;
+        let at = self
+            .bestiary
+            .iter()
+            .position(|b| *b == self.foe)
+            .unwrap_or(0) as i32;
         let next = (((at + delta) % n) + n) % n;
         let id = self.bestiary[next as usize].clone();
         self.set_foe(&id);
@@ -270,13 +289,22 @@ impl World {
         let humans = humans.clamp(1, 4);
         let total = (humans + foes).clamp(2, 4);
         self.control = (0..total)
-            .map(|i| if i < humans { Control::Local(i) } else { Control::Ai })
+            .map(|i| {
+                if i < humans {
+                    Control::Local(i)
+                } else {
+                    Control::Ai
+                }
+            })
             .collect();
         self.reset();
     }
 
     pub fn humans(&self) -> usize {
-        self.control.iter().filter(|c| matches!(c, Control::Local(_))).count()
+        self.control
+            .iter()
+            .filter(|c| matches!(c, Control::Local(_)))
+            .count()
     }
 
     /// `TotalMonsters` for the next bout, which a lair hands over and the road
@@ -340,7 +368,10 @@ impl World {
     /// How many daggers a seat has left, for writing back to the sheet after
     /// a fight. A thrown dagger is a dagger gone.
     pub fn daggers_left(&self, seat: usize) -> u32 {
-        self.bout.fighters.get(seat).map_or(0, |f| f.record.get(field::DAGGERS).max(0) as u32)
+        self.bout
+            .fighters
+            .get(seat)
+            .map_or(0, |f| f.record.get(field::DAGGERS).max(0) as u32)
     }
 
     /// The gore switch, from the title. Takes effect on the next reset, the
@@ -365,7 +396,10 @@ impl World {
     /// constitution makes the knight harder to kill without making the
     /// troll harder to kill too.
     pub fn set_sheet(&mut self, sheet: Sheet) {
-        self.sheet = Some(Sheet { max_health: sheet.max_health.max(1), ..sheet });
+        self.sheet = Some(Sheet {
+            max_health: sheet.max_health.max(1),
+            ..sheet
+        });
         self.reset();
     }
 
@@ -403,7 +437,11 @@ impl World {
     /// knight's banks, in entries 9 to 11, as `Colour2ndKnight` colours him.
     fn second_knight_seat(&self) -> Option<usize> {
         let main = self.main_knight_seat()?;
-        self.bout.fighters.iter().enumerate().position(|(i, f)| i != main && f.actor == "knight")
+        self.bout
+            .fighters
+            .iter()
+            .enumerate()
+            .position(|(i, f)| i != main && f.actor == "knight")
     }
 
     /// Whether a seat draws through the second knight's banks. Every knight
@@ -462,7 +500,9 @@ impl World {
         if main != Some(seat) && self.second_knight_seat() != Some(seat) {
             return Vec::new();
         }
-        let Some(target) = self.colours.glow_for(self.knight_at(seat)) else { return Vec::new() };
+        let Some(target) = self.colours.glow_for(self.knight_at(seat)) else {
+            return Vec::new();
+        };
         let (first, slow) = if self.draws_as_second(seat) {
             (battle_palette::SECOND_AT as u8, 1)
         } else {
@@ -485,7 +525,9 @@ impl World {
     /// fallen knight keeps breathing until the bout is over. Without a sheet
     /// the browser's knight stands at a hundred, and the line moves with him.
     pub fn knight_is_low(&self, seat: usize) -> bool {
-        let Some(f) = self.bout.fighters.get(seat) else { return false };
+        let Some(f) = self.bout.fighters.get(seat) else {
+            return false;
+        };
         if !self.is_knight(seat) {
             return false;
         }
@@ -527,7 +569,11 @@ impl World {
         // `SetUpDKL` calls `SetKnightCombat` and then each `InitKnightvs*` walks
         // its table.
         let knight = self.actors["knight"].clone();
-        let foe = self.actors.get(&self.foe).cloned().unwrap_or_else(|| knight.clone());
+        let foe = self
+            .actors
+            .get(&self.foe)
+            .cloned()
+            .unwrap_or_else(|| knight.clone());
         // **How many creatures, and how many at once, is the original's.**
         // `InitKnightvs*` writes `MaxMonsters`, `TotalMonsters` and
         // `NumberInCombat`, `AdjustLevel` (0x2824) moves all three by what the
@@ -551,8 +597,15 @@ impl World {
             self.control.len().max(2)
         };
         if wave.max > 0 {
-            self.control =
-                (0..n).map(|i| if i < humans { Control::Local(i) } else { Control::Ai }).collect();
+            self.control = (0..n)
+                .map(|i| {
+                    if i < humans {
+                        Control::Local(i)
+                    } else {
+                        Control::Ai
+                    }
+                })
+                .collect();
         }
         let mut fighters: Vec<Fighter> = Vec::with_capacity(n);
         let mut nth: BTreeMap<&str, usize> = BTreeMap::new();
@@ -560,7 +613,11 @@ impl World {
             // People are knights. The seats the machine fills are whatever the
             // road, the wave, or the browser asked for.
             let creature = matches!(self.control.get(i), Some(Control::Ai)) && self.foe != "knight";
-            let (id, def) = if creature { (self.foe.as_str(), &foe) } else { ("knight", &knight) };
+            let (id, def) = if creature {
+                (self.foe.as_str(), &foe)
+            } else {
+                ("knight", &knight)
+            };
             let seat = nth.entry(id).or_insert(0);
             // A creature in a wave takes the record `SetMonsterCombat`'s own
             // pointer walk names, or the one `SIDE` names where the fight opens
@@ -578,7 +635,7 @@ impl World {
             }
             .unwrap_or((GLOBAL.left + 50, 1));
             *seat += 1;
-            let y = field.standing_row(self.arrivals.next());
+            let y = field.standing_row(self.arrivals.next_place());
             fighters.push(Fighter::new(id, def, x, y, facing));
         }
         // **The dragon's set piece.** `InitKnightvsDragon` does not put a
@@ -591,7 +648,10 @@ impl World {
             let claw = self.actors["dragon_claw"].clone();
             fighters.retain(|f| f.actor == "knight" || f.actor == "dragon");
             fighters.truncate(2);
-            let head = fighters.iter().find(|f| f.actor == "dragon").map_or(0, |f| f.y);
+            let head = fighters
+                .iter()
+                .find(|f| f.actor == "dragon")
+                .map_or(0, |f| f.y);
             // `DragonMoveClaw1`: claw one ten rows in front of the head, claw
             // two twenty behind it, and both follow it.
             for (seat, dz) in [10, -20].into_iter().enumerate() {
@@ -599,11 +659,17 @@ impl World {
                 let (x, y) = GLOBAL.clamp(x, head + dz);
                 let mut f = Fighter::new("dragon_claw", &claw, x, y, 1);
                 f.brain.timer = dz;
-                self.arrivals.next();
+                self.arrivals.next_place();
                 fighters.push(f);
             }
             self.control = (0..fighters.len())
-                .map(|i| if i == 0 { Control::Local(0) } else { Control::Ai })
+                .map(|i| {
+                    if i == 0 {
+                        Control::Local(0)
+                    } else {
+                        Control::Ai
+                    }
+                })
                 .collect();
         }
         self.bout = Bout::new(field, fighters);
@@ -632,10 +698,19 @@ impl World {
             .bout
             .fighters
             .iter()
-            .map(|f| (f.actor.clone(), self.def_of(&f.actor).under_moon(&self.moon)))
+            .map(|f| {
+                (
+                    f.actor.clone(),
+                    self.def_of(&f.actor).under_moon(&self.moon),
+                )
+            })
             .collect();
         if self.sheet.is_some() {
-            self.bout.damage = knight.attacks.get(&knight.attack).map_or(4, |a| a.damage).max(1);
+            self.bout.damage = knight
+                .attacks
+                .get(&knight.attack)
+                .map_or(4, |a| a.damage)
+                .max(1);
         }
         for (i, f) in self.bout.fighters.iter_mut().enumerate() {
             if f.actor == "knight" {
@@ -657,7 +732,10 @@ impl World {
                 // What the moon makes of it, before anything is scaled: a
                 // ratman is five points and a slash of one most nights, seven
                 // and three on the full moon and twelve and five on the new.
-                let (health, damage) = moon.get(&f.actor).copied().unwrap_or((f.max_health, f.damage));
+                let (health, damage) = moon
+                    .get(&f.actor)
+                    .copied()
+                    .unwrap_or((f.max_health, f.damage));
                 f.max_health = scale(health);
                 f.health = f.max_health;
                 f.damage = scale(damage);
@@ -688,7 +766,9 @@ impl World {
         self.events.clear();
     }
 
-    pub fn settled_for(&self) -> u32 { self.bout.settled_for }
+    pub fn settled_for(&self) -> u32 {
+        self.bout.settled_for
+    }
 
     /// What the fallen were carrying, for whoever is left standing.
     ///
@@ -717,12 +797,12 @@ impl World {
             .sum()
     }
 
-    pub fn arena(&self) -> &ArenaData { &self.arenas[&self.order[self.index]] }
-    pub fn name(&self) -> &str { &self.order[self.index] }
-    /// The ground of the arena that is up: every rectangle nobody may walk
-    /// into. The global limits are the same in every arena and are [`GLOBAL`].
-    pub fn field(&self) -> Field { self.arena().field() }
-
+    pub fn arena(&self) -> &ArenaData {
+        &self.arenas[&self.order[self.index]]
+    }
+    pub fn name(&self) -> &str {
+        &self.order[self.index]
+    }
     /// How many arenas a family's rotation has in it. Eight, in every family
     /// the original ships; asked for rather than assumed so a pack can differ.
     pub fn rotation_len(&self, family: &str) -> usize {
@@ -738,14 +818,20 @@ impl World {
     /// round in order, and the six lair layouts, which are not in that table,
     /// never come up on the road at all.
     pub fn set_family(&mut self, family: &str, pick: usize) {
-        let names = self.families.get(family).map(|f| f.arenas.clone()).unwrap_or_default();
+        let names = self
+            .families
+            .get(family)
+            .map(|f| f.arenas.clone())
+            .unwrap_or_default();
         let wanted = names
             .get(pick % names.len().max(1))
             .and_then(|n| self.order.iter().position(|o| o == n));
         // A family with no rotation in the pack still has to put the fight
         // somewhere, so fall back to any arena that claims the family.
         let fallback = || {
-            self.order.iter().position(|n| self.arenas[n].family == family)
+            self.order
+                .iter()
+                .position(|n| self.arenas[n].family == family)
         };
         if let Some(i) = wanted.or_else(fallback) {
             self.index = i;
@@ -758,13 +844,17 @@ impl World {
     /// The lair layouts are not in any family's rotation, so a raid cannot ask
     /// for one by turn counter the way the road does. It names it instead.
     pub fn set_arena(&mut self, name: &str) -> bool {
-        let Some(i) = self.order.iter().position(|o| o == name) else { return false };
+        let Some(i) = self.order.iter().position(|o| o == name) else {
+            return false;
+        };
         self.index = i;
         self.reset();
         true
     }
 
-    pub fn family(&self) -> &str { &self.arena().family }
+    pub fn family(&self) -> &str {
+        &self.arena().family
+    }
 
     pub fn step_arena(&mut self, delta: i32) {
         let n = self.order.len() as i32;
@@ -778,7 +868,7 @@ impl World {
     pub fn update(&mut self, local: &[Intent]) {
         let mut intents = vec![Intent::default(); self.bout.fighters.len()];
 
-        for i in 0..self.bout.fighters.len() {
+        for (i, intent) in intents.iter_mut().enumerate() {
             // A creature the wave walked in mid-fight has no seat in the control
             // list, because the list was fixed when the bout was built. It is
             // the machine's, like every other creature: `FindTABLE` hands
@@ -786,7 +876,7 @@ impl World {
             // it off its kind, not off where it sits.
             match self.control.get(i).copied().or(Some(Control::Ai)) {
                 Some(Control::Local(slot)) => {
-                    intents[i] = local.get(slot).copied().unwrap_or_default();
+                    *intent = local.get(slot).copied().unwrap_or_default();
                 }
                 Some(Control::Ai) => {
                     // Somebody standing, or failing that a body still worth
@@ -810,8 +900,9 @@ impl World {
                         // them back is the cheap way to say that; the map is
                         // moved, not cloned.
                         let actors = std::mem::take(&mut self.actors);
-                        intents[i] =
-                            self.bout.monster_intent(i, target, |name| &actors[name], gore);
+                        *intent = self
+                            .bout
+                            .monster_intent(i, target, |name| &actors[name], gore);
                         self.actors = actors;
                     }
                 }
@@ -838,7 +929,10 @@ impl World {
         // The backdrop's own palette is the base, and `BattlePal` is that with
         // the fighters written over it: the knight in 6 to 8, the creature or
         // the second knight from 9, the ground, black at 0 and red at 15.
-        if let Some(p) = reg.palette(&format!("palette.{backdrop_id}")).map(|r| r.value.clone()) {
+        if let Some(p) = reg
+            .palette(&format!("palette.{backdrop_id}"))
+            .map(|r| r.value.clone())
+        {
             self.palette = self.battle_palette(&p);
             fb.set_palette(&self.palette);
         }
@@ -849,7 +943,11 @@ impl World {
             _ => fb.clear(0),
         }
 
-        enum Item<'a> { Prop(&'a henge_core::arena::Prop), Fighter(usize), Missile(usize) }
+        enum Item<'a> {
+            Prop(&'a henge_core::arena::Prop),
+            Fighter(usize),
+            Missile(usize),
+        }
         let props: Vec<henge_core::arena::Prop> = self.arena().terrain.placements.clone();
         let mut items: Vec<(i32, Item)> = props
             .iter()
@@ -890,13 +988,22 @@ impl World {
         Ok(())
     }
 
-    fn draw_prop(&self, reg: &mut Registry, fb: &mut Framebuffer, sheet: &str,
-                 p: &henge_core::arena::Prop) {
+    fn draw_prop(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        sheet: &str,
+        p: &henge_core::arena::Prop,
+    ) {
         let Ok(img) = reg.image(sheet) else { return };
         let per_row = img.width / CELL_W;
-        if per_row == 0 { return; }
-        let (sx, sy) = ((p.cell as usize % per_row) * CELL_W,
-                        (p.cell as usize / per_row) * CELL_H);
+        if per_row == 0 {
+            return;
+        }
+        let (sx, sy) = (
+            (p.cell as usize % per_row) * CELL_W,
+            (p.cell as usize / per_row) * CELL_H,
+        );
         let mut cell = vec![0u8; CELL_W * CELL_H];
         for row in 0..CELL_H {
             let src = (sy + row) * img.width + sx;
@@ -908,19 +1015,29 @@ impl World {
         fb.blit(&cell, CELL_W, CELL_H, p.x as i32, p.y as i32, false);
     }
 
-    fn draw_fighter(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
-        -> anyhow::Result<()> {
+    fn draw_fighter(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        index: usize,
+    ) -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
         let def = self.def_at(index);
         if def.scripted() {
             return self.draw_task(reg, fb, index);
         }
-        let Some(seq) = f.sequence(def) else { return Ok(()) };
-        let Some(frame) = f.player.current(seq) else { return Ok(()) };
+        let Some(seq) = f.sequence(def) else {
+            return Ok(());
+        };
+        let Some(frame) = f.player.current(seq) else {
+            return Ok(());
+        };
         let Some(rect) = reg
             .sheet(&def.sheet)
             .and_then(|r| r.value.frames.get(frame.sprite as usize).copied())
-        else { return Ok(()) };
+        else {
+            return Ok(());
+        };
 
         let img = reg.image(&def.sheet)?;
         let (w, h) = (rect.w as usize, rect.h as usize);
@@ -947,18 +1064,28 @@ impl World {
     /// The simulation decided all of this. Nothing here chooses a frame or a
     /// position; it resolves a bank slot to a sheet and blits, with the mirror
     /// term the original's `TASKLEFT` applies.
-    fn draw_task(&self, reg: &mut Registry, fb: &mut Framebuffer, index: usize)
-        -> anyhow::Result<()> {
+    fn draw_task(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        index: usize,
+    ) -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
         let def = self.def_at(index);
-        let Some(task) = f.task.as_ref() else { return Ok(()) };
+        let Some(task) = f.task.as_ref() else {
+            return Ok(());
+        };
         // Everyone is drawn in their own pixel indices, and the palette says
         // what those are this bout: the knight's 6 to 8 hold his colours, a
         // creature's 9 upwards hold its block for this ground, which is how
         // the original got a swamp trogg and a forest trogg from one sheet.
         // A second knight is the one figure drawn from other banks, the
         // `HE*.OB` set painted in 9 to 11.
-        let banks = if self.draws_as_second(index) { self.second_banks.as_deref() } else { None };
+        let banks = if self.draws_as_second(index) {
+            self.second_banks.as_deref()
+        } else {
+            None
+        };
         Self::draw_parts(reg, fb, def, task, banks)
     }
 
@@ -969,7 +1096,11 @@ impl World {
     /// way the creature table stands in for the knight's when a second knight
     /// is loaded into it.
     fn draw_parts(
-        reg: &mut Registry, fb: &mut Framebuffer, def: &ActorDef, task: &Task, banks: Option<&[Bank]>,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        def: &ActorDef,
+        task: &Task,
+        banks: Option<&[Bank]>,
     ) -> anyhow::Result<()> {
         if !task.active {
             return Ok(());
@@ -980,7 +1111,9 @@ impl World {
                 .filter(|_| part.table == def.bank_table)
                 .and_then(|b| b.get(part.bank as usize))
                 .filter(|b| !b.cels.is_empty());
-            let Some(bank) = swapped.or_else(|| def.bank(part.table, part.bank)) else { continue };
+            let Some(bank) = swapped.or_else(|| def.bank(part.table, part.bank)) else {
+                continue;
+            };
             let Some(placed) = henge_core::taskvm::place(part, bank, at, task.mirror()) else {
                 continue;
             };
@@ -1004,6 +1137,3 @@ impl World {
         Ok(())
     }
 }
-
-impl FighterExt for Fighter {}
-pub trait FighterExt {}

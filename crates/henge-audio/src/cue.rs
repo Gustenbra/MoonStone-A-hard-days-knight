@@ -81,7 +81,11 @@ impl Voices {
             if now.state == Some(State::Attack) && was.state != Some(State::Attack) {
                 out.push((i, Cue::Swing));
             }
-            let steps = if scripted { &self.script_step_frames } else { &self.step_frames };
+            let steps = if scripted {
+                &self.script_step_frames
+            } else {
+                &self.step_frames
+            };
             if f.state == State::Walk && now.frame != was.frame && steps.contains(&now.frame) {
                 out.push((i, Cue::Step));
             }
@@ -110,11 +114,17 @@ mod tests {
 
     fn def() -> ActorDef {
         ActorDef {
-            sheet: "t".into(), health: 100, speed_x: 2, speed_y: 1,
-            reach: 40, depth_tolerance: 6, attack_cooldown: 30,
+            sheet: "t".into(),
+            health: 100,
+            speed_x: 2,
+            speed_y: 1,
+            reach: 40,
+            depth_tolerance: 6,
+            attack_cooldown: 30,
             bounty: 0,
             girth: 0,
-            body: [-9, 0, 9, 52], sequences: BTreeMap::new(),
+            body: [-9, 0, 9, 52],
+            sequences: BTreeMap::new(),
             ..ActorDef::default()
         }
     }
@@ -141,10 +151,16 @@ mod tests {
     fn footfalls_land_on_their_frames_and_not_between_them() {
         let mut v = Voices::new();
         v.observe(&[fighter(State::Walk, 7)], &[]);
-        assert_eq!(v.observe(&[fighter(State::Walk, 0)], &[]), vec![(0, Cue::Step)]);
+        assert_eq!(
+            v.observe(&[fighter(State::Walk, 0)], &[]),
+            vec![(0, Cue::Step)]
+        );
         assert!(v.observe(&[fighter(State::Walk, 1)], &[]).is_empty());
         assert!(v.observe(&[fighter(State::Walk, 3)], &[]).is_empty());
-        assert_eq!(v.observe(&[fighter(State::Walk, 4)], &[]), vec![(0, Cue::Step)]);
+        assert_eq!(
+            v.observe(&[fighter(State::Walk, 4)], &[]),
+            vec![(0, Cue::Step)]
+        );
     }
 
     #[test]
@@ -158,8 +174,18 @@ mod tests {
     fn a_landed_blow_is_heard_and_a_fatal_one_sounds_different() {
         let mut v = Voices::new();
         let hits = vec![
-            HitEvent { attacker: 0, target: 1, damage: 25, fatal: false },
-            HitEvent { attacker: 0, target: 2, damage: 25, fatal: true },
+            HitEvent {
+                attacker: 0,
+                target: 1,
+                damage: 25,
+                fatal: false,
+            },
+            HitEvent {
+                attacker: 0,
+                target: 2,
+                damage: 25,
+                fatal: true,
+            },
         ];
         let crowd: Vec<Fighter> = (0..3).map(|_| fighter(State::Attack, 0)).collect();
         let out = v.observe(&crowd, &hits);

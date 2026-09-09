@@ -66,7 +66,11 @@ pub struct Title {
 
 impl Default for Title {
     fn default() -> Title {
-        Title { row: 0, players: 1, gore: true }
+        Title {
+            row: 0,
+            players: 1,
+            gore: true,
+        }
     }
 }
 
@@ -215,7 +219,11 @@ impl Select {
 
     /// Every choice made so far, in seat order.
     pub fn chosen(&self) -> Vec<usize> {
-        self.taken.iter().take(self.players).filter_map(|t| *t).collect()
+        self.taken
+            .iter()
+            .take(self.players)
+            .filter_map(|t| *t)
+            .collect()
     }
 
     pub fn done(&self) -> bool {
@@ -349,7 +357,10 @@ mod tests {
         // Fire starts the typing and leaves the seat where it is, which is
         // `ChooseFIRE` calling `TypeName` before it clears the knight's bit.
         assert_eq!(s.take("SIR JEFFREY"), Some(2));
-        assert!(!s.done(), "the seat is still choosing while the name is typed");
+        assert!(
+            !s.done(),
+            "the seat is still choosing while the name is typed"
+        );
         assert_eq!(s.take("SIR JEFFREY"), None, "and fire again does nothing");
         assert_eq!(s.name_done(), Some((2, "SIR JEFFREY".into())));
         assert!(s.done());

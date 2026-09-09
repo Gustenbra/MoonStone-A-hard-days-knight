@@ -94,7 +94,9 @@ impl MapScene {
         let img = reg.image(MAP_SCENE)?;
         anyhow::ensure!(
             img.width == 320 && img.height == 200,
-            "{MAP_SCENE} is {}x{}, expected a full screen", img.width, img.height
+            "{MAP_SCENE} is {}x{}, expected a full screen",
+            img.width,
+            img.height
         );
         let pixels = img.pixels.clone();
         // `_MAP:MapType` and `_MAP:MapSLOW`, read out of the image at bake time.
@@ -131,9 +133,14 @@ impl MapScene {
     /// `DisplayOtherKnights`, then `FOLLOW`, whose encounter walk marks the lair
     /// under your feet, then `SHOW`. `DisplayStack` adds `CreatePaper` after
     /// `SHOW` when it has more than one entry to offer.
-    pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                  fonts: &std::collections::BTreeMap<String, crate::text::Font>,
-                  run: &henge_core::run::Run, world: &Marks) -> anyhow::Result<()> {
+    pub fn render(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        fonts: &std::collections::BTreeMap<String, crate::text::Font>,
+        run: &henge_core::run::Run,
+        world: &Marks,
+    ) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
         self.draw_icons(reg, fb, world.icons, world.marked);
@@ -164,8 +171,13 @@ impl MapScene {
     /// paints every place they name. This used to draw them as flat silhouettes
     /// in one colour, which was a marker the original does not have, in a
     /// colour the frame does not carry.
-    fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                  icons: &[(i32, i32, usize)], marked: &[(i32, i32)]) {
+    fn draw_icons(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        icons: &[(i32, i32, usize)],
+        marked: &[(i32, i32)],
+    ) {
         for (x, y, frame) in icons {
             crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
         }
@@ -207,11 +219,22 @@ impl MapScene {
     /// is twenty tall; `docs/COMPLETE.md` had this as fifteen pixels a line,
     /// which is the single step taken before the first line and not the step
     /// between them.
-    fn draw_paper(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                  font: Option<&crate::text::Font>, paper: &Paper) {
+    fn draw_paper(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        font: Option<&crate::text::Font>,
+        paper: &Paper,
+    ) {
         crate::sprite::draw(reg, fb, TOKEN_SHEET, PAPER_FRAME, PAPER_X, PAPER_Y, false);
         crate::sprite::draw(
-            reg, fb, TOKEN_SHEET, paper.seat.min(4), PAPER_X + 5, PAPER_Y + 5, false,
+            reg,
+            fb,
+            TOKEN_SHEET,
+            paper.seat.min(4),
+            PAPER_X + 5,
+            PAPER_Y + 5,
+            false,
         );
         let Some(font) = font else { return };
         let heading = format!("{}{PAPER_OPT}", paper.knight);
