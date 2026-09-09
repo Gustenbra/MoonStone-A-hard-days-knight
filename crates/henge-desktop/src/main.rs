@@ -1060,6 +1060,19 @@ struct App {
     /// for good. See `sheet_tick`, where a successful take closes this the
     /// same way for a living loser and keeps it open for a dead one.
     trade_page: Option<(usize, bool)>,
+    /// The dragon's hoard, `StatTYPE` 0xa, up once the dragon is dead for
+    /// good. The routine at 0xcf3/0xcf6 (`DragonEncounter+54`, 0xa41b, calls
+    /// it) settles the bout the same way [`Self::knight_fight_settled`]'s
+    /// caller does; its own `_dragon_won` branch either leaves the dragon
+    /// flying (`0xd23`, a life point and one thing taken, already
+    /// `Rival::dragon_on_rival`'s shape for a computer knight) or, when the
+    /// bout the player just won killed it for good, grounds it
+    /// (`0xd35` to `0xd50`, [`henge_core::dragon::Flight::fight_over`]) and
+    /// opens this with `0xd44 mov ax, 0xa; call 0xbdd3`, exactly as
+    /// `Knight1Won+6` (0x46b) opens the trade page on `StatTYPE` 1. No
+    /// `TakeCNT` of its own the trade page has one for, so `EXIT` alone
+    /// closes it; see `sheet_tick`.
+    dragon_page: bool,
     /// The dice table's own one-bank table, `dice.cel` in `DiceHANDLE`.
     dice_banks: Option<henge_core::taskvm::BankTables>,
     /// Every animation script, which the circle's two tasks run on. The bout
@@ -1492,6 +1505,7 @@ impl App {
             duel: None,
             duel_settled: None,
             trade_page: None,
+            dragon_page: false,
             stones: None,
             stones_banks,
             dragon_banks,
@@ -2410,14 +2424,6 @@ impl App {
                             let xp = w.experience();
                             self.run.finished_fight_worth(health, won, w.purse(), xp);
                         }
-                        // The routine at 0xcf6 on its way out: `_dragon_won`
-                        // (0xd23) leaves it flying; 0xd38 to 0xd50 ground it
-                        // for good. `add word [si+0x36], 2` at 0xd40 is the
-                        // two points `w.experience()` has just paid.
-                        if self.dragon_fight {
-                            self.dragon_fight = false;
-                            self.run.dragon.fight_over(won);
-                        }
                         w.set_player_cursed(false);
                         // And what was thrown is gone: the sheet's daggers are
                         // whatever is left on the belt.
@@ -2457,6 +2463,14 @@ impl App {
                             if self.duel.take().is_some() {
                                 let settled = self.duel_settled.take();
                                 self.knight_fight_settled(settled);
+                                return;
+                            }
+                            // The routine at 0xcf6 on its way out, held here
+                            // for the finishing beat the same way the trade
+                            // page and the lair's floor are.
+                            if self.dragon_fight {
+                                self.dragon_fight = false;
+                                self.dragon_fight_settled(won);
                                 return;
                             }
                             // The Valley's Guardian, which is neither a lair
@@ -3259,6 +3273,8 @@ impl App {
                 self.close_lair_page();
             } else if self.trade_page.is_some() {
                 self.close_trade_page();
+            } else if self.dragon_page {
+                self.dragon_page = false;
             } else {
                 self.sheet = false;
             }
@@ -3340,6 +3356,15 @@ impl App {
                 self.trade_took(loser);
                 self.sync_sheet();
             }
+            return;
+        }
+        // The dragon's hoard, `StatTYPE` 0xa: `Screen::right_table` marks
+        // its gadgets `Take` the same as the lair's floor, but `WhoLived`
+        // put the whole hoard into `dragon_hoard` in one write and nothing
+        // here reads it back out gadget by gadget. TODO: a take mechanic of
+        // its own, the lair page's shape, once one is wanted; until then
+        // `EXIT`, above, is the only thing this page does.
+        if self.dragon_page {
             return;
         }
         let Some(slot) = henge_core::status::slot_of(hit.id) else {
@@ -3685,6 +3710,51 @@ impl App {
                     self.mode = Mode::Map;
                 }
             }
+        }
+    }
+
+    /// The routine at 0xcf3/0xcf6 on its way out, once a dragon fight this
+    /// session began (`begin_dragon_fight`) has settled: `won` is the same
+    /// `w.bout.winner() == Some(0)` [`Self::knight_fight_settled`]'s own
+    /// caller reads.
+    ///
+    /// ```text
+    /// 00d1b  test word [KnightDeath], 1; je 00d35
+    /// _dragon_won:
+    /// 00d23  mov si, 0x6e26; mov di, [KnightTable]; call 0xaf7   ; taken
+    /// 00d2d  or word [KnightDeath], 1
+    /// 00d32  jmp EncounterAllDone
+    /// 00d35  mov si, 0x6e26; mov byte [si+0x31], 0xff            ; dead
+    /// 00d3c  mov si, [KnightTable]; add word [si+0x36], 2        ; 2 xp
+    /// 00d44  mov ax, 0xa; call 0xbdd3       ; the panel on StatTYPE 0xa
+    /// 00d4a  mov word [0xccb0], 0; 00d50 mov word [0xccb2], 0xffff
+    /// 00d56  jmp EncounterAllDone
+    /// ```
+    ///
+    /// A dragon lost to keeps flying and `ContinueDragon` rolls again next
+    /// turn (`Flight::fight_over`'s own `false` arm, which does nothing);
+    /// nothing here takes a life point off the player for it, because
+    /// `finished_fight_worth`, called above off the same `won`, already
+    /// has. One thing missing: `WhoLived+57` (0xaf7) at `_dragon_won` takes
+    /// one thing off the loser into the winner's magic record whichever
+    /// kind lost, the same call `Rival::dragon_on_rival` already makes for
+    /// a computer knight, but nothing here makes the equivalent call for a
+    /// human losing this same bout, so `dragon_hoard` does not grow on a
+    /// loss the way it does when a computer knight loses to the dragon on
+    /// the map. TODO: build that call once a lost dragon fight is wanted to
+    /// cost the loser a magic item or a suit of armour, the way it already
+    /// does for a rival.
+    fn dragon_fight_settled(&mut self, won: bool) {
+        self.run.dragon.fight_over(won);
+        if won {
+            // `Knight1Won+6` (0x46b) opens the trade page on `StatTYPE` 1
+            // the same way; `StatusSetup` opens either with the pointer at
+            // (0xa0, 0x64).
+            self.dragon_page = true;
+            self.point_at(0xa0, 0x64);
+        }
+        if self.map.is_some() {
+            self.mode = Mode::Map;
         }
     }
 
@@ -4289,6 +4359,17 @@ impl App {
                 }),
             ));
         }
+        if self.dragon_page {
+            return Some((
+                SheetScreen::Dragon,
+                Some(status::Other {
+                    hoard: self.run.dragon_hoard,
+                    gold: 0,
+                    scouted: false,
+                    loser: None,
+                }),
+            ));
+        }
         self.sheet.then_some((SheetScreen::Sheet, None))
     }
 
@@ -4764,6 +4845,63 @@ mod tests {
         app.knight_fight_settled(Some(Settled::PlayerWon { loser: 2 }));
         assert_eq!(app.mode, Mode::Map);
         assert_eq!(app.trade_page, Some((2, false)));
+    }
+
+    /// The routine at 0xcf3/0xcf6 on its way out: the panel opens on
+    /// `StatTYPE` 0xa only for the branch that grounds the dragon for
+    /// good, never for the one that leaves it flying.
+    #[test]
+    fn dragon_fight_settled_opens_the_hoard_page_only_on_a_win() {
+        let Some(mut app) = quest_app_with_a_real_pack() else {
+            return;
+        };
+        app.mode = Mode::Combat;
+        app.dragon_fight_settled(false);
+        assert_eq!(app.mode, Mode::Map);
+        assert!(
+            !app.dragon_page,
+            "0xd23: the dragon flies on, not the panel"
+        );
+        assert!(!app.run.dragon.dead, "no write to the dragon's own +0x31");
+
+        app.mode = Mode::Combat;
+        app.dragon_fight_settled(true);
+        assert_eq!(app.mode, Mode::Map);
+        assert!(app.dragon_page, "0xd44: mov ax, 0xa; call 0xbdd3");
+        assert!(app.run.dragon.dead, "0xd38: [si+0x31] = 0xff");
+    }
+
+    /// `panel_now`'s dispatch for the dragon's hoard: `Screen::Dragon` with
+    /// `dragon_hoard` in the other arch and no gold, since the dragon's own
+    /// record's kind (0x14) never matches `TakeGold`'s `0xa` at 0xafa.
+    #[test]
+    fn panel_now_shows_the_dragon_hoard_with_no_gold() {
+        let Some(mut app) = quest_app() else { return };
+        app.run.dragon_hoard.gems = 3;
+        app.dragon_page = true;
+        let (screen, other) = app.panel_now().expect("dragon_page is up");
+        assert_eq!(screen, SheetScreen::Dragon);
+        let other = other.expect("the hoard and the gold");
+        assert_eq!(other.hoard.gems, 3);
+        assert_eq!(other.gold, 0);
+        assert!(!other.scouted);
+        assert!(other.loser.is_none());
+    }
+
+    /// `EXIT` closes the dragon's hoard page back to the map, the same way
+    /// it closes every other page `StatLOOP`'s own gadget handling reaches.
+    #[test]
+    fn the_exit_gadget_closes_the_dragon_hoard_page() {
+        let Some(mut app) = quest_app() else { return };
+        app.dragon_page = true;
+        app.gadgets
+            .add_box(henge_core::status::EXIT_ID, 0, 0, 10, 10, "EXIT");
+        app.pointer.x = 5;
+        app.pointer.y = 5;
+        app.pointer.woken = true;
+        app.pressed[6] = true;
+        app.sheet_tick();
+        assert!(!app.dragon_page);
     }
 
     /// The trade page's own gadgets: a take moves something, and `EXIT`

@@ -320,9 +320,12 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
       is after, with neither the gem nor the hawk up. A knight who kills it
       grounds it for good (0xd38, 0xd50); one who does not leaves it flying.
       The desktop draws it over the map on `DrAnim[DR_WALK]` from the pack's
-      table 5, and the trace line carries `dragon@x,z after seat`. **Not built**:
-      the hoard, `WhoLived+57` (0xaf7) for a dragon and `DisplayDragon` on
-      `StatTYPE` 0xa, and the knight picker page the Scroll of the Wyrm opens
+      table 5, and the trace line carries `dragon@x,z after seat`. The hoard
+      is built: `WhoLived+57` (0xaf7) for a dragon feeds `Rival::dragon_on_rival`
+      the way it always did for a rival's own loss, and grounding the dragon
+      for good opens `DisplayDragon` on `StatTYPE` 0xa through
+      `App::dragon_fight_settled`. **Not built**: the knight picker page the
+      Scroll of the Wyrm opens
 - [x] 37. **Per-creature behaviour, and it is translation, not design.** Every
       controller is a named routine in `MOON` and every one of them reads. They are
       in `henge-core/src/monster.rs`, dispatched by the `controller` each actor now
