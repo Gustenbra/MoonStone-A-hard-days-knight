@@ -15,6 +15,7 @@ use anyhow::Context;
 use henge_assets::{palette, FrameRect, Manifest, Provenance, Sheet, RECIPE};
 use henge_core::content::{ActorDef, AttackDef};
 use henge_core::taskvm::{Bank, BankTables, Instr, ScriptSet};
+use henge_core::wave::WaveDef;
 use henge_formats::taskvm::{all_scripts, Symbols};
 use henge_formats::{piv, voc, Collide, Library, Sprite};
 use std::collections::{BTreeMap, BTreeSet};
@@ -207,6 +208,79 @@ const KNIGHT_SPAWNED: &[&str] = &["SpeedKnife", "Knife"];
 /// The spray `AddBlood` starts, on bank table 4. Every part of it is gated.
 const BLOOD: &str = "Blood1";
 
+/// `TroggTABLE`, DS:0x97a, four eight-byte `[x][y][z][facing]` records and a
+/// zero word. The troggs take it from the front and the troll from record one.
+/// Every x is off the side of the screen and every facing points into it.
+const TROGG_SEATS: &[[i32; 4]] =
+    &[[-50, 0, 100, 1], [360, 0, 150, 3], [340, 0, 50, 3], [-80, 0, 120, 1]];
+/// `BeastTABLE`, DS:0x99c, three records.
+const BEAST_SEATS: &[[i32; 4]] = &[[-60, 0, 50, 1], [360, 0, 140, 3], [370, 0, 120, 3]];
+/// `RatmanTABLE`, DS:0x9b6, five records. Record three is the only one in the
+/// bestiary that starts on screen, at x 30.
+const RATMAN_SEATS: &[[i32; 4]] =
+    &[[-50, 0, 50, 1], [340, 0, 100, 3], [360, 0, 50, 3], [30, 0, 90, 1], [-50, 0, 50, 1]];
+/// `MudmanTABLE`, DS:0x9e0, five records.
+const MUDMAN_SEATS: &[[i32; 4]] =
+    &[[-80, 0, 50, 1], [380, 0, 100, 3], [380, 0, 50, 3], [-80, 0, 90, 1], [-80, 0, 50, 1]];
+/// `BalokTABLE`, DS:0xa5c, one record.
+const BALOK_SEATS: &[[i32; 4]] = &[[-60, 0, 0, 1]];
+
+/// `lev_adjust`, DS:0xa0a, sixty four signed bytes: eight rows of eight, one
+/// row per creature and one entry per level of the knight.
+///
+/// **Recovered**, and it is read straight out of the data segment.
+/// `AdjustLevel` (image 0x2824) works the level out from the knight's swing and
+/// his experience, finds the row by looking `INITANIM` up in `KLTAB` (DS:0xa4c,
+/// eight words: `SetBalokTables`, `SetRatmenTables`, `SetTroggAxeTables`,
+/// `SetTroggHammerTables`, `SetTroggSpTables`, `SetUpMudmenTables`,
+/// `SetTrollTable`, `SetBeastTables`), and subtracts the entry from
+/// `TotalMonsters` at 0x290f. A row falls from positive to negative across its
+/// eight, so a weak knight is sent fewer of a creature and a strong one more.
+/// Each row is carried on its own creature, which is what `KLTAB` says it
+/// belongs to.
+const LEV_BALOK: &[i32] = &[2, 2, 1, 1, 0, -1, -1, -2];
+const LEV_RATMAN: &[i32] = &[5, 4, 3, 2, 0, -1, -2, -4];
+const LEV_TROGG_AXE: &[i32] = &[5, 4, 2, 0, 0, -1, -3, -4];
+const LEV_TROGG_HAMMER: &[i32] = &[5, 4, 2, 0, 0, -1, -3, -4];
+const LEV_TROGG_SPEAR: &[i32] = &[3, 3, 2, 2, 0, -1, -2, -3];
+const LEV_MUDMAN: &[i32] = &[3, 2, 1, 0, 0, -1, -1, -2];
+const LEV_TROLL: &[i32] = &[3, 2, 1, 0, 0, 0, 0, -1];
+const LEV_BEAST: &[i32] = &[2, 1, 0, 0, -1, -1, -2, -3];
+
+/// One creature's wave, as its own `InitKnightvs*` writes it and `AdjustLevel`
+/// then moves it: `MaxMonsters`, `TotalMonsters`, the ceiling `AdjustLevel` will
+/// not take `MaxMonsters` past, whether `INITMO` flips `SIDE`, whether `INITMO`
+/// puts anything in at all, whether the fight opens through `INITMO` rather than
+/// through `SetMonsterCombat`, and the row of `lev_adjust`.
+///
+/// `wave(0, ...)` is the absence of one, which is what the knight, the demon and
+/// the dragon have: their `INITMO` is the bare `ret` at image 0x2059 and their
+/// `InitKnightvs*` builds the opponent inline instead of calling
+/// `SetMonsterCombat`, so nothing about the fight is a count.
+const fn wave(
+    max: i32,
+    heads: i32,
+    cap: i32,
+    alternates: bool,
+    opens_with_side: bool,
+    level: &'static [i32],
+) -> WaveSpec {
+    WaveSpec { max, heads, cap, alternates, opens_with_side, level }
+}
+
+#[derive(Clone, Copy)]
+struct WaveSpec {
+    max: i32,
+    heads: i32,
+    cap: i32,
+    alternates: bool,
+    opens_with_side: bool,
+    level: &'static [i32],
+}
+
+/// No wave: the knight, the demon and the dragon.
+const NO_WAVE: WaveSpec = wave(0, 0, 0, false, false, &[]);
+
 /// One creature of the bestiary: which scripts its five states play, and the
 /// numbers the original's own set-up routine gives it.
 #[derive(Clone, Copy)]
@@ -270,6 +344,25 @@ struct Creature {
     /// What the moon does to it: the phase key, the hit points and the blow it
     /// is fielded with on that night. Only the ratman has one.
     moon: &'static [(&'static str, i32, i32)],
+    /// The creature's own spawn table, `[x, y, z, facing]` per seat, as
+    /// `InitNewMO` (0x27ee) reads it, and which seat the first arrival takes.
+    ///
+    /// The tables are in the readable span of DGROUP: `TroggTABLE` DS:0x97a,
+    /// `BeastTABLE` 0x99c, `RatmanTABLE` 0x9b6, `MudmanTABLE` 0x9e0,
+    /// `BalokTABLE` 0xa5c, each a run of eight-byte records closed by a zero
+    /// word. The troll has none of its own: `InitKnightvsTroll` (0x26f1) hands
+    /// `InitTrogg` the trogg's table. The demon's and the dragon's are written
+    /// into the record in code instead, at 0x278d and 0x2476.
+    seats: &'static [[i32; 4]],
+    /// `SetMonsterCombat` (0x27e4) starts at record 0; `InitTrogg` (0x225b) and
+    /// `InitMudmen` (0x2655) `xor [SIDE], 1` against the 0 `SetUpDKL` left and
+    /// so start at record 1.
+    first_seat: usize,
+    /// How many of it a fight holds and how many of them at once: the counts its
+    /// own `InitKnightvs*` writes, the ceiling and the `lev_adjust` row
+    /// `AdjustLevel` (0x2824) moves them by, and which routine its `INITMO` is.
+    /// See `henge_core::wave`.
+    wave: WaveSpec,
 }
 
 /// The bestiary, as the original sets each creature up.
@@ -327,6 +420,14 @@ const CREATURES: &[Creature] = &[
         health: 40, damage: 3, approach: 150, back_off: 90, depth: 5,
         // `TrollWALKR` steps 16, 26, 13, 26: twenty pixels a frame.
         reach: 80, speed: [3, 1], bounty: 40, girth: 0, moon: &[],
+        // `InitKnightvsTroll` (0x26f1) hands `InitTrogg` the trogg's own table,
+        // and `InitTrogg`'s `xor [SIDE], 1` starts it on record one.
+        seats: TROGG_SEATS, first_seat: 1,
+        // `InitKnightvsTroll` (0x26aa): one at a time and one owed, and
+        // `AdjustLevel` (0x289e) will not take `MaxMonsters` past two for it.
+        // Its fight opens through `INITMO` at 0x26f4 rather than through
+        // `SetMonsterCombat`, so the first one in is chosen by `SIDE` too.
+        wave: wave(1, 1, 2, true, true, LEV_TROLL),
     },
     Creature {
         id: "trogg_axe", name: "Trogg", banks: "trogg_axe", sheet: "actor.trogg_axe",
@@ -350,6 +451,9 @@ const CREATURES: &[Creature] = &[
         health: 20, damage: 3, approach: 100, back_off: 90, depth: 5,
         // `TroggWALKR` steps 0, 7, 23: ten pixels a frame.
         reach: 70, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
+        seats: TROGG_SEATS, first_seat: 0,
+        // `InitKnightvsTroggAxe` (0x20b9): one at a time, three owed.
+        wave: wave(1, 3, 0, true, false, LEV_TROGG_AXE),
     },
     Creature {
         id: "trogg_hammer", name: "Trogg", banks: "trogg_axe", sheet: "actor.trogg_axe",
@@ -370,6 +474,9 @@ const CREATURES: &[Creature] = &[
         bleeds: false,
         health: 20, damage: 2, approach: 70, back_off: 65, depth: 5,
         reach: 60, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
+        seats: TROGG_SEATS, first_seat: 0,
+        // `InitKnightvsTroggHammer` (0x2145), the same numbers and its own row.
+        wave: wave(1, 3, 0, true, false, LEV_TROGG_HAMMER),
     },
     Creature {
         id: "trogg_spear", name: "Trogg", banks: "trogg_spear", sheet: "actor.trogg_spear",
@@ -396,6 +503,9 @@ const CREATURES: &[Creature] = &[
         // lands, in code not yet read. Three is the axe's, as a stand-in.
         health: 15, damage: 3, approach: 130, back_off: 120, depth: 5,
         reach: 100, speed: [2, 1], bounty: 15, girth: 0, moon: &[],
+        seats: TROGG_SEATS, first_seat: 0,
+        // `InitKnightvsTroggSpear` (0x21e2).
+        wave: wave(1, 3, 0, true, false, LEV_TROGG_SPEAR),
     },
     Creature {
         id: "ratmen", name: "Ratman", banks: "ratmen", sheet: "actor.ratmen",
@@ -433,6 +543,10 @@ const CREATURES: &[Creature] = &[
         health: 5, damage: 1, approach: 40, back_off: 30, depth: 5,
         reach: 24, speed: [3, 1], bounty: 5, girth: 0,
         moon: &[("full", 7, 3), ("new", 12, 5)],
+        seats: RATMAN_SEATS, first_seat: 0,
+        // `InitKnightvsRatmen` (0x2337): the one fight in the game that holds
+        // two creatures at once, and two owed behind them.
+        wave: wave(2, 2, 0, true, false, LEV_RATMAN),
     },
     Creature {
         id: "mudmen", name: "Mudman", banks: "mudmen", sheet: "actor.mudmen",
@@ -460,6 +574,12 @@ const CREATURES: &[Creature] = &[
         // `MudmenWALK` steps (12, 12), (10, 14): it comes at you on a
         // diagonal, eleven across and thirteen deep a frame.
         reach: 90, speed: [2, 2], bounty: 25, girth: 0, moon: &[],
+        // `InitMudmen` (0x2655) is the other `SIDE` one: record one.
+        seats: MUDMAN_SEATS, first_seat: 1,
+        // `InitKnightvsMudmen` (0x2620): two owed, and `AdjustLevel` (0x2898)
+        // forces `MaxMonsters` back to one however strong the knight is. Its
+        // fight opens through `INITMO` at 0x264c.
+        wave: wave(1, 2, 1, true, true, LEV_MUDMAN),
     },
     Creature {
         id: "demon", name: "Demon", banks: "demon", sheet: "actor.demon",
@@ -497,6 +617,13 @@ const CREATURES: &[Creature] = &[
         // a dragon's bite. It moves five pixels a frame, which is one a tick.
         health: 250, damage: 4, approach: 95, back_off: 90, depth: 2,
         reach: 65, speed: [1, 1], bounty: 100, girth: 0, moon: &[],
+        // `InitKnightvsDemon` writes the record itself, 0x278d..0x27ab:
+        // x 100, y 5, z 100, facing 1. It is the one creature that opens on
+        // screen and in the middle of it.
+        seats: &[[100, 5, 100, 1]], first_seat: 0,
+        // `InitKnightvsDemon` (0x27d1) sets `INITMO` to the bare `ret` at
+        // 0x2059 and builds the demon itself, so there is no wave at all.
+        wave: NO_WAVE,
     },
     Creature {
         id: "beast", name: "Beast", banks: "beast", sheet: "bank.be1",
@@ -531,6 +658,9 @@ const CREATURES: &[Creature] = &[
         // Its weapon parts are its own body, so it has to be allowed close:
         // three quarters of its width would keep it out of its own bite.
         reach: 40, speed: [4, 1], bounty: 30, girth: 20, moon: &[],
+        seats: BEAST_SEATS, first_seat: 0,
+        // `InitKnightvsBeast` (0x228d).
+        wave: wave(1, 3, 0, true, false, LEV_BEAST),
     },
     Creature {
         id: "balok", name: "Balok", banks: "balok", sheet: "actor.balok",
@@ -551,6 +681,11 @@ const CREATURES: &[Creature] = &[
         // Its uppercut lands from 41 to 74 pixels out, and its own width
         // keeps a knight sixty away, so it swings from just outside that.
         reach: 70, speed: [2, 1], bounty: 80, girth: 0, moon: &[],
+        seats: BALOK_SEATS, first_seat: 0,
+        // `InitKnightvsBalok` (0x2591): two owed, `MaxMonsters` forced back to
+        // one at 0x288a, and `InitBalok` (0x25cf) is the one `INITMO` with no
+        // `xor [SIDE], 1`, so every Balok comes in at the same seat.
+        wave: wave(1, 2, 1, false, false, LEV_BALOK),
     },
     Creature {
         id: "dragon", name: "Dragon", banks: "dragon", sheet: "actor.dragon",
@@ -597,6 +732,11 @@ const CREATURES: &[Creature] = &[
         // is at its origin, and a knight kept the figure's width away could
         // never be bitten.
         reach: 60, speed: [1, 1], bounty: 250, girth: 50, moon: &[],
+        // `InitKnightvsDragon` 0x2476: the head at x 80, forty rows up, facing
+        // right. Its `z` of 100 goes the way every other arrival's does.
+        seats: &[[80, -40, 100, 1]], first_seat: 0,
+        // `InitKnightvsDragon` (0x2519) sets `INITMO` to the `ret` as well.
+        wave: NO_WAVE,
     },
     Creature {
         // `InitKnightvsDragon` sets two more actors up beside the dragon,
@@ -621,6 +761,12 @@ const CREATURES: &[Creature] = &[
         // dragon's own 200 and 120 back over it, so fifty never takes effect.
         health: 200, damage: 10, approach: 0, back_off: 0, depth: 10,
         reach: 60, speed: [0, 0], bounty: 0, girth: 30, moon: &[],
+        // 0x249c and 0x24d5: both claws at x 5, depths 80 and 120, facing
+        // right. `DragonMoveClaw1` then pins them either side of the head.
+        seats: &[[5, 0, 80, 1], [5, 0, 120, 1]], first_seat: 0,
+        // A claw is not a creature the fight counts; the dragon's set piece
+        // builds both of them.
+        wave: NO_WAVE,
     },
 ];
 
@@ -1402,7 +1548,7 @@ fn actor_definitions(
         // What a fallen knight is carrying, for whoever is left standing. Not
         // recovered: the original names `BESTOWGOLD` and a `GOLD` readout but
         // no table of what anything is worth, so this is a number chosen
-        // against the prices. Three foes put down pays for a flask and leaves
+        // against the prices. Three foes put down pays for a potion and leaves
         // change.
         bounty: 15,
         // `BKwon`: a knight put down is one point of experience.
@@ -1436,6 +1582,14 @@ fn actor_definitions(
     // in a seat the machine plays gets the plain opponent, which closes and
     // swings and struggles out of a hold.
     def.controller = "knight".into();
+    // Where a knight stands at the opening of a bout. `SetKnightCombat`
+    // (0x2962) writes the first record a field at a time, `mov [di+2], 0xfa;
+    // mov [di+4], 0; mov [di+6], 0x64; mov byte [di+8], 3`, so the player's
+    // knight is at x 250 facing left. The second is the only other one the
+    // original has, and both the routines that place it agree to the word:
+    // `InitPractice` (0x200a) and `InitKnightvsKnight` (0x206b) put him at
+    // x 30 facing right. Both `z` words die in `AddKnight` like everyone's.
+    def.seats = vec![[250, 0, 100, 3], [30, 0, 75, 1]];
     def.animation = animation;
     if !def.animation.is_empty() {
         def.validate().map_err(|e| anyhow::anyhow!("knight: {e}"))?;
@@ -1574,6 +1728,19 @@ fn creature_definition(
     }
     def.controller = c.controller.to_string();
     def.border = c.border;
+    def.seats = c.seats.to_vec();
+    def.first_seat = c.first_seat;
+    def.wave = WaveDef {
+        max: c.wave.max,
+        heads: c.wave.heads,
+        cap: c.wave.cap,
+        alternates: c.wave.alternates,
+        // Everything with counts of its own has a real `INITMO`; the three with
+        // none are `NO_WAVE`, whose `max` of nought is what says so.
+        reinforced: c.wave.max > 0,
+        opens_with_side: c.wave.opens_with_side,
+        level: c.wave.level.to_vec(),
+    };
     def.attack = c.kind.to_string();
     def.hurt_by = c.hurt_by.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
     def.blockable = c.blockable;
@@ -1810,10 +1977,10 @@ fn unpacked_image(src: &str) -> Option<Vec<u8>> {
 /// stream instead of stopping where the emulated stub stops, and
 /// `MapIconsTABLE`, `LairLocation` and `LairType` are all in what came back. So
 /// every place on the map could stop being a construction. That is the map's
-/// own change and not this one; until somebody makes it, what is below stands.
-///
-/// The healer and the stones have no recovered coordinates at all. They are
-/// placed on the landmarks the map already draws.
+/// own change and not this one, and it has since been made: every place on the
+/// map, the four home villages included, is read out of `MapIconsTABLE` now,
+/// and the two towns keep the construction below only as a fallback for a pack
+/// baked without the image.
 /// What each entry of `MOON:CombatTable` puts in the arena.
 ///
 /// **Recovered**, out of `MOON:InitGameStart` at image 0x1d44, which is a run
@@ -2065,7 +2232,7 @@ const LAIR_H: i32 = 5;
 
 /// Where each place sits, and how big it is.
 ///
-/// **Every coordinate on the map is recovered now except the hermit's.**
+/// **Every coordinate on the map is recovered.**
 /// `MOON:MapIconsTABLE` is the original's own list of what stands on the
 /// overworld and where, and it is read out of the image by [`map_marks`]. Each
 /// record's pair is the top-left corner of the icon the overlap test measures,
@@ -2079,32 +2246,35 @@ const LAIR_H: i32 = 5;
 /// `_MAP:KnightGoesToTown` carries as literals, (94, 47) and (297, 157), and
 /// by hanging the rest on whatever landmark the map painted nearby. That is
 /// gone. What the construction got wrong is worth recording: the ruin in the
-/// southern woods this project called the hermit's is Stonehenge, and the ring
-/// in the middle of it all this project called Stonehenge is the Valley of the
-/// Gods. Both were sited on the right artwork under the wrong name.
+/// southern woods this project called a hermit's is Stonehenge, and the ring in
+/// the middle of it all this project called Stonehenge is the Valley of the
+/// Gods. Both were sited on the right artwork under the wrong name. There was
+/// also a second healer, a hermit, invented and stood in the southern woods;
+/// the original has no such place and it is gone.
 ///
 /// The two towns keep the `KnightGoesToTown` construction as a fallback, so a
 /// pack baked without the unpacked image still has somewhere to buy a sword.
 /// Everything else the table names is baked only when the table is there.
 ///
-/// **The four villages are recovered and not baked.** Frames 0x15 to 0x18 are
-/// in the table at (18, 11), (286, 11), (0, 187) and (303, 192), one in each
-/// corner, and `MOON:CheckGROOC` gates each on `[di+0x20]`, the knight's own
-/// index, so a village belongs to one knight and only he may enter it. Nothing
-/// in this project has a village to enter yet, and putting four unguarded ones
-/// on the map would be worse than leaving them off.
+/// **The four villages are recovered and baked.** Frames 0x15 to 0x18 are in
+/// the table at (18, 11), (286, 11), (0, 187) and (303, 192), one in each
+/// corner, and `MOON:CheckGROOC` at image 0x732 gates each on `[di+0x20]`, the
+/// knight's own colour index, so a village belongs to one knight and the other
+/// three cannot see it at all. That gate is the place's `knight`. What is in one
+/// is `ForestVillage` at 0x112a, which all four go to (`TakingMoon`, 0xc99 to
+/// 0xcb6): one life point, and `cmp byte [si+0x31], 3 / jge` will not take a
+/// knight past three. It costs nothing and no day passes.
 ///
-/// **The hermit is ours, and now has no landmark behind it.** It used to stand
-/// on the ruin in the southern woods, which turns out to be Stonehenge's own
-/// artwork; it has been moved off it into the deep woods to the west, clear of
-/// every recovered box, because a second healer that is not in the original
-/// should not sit on top of a place that is.
-///
-/// **The menu lines a map gadget carries are recovered**, from `_MAP`:
+/// **The lines the map's paper carries are recovered**, from `_MAP`:
 /// `knhigh` `Enter the city of Highwood`, `knwater` `Enter the city of
-/// Waterdeep`, `knhenge` `Enter Stonehenge`, `knmath` `Visit Math the Wizard`
-/// and `knlair` `Enter Lair`. Those are the words the original puts on its own
-/// list when you are standing on one, so they are the words used here.
+/// Waterdeep`, `knhenge` `Enter Stonehenge`, `knmath` `Visit Math the Wizard`,
+/// `knvalley` `Enter Valley of the Gods` and `knlair` `Enter Lair`. They are
+/// baked as each place's `line`, which is what `_MAP:OrderOpt` composes a
+/// numbered line out of: kind 2 takes `knlair` outright, kind 1 takes `knkn`
+/// (`Battle with `) and the rival's name, and everything else indexes
+/// `StackMessages` at `DS:0xc404` by `kind - 0x15`, the kind being the `MI.C`
+/// frame `MapIconsTABLE` gives. The villages' line is `knvillage`, which is
+/// `StackMessages[0]` and reads `Enter Village` for all four of them.
 ///
 /// **A stall is a room, not a menu line.** The merchant, the tavern, the town
 /// healer, the temple and the mystic are all their own places, marked `hidden`
@@ -2112,8 +2282,8 @@ const LAIR_H: i32 = 5;
 /// leaving back into it. That keeps a town's front door short and gives each
 /// room a box wide enough for what it has to say.
 ///
-/// **Two prices.** The hermit in the woods takes only days. The town healer
-/// takes coin and gives it all to whatever it will buy, which is `HealDon`.
+/// **One price for mending.** The town healer takes coin and gives it all to
+/// whatever it will buy, which is `HealDon`.
 fn place_definitions(
     icons: &BTreeMap<u8, (i32, i32)>,
     marks: &BTreeMap<u8, (i32, i32)>,
@@ -2140,19 +2310,24 @@ fn place_definitions(
     let stones = mark(0x1b, icon(0x1b, (18, 12)));
     let valley = mark(0x1c, icon(0x1c, (13, 10)));
     let wizard = mark(0x1e, icon(0x1e, (7, 20)));
-    // **Ours.** The hermit is not in the original at all, so no table places
-    // him. He stands deep in the southern woods, clear of every recovered box
-    // and of Stonehenge in particular, which is where he used to stand.
-    let healer = (58, 170, 10, 10);
-
-    let heal = |days: u32, gold: u32| {
-        serde_json::json!({
-            "do": "heal", "days": days, "gold": gold,
-            "said": "Rest well. You are whole again.",
-            "refused": "You are unmarked. Keep your days.",
-            "too_poor": "I keep no man for nothing."
+    // The four home villages, frames 0x15 to 0x18 in table order, which is also
+    // the order of the knights' own colour indices that `CheckGROOC` gates them
+    // on. `MI.C` gives each its size the way it gives a town one.
+    let villages: Vec<(usize, (i32, i32, i32, i32))> = (0x15u8..=0x18)
+        .enumerate()
+        .filter_map(|(whose, frame)| {
+            mark(frame, icon(frame, (8, 10))).map(|box_| (whose, box_))
         })
-    };
+        .collect();
+
+    // `ForestVillage` (0x112a): one life point, and three is as high as it goes.
+    // What it says is ours; the routine itself says nothing, it jumps back out
+    // to the map through `ColourStatus`.
+    let village = serde_json::json!({
+        "do": "village",
+        "said": "Your own people take you in.",
+        "refused": "They have nothing more to give."
+    });
     let leave = serde_json::json!({ "do": "leave" });
     let go = |place: &str| serde_json::json!({ "do": "go", "place": place });
     let buy = |item: &str| {
@@ -2189,12 +2364,11 @@ fn place_definitions(
             "x": 0, "y": 0, "w": 0, "h": 0,
             "menu": menu,
             // The goods are the original's merchant's own list, `pu1`..`pu17`,
-            // and the henge flask and draught beside them. Casting is done on
-            // the character sheet, as the original does it on the status
-            // screen, so a stall only sells.
+            // and nothing else: the flask and the draught this project used to
+            // sell beside them are gone, because the original has neither.
+            // Casting is done on the character sheet, as the original does it on
+            // the status screen, so a stall only sells.
             "options": [
-                { "label": "Flask of healing",      "effect": buy("flask") },
-                { "label": "Draught of life",       "effect": buy("elixir") },
                 { "label": "Potion of healing",     "effect": buy("potion") },
                 { "label": "Broad sword",           "effect": buy("broad_sword") },
                 { "label": "Claymore sword",        "effect": buy("claymore") },
@@ -2207,8 +2381,7 @@ fn place_definitions(
                 { "label": "Scroll of Haste",       "effect": buy("scroll_of_haste") },
                 { "label": "Scroll of the Hawk",    "effect": buy("scroll_of_the_hawk") },
                 { "label": "Scroll of Protection",  "effect": buy("scroll_of_protection") },
-                { "label": "Drink a flask",         "effect": drink("flask") },
-                { "label": "Drink a draught",       "effect": drink("elixir") },
+                { "label": "Drink a potion",        "effect": drink("potion") },
                 { "label": "Back",                  "effect": go(back) }
             ]
         })
@@ -2317,7 +2490,6 @@ fn place_definitions(
                 { "label": "Sell scroll of Aquisition",  "effect": sell("scroll_of_acquisition") },
                 { "label": "Sell scroll of the Wyrm",    "effect": sell("scroll_of_the_wyrm") },
                 { "label": "Sell scroll of Protection",  "effect": sell("scroll_of_protection") },
-                { "label": "Sell Flask of healing",      "effect": sell("flask") },
                 { "label": "Back",                       "effect": go("highwood") }
             ]
         }),
@@ -2350,6 +2522,9 @@ fn place_definitions(
         "highwood".into(),
         serde_json::json!({
             "name": "Highwood",
+            // `_MAP:knhigh` at `DS:0xc329`, which `StackMessages[0x19 - 0x15]`
+            // points at: the line the map's paper carries for this box.
+            "line": "Enter the city of Highwood",
             "scene": "scene.highwood",
             "x": highwood.0, "y": highwood.1, "w": highwood.2, "h": highwood.3,
             "menu": [256, 0, 62, 200],
@@ -2366,6 +2541,8 @@ fn place_definitions(
         "waterdeep".into(),
         serde_json::json!({
             "name": "Waterdeep",
+            // `_MAP:knwater` at `DS:0xc344`, `StackMessages[0x1a - 0x15]`.
+            "line": "Enter the city of Waterdeep",
             "scene": "scene.waterdee",
             "x": waterdeep.0, "y": waterdeep.1, "w": waterdeep.2, "h": waterdeep.3,
             "menu": [2, 0, 62, 200],
@@ -2378,21 +2555,36 @@ fn place_definitions(
             ]
         }),
     );
-    places.insert(
-        "healer".into(),
-        serde_json::json!({
-            "name": "The Healer",
-            "scene": "scene.hea",
-            "x": healer.0, "y": healer.1, "w": healer.2, "h": healer.3,
-            "menu": [6, 88, 154, 58],
-            "text": [4, 148, 312, 40],
-            "options": [
-                { "label": "Tend my wounds", "effect": heal(3, 0) },
-                { "label": "Drink a flask",  "effect": drink("flask") },
-                { "label": "Leave",          "effect": leave }
-            ]
-        }),
-    );
+    // The four home villages, one in each corner of the map.
+    //
+    // **A village has no picture and no menu.** `_MAP:StackDecision` hands the
+    // kind to `TakingMoon`, which jumps frames 0x15 to 0x18 straight to
+    // `ForestVillage` (0xc99 to 0xcb6, all four to 0x112a); that routine gives
+    // the life point and returns through `ColourStatus` to the map. No backdrop
+    // is loaded anywhere on the path, so the village is a line on the paper and
+    // nothing more. `scene` is empty to say so, and `henge`'s own map opens it
+    // where it stands instead of changing screens.
+    for (whose, (x, y, w, h)) in &villages {
+        places.insert(
+            format!("village.{}", whose + 1),
+            serde_json::json!({
+                "name": "Village",
+                // `_MAP:knvillage` at `DS:0xc3a0`, which is
+                // `StackMessages[0x15 - 0x15]` and the entry for all four.
+                "line": "Enter Village",
+                "scene": "",
+                "x": x, "y": y, "w": w, "h": h,
+                // `CheckGROOC` 0x732: frame 0x15 is knight 0's, 0x16 knight
+                // 1's, 0x17 knight 2's and 0x18 knight 3's.
+                "knight": whose,
+                "menu": [0, 0, 0, 0],
+                "options": [
+                    { "label": "Enter Village", "effect": village },
+                    { "label": "Leave",         "effect": leave }
+                ]
+            }),
+        );
+    }
     // The stones, at `MapIconsTABLE`'s frame 0x1b. `MOON:Henge` tests the
     // moonstone bits against tonight's moon before it offers anything else;
     // short of that the druids take an offering, which is what the
@@ -2403,6 +2595,8 @@ fn place_definitions(
             "stones".into(),
             serde_json::json!({
                 "name": "The Stones",
+                // `_MAP:knhenge` at `DS:0xc360`, `StackMessages[0x1b - 0x15]`.
+                "line": "Enter Stonehenge",
                 "scene": "scene.hen1",
                 "x": stones.0, "y": stones.1, "w": stones.2, "h": stones.3,
                 "menu": [8, 16, 148, 40],
@@ -2423,6 +2617,8 @@ fn place_definitions(
             "wizard".into(),
             serde_json::json!({
                 "name": "Math the Wizard",
+                // `_MAP:knmath` at `DS:0xc371`, `StackMessages[0x1e - 0x15]`.
+                "line": "Visit Math the Wizard",
                 "scene": "scene.wi1",
                 "x": wizard.0, "y": wizard.1, "w": wizard.2, "h": wizard.3,
                 "menu": [6, 6, 128, 40],
@@ -2465,6 +2661,8 @@ fn place_definitions(
             "valley".into(),
             serde_json::json!({
                 "name": "Valley of the Gods",
+                // `_MAP:knvalley` at `DS:0xc387`, `StackMessages[0x1c - 0x15]`.
+                "line": "Enter Valley of the Gods",
                 "scene": "scene.bg4",
                 "x": x, "y": y, "w": w, "h": h,
                 "menu": [8, 12, 168, 40],
@@ -2509,6 +2707,9 @@ fn place_definitions(
             format!("lair.{family}.{}", n + 1),
             serde_json::json!({
                 "name": "Lair",
+                // `_MAP:knlair` at `DS:0xc3ae`, which `OrderOpt` takes for
+                // kind 2 without going through `StackMessages` at all.
+                "line": "Enter Lair",
                 "scene": scene,
                 "x": lair.x, "y": lair.y, "w": w, "h": h,
                 "icon": 0x14,
@@ -2537,9 +2738,9 @@ fn place_definitions(
 
 /// What there is to carry, and what a stall asks for it.
 ///
-/// The flask and the draught are ours: they predate the recovered potion
-/// and were chosen against each other, a flask about two won fights and a
-/// draught about five. The rest is the original's.
+/// Every item here is the original's. A flask and a draught of this project's
+/// own invention used to sit in front of the ten, chosen against each other
+/// rather than read out of anything; they are gone.
 ///
 /// **The ten magic items are recovered**, names, prices and what they do.
 /// `MagicName` (DS:`0xe38d`) pairs each slot of a knight's magic record with
@@ -2557,8 +2758,6 @@ fn place_definitions(
 /// gift, what is on a lair's floor, and what the temple will buy back. A pack
 /// that files one of them under another id simply never has it handed out, so
 /// the two have to agree and the engine's side is the one that cannot move.
-/// That is also why the flask, which is ours, is `flask` and not `potion`: the
-/// original's own Potion of Healing is slot 0 and has the better claim to it.
 ///
 /// The four keys are here so that one carried out of a lair has a name to be
 /// listed under. They are `moon::Key::item` ids, they carry no price, and
@@ -2568,19 +2767,6 @@ fn place_definitions(
 /// places that sell it, and those carry the original's own town art.
 fn item_definitions() -> String {
     serde_json::json!({
-        "flask": {
-            "name": "Flask of healing",
-            "price": 25,
-            "consumed": true,
-            "virtue": { "does": "heal", "health": 40 }
-        },
-        "elixir": {
-            "name": "Draught of life",
-            "price": 70,
-            "consumed": true,
-            "virtue": { "does": "heal", "health": 100 }
-        },
-
         // The original's own magic, slot by slot.
         "potion": {
             "name": "Potion of healing", "price": 20, "consumed": true,
@@ -2690,8 +2876,8 @@ fn item_definitions() -> String {
         // looks like an oversight in the original and is kept because it is what
         // the original does.
         //
-        // Nothing sells these yet: the merchant's list is flasks, and putting
-        // swords on it is the economy's business rather than the shell's. They
+        // Nothing sells these yet: putting swords on the merchant's list is the
+        // economy's business rather than the shell's. They
         // are here because a knight starts wearing two of them and the status
         // panel has to be able to name what they are worth.
         "dagger": {
@@ -3262,6 +3448,162 @@ mod tests {
         ] {
             assert!(used.contains(want), "nothing in the bestiary runs {want}");
         }
+    }
+
+    /// Every creature knows where it stands at the opening of a bout, and the
+    /// records are the original's: `InitNewMO` (0x27ee) reads `[x][y][z][facing]`
+    /// and the facing word is the original's 1 or 3.
+    #[test]
+    fn every_creature_carries_the_seat_table_init_new_mo_reads() {
+        for c in CREATURES {
+            assert!(!c.seats.is_empty(), "{}: no seat table", c.id);
+            assert!(
+                c.first_seat < c.seats.len(),
+                "{}: first seat {} is past the end of a table of {}",
+                c.id,
+                c.first_seat,
+                c.seats.len()
+            );
+            for [x, _y, _z, facing] in c.seats {
+                assert!(*facing == 1 || *facing == 3, "{}: facing {facing} is not 1 or 3", c.id);
+                // Every creature but the demon and the dragon comes on from
+                // beyond the screen's own columns, which is why the tables
+                // hold numbers `CheckBorder` would never allow.
+                assert!((-100..=400).contains(x), "{}: x {x} is nowhere", c.id);
+            }
+        }
+        // `TroggTABLE`, DS:0x97a, word for word, and the troll shares it.
+        let trogg = CREATURES.iter().find(|c| c.id == "trogg_axe").unwrap();
+        assert_eq!(trogg.seats, TROGG_SEATS);
+        assert_eq!(trogg.first_seat, 0);
+        assert_eq!(
+            TROGG_SEATS,
+            &[[-50, 0, 100, 1], [360, 0, 150, 3], [340, 0, 50, 3], [-80, 0, 120, 1]]
+        );
+        // `SetUpDKL` zeroes `SIDE` and `InitTrogg`/`InitMudmen` then xor it, so
+        // these two open on record one and come in from the right.
+        for id in ["troll", "mudmen"] {
+            let c = CREATURES.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(c.first_seat, 1, "{id} should open on the second record");
+            assert_eq!(c.seats[1][3], 3, "{id}'s second record faces left");
+        }
+        assert_eq!(CREATURES.iter().find(|c| c.id == "troll").unwrap().seats, TROGG_SEATS);
+    }
+
+    /// The counts every `InitKnightvs*` writes, and the `lev_adjust` row
+    /// `AdjustLevel` moves them by. These are what decides how many creatures a
+    /// lair puts in front of a player, so a wrong one is a wrong fight.
+    #[test]
+    fn every_creature_carries_the_counts_its_own_init_knightvs_writes() {
+        for c in CREATURES {
+            let w = &c.wave;
+            // `NO_WAVE` is the knight's, the demon's and the dragon's: their
+            // `INITMO` is the `ret` at 0x2059 and nothing about the fight is a
+            // count. Everything else has all four numbers.
+            if w.max == 0 {
+                assert_eq!((w.heads, w.cap), (0, 0), "{}: half a wave", c.id);
+                assert!(w.level.is_empty(), "{}: a lev_adjust row and no wave", c.id);
+                assert!(!w.alternates && !w.opens_with_side, "{}: half a wave", c.id);
+                continue;
+            }
+            assert!(w.heads > 0, "{}: MaxMonsters but no TotalMonsters", c.id);
+            assert_eq!(w.level.len(), 8, "{}: lev_adjust is eight to a row", c.id);
+            // A row falls from positive to negative across its eight, which is
+            // what makes a strong knight meet more of a creature than a weak
+            // one. It is not strictly monotonic, so this is the shape and not
+            // the order: it starts at or above nothing and ends at or below it.
+            assert!(w.level[0] >= 0 && w.level[7] <= 0, "{}: lev_adjust runs the wrong way", c.id);
+            for v in w.level {
+                assert!((-8..=8).contains(v), "{}: lev_adjust entry {v} is not a signed byte", c.id);
+            }
+            if w.cap > 0 {
+                assert!(w.cap <= 2, "{}: AdjustLevel's three ceilings are 1, 1 and 2", c.id);
+            }
+        }
+        // The three the ceilings belong to, and what they are: `mov
+        // [MaxMonsters], 1` at 0x288a for Balok and 0x2898 for the mudmen, and
+        // `cmp [MaxMonsters], 2 / jle` at 0x289e for the troll.
+        let cap = |id: &str| CREATURES.iter().find(|c| c.id == id).unwrap().wave.cap;
+        assert_eq!((cap("balok"), cap("mudmen"), cap("troll")), (1, 1, 2));
+        assert_eq!(cap("trogg_axe"), 0, "nothing holds a trogg fight down");
+        // `InitKnightvsRatmen` (0x2337) is the only `MaxMonsters` of two in the
+        // game: every other fight holds one creature at a time.
+        for c in CREATURES.iter().filter(|c| c.wave.max > 0) {
+            let want = if c.id == "ratmen" { 2 } else { 1 };
+            assert_eq!(c.wave.max, want, "{}: MaxMonsters", c.id);
+        }
+        // And the head counts, routine by routine: 3 for the three troggs and
+        // the beast (0x20bf, 0x214b, 0x21e8, 0x2293), 2 for the ratmen, Balok
+        // and the mudmen (0x233d, 0x2597, 0x2626), 1 for the troll (0x26c5).
+        let heads = |id: &str| CREATURES.iter().find(|c| c.id == id).unwrap().wave.heads;
+        for id in ["trogg_axe", "trogg_hammer", "trogg_spear", "beast"] {
+            assert_eq!(heads(id), 3, "{id}: TotalMonsters");
+        }
+        for id in ["ratmen", "balok", "mudmen"] {
+            assert_eq!(heads(id), 2, "{id}: TotalMonsters");
+        }
+        assert_eq!(heads("troll"), 1);
+        // `InitBalok` (0x25cf) is the one `INITMO` with no `xor [SIDE], 1`;
+        // `InitKnightvsMudmen` (0x264c) and `InitKnightvsTroll` (0x26f4) are the
+        // two fights that open through `INITMO` instead of `SetMonsterCombat`.
+        let w = |id: &str| CREATURES.iter().find(|c| c.id == id).unwrap().wave;
+        assert!(!w("balok").alternates);
+        for id in ["trogg_axe", "trogg_hammer", "trogg_spear", "beast", "ratmen", "mudmen", "troll"]
+        {
+            assert!(w(id).alternates, "{id} should flip SIDE");
+        }
+        for c in CREATURES.iter().filter(|c| c.wave.opens_with_side) {
+            assert!(
+                c.id == "mudmen" || c.id == "troll",
+                "{} does not open through INITMO",
+                c.id
+            );
+            assert_eq!(c.first_seat, 1, "{}: and SIDE puts the first one on record one", c.id);
+        }
+    }
+
+    /// The four home villages, `MapIconsTABLE` frames 0x15 to 0x18, each gated
+    /// on the knight's own colour index by `CheckGROOC` at image 0x732.
+    #[test]
+    fn the_four_villages_are_one_to_a_knight() {
+        let mut marks = marks();
+        for (i, frame) in (0x15u8..=0x18).enumerate() {
+            marks.insert(frame, (20 + i as i32 * 60, 170));
+        }
+        let places: serde_json::Value =
+            serde_json::from_str(&place_definitions(&BTreeMap::new(), &marks, &lairs())).unwrap();
+        let mut whose: Vec<u64> = Vec::new();
+        for (id, def) in places.as_object().unwrap() {
+            if !id.starts_with("village.") {
+                continue;
+            }
+            assert_eq!(def["line"], "Enter Village", "_MAP:knvillage, DS:0xc3a0");
+            // `ForestVillage` loads no backdrop, so the village is a line on the
+            // paper and not a screen.
+            assert_eq!(def["scene"], "");
+            assert_eq!(def["options"][0]["effect"]["do"], "village");
+            whose.push(def["knight"].as_u64().unwrap());
+        }
+        whose.sort();
+        assert_eq!(whose, vec![0, 1, 2, 3], "one village to each of the four knights");
+    }
+
+    /// The hermit, a second healer this project invented and stood in the
+    /// southern woods, is gone, and so is everything that was sold only there.
+    #[test]
+    fn nothing_on_the_map_is_sited_by_us() {
+        let places = places();
+        let marks = marks();
+        for (id, def) in places.as_object().unwrap() {
+            if def["hidden"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let (x, y) = (def["x"].as_i64().unwrap(), def["y"].as_i64().unwrap());
+            let known = marks.values().any(|(mx, my)| *mx as i64 == x && *my as i64 == y)
+                || lairs().iter().any(|l| l.x as i64 == x && l.y as i64 == y);
+            assert!(known, "{id} stands at ({x}, {y}), which no table names");
+        }
+        assert!(places.get("healer").is_none(), "the hermit is not in the original");
     }
 
     /// **Item 59.** The moors is landscape code 0, whose generator loads

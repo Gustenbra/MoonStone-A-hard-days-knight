@@ -800,7 +800,7 @@ mod tests {
         let mut add = |id: &str, name: &str, price: u32, virtue: Virtue, consumed: bool| {
             items.insert(id.into(), ItemDef { name: name.into(), price, virtue, consumed });
         };
-        add("potion", "Potion of healing", 20, Virtue::Heal { health: 40 }, true);
+        add("potion", "Potion of healing", 20, Virtue::Restore, true);
         add("gem_of_seeing", "Gem of seeing", 32, Virtue::Inert, false);
         add("sword_of_sharpness", "Sword of Sharpness", 100, Virtue::Weapon { damage: 5 }, false);
         add("ring_of_protection", "Ring of protection", 50, Virtue::Ward { health: 20 }, false);

@@ -57,9 +57,10 @@ need your own copy of the original, which the engine reads and converts locally.
   of the fourteen things the Gods have to say. The ratmen are stronger on some
   nights than others, because the original's own set-up routine reads the phase
 - **Gold and goods**: coin comes off whoever you put down, and the merchants in
-  both towns are open. Flasks and draughts are bought, carried and drunk; a
-  healer in the woods still charges only days, and one inside the walls wants
-  coin as well. What you carry can leave you too, to a cutpurse on the road
+  both towns are open. The original's ten magic items are bought, carried and
+  used, and the healer inside the walls takes a donation and spends it down. Your
+  own home village is worth a life point. What you carry can leave you too, to a
+  cutpurse on the road
 - **A title screen, and a knight to choose.** The game opens on its own wordmark,
   which turned out to be the last three frames of the bold font's bank, over the
   picture the original draws it on: `_LOADER:MoonPic` is `CH.PIV`, a night sky,
@@ -98,8 +99,9 @@ need your own copy of the original, which the engine reads and converts locally.
   on your back go where `DisplayKnight` puts them, in the colours of `STAPAL`, the
   screen's own thirty two, with two entries of it repainted for whichever knight
   you are. The menu goes in the right hand arch, which is the one the original
-  leaves empty here. One plate per fighter along the bottom of an arena, and the
-  whole sheet on a key
+  leaves empty here. It is a screen of its own, on a key, and it is the only place
+  any of it is drawn: the original's fight loop puts no readout over an arena, so
+  neither does this, and the ground runs to the foot of the screen
 - **Up to four fighters in one arena**, the original's player count, in any mix of
   people at the keyboard and opponents. A knight is the colour the original makes
   him, by the original's own mechanism: `ColourKnight` writes his three shades into
@@ -364,9 +366,9 @@ actor, because what waits in a swamp is a mudman and that is worth seeing too.
 ```
 
 ```
-    0  PLACE   day 1  hp  40  gold  100  -         Merchant  > Flask of healing [25]
-    1  PLACE   day 1  hp  40  gold   75  flask     Merchant  > Flask of healing [25]  A fair trade.
-    6  PLACE   day 1  hp  80  gold   50  flask     Merchant  > Drink a flask          You drain it.
+    0  PLACE   day 1  hp  40  gold  100  -         Merchant  > Potion of healing [20]
+    1  PLACE   day 1  hp  40  gold   80  potion    Merchant  > Potion of healing [20]  A fair trade.
+    6  PLACE   day 1  hp  80  gold   60  potion    Merchant  > Drink a potion          You drain it.
 ```
 
 ## How it is put together
@@ -546,13 +548,13 @@ menu line takes its price from the goods rather than repeating it in the label,
 so the two can never drift apart:
 
 ```json
-"flask": { "name": "Flask of healing", "price": 25, "consumed": true,
-           "virtue": { "does": "heal", "health": 40 } }
+"potion": { "name": "Potion of healing", "price": 20, "consumed": true,
+            "virtue": { "does": "restore" } }
 ```
 
 **Things leave the pack as well as entering it.** The original names a routine
 `TAKEFROMKNIGHT`, so losing is a real operation rather than an afterthought on a
-list that only ever grows: a flask drunk is a flask gone, and a cutpurse on the
+list that only ever grows: a potion drunk is a potion gone, and a cutpurse on the
 road takes a share of the purse or, failing that, something out of the pack. Who
 gets robbed is decided by a seeded roll carried in the run, so two machines
 walking the same road are robbed on the same step.

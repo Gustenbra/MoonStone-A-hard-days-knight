@@ -553,6 +553,38 @@ time by `SBORD` and by nothing else. In the DOS game a troll walks through the t
 `bord` (`0x5828`) is not part of any of this: it writes attribute controller register
 `0x11`, the overscan colour.
 
+### The fight loop draws no readout, and it is short enough to say so exhaustively
+
+The question this settles is whether the original puts anything over an arena. It does
+not, and `MOON:Combat` at image `0x351` is the whole of the argument: ten calls, a test of
+`DS:0x897d` and a decrement of `DS:0x8987`, and back to the top.
+
+```text
+0x96e1  read the BIOS tick at 0:046c, target = tick + 2
+0x5a24  wait for vertical retrace on port 0x3da
+0x4988  ShakeScreen's tail, then walk VBLQUE calling each entry
+0x5a66  copy 200 rows of 0xac00 to the display segment, all four planes
+0x9702  walk the ten TaskTable slots through PerformCOMMAND
+0x975b  place the parts and the shadows
+0x5a3e  advance ClipYOffset by 0x400 and write CRTC register 0x0c: the page flip
+0x9f1d  TaskCol, the collision pass over the same ten slots
+0x8f8   KnightGlowOn
+0x96f1  spin until the BIOS tick reaches the target
+```
+
+Three of those targets need the correction from the section above, since `Combat` sits in
+the region shifted by 0 and the task and video routines in regions shifted by -473 and
+-12. The two things that could have hidden a readout are `VBLQUE` and the task loop.
+`VBLQUE` is filled by exactly one routine, `ADDCOL` at `0x49b8`, and the only address it
+ever appends is `0x4a3f`, a palette upload. The task loop draws sprite parts and nothing
+else. And `DisplayKnight` (`0xc0c2`), which is where the knight's numbers are drawn, has
+three callers, `ReDisplay+72` and the two arms of `_displayknight`, all three inside
+`_STATUS`, and `ReDisplay`'s own callers are `ResetStatus`, `HotGadget`, `DoneCast` and
+the buying routines. Nothing on that screen is reachable from a bout.
+
+The symbol sweep agrees: of the 2,223 names, one matches energy, health, bar, hud, strip,
+gauge, meter, score, life, pip or vital, and it is `_MAP:HealLife`.
+
 ## `INTR.EXE` unpacks the same way, and it is the same program
 
 The intro is a separate executable and had never been looked at. It is packed identically,

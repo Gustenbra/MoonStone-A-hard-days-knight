@@ -174,7 +174,7 @@ impl PlaceScene {
 
         for (i, choice) in def.options.iter().enumerate() {
             // Two different kinds of "no". A shut door is dim because it is not
-            // built; a flask you cannot afford is dim because of what is in
+            // built; a potion you cannot afford is dim because of what is in
             // your purse, and it brightens the moment you can pay for it.
             let open = choice.effect.offered(items, run);
             // A price belongs to the goods, so the label never repeats it and

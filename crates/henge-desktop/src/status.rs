@@ -1,19 +1,32 @@
 //! The status panel: what a knight is, drawn.
 //!
-//! Two views of the same sheet.
+//! One view, and it is a whole screen of its own.
 //!
-//! **In a bout**, one plate per fighter along the bottom of the arena. That
-//! half is ours: the original has no in-fight bar at all, and the reason it
-//! does not is that it has nowhere to put one. The ground an arena is fought
-//! on runs from its own tree line, between y 80 and y 159, down to the foot of
-//! the screen: `AddKnight` stands an arrival a quarter, a half or three
-//! quarters of the way between the two, and `CheckBorder` lets a knight walk
-//! his shadow down to row 199. **So this strip covers ground a fighter can
-//! reach**, which the note here used to deny, and a fighter who walks all the
-//! way down goes behind it. Nothing else in the engine is in his way; see item
-//! 60. The three quarter standing place is not used for the same reason.
+//! **There is no in-fight readout, and there never was one.** This file used to
+//! draw a plate per fighter across the deepest thirty two rows of every arena,
+//! with a name, a health bar, a `have/most` number and life pips, and all of it
+//! was ours. `MOON:Combat`, image `0x351`, is the whole fight loop and it is ten
+//! calls long: set the frame's tick target off the BIOS counter at `0:046c`
+//! (`0x96e1`), wait for vertical retrace on port `0x3da` (`0x5a24`), shake the
+//! screen and run `VBLQUE` (`0x4988`), copy two hundred rows of the back buffer
+//! to the page (`0x5a66`), run the ten task slots through `PerformCOMMAND`
+//! (`0x9702`), place them and their shadows (`0x975b`), flip the page by writing
+//! CRTC register `0x0c` (`0x5a3e`), test collisions (`0x9f1d`), `KnightGlowOn`
+//! (`0x8f8`), and wait for the tick (`0x96f1`). Not one of them draws a glyph or
+//! a rectangle; the only thing `VBLQUE` ever holds is `ADDCOL`'s palette upload
+//! at `0x4a3f`. The knight's numbers live on the sheet this file draws, and
+//! `DisplayKnight` (`0xc0c2`) has exactly three callers, `ReDisplay` and the two
+//! arms of `_displayknight`, all three of them in `_STATUS` and none of them
+//! reachable from a bout. A sweep of all 2,223 symbols for energy, health, bar,
+//! hud, strip, gauge, meter, score, life and pip returns one name,
+//! `_MAP:HealLife`, which is the healer.
 //!
-//! **The sheet itself is the original's whole screen**, and all of it is
+//! So the strip is gone, and the arena is the whole 320x200 screen it always
+//! was: `AddKnight` stands an arrival a quarter, a half or three quarters of the
+//! way from the deepest impassable rectangle down to row 200, and `CheckBorder`
+//! lets a fighter walk his feet to row 198.
+//!
+//! **The sheet here is the original's whole screen**, and all of it is
 //! recovered. `_STATUS:DisplayPillars` clears the screen to index 0 and falls
 //! into `StatusSetup`, which walks a table of eight byte records
 //! `[cel][x][y][mirror]` until the first word is negative and blits each one.
@@ -69,7 +82,6 @@ use crate::sprite;
 use crate::text::Font;
 use henge_assets::Registry;
 use henge_core::run::Run;
-use henge_core::SCREEN_W;
 
 /// The original's UI furniture.
 const UI: &str = "bank.ki";
@@ -185,80 +197,6 @@ pub fn extremes(fb: &Framebuffer) -> (u8, u8) {
         }
     }
     (dark as u8, light as u8)
-}
-
-/// Something between the two extremes, for a menu line that is there but not
-/// the one you are on. A shut option and an unlit one both need to read as
-/// present rather than as absent.
-pub fn faint(fb: &Framebuffer) -> u8 {
-    let (dark, light) = extremes(fb);
-    let midpoint = (luma(fb.palette[dark as usize]) + luma(fb.palette[light as usize])) / 2;
-    (1..32)
-        .min_by_key(|i| (luma(fb.palette[*i]) - midpoint).abs())
-        .unwrap_or(light as usize) as u8
-}
-
-/// One fighter's line on the in-bout strip.
-pub struct Plate {
-    pub name: String,
-    /// The seat's colour in the loaded palette, so the plate names the knight on
-    /// screen rather than a number.
-    pub colour: u8,
-    pub health: i32,
-    pub max_health: i32,
-    pub lives: i32,
-}
-
-/// Where the strip sits. Ours, and in the way: the deepest thirty two rows of
-/// every arena are ground, and this covers them. See the note at the top.
-const STRIP_Y: i32 = 168;
-const STRIP_H: i32 = 32;
-
-/// One plate per fighter, along the bottom of the arena.
-pub fn draw_plates(reg: &mut Registry, fb: &mut Framebuffer, font: Option<&Font>, plates: &[Plate]) {
-    if plates.is_empty() {
-        return;
-    }
-    let (dark, light) = extremes(fb);
-    fb.rect(0, STRIP_Y, SCREEN_W as i32, STRIP_H, dark);
-
-    let n = plates.len() as i32;
-    let step = SCREEN_W as i32 / n;
-    let w = step - 3;
-    let faint = faint(fb);
-    for (i, p) in plates.iter().enumerate() {
-        let x = 2 + i as i32 * step;
-        // A rule in the knight's own colour, so a plate is matched to a figure
-        // by hue and not by counting from the left.
-        fb.rect(x, STRIP_Y + 2, w, 1, p.colour);
-        let Some(font) = font else { continue };
-
-        // A fallen knight goes dim rather than disappearing: who was in the
-        // fight is worth knowing after they are out of it.
-        let down = p.health <= 0;
-        let ink = if down { faint } else { light };
-        font.draw(reg, fb, &p.name, x + 2, STRIP_Y + 6, if down { faint } else { p.colour });
-
-        // Health, as a bar and as a number, because a bar says how bad it is and
-        // a number says how bad exactly.
-        let bar = w - 4;
-        let frac = p.health.max(0) * bar / p.max_health.max(1);
-        fb.rect(x + 2, STRIP_Y + 15, bar, 5, dark);
-        fb.rect(x + 2, STRIP_Y + 15, frac, 5, p.colour);
-        fb.rect(x + 2, STRIP_Y + 14, bar, 1, ink);
-        fb.rect(x + 2, STRIP_Y + 20, bar, 1, ink);
-
-        let line = format!("{}/{}", p.health.max(0), p.max_health);
-        font.draw(reg, fb, &line, x + 2, STRIP_Y + 23, ink);
-
-        // Life points, right-aligned. Small blocks rather than the panel's own
-        // figure: five of those are sixty-five pixels wide and a plate is
-        // seventy-seven, which would leave nowhere for the number.
-        let pips = p.lives.max(0).min(8);
-        for k in 0..pips {
-            fb.rect(x + w - 2 - (k + 1) * 5, STRIP_Y + 24, 3, 5, if down { faint } else { p.colour });
-        }
-    }
 }
 
 /// The original's whole status screen, and in the right hand arch the menu

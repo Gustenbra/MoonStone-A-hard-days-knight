@@ -4,6 +4,7 @@
 use crate::anim::Sequence;
 use crate::arena::{Border, Field, Prop};
 use crate::taskvm::{BankTables, ScriptSet};
+use crate::wave::WaveDef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -281,6 +282,56 @@ pub struct ActorDef {
     /// `InitKnightvsDemon` calls it, at image `0x2752`. See `docs/TASKVM.md`.
     #[serde(default)]
     pub border: Option<[i32; 4]>,
+    /// Where this actor stands at the opening of a bout, one record per seat,
+    /// `[x, y, z, facing]` with the facing as the original writes it: 1 right,
+    /// 3 left.
+    ///
+    /// **Recovered.** `InitNewMO` at image `0x27ee` copies four fields out of an
+    /// eight-byte record into the actor record and nothing else:
+    ///
+    /// ```text
+    /// 027fa  mov ax, [si]    ; mov [di+2], ax    x
+    /// 027ff  mov ax, [si+2]  ; mov [di+4], ax    y, the height above the ground
+    /// 02805  mov ax, [si+4]  ; mov [di+6], ax    z, the depth
+    /// 0280b  mov ax, [si+6]  ; mov [di+8], al    facing
+    /// ```
+    ///
+    /// and the tables are `TroggTABLE` (DS:`0x97a`, four records, also the
+    /// troll's), `BeastTABLE` (`0x99c`, three), `RatmanTABLE` (`0x9b6`, five),
+    /// `MudmanTABLE` (`0x9e0`, five) and `BalokTABLE` (`0xa5c`, one); the demon
+    /// and the dragon have theirs written straight into the record by
+    /// `InitKnightvsDemon` (`0x278d`) and `InitKnightvsDragon` (`0x2476`).
+    ///
+    /// Only `x` and `facing` survive the arrival. `AddPlayer` falls into
+    /// `AddKnight`, whose store at `0x29b6` writes the rotating standing depth
+    /// over `+6`, so the `z` here is dead; and this engine keeps no equivalent
+    /// of the record's `+4`, which is zero in every creature's table anyway. The
+    /// whole record is carried because the record is what the original holds.
+    #[serde(default)]
+    pub seats: Vec<[i32; 4]>,
+    /// Which of [`ActorDef::seats`] the first of this actor to arrive takes.
+    ///
+    /// **Recovered**, and it is not always zero. `SetMonsterCombat` (`0x27e4`)
+    /// walks the table from the front, so a trogg, a beast, a ratman and Balok
+    /// all open on record 0. The troll and the mudmen instead go through
+    /// `InitTrogg` (`0x225b`) and `InitMudmen` (`0x2655`), which do
+    /// `xor word [SIDE], 1` and step the pointer on by eight when the result is
+    /// not zero. `SetUpDKL` (`0x292e`) has just set `SIDE` to 0, so the first
+    /// one in takes record **1** and comes in from the other side of the screen.
+    ///
+    /// Now that `SIDE` itself is modelled (see [`crate::wave`]) this is derived
+    /// rather than needed: it is what [`crate::wave::WaveDef::opens_with_side`]
+    /// produces for a fight that holds one creature at a time. It is still
+    /// carried, and still what the fights with no wave at all are seated from,
+    /// because it is what the table says.
+    #[serde(default)]
+    pub first_seat: usize,
+    /// How many of this actor a fight holds, how many of them at once, and when
+    /// the next one walks in: the three counts its `InitKnightvs*` writes and
+    /// the row of `lev_adjust` that `AdjustLevel` moves them by. See
+    /// [`crate::wave`].
+    #[serde(default)]
+    pub wave: WaveDef,
 }
 
 /// An actor's numbers on one night of the moon.
@@ -345,6 +396,9 @@ impl Default for ActorDef {
             moon: BTreeMap::new(),
             controller: String::new(),
             border: None,
+            seats: Vec::new(),
+            first_seat: 0,
+            wave: WaveDef::default(),
         }
     }
 }
@@ -488,6 +542,35 @@ impl ActorDef {
     /// The rectangle this actor narrows a fight to, if it has one.
     pub fn ground(&self) -> Option<Border> {
         self.border.map(|[left, right, top, bottom]| Border { left, right, top, bottom })
+    }
+
+    /// Where the `n`th of this actor to arrive stands, as `(x, facing)` with
+    /// the facing as this engine keeps it: 1 right, -1 left.
+    ///
+    /// `first_seat` is where `InitNewMO`'s pointer starts and `n` is how many of
+    /// this actor came in before. The wrap is ours: the original never fields
+    /// more of anything than its table has records for, and running off the end
+    /// of a table there reads the next table's bytes.
+    pub fn seat(&self, n: usize) -> Option<(i32, i32)> {
+        if self.seats.is_empty() {
+            return None;
+        }
+        let [x, _y, _z, facing] = self.seats[(self.first_seat + n) % self.seats.len()];
+        Some((x, if facing == 3 { -1 } else { 1 }))
+    }
+
+    /// The same record, by its own index in the table rather than by how many
+    /// arrived before.
+    ///
+    /// This is what the wave machinery uses, because `SIDE` and
+    /// `SetMonsterCombat` name a record outright and `first_seat` is the answer
+    /// one of them already gave. The wrap is [`ActorDef::seat`]'s.
+    pub fn seat_at(&self, index: usize) -> Option<(i32, i32)> {
+        if self.seats.is_empty() {
+            return None;
+        }
+        let [x, _y, _z, facing] = self.seats[index % self.seats.len()];
+        Some((x, if facing == 3 { -1 } else { 1 }))
     }
 
     /// Whether this actor is animated by the task VM rather than by frame lists.
@@ -669,6 +752,26 @@ mod tests {
         d.animation.remove("fall");
         let err = d.validate().unwrap_err();
         assert!(err.contains("fall"), "{err}");
+    }
+
+    /// `InitNewMO`'s seat record, read the way this engine needs it: the x and
+    /// the facing, with the original's 1 and 3 turned into 1 and -1.
+    #[test]
+    fn a_seat_gives_the_column_and_the_facing_the_original_wrote() {
+        let mut d = super::ActorDef::default();
+        // `TroggTABLE`, DS:0x97a.
+        d.seats = vec![[-50, 0, 100, 1], [360, 0, 150, 3], [340, 0, 50, 3], [-80, 0, 120, 1]];
+        assert_eq!(d.seat(0), Some((-50, 1)));
+        assert_eq!(d.seat(1), Some((360, -1)));
+        // Past the end it comes round again, which is ours: the original never
+        // fields more of anything than its table holds.
+        assert_eq!(d.seat(4), Some((-50, 1)));
+        // `InitTrogg` and `InitMudmen` start the pointer one record in.
+        d.first_seat = 1;
+        assert_eq!(d.seat(0), Some((360, -1)));
+        assert_eq!(d.seat(3), Some((-50, 1)));
+        // An actor with no table has no opinion, rather than standing at zero.
+        assert_eq!(super::ActorDef::default().seat(0), None);
     }
 }
 

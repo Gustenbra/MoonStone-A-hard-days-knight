@@ -3,9 +3,7 @@
 
 use crate::framebuffer::Framebuffer;
 use henge_assets::Registry;
-use henge_core::overworld::{
-    terrain_of_patch, Landscape, Overworld, Step, Terrain, MAP_H, MAP_W, TOKEN_H, TOKEN_W,
-};
+use henge_core::overworld::{Landscape, Overworld, Step, Terrain};
 
 /// The map's icon set. Frames 0-4 are the four knights' tokens and a fifth in
 /// dark purple, each in its own colour out of `MAP.CMP`'s palette: 30 blue, 29
@@ -19,18 +17,61 @@ const TOKEN_SHEET: &str = "bank.mi";
 /// the same seat without the five, so the other three do not glow.
 const TOKEN_FIRST: usize = 5;
 const MAP_SCENE: &str = "scene.map";
-/// `_MAP:DisplayLairs` blits this one, and it is the only icon in the bank
-/// that is a picture rather than an outline.
-const LAIR_FRAME: usize = 0x14;
 
-/// What the map has to be told about the world before it can draw it: the place
-/// under the traveller's feet, whatever a cutpurse just took, and the icons the
-/// picture does not already contain.
+/// `MI.C` frame 0x14, which `_MAP:DisplayLairs` blits at every lair still on
+/// the map: `mov ax, 0x14; mov bx, [si+0xa]; mov cx, [si+0xc]` at image 0xa286,
+/// skipped when the record's x has gone negative.
+pub const LAIR_FRAME: usize = 0x14;
+
+/// `MI.C` frame 0x1f, which `MOON:CheckLairEncounter` blits at the lair the
+/// traveller is standing on: `mov bx, [si+0xa]; mov cx, [si+0xc];
+/// mov ax, 0x1f; les si, [0x8975]; call <blit>` at image 0x88f. It is nine by
+/// five, the same shape as the lair marker it covers, and it is the only thing
+/// on the map that says which of them is under your feet.
+const LAIR_HERE_FRAME: usize = 0x1f;
+
+/// `MI.C` frame 0x20, the paper. One hundred and seventy four by fifty one, and
+/// the only frame in the bank that size: `_MAP:InitPaper` blits it with
+/// `mov ax, 0x20; mov bx, 0x32; mov cx, 0x64` at image 0xafbc, having just set
+/// `PaperX` and `PaperY` to the same 0x32 and 0x64.
+const PAPER_FRAME: usize = 0x20;
+const PAPER_X: i32 = 0x32;
+const PAPER_Y: i32 = 0x64;
+/// `_MAP:knightopt` at `DS:0xc31f`, which `CreatePaper` copies straight after
+/// the knight's name to make the heading: `dec bp; mov di, 0xc31f; call CopyText`.
+const PAPER_OPT: &str = " may ... ";
+
+/// The panel the paper lays out, as `_MAP:CreatePaper` does it.
+///
+/// The knight's own token goes at `PaperX + 5, PaperY + 5` in the frame his
+/// seat names with nothing added (`mov ax, [si+0x20]`, image 0xaeed), the
+/// heading fifteen pixels right of the corner and five down, and then `PaperY`
+/// takes one step of fifteen before the first line and a step of six after
+/// every one of them.
+pub struct Paper<'a> {
+    /// The knight's name, which `InitPaper` copies out of `[si+0x4c]`.
+    pub knight: &'a str,
+    pub seat: usize,
+    /// The numbered lines, already composed by `henge_core::place::Overlaps`.
+    pub lines: &'a [String],
+}
+
+/// What the map has to be told about the world before it can draw it.
+///
+/// The map picture is the whole screen and `_MAP:SHOW`, `_MAP:DisplayLairs` and
+/// `_MAP:DisplayOtherKnights` are nearly all of what goes on top of it; the one
+/// thing beside them is `MOON:CheckLairEncounter`'s mark on the lair you are
+/// standing on, and the paper when `_MAP:DisplayStack` has put it up. There is
+/// no status bar, no purse and no message line anywhere on it.
 #[derive(Default)]
 pub struct Marks<'a> {
-    pub here: Option<&'a str>,
-    pub notice: Option<&'a str>,
+    /// `_MAP:DisplayLairs`: every place whose pack gives it an `MI.C` frame, as
+    /// `[x, y, frame]`.
     pub icons: &'a [(i32, i32, usize)],
+    /// The lairs the traveller's token overlaps, which take frame 0x1f on top.
+    pub marked: &'a [(i32, i32)],
+    /// The paper, when there is more than one thing under your feet.
+    pub paper: Option<Paper<'a>>,
 }
 
 pub struct MapScene {
@@ -39,8 +80,7 @@ pub struct MapScene {
     /// during the update.
     palette: Vec<u32>,
     pixels: Vec<u8>,
-    /// The recovered `MapType` and `MapSLOW` grids. Empty only when the pack
-    /// was baked without the unpacked executable to read them out of.
+    /// The recovered `MapType` and `MapSLOW` grids.
     land: Landscape,
     pub last_terrain: Terrain,
 }
@@ -57,12 +97,14 @@ impl MapScene {
             "{MAP_SCENE} is {}x{}, expected a full screen", img.width, img.height
         );
         let pixels = img.pixels.clone();
-        let land: Landscape = reg.read_data("data.overworld").unwrap_or_default();
-        if land.is_empty() {
-            eprintln!(
-                "no overworld grid in the packs: terrain will be guessed from the map's colours"
-            );
-        }
+        // `_MAP:MapType` and `_MAP:MapSLOW`, read out of the image at bake time.
+        // The baker refuses a pack whose map picture and grids disagree, so this
+        // is always the original's own table and there is nothing to guess from.
+        let land: Landscape = reg.read_data("data.overworld")?;
+        anyhow::ensure!(
+            !land.is_empty(),
+            "the pack carries no overworld grid, so `_MAP:FindLandscape` has nothing to read"
+        );
         Ok(MapScene {
             state: Overworld::new(146, 115),
             palette,
@@ -72,33 +114,8 @@ impl MapScene {
         })
     }
 
-    /// Sample a patch around the traveller rather than a single pixel: the map
-    /// art is dithered, so one pixel flips between two or three terrains as you
-    /// walk and a fight would be picked at random.
-    ///
-    /// Fallback only. When the pack carries the real `MapType` grid the answer
-    /// comes off that instead, and the art is never looked at.
-    fn terrain_by_colour(&self) -> Terrain {
-        const R: i32 = 4;
-        let (cx, cy) = (self.state.x + TOKEN_W / 2, self.state.y + TOKEN_H / 2);
-        let mut samples = Vec::with_capacity(((R * 2 + 1) * (R * 2 + 1)) as usize);
-        for dy in -R..=R {
-            for dx in -R..=R {
-                let x = (cx + dx).clamp(0, MAP_W - 1) as usize;
-                let y = (cy + dy).clamp(0, MAP_H - 1) as usize;
-                let idx = self.pixels[y * MAP_W as usize + x] as usize;
-                samples.push(*self.palette.get(idx).unwrap_or(&0));
-            }
-        }
-        terrain_of_patch(samples)
-    }
-
     pub fn terrain_here(&self) -> Terrain {
-        if self.land.is_empty() {
-            self.terrain_by_colour()
-        } else {
-            self.state.terrain(&self.land)
-        }
+        self.state.terrain(&self.land)
     }
 
     /// One tick.
@@ -108,25 +125,22 @@ impl MapScene {
         step
     }
 
-    /// `here` is the place you are standing on or walking towards, if any. It
-    /// takes the middle of the status bar off the terrain, because when a town
-    /// is under your feet its name is the more useful of the two.
+    /// One frame of the map, in the order the original's own frame draws it.
+    ///
+    /// The loop body at image 0xa2d7: restore the picture, `DisplayLairs`,
+    /// `DisplayOtherKnights`, then `FOLLOW`, whose encounter walk marks the lair
+    /// under your feet, then `SHOW`. `DisplayStack` adds `CreatePaper` after
+    /// `SHOW` when it has more than one entry to offer.
     pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer,
                   fonts: &std::collections::BTreeMap<String, crate::text::Font>,
                   run: &henge_core::run::Run, world: &Marks) -> anyhow::Result<()> {
-        let (here, notice) = (world.here, world.notice);
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
-        self.draw_icons(reg, fb, world.icons);
-
-        // The status bar goes down first and the traveller on top of it. The
-        // map is the whole screen in the original, and the recovered bound lets
-        // the token walk to y=190, which is inside our bar; a token drawn first
-        // simply vanishes down there. Ours is the bar, so ours is the one that
-        // gives way.
-        self.draw_status(reg, fb, fonts.get("small").or_else(|| fonts.get("bold")), run, here);
-        self.draw_purse(reg, fb, fonts.get("small"), run, notice);
+        self.draw_icons(reg, fb, world.icons, world.marked);
         self.draw_token(reg, fb, run.knight.seat);
+        if let Some(paper) = world.paper.as_ref() {
+            self.draw_paper(reg, fb, fonts.get("small"), paper);
+        }
         Ok(())
     }
 
@@ -136,65 +150,28 @@ impl MapScene {
     /// painted into `MAP.CMP` and need nothing. A lair is not: `_MAP:DisplayLairs`
     /// walks the lair table and blits `MI.C` frame 0x14 at every one whose x is
     /// not negative, which is how a lair leaves the map when it has been beaten
-    /// and stripped. That one is authored against the map's own palette, so it
-    /// draws in its own colours with nothing translated.
+    /// and stripped. Frame 0x1f goes on top of the one you are standing on,
+    /// which is `MOON:CheckLairEncounter`'s own blit.
     ///
-    /// **The rest of `MI.C` from 0x15 up are not pictures, they are outlines**:
-    /// frame 0x19 is the silhouette of a town wall, 0x1b a ring of stones, 0x1c
-    /// the Valley of the Gods and 0x1e the wizard's tower, each one pixel wide
-    /// and drawn entirely in palette index 31, which `MAP.CMP` holds as
-    /// magenta. Nothing in the original blits them: `SHOW`, `DisplayLairs` and
-    /// `DisplayOtherKnights` are the whole of what goes on the map picture, and
-    /// those are the shapes `MOON:CheckGROOC` measures a place's box from
-    /// through `MOON:GetWIDTH`. Every place those frames name is painted into
-    /// `MAP.CMP` itself and needs no icon.
-    ///
-    /// This used to draw one of them anyway, the Valley of the Gods, because
-    /// where it stood was this project's guess and nothing on the picture
-    /// marked it. `MOON:MapIconsTABLE` is readable now and puts it on the green
-    /// ring in the mountains the artwork already draws, so the marker is gone
-    /// and the map is again only what the original blits on it. The masked
-    /// path below still stands, because a pack may put an icon on a place of
-    /// its own.
-    fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer, icons: &[(i32, i32, usize)]) {
-        let ink = crate::status::extremes(fb).1;
+    /// Both are authored against the map's own palette, which is the palette
+    /// loaded here, so they draw in their own colours with nothing translated
+    /// and nothing flattened. **The rest of `MI.C` from 0x15 up are outlines,
+    /// not pictures**: frame 0x19 is the silhouette of a town wall, 0x1b a ring
+    /// of stones, 0x1c the Valley of the Gods and 0x1e the wizard's tower, each
+    /// one pixel wide and drawn entirely in palette index 31, which `MAP.CMP`
+    /// holds as magenta. Nothing in the original blits them; they are there for
+    /// `MOON:GetWIDTH` to measure a place's box out of, and `MAP.CMP` already
+    /// paints every place they name. This used to draw them as flat silhouettes
+    /// in one colour, which was a marker the original does not have, in a
+    /// colour the frame does not carry.
+    fn draw_icons(&self, reg: &mut Registry, fb: &mut Framebuffer,
+                  icons: &[(i32, i32, usize)], marked: &[(i32, i32)]) {
         for (x, y, frame) in icons {
-            if *frame == LAIR_FRAME {
-                crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
-            } else {
-                crate::sprite::draw_mask(reg, fb, TOKEN_SHEET, *frame, *x, *y, ink);
-            }
+            crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
         }
-    }
-
-    /// The purse, on a plate in the corner of the map.
-    ///
-    /// Not on the status bar, which is already full: the bold font is wide
-    /// enough that "open ground" and "100 of 100" barely share a line as it is,
-    /// and a third number would push one of them off. The corner is out of the
-    /// way, and it is where the same number sits in the place screens, so what
-    /// you are worth is always somewhere on the screen.
-    ///
-    /// A cutpurse's notice rides along beside it, because the map has no
-    /// message line and something taken off you cannot go unsaid.
-    fn draw_purse(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                  font: Option<&crate::text::Font>, run: &henge_core::run::Run,
-                  notice: Option<&str>) {
-        let Some(font) = font else { return };
-        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        let (mut dark, mut light) = (0usize, 0usize);
-        for i in 1..32 {
-            if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
-            if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
+        for (x, y) in marked {
+            crate::sprite::draw(reg, fb, TOKEN_SHEET, LAIR_HERE_FRAME, *x, *y, false);
         }
-        let mut line = format!("{} gold", run.gold);
-        if let Some(n) = notice {
-            line.push_str("   ");
-            line.push_str(n);
-        }
-        let w = font.width(reg, &line);
-        fb.rect(4, 4, w + 8, 12, dark as u8);
-        font.draw(reg, fb, &line, 8, 7, light as u8);
     }
 
     /// Draw the traveller, as `_MAP:SHOW` draws him: his own token, in his own
@@ -207,57 +184,42 @@ impl MapScene {
     /// which is the original's answer and not an outline.
     fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer, seat: usize) {
         let frame = TOKEN_FIRST + seat.min(4);
-        let Some(rect) = reg.sheet(TOKEN_SHEET).and_then(|r| r.value.frames.get(frame).copied())
-        else { return };
-        let Ok(img) = reg.image(TOKEN_SHEET) else { return };
-
-        let (w, h) = (rect.w as usize, rect.h as usize);
-        let mut px = vec![0u8; w * h];
-        for row in 0..h {
-            let src = (rect.y as usize + row) * img.width + rect.x as usize;
-            if src + w <= img.pixels.len() {
-                px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
-            }
-        }
-
+        let (x, y) = (self.state.x, self.state.y);
         // The original's map position is the token's own top-left corner, which
         // is what `_MAP:SHOW` hands the blitter, so there is nothing to offset.
-        let (x, y) = (self.state.x, self.state.y);
-
-        fb.blit(&px, w, h, x, y, false);
+        crate::sprite::draw(reg, fb, TOKEN_SHEET, frame, x, y, false);
     }
 
-    fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer,
-                   font: Option<&crate::text::Font>, run: &henge_core::run::Run,
-                   here: Option<&str>) {
-        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        let (mut dark, mut light) = (0usize, 0usize);
-        for i in 1..32 {
-            if luma(fb.palette[i]) < luma(fb.palette[dark]) { dark = i; }
-            if luma(fb.palette[i]) > luma(fb.palette[light]) { light = i; }
-        }
-        fb.rect(0, 188, 320, 12, dark as u8);
-
-        // The small font, not the bold one. The bold font is the title
-        // wordmark's face, twenty pixels tall on a two hundred pixel screen,
-        // and a status bar set in it came out as unreadable blobs that
-        // overran their own bar.
+    /// `_MAP:CreatePaper`, image 0xaed4, line for line.
+    ///
+    /// ```text
+    /// 0xaed5  call InitPaper          ; PaperX = 0x32, PaperY = 0x64, blit cel 0x20 there
+    /// 0xaed8  dec bp / mov di, knightopt / call CopyText     the heading
+    /// 0xaee7  add bx, 5 / add cx, 5 / mov ax, [si+0x20]      his token at +5, +5
+    /// 0xaefe  add ax, 0xf / add bx, 5                        the heading at +15, +5
+    /// 0xaf0f  add [PaperY], 0xf                              one step before the list
+    /// 0xaf14  mov [KEYNUM], 0x31                             the digit, as a character
+    /// 0xaf3b  add ax, 5 / add bx, 5                          each line at +5, PaperY + 5
+    /// 0xaf52  add [PaperY], 6                                and six pixels to the next
+    /// ```
+    ///
+    /// Six pixels a line is the small face's step and not the bold one's, which
+    /// is twenty tall; `docs/COMPLETE.md` had this as fifteen pixels a line,
+    /// which is the single step taken before the first line and not the step
+    /// between them.
+    fn draw_paper(&self, reg: &mut Registry, fb: &mut Framebuffer,
+                  font: Option<&crate::text::Font>, paper: &Paper) {
+        crate::sprite::draw(reg, fb, TOKEN_SHEET, PAPER_FRAME, PAPER_X, PAPER_Y, false);
+        crate::sprite::draw(
+            reg, fb, TOKEN_SHEET, paper.seat.min(4), PAPER_X + 5, PAPER_Y + 5, false,
+        );
         let Some(font) = font else { return };
-        let y = 191;
-        let left = format!("Day {}", self.state.day);
-        let lw = font.width(reg, &left);
-        font.draw(reg, fb, &left, 6, y, light as u8);
-        let right = format!("{} of {}", run.health.max(0), run.max_health);
-        let rw = font.width(reg, &right);
-        font.draw(reg, fb, &right, 314 - rw, y, light as u8);
-
-        // The middle is centred in what is left over rather than on the screen,
-        // so a long place name cannot run through the health readout.
-        let mid = here.unwrap_or_else(|| self.last_terrain.name());
-        let (from, to) = (6 + lw + 6, 314 - rw - 6);
-        let mw = font.width(reg, mid);
-        if mw <= to - from {
-            font.draw(reg, fb, mid, from + (to - from - mw) / 2, y, light as u8);
+        let heading = format!("{}{PAPER_OPT}", paper.knight);
+        font.draw_own(reg, fb, &heading, PAPER_X + 0xf, PAPER_Y + 5);
+        let mut y = PAPER_Y + 0xf + 5;
+        for line in paper.lines {
+            font.draw_own(reg, fb, line, PAPER_X + 5, y);
+            y += 6;
         }
     }
 }

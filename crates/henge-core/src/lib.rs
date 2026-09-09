@@ -25,6 +25,7 @@ pub mod save;
 pub mod service;
 pub mod shell;
 pub mod taskvm;
+pub mod wave;
 
 /// The original ran at 320x200 on a 4:3 display. Keeping that resolution keeps the
 /// art direction honest; the window scales it up.

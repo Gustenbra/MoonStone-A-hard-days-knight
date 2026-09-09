@@ -177,8 +177,9 @@ All 386 files decode. See `FORMATS.md`.
       accumulates it into a 16.8 fixed-point channel, showing the high byte, so step *k*
       of sixteen shows *k* sixteenths; `FADEPALETTEOUT` reads the DAC back through port
       0x3c7 and subtracts its way to black. Every screen change fades in here, and the
-      two screens that end on their own fade out: the between-days screen, which is
-      `FADEOUTDAY`, and a message chain
+      two screens that are dismissed rather than walked away from fade out: the
+      between-days screen, which is `FADEOUTDAY` and which `NextWHICH` reaches through
+      `WaitFIRE`, and a message chain
 - [x] **Colour cycling, and which indices cycle per scene.** `ADDCOL` queues `COLCON` on
       the frame list and points `PALLOC` at the live palette, which is 32 twelve-bit
       words. `COLCON` walks six `CYCLES` slots of six bytes (first, last, direction,
@@ -385,13 +386,13 @@ stat block. These are recovered and in the pack:
 | `FaceKnight` (0x3cf3), the controller tail (0x2d52, `mov dh, [di+8]`), `TASKHANDLE` (0x9741, `mov [di+0x14], dh`), `ADDTASK` (0x968a), `perdone` (0x99d5), `TASK_FLIP` (0x9a6d), `TASKLEFT` (0x9864), `MoveBACK` (0x5783), `ControlKnight` (0x3f77, 0x3f86) | which way a fighter faces, how it reaches the task, and how the blit mirrors | **done**, each link translated with its listing; `BUILD_ORDER.md` item 37 walks the chain. A creature is turned by `FaceKnight` and by nothing it does while walking |
 | `ControlTrogg` (0x2ddf) to `TroggChop` (0x2eff), `TroggStruck+3` (0x2f1c), `TroggHit+8` (0x2f55), `DeCapFLAG` (DS:0x7841) | the trogg, whole | **done**, translated block for block: ten frames of stance after a blow and the next on the eleventh (`sub; jmp` at 0x2eb1, not the demon's `sub; jne`), the count forgotten when struck and restarted at ten when a blow lands, the flag raised on the decision to finish |
 | `TASKWALKCOLLIDE` (0x9e06) | a fighter may not step into another actor's body, tested only in the direction he faces (`xdir = facing & 3`, 0x9e58) | **not built**; `Bout::separate` pushes overlapping fighters apart instead, which is ours |
-| `SetKnightCombat` (0x297d), `InitNewMO` (0x27ee), `TroggTABLE` and the other spawn tables | the knight at x 250, z 100, facing 3; creatures from eight-byte `[x][y][z][facing]` records, off screen and facing in | read (the tables are in the readable span now: `TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3), (-80, 0, 120, 1)); **not built**, the seats are ours and `FaceKnight` overwrites the creature's facing on its first frame |
+| `SetKnightCombat` (0x2962, the facing at 0x297d), `InitNewMO` (0x27ee), `TroggTABLE` and the other spawn tables | the knight at x 250, y 0, z 100, facing 3; creatures from eight-byte `[x][y][z][facing]` records, off screen and facing in | **done**. The records are in the readable span (`TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3), (-80, 0, 120, 1)) and they are baked on each actor as `ActorDef::seats`. Only x and facing survive the arrival: `AddPlayer` (0x2989) falls into `AddKnight`, whose `mov [di+6], ax` at 0x29b6 is unconditional, so every `z` in every table is dead, `SetKnightCombat`'s `0x64` included. The second knight's record is x 30 facing 1, written identically by `InitPractice` (0x200a) and `InitKnightvsKnight` (0x206b). `FaceKnight` still turns a creature on its first frame, which is the original doing that too |
 | `CONTROLTABLE`, `ControlTrogg`, `ControlTroll`, `ControlRatmen`, `ControlMudmen`, `ControlBalok`, `ControlBeast`, `ControlDemon`, `ControlDragon`, `ControlClaw` | the controller each kind runs | **done**, as `monster::Controller`, named on each actor |
 | `TroggStart`, `TroggAttacks`, `TroggChop`, `TroggSwing`, `TrollAttack`, `TrollBunt`, `ControlRatCollide`, `MudmenReach`, `MudmenIBury`, `MudmenAppear`, `MudmenEntangle`, `MudmenChoke`, `BeastCharge`, `SetBEASTZ`, `SetBeastTimer`, `BalokJump`, `DemonAttack` | per-creature behaviour | **done**, item 37 |
 | `_WIZARD:RND`, `GETPERCENT` | the shift register `TroggAttacks` rolls against | **done**, as `monster::rnd`, off a seed the bout carries |
 | actor record `+0x0a`, `+0x0b`, `+0x48`, `+0x49`, `+0x4a` | a controller's walk frame, timer, flags and cooldown | **done**, as `monster::Brain` on the fighter, in the fingerprint |
-| `TroggTABLE`, `BeastTABLE`, `RatmanTABLE`, `MudmanTABLE`, `BalokTABLE`, `DemonTABLE` | the spawn tables `InitNewMO` reads position and facing from | readable now, and read: eight-byte records `[i16 x][i16 y][i16 z][u8 facing]`, `InitNewMO+0xc..+0x23` (0x27fa..0x2811) copying them into `+2`, `+4`, `+6`, `+8`. Not yet built into the standing places |
-| `TotalMonsters`, `MaxMonsters`, `AdjustLevel`, `lev_adjust`, `KLTAB` | how many come, in waves, scaled to the knight | read in outline; one at a time is fielded |
+| `TroggTABLE` (DS:0x97a, 4), `BeastTABLE` (0x99c, 3), `RatmanTABLE` (0x9b6, 5), `MudmanTABLE` (0x9e0, 5), `BalokTABLE` (0xa5c, 1) | the spawn tables `InitNewMO` reads position and facing from | **done**: eight-byte records `[i16 x][i16 y][i16 z][u8 facing]`, `InitNewMO+0xc..+0x23` (0x27fa..0x2811) copying them into `+2`, `+4`, `+6`, `+8`, baked as `ActorDef::seats` and used for the opening layout. Which record the first arrival takes is not always zero: `SetMonsterCombat` (0x27e4) walks from the front for troggs, beasts, ratmen and Balok, while the troll (0x26f1 into `InitTrogg`, 0x225b, on the trogg's own table) and the mudmen (`InitMudmen`, 0x2655) `xor [SIDE], 1` against the zero `SetUpDKL` left and so start at record **1**. The demon's and the dragon's are written into the record in code, 0x278d and 0x2476. `DemonTABLE` and `WhirlTABLE` are not tables at all, they are single words `InitKnightvsDemon` stores the two records' addresses in |
+| `TotalMonsters`, `MaxMonsters`, `NumberInCombat`, `SIDE`, `INITMO`, `INITANIM`, `AdjustLevel`, `lev_adjust`, `KLTAB`, `SetMonsterCombat`, `InitNewMO`, `CountTheDead` | how many come, how many at once, from which side, and when the next one walks in | **done**, item 38, as `henge_core::wave` |
 | `SETDEMONBORD` | **not a screen border**: one record written over the arena's own border list, 0 to 309 across and 10 to 99 deep, which is the ground the demon may be fought on. `InitKnightvsDemon` calls it after the arena is loaded and `GENERATELANDSCAPE` calls it before, so only the first of the two survives | **done**, as `ActorDef::border` and `Bout::apply_actor_borders` |
 | `Demon_Evolve`, `AddDemonWhirl`, `FlipDemonWhirl`, `StopDemonWhirl`, `KnightOFF`, `KnightON`, `DemonOFollowT`, `DemonOWhipFollow`, `DemonUFollowT`, `DemonUWhipFollow` | the demon's entrance, its whirl, and the whip's four phases | **done**, item 33 |
 
@@ -407,8 +408,68 @@ stat block. These are recovered and in the pack:
       `RatmanGouge`), Balok's grab and its landing on a knight (`ControlBalokGrab`,
       `ControlBalokBite`, `ControlBalokCrush`, `Knight_Explode`), and the beast's
       `Beast_BackToss` and `ChestToss`
-- [ ] Waves: `TotalMonsters` and `MaxMonsters`, three troggs one after another, two
-      ratmen at once, `AdjustLevel` adding more for a stronger knight
+- [x] **Waves (item 38).** All of it reads and all of it is transcribed in
+      `henge_core::wave`. Four words of BSS carry it: `TotalMonsters` (DS:0x96a),
+      `MaxMonsters` (0x96c), `NumberInCombat` (0x96e) and `SIDE` (0x970), with `INITMO`
+      (0x972) the routine that puts one more in and `INITANIM` (0x974) the creature's own
+      `Set*Tables`.
+
+      **How many at once** is `MaxMonsters`, which every `InitKnightvs*` writes as 1
+      except `InitKnightvsRatmen` (0x2337), which writes 2. `SetMonsterCombat` (0x27e4) is
+      `cx = [MaxMonsters]` passes of `InitNewMO`, the seat pointer walking eight bytes a
+      pass, so that is exactly what the fight opens with. `InitKnightvsMudmen` (0x264c) and
+      `InitKnightvsTroll` (0x26f4) call `INITMO` once instead, so their opening is chosen
+      by `SIDE` like every later arrival.
+
+      **How many altogether** is `TotalMonsters`: 3 for the three troggs and the beast, 2
+      for the ratmen, Balok and the mudmen, 1 for the troll, the demon and the dragon, plus
+      one more when four people are playing (`cmp [0x91e], 4`, and 0x91e is the count
+      `Adjplayers` clamps to 1..4). It is not the head count but what is still owed:
+      `CountDone` sends one for every death that leaves it above zero, so a fight opens
+      with `max` and shows `max + total - 1` creatures altogether.
+
+      **When the next one walks in** is `CountTheDead` (0x213), which every one of the
+      bestiary's eighteen death scripts calls through `TASKGOSUB`. It takes one off
+      `NumberInCombat` and one off `TotalMonsters`; if the player is down (`[si+0x38]`
+      at or below nothing) or nothing is owed and nothing is standing, it is `StopCombat`
+      and thirty five more frames (`mov byte [0x8987], 0x23`); otherwise `CountDone`
+      (0x243) calls `INITMO` until the screen holds `MaxMonsters` again.
+
+      **From which side** is `SIDE`. `InitTrogg` (0x225b), `InitBeast` (0x22d2),
+      `InitRatmen` (0x239e) and `InitMudmen` (0x2655) all open `xor word [SIDE], 1` and
+      step the seat pointer eight bytes on when the result is not zero, so the seats run
+      1, 0, 1, 0 off the 0 `SetUpDKL` (0x292e) leaves. `InitBalok` (0x25cf) has no such
+      flip and every Balok comes in at the same seat. The depth is `AddCNT` as ever.
+
+      **What `AdjustLevel` (0x2824) does**, in its own order: `MaxMonsters` up one if
+      strength (`+0x2e`) is above three; `TotalMonsters` up one at thirty experience
+      (`+0x3c`), `MaxMonsters` up one at sixty, `TotalMonsters` up one at ninety, writing
+      `RegenerateFLAG` (0xa4a) 1, 2 and 3 as it goes; then, in a lair, the lair record's
+      own `+4` written straight over `TotalMonsters` (0x287e); then three ceilings, 1 for
+      Balok and the mudmen (0x288a, 0x2898) and 2 for the troll (0x289e). Last, the level:
+      `CalcDamage` with the swing's kind in `+0x28`, plus experience over four, halved,
+      less six, floored at nothing and held at fifteen, halved again for nought to seven.
+      That indexes the creature's row of `lev_adjust` (DS:0xa0a, eight rows of eight signed
+      bytes) found by looking `INITANIM` up in `KLTAB` (DS:0xa4c, eight words, in the order
+      `SetBalokTables`, `SetRatmenTables`, `SetTroggAxeTables`, `SetTroggHammerTables`,
+      `SetTroggSpTables`, `SetUpMudmenTables`, `SetTrollTable`, `SetBeastTables`), and the
+      entry is **subtracted** from `TotalMonsters`, and only if the result is positive:
+
+      ```
+      balok         2  2  1  1  0 -1 -1 -2
+      ratmen        5  4  3  2  0 -1 -2 -4
+      trogg axe     5  4  2  0  0 -1 -3 -4
+      trogg hammer  5  4  2  0  0 -1 -3 -4
+      trogg spear   3  3  2  2  0 -1 -2 -3
+      mudmen        3  2  1  0  0 -1 -1 -2
+      troll         3  2  1  0  0  0  0 -1
+      beast         2  1  0  0 -1 -1 -2 -3
+      ```
+
+      So a knight fresh off the select screen raids a lair of fourteen troggs and meets
+      nine of them, and a knight who swings for twenty with ninety experience meets more
+      than the table says. The rows and the counts are carried on each creature's own
+      definition, so a pack decides; nothing in the engine matches on an id
 
 ## 3.3 The dragon `done, but for the map flight`
 
@@ -461,8 +522,11 @@ in the pack as the dragon's table 5; `tools/taskvm.py --actor dragon_flight` dra
 `_MAP:FindLandscape` reads it and `MOON:ColourBackdrop` branches on those four codes.
 `_MAP:CalcKnGrid` builds the index from the traveller's own token as `((x+4)>>3,
 (y+10)>>3)`, which is why the grid needs a twenty-sixth row it never draws. The colour
-classifier is still in `henge-core` as a fallback for a pack baked without the unpacked
-executable, and is marked as such.
+classifier that used to stand behind it, which guessed the terrain from the map picture
+when a pack had no grid, is **gone**. The bake fails outright without the unpacked image
+(`overworld tables: the image vanished during the bake`) and checks the table it lifts
+against the four codes before it writes it, so a pack always carries the real grid and a
+guess behind it was a second answer to a question that has one.
 
 **`CHECKY`/`CHECKY2` are answered, and the answer is that nothing is impassable.**
 `_MAP:MapSLOW` is a second grid on the same index holding a two-bit mask, and
@@ -497,27 +561,55 @@ recovered boxes.
 two towns were nine. But the ruin in the southern woods this project had called the
 hermit's is Stonehenge, and the ring in the middle of it all this project had called
 Stonehenge is the Valley of the Gods: both were on the right artwork under the wrong name,
-85 and 74 pixels from where they belong. All five are read out of the table now. The
-hermit is the only place left on the map that is ours, and he has been moved off
-Stonehenge into the deep woods to the west. Every one of the recovered menu lines is used
-as its own gadget's label.
+85 and 74 pixels from where they belong. All five are read out of the table now. Every one
+of the recovered menu lines is used as its own gadget's label.
 
-The four villages have coordinates now and are still not baked: `CheckGROOC` gates each on
-`[di+0x20]`, the knight's own index, and a village belongs to one knight. Four unguarded
-ones on the map would be worse than none.
+**The hermit is gone.** There was a second healer in the southern woods, sited by hand and
+selling a flask and a draught this project invented; the original has no such place, no
+such man and no such goods, and all of it has been removed. Nothing on the map is sited by
+us any more: every box comes out of `MapIconsTABLE` or `LairLocation`, and the baker has a
+test that says so.
+
+**The four villages are built.** `CheckGROOC` at image 0x732 gates each of frames 0x15 to
+0x18 on `[di+0x20]`, the knight's own colour index, so village 0x15 is knight 0's and the
+other three cannot see it: the entry never reaches the paper. What is in one is
+`ForestVillage` at 0x112a, which `MooresVillage` and `WasteVillage` are two more names for
+and which `TakingMoon` sends all four frames to (0xc99 to 0xcb6):
+
+```
+0112a  mov  si, [JOYSTICK1+6]      ; whose turn it is
+0112e  cmp  byte [si+0x31], 3      ; his life points
+01132  jge  EncounterDone
+01134  add  byte [si+0x31], 1
+01138  mov  ax, 9 / call ColourStatus   ; and straight back out to the map
+```
+
+One life point, three is the ceiling, nothing is paid and no day passes. No backdrop is
+loaded anywhere on that path, so a village is a line on the paper and not a screen, and
+henge opens it where the traveller stands.
 
 - [x] The real terrain table
 - [x] `CHECKY`/`CHECKY2`: what makes ground impassable
 - [x] Scrolling: settled, and negative
 - [x] The whole location graph, out of `MapIconsTABLE` and `LairLocation`: the two towns,
       Stonehenge, the Valley of the Gods, Math's tower and the twenty four lairs, every
-      one of them at the original's own coordinates. Only the hermit is still ours
-- [ ] The four home villages, one per knight, which `StackMessages` names four times over
-      (`Enter Village`, and the entry is skipped unless the knight's index matches). Four
-      villages is a mechanic henge does not have at all, and the between-days screen tells
-      you to `Visit your home village to restore lost lives`
-- [ ] The Valley of the Gods (`knvalley`), which is what four keys are for, and pillaging
-      a dead rival's grave (`kngrave`). Both are phase 7's
+      one of them at the original's own coordinates. Nothing is ours
+- [x] The four home villages, one per knight, `MapIconsTABLE` frames 0x15 to 0x18 at
+      (18, 11), (286, 11), (0, 187) and (303, 192), gated on `[di+0x20]` by `CheckGROOC`
+      (0x732) and worth one life point up to three (`ForestVillage`, 0x112a). The
+      between-days screen's `Visit your home village to restore lost lives` is now true
+- [ ] Pillaging a dead rival's grave (`kngrave`, `StackMessages[0x21 - 0x15]`,
+      `Pillage knight's grave`). **Recovered and not built, because there is nobody to
+      pillage.** It is not a place: `MOON:CheckEncounterDone` (0x798) walks the other three
+      knight records at DS:0x6c9e, overlaps their tokens with yours, and pushes kind 1
+      (`Battle with `) for a living one and kind 0x21 for one whose life points are gone
+      (`cmp byte [si+0x31], 0 / jg`, 0x7c7); `_MAP:DisplayOtherKnights` (0xa22c) draws
+      `MI.C` frame 0x21 over him instead of his own colour for the same reason, so 0x21 is
+      a gravestone. Choosing it goes to 0x3b7, the same entry a challenge does, which sees
+      the zero at `[di+0x31]` and jumps straight to `Knight1Won` and `TakeALL` (0xbc5),
+      the field-by-field transfer of everything he was carrying. henge has one knight to a
+      run and no rival tokens on the map, so there is no grave to stand on; building one
+      would mean inventing the rival
 
 ## 4.2 Arena generation `done`
 
@@ -644,9 +736,14 @@ the twenty four `LairLocation` pairs land on a `MapType` cell of that same code.
 one, lair 15, is a cell into the treeline and is still fought in the marsh, because
 `InitLair` hands `ColourBackdrop` the record's landscape and never asks the map.
 
-The head count is `TotalMonsters`, which the original feeds in in waves. Henge fields what
-a bout seats, so a lair of fourteen ratmen puts three in front of you; the number goes into
-the pack unrounded rather than being thrown away at bake time. Waves are still not built.
+The head count is `TotalMonsters`, which the original feeds in in waves, and **the waves
+are built** (see 3.2). `AdjustLevel` (0x2824) writes the lair record's own `+4` over
+`TotalMonsters` at 0x287e and then takes the creature's `lev_adjust` row off it;
+`SetMonsterCombat` (0x27e4) stands `MaxMonsters` up, which is one for every creature but
+the ratmen; and `CountTheDead` (0x213) sends the next one in on the frame the last one's
+death script reaches its `TASKGOSUB`. So a lair of fourteen is fourteen fights one after
+another, and the number goes into the pack unrounded because nothing has to hold it all at
+once any more.
 
 What this replaced: twenty four hand-sited lairs, a median of 51 pixels and as much as 129
 from where the original puts them, and twenty four invented guardians of which five
@@ -697,13 +794,21 @@ circle with it. The first is live. The other two are built and cannot fire until
 hands out a moonstone, which is 7's. It does now.
 
 **What is ours**: the eight bytes of `MOON:Moons`, which are in the stale part of DGROUP,
-so the cycle is five pictures over eight steps waning and waxing back; and showing one of
-the fourteen `_LOADER:WaitMES` hints on the between-days screen, which the original shows
-while a disk loads and henge has no disk to load.
+so the cycle is five pictures over eight steps waning and waxing back. **Nothing else.** A
+day number and one of the fourteen `_LOADER:WaitMES` hints used to be drawn under the
+heading; the fourteen belong to `WAITMESSAGE`, which is a different screen shown while a
+disk loads, and the routine at 0x8e5b draws one chain and one cel and nothing besides.
+Both are gone.
+
+**And the screen waits.** `_MAP:NextWHICH` at 0xa454 is three calls in a row: the screen at
+0x8e5b, then `WaitFIRE` at 0x8251, which is `call 0x81ec; test bx, 0x10; je` until fire is
+down and the same again until it is up, and then the fade out at 0x5b65, which is
+`FADEOUTDAY`. It used to dismiss itself after 150 ticks. It waits now, and goes out over
+the same sixteen linear steps every other fade uses.
 
 - [x] Moon phases on a weekly cycle, and the between-days screen
 - [x] What the moon gates
-- [ ] `FADEOUTDAY`, the fade between the map and the screen, which is item 75's
+- [x] `FADEOUTDAY`, the fade between the map and the screen, which is item 75's
 
 ---
 
@@ -739,14 +844,68 @@ token like the knights' own. `MapIconsTABLE` is sixty bytes, and reading it conf
 shape: nine records of three words, one for each of the fixed places above, and a
 terminator. Its coordinates are in 4.1.
 
-**Four villages, one per knight, is a mechanic henge does not have at all**, and neither is
-the Valley of the Gods, the wizard, or pillaging a dead rival's grave.
+**The four villages are built** (see 4.1); pillaging a dead rival's grave is recovered and
+not built, because with one knight to a run there is no rival token to stand on.
+
+### The paper, in full, and what it replaces `done`
+
+Walking onto a place used to open it there and then, on an edge, and that was an invention.
+**The original never opens anything by walking.** The whole of it, with addresses:
+
+```text
+0x06b5  the walker         clears five eight-byte slots at DS:043c (mov bx, 0x43c; mov cx, 5),
+                           walks MapIconsTABLE three words a pass, calls CheckGROOC on each
+                           and pushes [x][y][kind] for every overlap
+0x0798  CheckEncounterDone the other three knights: kind 1 alive, 0x21 dead
+0x085a  CheckLairEncounter the 24 lairs, kind 2, and it blits MI.C frame 0x1f at the one
+                           you are on before it pushes
+0xa2d3  FOLLOW             calls the walker once a frame, so the stack is rebuilt from
+                           nothing every frame and remembers nothing
+0xa3c6  ScrollINPUT        mov ax, [JOYS]; test ax, 0x10; je  -> call DisplayStack
+0xae27  DisplayStack       counts the live slots: 0 returns 0 (NoEncounter), 1 falls into
+                           StackDecision, more draws CreatePaper and waits
+0xae58  the key loop       call 0x8149 until 2 <= ax <= 0x0a, then (ax - 2) * 8 is the slot;
+                           an empty slot is refused and it asks again
+0xae9f  StackDecision      kind 1 or 0x21 -> 0x101de, kind 2 -> 0x1039b, else -> 0x10aa6
+0xaed4  CreatePaper        the panel, the heading and the numbered lines
+0xaf5e  OrderOpt           kind 2 -> knlair, kind 1 -> knkn plus [di+0x4c], else
+                           StackMessages[kind - 0x15]
+0xaf99  InitPaper          PaperX = 0x32, PaperY = 0x64, blit MI.C cel 0x20 there
+```
+
+`MI.C` frame 0x20 is **174 by 51**, the only frame in the bank that size, and it is the
+paper itself. `CreatePaper` then puts the knight's own token at `PaperX + 5, PaperY + 5` in
+the frame his seat names with nothing added, the heading at `+15, +5`, which is his name
+with `_MAP:knightopt` (` may ... `) after it, and then steps `PaperY` by fifteen once and
+by **six** for each line, drawing every line at `PaperX + 5, PaperY + 5`. Six is the small
+face's height, and the bold face is twenty tall, so the step names the font as well.
+
+`StackMessages` at `DS:0xc404` is fourteen pointers for kinds 0x15 to 0x22, and reading them
+gives `knvillage` four times, `knhigh`, `knwater`, `knhenge`, `knvalley` twice, `knmath`,
+`knmath`, `knmath`, `kngrave`, `knmath`. Each line is baked beside the place it belongs to.
+
+The key loop has **exactly one exit** and it is a number naming something under your feet:
+there is no escape key in the original and there is none here. Every entry is a place with
+its own way out, so the paper cannot strand anyone.
+
+**One more thing the map draws, which was missed.** `CheckLairEncounter` blits `MI.C` frame
+0x1f, nine by five like the lair marker it covers, at the lair the token overlaps, every
+frame, before `SHOW` puts the token down. It is drawn entirely in palette index 31, which is
+the entry `MapEffects` glows, so the lair you are standing on breathes in the same colour
+the token does. So `SHOW`, `DisplayLairs` and `DisplayOtherKnights` are *nearly* all of what
+goes on the map picture, and this is the fourth.
+
+**What was removed with it**: a status bar across the bottom of the map, a purse plate in
+the top corner, a cutpurse notice beside it, and flat one-colour silhouettes of `MI.C`
+frames 0x15 and up, which are one-pixel outlines the original blits nowhere. `MAP.CMP` is
+one 320x200 picture and nothing else is on it. What a cutpurse took is said in the box the
+original says things in, `OCCURMESSAGE`, since the map has no line to put it on.
 
 | Original | What it is | Status |
 |---|---|---|
 | `TAVERN`, `TavernOpenScene`, `TavernLoop`, `LeaveTavern`, `SetBET` | the tavern | done: the five painted stakes, and an empty purse turned out at the door |
 | `DICE`, `RollDice`, `DiceSort`, `DiceWinner`, `DiceODDS`, `DDICE`, `BET` | a dice game | done, and **recovered, not designed** |
-| `HEALER`, `HealDon`, `ExitHealer`, `InitDonation` | restore health | done; the hermit costs days, the town healer takes a donation and spends it down |
+| `HEALER`, `HealDon`, `ExitHealer`, `InitDonation` | restore health | done: the town healer takes a donation and spends it down. There is no other healer; a hermit in the woods who took days was ours and has been removed |
 | `TEMPLE`, `TTemple`, `SellToTemple`, `GoldSell` | temple services | done for selling; the moonstone counter is a two-knight trade, see 7 |
 | `MYSTIC`, `MysticUpDown`, `MysticAbility`, `MysticJudge`, `DonationTAB` | mystic services | done |
 | `STONEHENGE`, `MOON:Henge`, `HengeControl`, `HengeWait` | the stone circle | done, and the winning branch fires now that section 7 hands out a moonstone |
@@ -865,19 +1024,39 @@ MOON:Henge           ax = tonight's moon; bl = [bx+0x16]
 
 MOON:KnightWonGame   bp = 1; 0x2e -> 2; 0x2d -> 4; 0x31 -> 3
                      knight 3 -> bp |= 0x10, 0 -> 0x20, 1 -> 0x30, 2 -> 0x40
-                     VICTORY; delay 0x14; [0x8186] = bp; jmp 0x8e
+                     push bp
+                     mov si, VICTORY; call 0x8eeb      ; OCCURMESSAGE
+                     mov ax, 0x14; call 0x5a24         ; one vertical blank
+                     call 0x8251                       ; WaitFIRE
+                     mov ax, 1; call 0x8f80
+                     pop ax; mov [0x8186], al; jmp 0x8e
 0x8e                 int 21h / ah=4Ch with that byte in al
 
 MOON:WhoLived        health <= 0: health = maximum; sub byte ptr [si+0x31], 1
                      called from the end of MOON:Combat's own loop, every fight
-0x617                GameOverMes; jmp StartAgain
+0x617                mov si, GameOverMes; call 0x8f17  ; INSTRUCTMESSAGE
+                     call 0x8251                       ; WaitFIRE
+                     call 0xa554                       ; the map's effects off
+                     jmp StartAgain
 ```
 
 **So a win quits the program with a code in it**, low nibble the moon and high nibble the
-knight, and a loss goes back to the title. Whatever reads that byte is in `INTR.EXE`,
-which section 8 has never opened, so the ending screen is henge's own;
-`quest::Tally::code` works the byte out regardless, because it is the only thing the
-original records about a win.
+knight, and a loss goes back to the title. `INTR.EXE` reads that byte: its ending half
+takes the same argument and hands it to `ColourMoonstone` (8.6). `quest::Tally::code` is
+the byte.
+
+**And both endings are one message over `MESSAGE.PIV` and nothing else.** 0x8eeb is
+`OCCURMESSAGE` and 0x8f17 is `INSTRUCTMESSAGE`, which is why the loss arrives in the red
+ramp and the win does not; both `call 0x8e90` first, and that is the `rep movsb` that puts
+the message picture back. 0x617 is reached from `_MAP:ScrollINPUT`, where scancode 0x10
+quits, and from `_MAP:NextWHICH`, where the last knight with no life points left falls
+through to it. 0x8251 is `WaitFIRE`: `test bx, 0x10` until fire is down and then until it
+is up again.
+
+`VICTORY` is `SHMES7` at y 75 and `SHMES8` at y 95; `GameOverMes` is `GOmes1` at y 95 and
+`promes4`, `Press fire to continue`, at y 180. Every record carries flags 1, the centre
+bit. **An ending screen of seven counted lines over `bg8.piv` used to stand here and
+there was never anything to port it from**, which the table below already said.
 
 **The words are recovered too, and they were hiding in the wrong place.** The message
 records `NoKeysMessage`, `ValleyEnter`, `VICTORY`, `GameOverMes` and `HengeInstruct` are
@@ -900,43 +1079,47 @@ every module's code.
 0xd908  Player       / GAME OVER
 ```
 
-Nothing in the load image connects a record to its lines, because the records are the
-stale part, so the pairing is by content. The line counts corroborate it: the records are
-ten bytes to a line, `HengeInstruct` to `VICTORY` is 0x28 and the first block is four
-lines, `GameOverMes` to `NoKeysMessage` is 0x14 and that block is two.
+That span reads now, so the records no longer have to be paired with their lines by
+content: `VICTORY` at `DS:0x671` chains `SHMES7` and `SHMES8`, and `GameOverMes` at
+`DS:0x76a` chains `GOmes1` and then `promes4`, which is the same
+`Press fire to continue` record `HengeInstruct` and `NextDayMes` end on. `bg8.piv` sits in
+the pool between the victory lines and the next message and **nothing in the image refers
+to its address**; it is one of the three plates `INTR.EXE`'s ending half uses.
+`Player      ` sits nine bytes before `GOmes1` and nothing refers to it either: it is dead
+data, and it was once taken for the first line of the game-over chain.
 
 **The Guardian is recovered as well.** `MOON:FightDemon` calls `InitKnightvsDemon`, which
 writes 250 into the monster's health, one of it, and finishes on
 `mov ax, 4; call ColourBackDrop`: **the Valley of the Gods is fought on marsh.**
 
-**The scoring, by contrast, really is ours.** `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`,
-`PINDEX`, `FMEM_POINTS` and `FMEM_COLAREA` are `PUBLIC` names with no addresses; the only
-symbol in that whole set that carries one is `GameOverMes`, and it is a two-line message.
-There is no tally page in the original to port. The one henge shows is seven lines of
-state the run already keeps, and one of its labels, `Life points left`, is the status
-panel's own.
+**There is no scoring.** `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`, `PINDEX`,
+`FMEM_POINTS` and `FMEM_COLAREA` are `PUBLIC` names with no addresses; the only symbol in
+that whole set that carries one is `GameOverMes`, and it is a two-line message. So there
+was no tally page to port, and the seven-line one henge used to show is gone: what is left
+is `Tally`, which holds the ending and the seat, and `Tally::code`.
 
 | Original | What it is | Status |
 |---|---|---|
 | `MOON:Valley`, `FightDemon`, `_MAP:knvalley`, `NoKeysMessage`, `ValleyEnter` | the Valley of the Gods | done, verbatim, on a site of our own choosing |
-| `MOON:Henge`, `KnightWonGame`, `VICTORY` | winning | done; the exit byte is computed and has nowhere to go |
-| `MOON:WhoLived`, `_MAP:CheckEncounterDone`, `GameOverMes` | losing | done: five life points, then the title |
+| `MOON:Henge`, `KnightWonGame`, `VICTORY` | winning | done: `OCCURMESSAGE`, `WaitFIRE`, and the exit byte |
+| `MOON:WhoLived`, `_MAP:CheckEncounterDone`, `GameOverMes` | losing | done: five life points, `INSTRUCTMESSAGE`, `WaitFIRE`, then the title |
 | `_STATUS:StatCheckKeys` | the keys on the sheet | done, its own cels and x spacing |
 | `_STATUS:BuyMoonstone`, `SellMoonstone`, `pu18`, `se18` | the moonstone counter | **not built**: it is a trade between two knights' records, and a run has one knight |
-| `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`, `PINDEX` | scoring | no addresses anywhere; the tally is ours |
+| `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`, `PINDEX` | scoring | no addresses anywhere, so there is nothing to build and nothing is built |
 
 - [x] The four keys, one per lair, and the door they open
 - [x] The moonstone: the Valley of the Gods pays one of four for four keys, at random
-- [x] Win condition and ending
-- [x] Scoring and the final tally, which is ours because there is nothing to port
+- [x] Win condition and ending: two messages, `WaitFIRE`, and the exit byte
+- [x] Scoring and the final tally: there is none in the original, so there is none here
 - [x] Losing properly: a life point a death, and the title after the last
 - [ ] The Guardian is the demon, and the demon has no set piece: 250 hit points and a
       single slap. Section 3.2's item 33 is what turns the end of the game from a wall
       into a fight
 - [ ] `HengeControl` and `HengeLOOP`, the circle's own set piece, which is where the
       winning moment should actually happen. Listed in section 5 too
-- [ ] Four villages, one per knight, and pillaging a dead rival's grave: two whole
-      mechanics of the original's four-player game that henge does not have
+- [x] Four villages, one per knight: built, see 4.1
+- [ ] Pillaging a dead rival's grave, which needs the rival knights on the map that henge
+      does not have. Recovered in 4.1 with addresses
 
 ---
 
@@ -1062,11 +1245,67 @@ the sky and glowing it repainted the whole screen. The backdrop was the mistake.
 The heading is `MOON:CRText`, one ten-byte record out of the same recovered span: `Select
 a Knight`, flags 1, which is `TextPTop`'s centre bit, at y 5.
 
-**Ours on this screen**, and no more than this: the line saying whose turn it is, the name
-under each portrait, the stat line along the bottom, and the `Player N` written where a
-taken knight was. The original draws none of them. What it does draw once a knight is
-taken is that knight's name at (50, 50), out of `NAMEy`, which `ChooseFIRE` points at
-`BNAME`, `GNAME`, `ENAME` or `RNAME`.
+**Nothing on this screen is ours any more.** A line saying whose turn it is, a name under
+each portrait, a stat line along the bottom and `Player N` written where a taken knight was
+all stood here, and `ChooseRefresh` draws none of them. It clears the screen, walks
+`CRText`, blits the portraits whose bits are still set, blits the frame on the chosen one,
+and then:
+
+```text
+0x1697  cmp word ptr [TypeFLAG], 0
+0x169c  je  0x16ad
+0x169e  mov si, word ptr [NAMEy]
+0x16a2  mov ax, 0x32          ; x
+0x16a5  mov bx, 0x32          ; y
+0x16a8  xor cx, cx            ; flags: left aligned
+0x16aa  call 0x7a70
+```
+
+0x7a70 builds a one-record chain at `DS:0x7ff2` out of `si`, `ax`, `bx` and `cx` and falls
+into the walker at 0x7a86, so that is **the name being typed, at (50, 50), in the bold face
+the heading is set in**. That is the whole routine; there is nothing else on the screen.
+
+### Typing your own name, which is the rest of that screen
+
+`ChooseFIRE` at 0x16be does not finish a seat's turn. Each of its four arms writes the
+knight's buffer into `NAMEy` (0x530, 0x51a, 0x546, 0x55c for knights 0 to 3), calls
+`TypeName` at 0x13f0, and only then clears the knight's bit in `choose_knight` and writes
+`[di+0x20]`. So the knight being named is still free, still drawn and still framed while
+the typing runs, and `ChooseKnight`'s loop steps `choose_player` on only afterwards.
+
+`TypeName` is small enough to quote whole:
+
+```text
+0x13f9  TypeFLAG = 1
+0x13ff  ScanREF  = ChooseRefresh          ; link offset 0x164d
+0x1405  CURSOR   = 0x5c
+0x140b  SPACE    = index of the first space or NUL in [NAMEy]
+ScanKEYS  0x142e  fire (bx & 0x10) -> NameDone
+                  scancode 0x1c, Enter -> NameDone
+                  scancode 0x0e -> BACKSPACE
+                  ASCIIKEY; zero -> redraw and round again
+                  SPACE >= 0xd -> beep, drop the key
+                  else [NAMEy + SPACE] = the character; SPACE += 1
+TypeREF   0x147a  Cursor; call [ScanREF]; round again
+Cursor    0x14ac  [NAMEy + SPACE] = CURSOR
+BACKSPACE 0x1485  [NAMEy + SPACE] = ' '; SPACE -= 1, floored at 0;
+                  [NAMEy + SPACE] = ' '
+NameDone  0x14bb  [NAMEy + SPACE] = 0; TypeFLAG = 0; AddClickSound
+```
+
+So the field is **thirteen characters**, the caret is `CURSOR` stamped into the buffer at
+`SPACE` before every redraw, and the name is truncated at the caret when Enter or fire ends
+it: backspacing the default away and pressing Enter really does leave a knight with no name.
+`CURSOR` is 0x5c, which `TextASCII` sends to glyph 71 along with `'/'`, so it draws as the
+stroke.
+
+`ASCIIKEY` at 0x14e8 is `mov bx, ASCIIT; xlatb`, and `ASCIIT` at 0x14f2 is the scancode to
+character table: uppercase throughout, no shift, and **the space bar maps to 0x5f**, the
+underscore. That is the other half of why the default names carry one.
+
+`ScanREF` holding `ChooseRefresh` is what makes the whole select screen redraw on every
+keystroke, which is why the name can be drawn by the same routine that draws everything
+else on it.
 
 **A second triple has since turned up, and it is the armour rather than the glow.**
 Item 75 read `ColourKnight`, which writes three 12-bit words into `BattlePal+12`, and
@@ -1117,6 +1356,26 @@ no computer knights to give them to yet: nothing uses them, which is the right a
 use for them, and the four in `knights.json` are now the player names.
 
 ## 8.3 The status panel `done`
+
+**There is no in-fight readout, and `Combat` is the proof.** The fight loop, `MOON:Combat`
+at image 0x351, is ten calls long and every one of them is accounted for: 0x96e1 sets the
+frame's target off the BIOS tick at `0:046c`, 0x5a24 waits for vertical retrace on port
+0x3da, 0x4988 shakes the screen and runs `VBLQUE`, 0x5a66 copies two hundred rows of the
+back buffer to the page, 0x9702 runs the ten `TaskTable` slots through `PerformCOMMAND`,
+0x975b places them and their shadows, 0x5a3e flips the page by writing CRTC register 0x0c,
+0x9f1d tests collisions, 0x8f8 is `KnightGlowOn` and 0x96f1 waits for the tick. Not one of
+them draws a glyph or a rectangle, and the only thing `VBLQUE` ever holds is `ADDCOL`'s
+palette upload at 0x4a3f (`ADDCOL`, 0x49b8, is its only filler). `DisplayKnight` (0xc0c2)
+has three callers, `ReDisplay+72` and the two arms of `_displayknight`, all of them in
+`_STATUS`; `ReDisplay` itself is called only from `ResetStatus`, `HotGadget` and the buying
+routines, so nothing on this screen is reachable from a bout. A sweep of all 2,223 symbols
+for energy, health, bar, hud, strip, gauge, meter, score, life, pip and vital returns one
+name, `_MAP:HealLife`, the healer. The knight's numbers are this screen and nowhere else.
+
+henge used to draw a plate per fighter across the deepest thirty two rows of every arena,
+from row 168 down. That was ours and it is gone, and what it was covering was ground:
+`Find3QuarterBORD` (0x29f7) stands an arrival with his feet on row 184 of a layout whose
+tree line is at 119, and `CheckBorder` lets him walk them to 198.
 
 **The screen is two ivied stone arches and it has its own palette.**
 `_STATUS:DisplayPillars` clears the screen to index 0 and falls into `StatusSetup`, which
@@ -1188,9 +1447,34 @@ bit 0x10 -> PointerFLAG = 0        ; fire
 clamp x to 0..0x13a, y to 0..0xc2
 ```
 
-and the routine just below it blits the art at that pair with nothing subtracted, so the
-hot spot is the top left corner. `PO.CEL` is the art: one 16 by 18 arrow with a tail,
-decoded on the project's first day and never drawn until now.
+and the routine just below it, `SHOWPOINTER` at image 0xcf31, blits the art at that pair
+with nothing subtracted, so the hot spot is the top left corner:
+
+```text
+push es
+les si, ptr [0x892f]      ; PO.CEL's bank
+sub ax, ax                ; cel 0
+mov bx, [0xe492]          ; the pointer's x
+mov cx, [0xe494]          ; and its y
+call 0x5d7f               ; the cel blit every other sprite in the game goes through
+pop es
+```
+
+`PO.CEL` is the art: one 16 by 18 arrow with a tail. **It is blitted in its own pixels like
+any other cel**, with no ink and no substitution: the flat silhouette with an
+eight-direction dark halo under it that used to stand here was invented to make a flattened
+version of drawn artwork read, and `sprite::draw_mask`, which flattened it, now has no
+callers at all.
+
+**And the pointer is only on the screens that call that routine.** Scanning every call in
+the image gives six: `MOON:WDLOOP+66` and `MOON:HWLOOP+66`, the two town menus;
+`_TAVERN:TavernLoop+57`; `_WIZARD:DonateLoop+52`; `_STATUS:StatLOOP+19`; and
+`_STATUS:FiDisplay+10`. `MovePointer` itself is called from `StatLOOP` alone. **The title
+and the select screens are not in either list**, and neither has a gadget: `DoOptions` at
+0x1241 and `ChooseLoop` at 0x15a0 poll the stick themselves (`test bx, 8` up, `test bx, 4`
+down, `test bx, 0x10` fire) with no `CLEARGADGETS`, no `ADDGADGET` and no `CHECKGADGET`
+anywhere in either. Both had a box per row here so a mouse could drive them, and both are
+gone.
 
 **The gadgets are a flat table of rectangles, not a widget kit.** `GadgetSlot` walks 98
 records of twenty bytes for one whose width is zero, so 98 is the size and a zero width is
@@ -1221,8 +1505,8 @@ operations. Here a gadget carries an id that the screen which registered it inte
 because the screens in this project are already lists with a highlight, and the pointer's
 job is to reach them rather than to invent a second way of doing everything. Being over a
 row is being on it, and fire over it is the same press space would be. The screens that lay
-gadgets out are the title's option list, the four portraits on select, a town's menu and
-the character sheet, which is the screen `_STATUS`'s own gadgets belong to.
+gadgets out are a town's menu and the character sheet, which is the screen `_STATUS`'s own
+gadgets belong to, and those are screens the original puts the pointer on.
 
 A real mouse moves it too, mapped back through the 4:3 letterbox, because a window with a
 mouse in it should behave like one. `--point x,y` places it with no display at all.
@@ -1230,9 +1514,12 @@ mouse in it should behave like one. `--point x,y` places it with no display at a
 **One correction while here.** The map's own arrival list, whose labels are
 `_MAP:knhigh`, `knwater`, `knhenge`, `knmath`, `knvalley`, `knvillage`, `knlair`, `knkn`
 and `kngrave`, is **not** a gadget screen. `_MAP:CreatePaper` draws a panel at
-`PaperX`, `PaperY` = (50, 100), steps fifteen pixels a line, and prefixes each line with a
-digit starting at `KEYNUM` = 0x31, which is `'1'`. It is a numbered list you answer with
-the number keys, and no `ADDGADGET` is anywhere in it. The gadgets all live in `_STATUS`.
+`PaperX`, `PaperY` = (50, 100) and prefixes each line with a digit starting at `KEYNUM` =
+0x31, which is `'1'`. It is a numbered list you answer with the number keys, and no
+`ADDGADGET` is anywhere in it. The gadgets all live in `_STATUS`. It is built now: see
+5's *The paper, in full*, which also corrects the step between its lines. It is six
+pixels and not the fifteen recorded here; fifteen is the single step `add [PaperY], 0xf`
+takes at 0xaf0f, before the first line and not between them.
 
 ## 8.5 The message system `done`
 
@@ -1368,11 +1655,48 @@ the loop that turns full-screen images into sheets asks for `.piv`, `.cmp` and `
 **The intro is the first half of `INTR.EXE` and the ending is the second.** The program
 reads its command tail at `PSP:0x82` and jumps to a different sequence when it is given
 one, and that is the half with `The End`, `And so, the tale of the Moonstone...`, `co.sti`
-and the plates `bg5`, `bg7` and `bg8`; `ColourMoonstone` reads the same argument to colour
-the stone. So the intro is five plates and a panorama, not eleven, and the other three are
-deliberately not in it. `CO.STI` decodes as the ending's own pan: 48 rows again, with the
-bottom eight a whole screen and everything above it one repeated tile, so the camera rises
-off `bg7` into empty sky.
+and the plates `bg5`, `bg7` and `bg8`. So the intro is five plates and a panorama, not
+eleven, and the other three are deliberately not in it. `CO.STI` decodes as the ending's
+own pan: 48 rows again, with the bottom eight a whole screen and everything above it one
+repeated tile, so the camera rises off `bg7` into empty sky.
+
+**And the argument is `MAIN.EXE`'s exit byte, which is now proved rather than assumed.**
+The entry reads it as
+
+```text
+0x000c  mov ax, es:[0x82]      ; the two characters of the command tail
+0x0010  sub ax, 0x3131         ; both are digits
+0x0013  cmp al, 3; ja          ; and both are '1' to '4'
+0x0017  cmp ah, 3; ja
+0x001c  add ax, 0x101
+0x001f  mov [0x12d1], ax
+0x0063  cmp [0x12d1], 0; je 0x6d      ; no tail: the intro
+0x006a  jmp 0xfa                      ; a tail: the ending
+```
+
+so `al` is the first digit and `ah` the second, each 1 to 4. Two routines read that word.
+The one at 0x3b23, called from `ColourKnight`, branches on **`al`** and patches three
+twelve-bit words into a plate's palette; the one at 0x3b9d, called five times from
+`ColourMoonstone` and once from `ColourKnight`, branches on **`ah`** and patches four:
+
+```text
+ah = 1  0xe00 0x900 0x600 0x300     red
+ah = 2  0x05d 0x028 0x016 0x003     blue
+ah = 3  0xfa0 0xb40 0x930 0x710     gold
+ah = 4  0x0c5 0x082 0x061 0x040     green
+```
+
+`MOON:KnightWonGame` puts the knight in the **high** nibble as 3 -> 1, 0 -> 2, 1 -> 3,
+2 -> 4, and seats 3, 0, 1 and 2 are `RNAME` red, `BNAME` blue, `GNAME` gold and `ENAME`
+emerald. **Four for four**: the second digit is the high nibble and it recolours the
+winning knight in the ending, so `Tally::code` has somewhere to go after all. The first
+digit is the low nibble, which is the moon, and it colours the stone.
+
+The sequence itself is at 0xfa: the `CEREMONY` card at `DS:0x13b9`, then the plate loads at
+0x3a00, then four scene routines at 0x547, 0x628, 0x6db and 0x778, then `The End` at
+`DS:0x0002` held for 0x64 retraces. `And so, the tale of the Moonstone...` at `DS:0x1459`
+is inside the last of the four. **Not built**: it wants `co.sti` baked as a second
+panorama, the eight cast scripts those four routines spawn, and a mode of its own.
 
 **Built:** the logo, the wordmark and the publisher's card, the seven credit screens, the
 pan, and the plates in the order the scene routines hand them to the blitter, with the cast
@@ -1383,7 +1707,9 @@ running on the intro's own scripts and every caption at its own y, then the stor
 held, because in the original each is up for exactly as long as the next file takes to come
 off a floppy; the rounding of the intro's 9.1 frames a second onto this engine's sixty ticks;
 and the dark ring drawn round a caption, which stands in for the glyph shading this engine's
-silhouette text throws away. The ending's own sequence is recovered above but not built.
+silhouette text throws away. The ending's own sequence is recovered above but not built: a
+win shows `VICTORY`, waits for fire and goes to the title, which is as far as it can go
+while there is nothing to hand the exit byte to.
 
 ## 8.7 Save and load `done, ours`
 
@@ -1428,8 +1754,10 @@ and F9, because core does no I/O and keeps its one dependency.
 
 - [x] Title screen and attract mode
 - [x] Character select: the four knights, and what they are
-- [x] A real status panel
-- [ ] Typing your own name over the knight's, and the panel's other pages
+- [x] A real status panel, which is a screen of its own and the only place the knight's
+      numbers are drawn. Nothing is drawn over a bout; see 8.3
+- [x] Typing your own name over the knight's: `TypeName`, `ASCIIT`, `CURSOR` and the
+      thirteen-character field. The panel's other pages are still not built
 - [x] Mouse pointer and clickable widgets
 - [x] The message system: three distinct kinds (wait, occurrence, instruction)
 - [x] The intro sequence. `INTR.EXE`'s image expanded, the `.STI` tile map decoded, the

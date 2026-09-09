@@ -32,12 +32,49 @@
 //! ```
 //!
 //! So **winning quits MAIN.EXE with an exit code**: the low nibble says which
-//! moon it was and the high nibble which of the four knights, and something
-//! outside the program is meant to read it. `INTR.EXE` has never been examined
-//! ([`docs/BUILD_ORDER.md`] item 55), so what it does with that byte is not
-//! known and the ending henge shows is ours. [`Tally::code`] computes the byte
-//! anyway, because it is recovered and because it is the one thing the original
-//! records about a win.
+//! moon it was and the high nibble which of the four knights, and `INTR.EXE`
+//! reads it. Its entry does `mov ax, es:[0x82]; sub ax, 0x3131` on a two digit
+//! command tail and jumps to the ending sequence when there is one, and the
+//! routine at its 0x3b9d branches on the second digit to patch four twelve bit
+//! words into a plate's palette: red for 1, blue for 2, gold for 3, green for 4.
+//! `KnightWonGame`'s high nibble is 3 -> 1, 0 -> 2, 1 -> 3, 2 -> 4, and seats 3,
+//! 0, 1 and 2 are the red, blue, gold and emerald knights, so the two agree four
+//! for four. [`Tally::code`] is that byte. `docs/COMPLETE.md` 8.6 has the rest;
+//! the sequence itself is not built.
+//!
+//! **The two endings are two messages and nothing else.** Both were read out of
+//! the image rather than designed:
+//!
+//! ```text
+//! MOON:KnightWonGame 0x10cf  push bp                      ; the exit byte
+//!                            mov si, VICTORY
+//!                            call 0x8eeb                  ; OCCURMESSAGE
+//!                            mov ax, 0x14; call 0x5a24    ; one vertical blank
+//!                            call 0x8251                  ; WaitFIRE
+//!                            mov ax, 1; call 0x8f80
+//!                            pop ax; mov [0x8186], al
+//!                            jmp 0x8e   -> mov ah, 4ch; mov al, [0x8186]; int 21h
+//!
+//! MOON:0x617                 mov si, GameOverMes
+//!                            call 0x8f17                  ; INSTRUCTMESSAGE
+//!                            call 0x8251                  ; WaitFIRE
+//!                            call 0xa554                  ; the map's effects off
+//!                            jmp StartAgain               ; the title
+//! ```
+//!
+//! `0x617` is reached from `_MAP:ScrollINPUT`, where scancode 0x10 quits, and
+//! from `_MAP:NextWHICH`, where the last knight with no life points left falls
+//! through to it.
+//!
+//! **So there is no ending screen and no tally.** `OCCURMESSAGE` (image 0x8eeb)
+//! and `INSTRUCTMESSAGE` (0x8f17) both `call 0x8e90` first, which is the
+//! `rep movsb` that puts `MESSAGE.PIV` back, so a win and a loss are the same
+//! stone circle every other message is drawn over; the loss gets the red ramp
+//! because it goes through the instruction door. A page of seven counted lines
+//! over `bg8.piv` used to stand here. `GAMEOVER`, `GAMETABLE`, `TOTALS`,
+//! `PPOINT`, `PINDEX`, `FMEM_POINTS` and `FMEM_COLAREA` are PUBLIC names with
+//! no addresses behind them, so there was never a tally to port, and `bg8.piv`
+//! belongs to `INTR.EXE`'s ending sequence rather than to this.
 //!
 //! **The words are the original's, and the records have now been read.** Every
 //! message in the chain lives in MOON's text pool at image 0xd6e0, which is a
@@ -51,14 +88,17 @@
 //! ```text
 //! HengeInstruct  To be granted a / longer life you must / offer an item of /
 //!                magical nature to Danu / Press fire to continue
-//! VICTORY        You have completed / the quest
+//! VICTORY        You have completed  y 75 / the quest  y 95
 //! ValleyEnter    You have proven your skill / and agility against the /
 //!                Guardian.  You have been / granted a Moonstone. /
 //!                Press fire to continue
 //! NoKeysMessage  You must have all four keys / to enter the /
 //!                Valley of the Gods / Press fire to continue
-//! GameOverMes    GAME OVER / Press fire to continue
+//! GameOverMes    GAME OVER  y 95 / Press fire to continue  y 180
 //! ```
+//!
+//! Every record in both of those two carries flags 1, which is
+//! `TextPTop`'s centre bit.
 //!
 //! The old pairing was right about every line but one. **`GameOverMes` is not
 //! two lines with a blank for the player number.** It is `GOmes1`, `GAME OVER`,
@@ -67,10 +107,12 @@
 //! the first of them; nothing in the image refers to its address at all, and
 //! `GameOverMes`'s first record points at `GOmes1`. It is dead data.
 //!
-//! `bg8.piv` still sits in the text pool between the victory lines and the next
-//! message, which is why the ending is drawn over that plate. That is an
-//! inference from where the string sits and not a reference anybody has traced,
-//! and it is the only full-screen picture MOON names.
+//! `bg8.piv` sits in the text pool between the victory lines and the next
+//! message, which is why this project once drew the ending over that plate.
+//! Nothing in MOON refers to the string's address, `OCCURMESSAGE` puts
+//! `MESSAGE.PIV` up unconditionally, and `bg8` is one of the three plates
+//! `INTR.EXE`'s ending half uses. So the name is in MOON's pool and the picture
+//! is not MOON's to show.
 //!
 //! **The Guardian's own fight is recovered too.** `InitKnightvsDemon` writes
 //! 250 into the demon's health, one monster, and `ColourBackDrop` with 4, which
@@ -78,11 +120,11 @@
 //!
 //! **What is ours**: where the Valley stands on the map, because
 //! `MOON:MapIconsTABLE` is in the unreadable part of DGROUP like every other
-//! place but the two towns; the ending screen and the tally on it, because the
-//! original has neither and exits to DOS instead; and the words of the tally.
+//! place but the two towns. Nothing else.
 
-use crate::moon::{Key, Moonstone, Phase};
 use crate::item::Items;
+use crate::message::{Kind, Line, Message, FLAG_CENTRE};
+use crate::moon::{Key, Moonstone, Phase};
 use crate::run::Run;
 use serde::{Deserialize, Serialize};
 
@@ -98,16 +140,17 @@ pub const VALLEY_ENTER: [&str; 4] = [
     "granted a Moonstone.",
 ];
 
-/// `VICTORY`, verbatim.
-pub const VICTORY: [&str; 2] = ["You have completed", "the quest"];
+/// `VICTORY`, verbatim: `SHMES7` at y 75 and `SHMES8` at y 95, both centred.
+pub const VICTORY: [(&str, i32); 2] = [("You have completed", 75), ("the quest", 95)];
 
-/// `GOmes1`, the whole of what `GameOverMes` puts up before
-/// `Press fire to continue`. One line, centred at y 95.
-pub const GAME_OVER: &str = "GAME OVER";
-
-/// The plate the ending is drawn over: the only picture MOON names by file,
-/// and it sits in the text pool immediately after the victory lines.
-pub const VICTORY_PLATE: &str = "scene.bg8";
+/// `GameOverMes`, verbatim: `GOmes1` at y 95 and `promes4` at y 180, both
+/// centred.
+///
+/// The string `Player      ` sits nine bytes before `GOmes1` in the data and was
+/// once taken for a first line of this chain. Nothing in the image refers to its
+/// address; `GameOverMes`'s first record points at `GOmes1`.
+pub const GAME_OVER: [(&str, i32); 2] =
+    [("GAME OVER", 95), ("Press fire to continue", 180)];
 
 /// All four key bits. `cmp byte ptr [si+0x14], 0xf`.
 pub const ALL_KEYS: u8 = 0xf;
@@ -149,30 +192,18 @@ pub enum Ending {
     Slain,
 }
 
-/// The final tally.
+/// How a finished run ends: which of the two messages goes up, and the byte a
+/// win leaves behind.
 ///
-/// **Ours.** The original keeps no such page: `KnightWonGame` shows two lines
-/// and exits to DOS, and the game-over routine shows two lines and goes back
-/// to the title. Everything counted here is state the run already carries, so
-/// the tally invents nothing; it only reads out what a quest cost.
+/// There is nothing else in it. `KnightWonGame` shows `VICTORY` and quits with
+/// the exit byte; the routine at 0x617 shows `GameOverMes` and jumps to
+/// `StartAgain`. Neither counts anything, so neither does this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tally {
-    pub knight: String,
-    /// The seat, which is also the knight number `KnightWonGame` folds into
-    /// its exit code.
+    /// The seat, which is the knight number `KnightWonGame` folds into its
+    /// exit code: `[di+0x20]`.
     pub seat: usize,
     pub ending: Ending,
-    pub day: u32,
-    pub fights: u32,
-    pub victories: u32,
-    /// Lairs whose guardian is down, out of however many there are.
-    pub lairs_cleared: usize,
-    pub lairs: usize,
-    pub keys: Vec<Key>,
-    pub stones: Vec<Moonstone>,
-    pub gold: u32,
-    pub experience: u32,
-    pub lives: i32,
 }
 
 impl Tally {
@@ -205,37 +236,20 @@ impl Tally {
         Some(low | high)
     }
 
-    /// The heading, which is one of the original's two messages.
-    pub fn heading(&self) -> String {
-        self.heading_lines().join(" ")
-    }
-
-    /// The heading as the original sets it: `VICTORY` is two lines and
-    /// `GameOverMes` is the one line `GOmes1`.
-    pub fn heading_lines(&self) -> Vec<String> {
-        match self.ending {
-            Ending::Won { .. } => VICTORY.iter().map(|l| l.to_string()).collect(),
-            Ending::Slain => vec![GAME_OVER.to_string()],
+    /// The chain that goes up, and which of the three doors shows it.
+    ///
+    /// `KnightWonGame` hands `VICTORY` to `OCCURMESSAGE` and the routine at
+    /// 0x617 hands `GameOverMes` to `INSTRUCTMESSAGE`, so a win comes up in the
+    /// ordinary message colours and a loss in the red ramp that door installs.
+    pub fn message(&self) -> Message {
+        let (kind, chain): (Kind, &[(&str, i32)]) = match self.ending {
+            Ending::Won { .. } => (Kind::Occurrence, &VICTORY),
+            Ending::Slain => (Kind::Instruction, &GAME_OVER),
+        };
+        Message {
+            kind,
+            lines: chain.iter().map(|(t, y)| Line::new(t, 0, *y, FLAG_CENTRE)).collect(),
         }
-    }
-
-    /// The lines under it. Ours: the original counts none of this, which is
-    /// why they read as plainly as they do. `Life points left` is the one
-    /// label of the seven that is the original's, off the status panel.
-    pub fn lines(&self) -> Vec<String> {
-        vec![
-            format!("{}   Day {}", self.knight, self.day),
-            format!("Won {} of {} fights", self.victories, self.fights),
-            format!("Lairs cleared {} of {}", self.lairs_cleared, self.lairs),
-            format!("Gold {}   Experience {}", self.gold, self.experience),
-            format!("Life points left {}", self.lives),
-            format!("Keys {} of {}", self.keys.len(), Key::ALL.len()),
-            if self.stones.is_empty() {
-                "No moonstone".to_string()
-            } else {
-                self.stones.iter().map(|s| s.name()).collect::<Vec<_>>().join(", ")
-            },
-        ]
     }
 }
 
@@ -321,28 +335,10 @@ impl Run {
         (!self.alive()).then_some(Ending::Slain)
     }
 
-    /// The final page. `None` while the run is still going.
+    /// Which of the two endings is up, and the seat the exit byte is made from.
+    /// `None` while the run is still going.
     pub fn tally(&self) -> Option<Tally> {
-        let ending = self.ending()?;
-        Some(Tally {
-            knight: if self.knight.named() {
-                self.knight.name.clone()
-            } else {
-                "A knight".into()
-            },
-            seat: self.knight.seat,
-            ending,
-            day: self.day,
-            fights: self.fights,
-            victories: self.victories,
-            lairs_cleared: self.lairs.iter().filter(|l| l.cleared).count(),
-            lairs: self.lairs.len(),
-            keys: self.keys_held(),
-            stones: self.stones_held(),
-            gold: self.gold,
-            experience: self.experience,
-            lives: self.lives.max(0),
-        })
+        Some(Tally { seat: self.knight.seat, ending: self.ending()? })
     }
 }
 
@@ -501,10 +497,18 @@ mod tests {
         assert_eq!(r.rite_at_the_stones(None, &items), crate::service::Rite::Won(stone));
         let tally = r.tally().expect("the quest is done");
         assert_eq!(tally.ending, Ending::Won { stone, phase: stone.phase() });
-        assert_eq!(tally.knight, "SIR GODBER");
-        assert_eq!(tally.stones, vec![stone]);
-        assert!(tally.keys.is_empty());
-        assert_eq!(tally.heading(), "You have completed the quest");
+        assert_eq!(r.knight.name, "SIR GODBER");
+        assert_eq!(r.stones_held(), vec![stone]);
+        assert!(r.keys_held().is_empty());
+        // `KnightWonGame` hands `VICTORY` to `OCCURMESSAGE`, so the win is two
+        // centred lines over `MESSAGE.PIV` in the ordinary message colours.
+        let m = tally.message();
+        assert_eq!(m.kind, Kind::Occurrence);
+        assert_eq!(
+            m.lines.iter().map(|l| (l.text.as_str(), l.y)).collect::<Vec<_>>(),
+            vec![("You have completed", 75), ("the quest", 95)],
+        );
+        assert!(m.lines.iter().all(|l| l.align == crate::message::Align::Centre));
     }
 
     /// The exit byte `KnightWonGame` leaves for DOS, for each of the four
@@ -533,9 +537,10 @@ mod tests {
         assert_eq!(t.code(), None, "the loss path never reaches that routine");
     }
 
-    /// Losing properly: the last life ends the run, and the tally says so.
+    /// Losing properly: the last life ends the run, and what goes up is
+    /// `GameOverMes` through the instruction door.
     #[test]
-    fn the_last_life_ends_the_run_and_the_tally_says_what_it_cost() {
+    fn the_last_life_ends_the_run_and_game_over_goes_up() {
         let items = goods();
         let mut r = Run::for_knight(&knight(), 0, &items);
         r.lairs = vec![crate::lair::Lair::default(); PER_FAMILY];
@@ -547,20 +552,25 @@ mod tests {
         }
         let tally = r.tally().expect("out of lives");
         assert_eq!(tally.ending, Ending::Slain);
-        assert_eq!(tally.heading(), "GAME OVER");
-        assert_eq!(tally.fights, 5);
-        assert_eq!(tally.victories, 0);
-        assert_eq!(tally.lairs_cleared, 1);
-        assert_eq!(tally.lairs, PER_FAMILY);
-        assert_eq!(tally.gold, 42);
-        let lines = tally.lines();
-        assert!(lines.iter().any(|l| l == "No moonstone"), "{lines:?}");
-        assert!(lines.iter().any(|l| l == "Lairs cleared 1 of 6"), "{lines:?}");
-        assert!(lines.iter().any(|l| l == "Keys 0 of 4"), "{lines:?}");
-        assert!(lines.iter().any(|l| l == "Life points left 0"), "{lines:?}");
-        // Nothing on the page runs away with itself: the ending screen is 320
-        // pixels wide and a line that overflows it is a line nobody can read.
-        assert!(lines.iter().all(|l| l.len() <= 40), "{lines:?}");
+        assert_eq!(tally.code(), None, "a loss leaves no exit byte");
+        // The run's own counters are untouched by a run ending: nothing reads
+        // them out onto a screen, because the original has no such screen, but
+        // the loss itself has to have been counted.
+        assert_eq!(r.fights, 5);
+        assert_eq!(r.victories, 0);
+        assert_eq!(r.lairs.iter().filter(|l| l.cleared).count(), 1);
+        assert_eq!(r.lairs.len(), PER_FAMILY);
+        assert_eq!(r.gold, 42);
+        assert_eq!(r.lives, 0);
+        // `mov si, GameOverMes; call 0x8f17`, which is `INSTRUCTMESSAGE`: the
+        // red ramp, `GOmes1` at y 95 and `promes4` at y 180, both centred.
+        let m = tally.message();
+        assert_eq!(m.kind, Kind::Instruction);
+        assert_eq!(
+            m.lines.iter().map(|l| (l.text.as_str(), l.y)).collect::<Vec<_>>(),
+            vec![("GAME OVER", 95), ("Press fire to continue", 180)],
+        );
+        assert!(m.lines.iter().all(|l| l.align == crate::message::Align::Centre));
     }
 
     #[test]

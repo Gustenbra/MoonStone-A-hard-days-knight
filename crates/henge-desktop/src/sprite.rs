@@ -44,31 +44,28 @@ pub fn draw(
     }
 }
 
-/// Draw a frame as a flat silhouette.
-///
-/// **Nothing the original draws is drawn this way**, so every use of it is this
-/// project's own and each one has to earn its place. Sheet pixels are palette
-/// indices and nothing records which palette they were baked against, so a
-/// sprite put over a screen it was not authored for comes out as noise; where
-/// henge shows a sprite somewhere the original never shows it, a silhouette in
-/// a chosen colour is the honest answer. What is left after the audit is the
-/// pointer, which henge puts on screens the original has no pointer on; the
-/// Valley's marker on the map; and the in-fight name plates, which the original
-/// does not have at all.
-///
-/// The select screen's highlight frame used to be on that list, because it is
-/// one index and that index belonged to a palette that had not been read. It is
-/// read now, so the frame is blitted like every other cel and this is one use
-/// shorter than it was.
-pub fn draw_mask(
-    reg: &mut Registry, fb: &mut Framebuffer, sheet: &str, index: usize,
-    x: i32, y: i32, colour: u8,
-) -> (i32, i32) {
-    match cut(reg, sheet, index) {
-        Some(c) => {
-            fb.blit_mask(&c.pixels, c.w, c.h, x, y, colour);
-            (c.w as i32, c.h as i32)
-        }
-        None => (0, 0),
-    }
-}
+// `draw_mask`, which drew a frame as a flat silhouette in a chosen colour, used
+// to sit here, and **nothing calls it any more**.
+//
+// Nothing the original draws is drawn that way, so every use of it was this
+// project's own and each one had to earn its place; the audit that began with
+// four uses has finished with none.
+//
+// - The in-fight name plates went first: the original's fight loop (`Combat`,
+//   image 0x351) draws no readout of any kind, so there was nothing there to be
+//   a silhouette of.
+// - The map's own markers went next: `_MAP:DisplayLairs` and
+//   `MOON:CheckLairEncounter` blit `MI.C` 0x14 and 0x1f in their own colours
+//   against `MAP.CMP`'s own palette, and the frames henge flattened are
+//   outlines the original blits nowhere.
+// - The select screen's highlight frame went when `SelectPAL` was read: every
+//   pixel of `SEL.CEL` cel 1 is index 15 and that palette says what 15 is, so
+//   the frame goes through the ordinary cel blit like everything else.
+// - The pointer was the last. `SHOWPOINTER` at image 0xcf31 is one
+//   `call 0x5d7f` with cel 0 in `ax` and the coordinates in `bx` and `cx`: the
+//   same blit, in `PO.CEL`'s own pixels, with no ink and no halo. See
+//   `shell::draw_pointer`.
+//
+// `Framebuffer::blit_mask` stays, because `text::Font::draw` still uses it for
+// the screens whose palette is an arena's rather than one of the three plates
+// that reserve the bold face's five entries.

@@ -148,7 +148,7 @@ pub struct KnightDef {
     pub constitution: i32,
     pub endurance: i32,
     /// Life points. Five, and the healer in `KnightHeal` treats fewer than five
-    /// as a reason to open a flask.
+    /// as a reason to open a potion.
     pub life: i32,
     pub daggers: u32,
     pub gold: u32,

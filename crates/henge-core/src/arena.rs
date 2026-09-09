@@ -94,6 +94,50 @@ pub mod limit {
     pub const FLOOR: i32 = 200;
 }
 
+/// `AddCNT` at DS:`0xa68`, and what `AddKnight` does with it.
+///
+/// **Recovered**, `AddKnight` at image `0x298c`:
+///
+/// ```text
+/// 0298c  add  word [AddCNT], 1
+/// 02991  and  word [AddCNT], 3
+/// 02996  je   AddKnight              ; zero is skipped: round again
+/// 02998  cmp  word [AddCNT], 3  / jne +3 / call FindHalfBORD
+/// 029a2  cmp  word [AddCNT], 2  / jne +3 / call FindQuarterBORD
+/// 029ac  cmp  word [AddCNT], 1  / jne +3 / call Find3QuarterBORD
+/// 029b6  mov  word [di+6], ax        ; whichever of the three ran
+/// ```
+///
+/// So the counter runs 1, 2, 3, 1, 2, 3 and never rests on 0, and the places it
+/// hands out are three quarters, one quarter, one half, over and over. Two
+/// things follow. **Every arrival gets one of the three**, because the store at
+/// `0x29b6` is unconditional, which is why the `z` word of a creature's seat
+/// table and the `0x64` `SetKnightCombat` writes are both dead. And **the
+/// counter is never reset**: it is a word of BSS that only `AddKnight` touches,
+/// so the rotation carries on across a whole session rather than starting again
+/// each bout, and which depth the player's knight gets depends on how many
+/// fighters have stood up before him.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Arrivals(pub i32);
+
+impl Arrivals {
+    /// One arrival: step the counter as `AddKnight` does, and say which of the
+    /// three standing places this one takes, in quarters.
+    pub fn next(&mut self) -> i32 {
+        loop {
+            self.0 = (self.0 + 1) & 3;
+            if self.0 != 0 {
+                break;
+            }
+        }
+        match self.0 {
+            3 => 2,
+            2 => 1,
+            _ => 3,
+        }
+    }
+}
+
 /// One impassable rectangle out of an arena's `.T` header, or the one
 /// `SETDEMONBORD` writes over the list.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,12 +261,17 @@ impl Field {
             .fold(limit::DEPTH_LOW, i32::max)
     }
 
-    /// `FindHalfBORD`, `FindQuarterBORD` and `Find3QuarterBORD`: where a knight
-    /// is stood, as an anchor depth, one quarter, one half or three quarters of
-    /// the way from the deepest border down to the foot of the screen.
+    /// `FindHalfBORD` (image `0x29cb`), `FindQuarterBORD` (`0x29e0`) and
+    /// `Find3QuarterBORD` (`0x29f7`): where an arrival is stood, as an anchor
+    /// depth, one quarter, one half or three quarters of the way from the
+    /// deepest border down to the foot of the screen.
     ///
-    /// `AddKnight` counts places round `1, 2, 3, 0` and calls the three of them
-    /// on 3, 2 and 1, so the fourth seat keeps whatever depth it was built with.
+    /// All three are the same five instructions on DS:`0x80b5`, the deepest
+    /// border row, which the layout loader at image `0x8d93` fills: subtract
+    /// 200, negate, shift, add the row back, take `0x2f` off. The three quarter
+    /// one takes the half and adds half of that again (`mov bx, ax; shr bx, 1;
+    /// add ax, bx`) rather than shifting twice, which is the same number for
+    /// every shipped layout and is reproduced as written.
     pub fn standing_depth(&self, quarters: i32) -> i32 {
         let floor = self.floor();
         let gap = limit::FLOOR - floor;
@@ -449,6 +498,22 @@ mod tests {
         assert_eq!(f.standing_depth(3), 132);
         // And the feet that go with them.
         assert_eq!(f.standing_row(2), 112 + limit::ANCHOR);
+        // The three quarter place is the deepest of the three and its feet are
+        // on row 184, which is inside the thirty two rows this engine used to
+        // cover with a status strip of its own. That is what settles that the
+        // strip was standing on ground a fighter arrives on.
+        assert_eq!(f.standing_row(3), 184);
+        assert!(f.standing_row(3) > 168);
+    }
+
+    #[test]
+    fn add_knight_rotates_three_quarters_one_quarter_one_half_and_never_rests_on_zero() {
+        let mut a = Arrivals::default();
+        let picked: Vec<i32> = (0..7).map(|_| a.next()).collect();
+        assert_eq!(picked, vec![3, 1, 2, 3, 1, 2, 3]);
+        // `and [AddCNT], 3` then `je AddKnight`: the counter itself is only
+        // ever 1, 2 or 3, so no arrival keeps the depth it was built with.
+        assert_eq!(a.0, 1);
     }
 
     #[test]

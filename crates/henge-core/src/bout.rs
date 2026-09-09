@@ -9,11 +9,12 @@
 //! from. A keyboard, an AI and a network packet are interchangeable, which is
 //! the seam networked play plugs into.
 
-use crate::arena::{Border, Field, GLOBAL};
+use crate::arena::{Arrivals, Border, Field, GLOBAL};
 use crate::combat::{line_hits_body, Attack, Fighter, Intent, Order, State};
 use crate::content::ActorDef;
 use crate::monster::Controller;
 use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
+use crate::wave::Wave;
 use serde::{Deserialize, Serialize};
 
 /// Reported so a caller can play a sound, shake the screen, or log a replay,
@@ -142,6 +143,22 @@ pub struct Bout {
     /// `BKnightAttack` (0x4c2b) read it.
     #[serde(default)]
     pub decap: bool,
+    /// How many creatures this fight still owes, how many it holds at once, and
+    /// what one of them is fielded with: `TotalMonsters`, `MaxMonsters`,
+    /// `NumberInCombat` and `SIDE`. See [`crate::wave`].
+    ///
+    /// An empty one owes nothing, which is what a knight against a knight is.
+    #[serde(default)]
+    pub wave: Wave,
+    /// `AddCNT`, DS:`0xa68`, the rotation every arrival's standing depth comes
+    /// out of.
+    ///
+    /// The original's lives in BSS and nothing ever resets it, so the caller
+    /// that sets a bout up carries it from one fight to the next and leaves it
+    /// here; a creature walking in mid-fight takes the next place in the same
+    /// rotation, which is the reason it has to live on the bout as well.
+    #[serde(default)]
+    pub arrivals: Arrivals,
 }
 
 /// Any non-zero start; the original seeds its register off the BIOS tick,
@@ -162,6 +179,8 @@ impl Bout {
             parries: Vec::new(),
             rng: default_rng(),
             decap: false,
+            wave: Wave::default(),
+            arrivals: Arrivals::default(),
         }
     }
 
@@ -187,8 +206,64 @@ impl Bout {
         }
     }
 
+    /// Whether the fight is over.
+    ///
+    /// `CountTheDead` ends one on two conditions and no others: the player's own
+    /// hit points at or below nothing (`0x21a`, and the `StopCombat` his own
+    /// death script calls), or nothing owed and nothing standing (`0x223` and
+    /// `0x22a`). So a fight that still owes creatures is not settled however
+    /// empty the screen looks, which is what used to keep the rest of a
+    /// fourteen strong lair from ever arriving.
+    ///
+    /// A bout with no wave at all, which is every knight against a knight, is
+    /// over when one is left, as it always was.
     pub fn settled(&self) -> bool {
+        if self.wave.max > 0 {
+            let player_down = self.fighters.first().is_some_and(|f| !f.alive());
+            // The count is `NumberInCombat`'s, and the arena is asked as well,
+            // so a death script that somehow never reaches its `TASKGOSUB`
+            // cannot leave a fight nothing is able to end.
+            let standing = self.fighters.iter().skip(1).any(|f| f.alive());
+            return player_down || (!self.wave.owed() && !standing);
+        }
         self.alive_count() <= 1
+    }
+
+    /// `InitNewMO` (`0x27ee`) and the `AddPlayer` (`0x2989`) it ends with: one
+    /// more creature on the screen.
+    ///
+    /// ```text
+    /// 027ee  add  word [NumberInCombat], 1
+    /// 027f5  call FindTABLE                  ; a free actor slot
+    /// 027fa  mov  ax, [si]     / mov [di+2], ax    x
+    /// 027ff  mov  ax, [si+2]   / mov [di+4], ax    y
+    /// 02805  mov  ax, [si+4]   / mov [di+6], ax    z, which AddPlayer overwrites
+    /// 0280b  mov  ax, [si+6]   / mov [di+8], al    facing
+    /// 02814  mov  bx, [INITANIM] / call bx         the stat block
+    /// 0281d  call AddPlayer                        the standing depth
+    /// ```
+    ///
+    /// `seat` is the record `SIDE` or `SetMonsterCombat` named. The hit points
+    /// and the blow are the wave's, because what `INITANIM` writes has already
+    /// been through the moon and through this engine's own scale by the time a
+    /// bout is built, and the bout is not the place that knows either.
+    pub fn field_creature(&mut self, actor: &str, def: &ActorDef, seat: usize) -> usize {
+        // 027ee  add word [NumberInCombat], 1
+        self.wave.arrived();
+        let (x, facing) = def.seat_at(seat).unwrap_or((GLOBAL.left + 50, 1));
+        // 029b6  mov word [di+6], ax: the rotation's depth over the record's own.
+        let y = self.field.standing_row(self.arrivals.next());
+        let mut f = Fighter::new(actor, def, x, y, facing);
+        if self.wave.health > 0 {
+            f.max_health = self.wave.health;
+            f.health = self.wave.health;
+            f.record.set_health(self.wave.health);
+        }
+        if self.wave.damage > 0 {
+            f.damage = self.wave.damage;
+        }
+        self.fighters.push(f);
+        self.fighters.len() - 1
     }
 
     /// The nearest living fighter that is not `me`, for an opponent to aim at.
@@ -676,6 +751,20 @@ impl Bout {
                     Effect::Gosub { routine, .. } if routine == "SetDecapFLAG" => {
                         self.decap = true;
                     }
+                    // `CountTheDead` (0x213), which every one of the eighteen
+                    // death scripts in the bestiary calls through `TASKGOSUB`,
+                    // and which is the whole of the wave logic: one off
+                    // `NumberInCombat`, one off `TotalMonsters`, and then
+                    // `CountDone` (0x243) walks `INITMO` until the screen holds
+                    // `MaxMonsters` again or nothing is left to send. See
+                    // `crate::wave`.
+                    Effect::Gosub { routine, .. } if routine == "CountTheDead" => {
+                        let actor = self.fighters[i].actor.clone();
+                        for _ in 0..self.wave.dead() {
+                            let seat = self.wave.next_seat(&def.wave);
+                            self.field_creature(&actor, def, seat);
+                        }
+                    }
                     // `KillKnight`, which the dragon's own chewing calls.
                     Effect::Gosub { routine, .. } if routine == "KillKnight" => {
                         if let Some(t) = self.nearest_foe(i) {
@@ -1094,6 +1183,93 @@ mod tests {
                 .map(|i| Fighter::new("k", &d, 40 + i * 70, 100, 1))
                 .collect(),
         )
+    }
+
+    /// A lair fight is not over while it still owes creatures, and each death
+    /// brings the next one in: `CountTheDead` (0x213) and `CountDone` (0x243),
+    /// with `InitNewMO` (0x27ee) putting it where its seat record says.
+    ///
+    /// This replaces nothing: the bout used to end the moment one fighter was
+    /// left, which is what kept a lair of fourteen to whatever the arena seated.
+    #[test]
+    fn a_fight_that_still_owes_creatures_is_not_settled_and_tops_itself_up() {
+        use crate::wave::{Wave, WaveDef};
+        let mut def = def();
+        // `TroggTABLE`'s first two records: one off the left edge facing right,
+        // one off the right edge facing left.
+        def.seats = vec![[-50, 0, 100, 1], [360, 0, 150, 3]];
+        def.health = 10;
+        let wave_def = WaveDef {
+            max: 1,
+            heads: 4,
+            cap: 0,
+            alternates: true,
+            reinforced: true,
+            opens_with_side: false,
+            level: Vec::new(),
+        };
+        let mut b = Bout::new(
+            arena_field(),
+            vec![Fighter::new("k", &def, 200, 100, -1), Fighter::new("m", &def, -50, 100, 1)],
+        );
+        b.wave = Wave::open(&wave_def, None, &crate::wave::Level::default());
+        b.wave.arrived();
+        b.wave.health = 10;
+        assert_eq!((b.wave.max, b.wave.total, b.wave.in_combat), (1, 4, 1));
+
+        let mut arrived = 1;
+        let mut killed = 0;
+        while !b.settled() {
+            // Kill whatever creature is standing, then run what its death
+            // script's `TASKGOSUB CountTheDead` runs.
+            let Some(i) = (1..b.fighters.len()).find(|i| b.fighters[*i].alive()) else {
+                panic!("the wave owes {} and the arena is empty", b.wave.total);
+            };
+            b.fighters[i].health = 0;
+            b.fighters[i].state = State::Dead;
+            killed += 1;
+            for _ in 0..b.wave.dead() {
+                let seat = b.wave.next_seat(&wave_def);
+                let n = b.field_creature("m", &def, seat);
+                arrived += 1;
+                // `SIDE` alternates, so the arrivals come in from opposite
+                // sides: record one first off the 0 `SetUpDKL` leaves.
+                let want = if seat == 1 { (360, -1) } else { (-50, 1) };
+                assert_eq!((b.fighters[n].x, b.fighters[n].facing), want);
+                // And each is fielded with what the wave carries, not with the
+                // definition's own hit points.
+                assert_eq!(b.fighters[n].health, 10);
+            }
+            assert!(killed < 20, "the count has to run out");
+        }
+        // `max + total - 1`: one on the screen and four owed is four fights.
+        assert_eq!((killed, arrived), (4, 4));
+        assert!(b.wave.done());
+        assert_eq!(b.wave.in_combat, 0);
+        // The player is still up, so the bout is settled by the count and not
+        // by him going down.
+        assert!(b.fighters[0].alive());
+    }
+
+    /// The other of `CountTheDead`'s two endings: `or ax, ax / jle StopCombat`
+    /// on the player's own hit points at 0x21a. A lair that still owes ten
+    /// creatures is over the moment he falls.
+    #[test]
+    fn the_player_going_down_ends_a_fight_that_still_owes_creatures() {
+        use crate::wave::{Wave, WaveDef};
+        let d = def();
+        let mut b = Bout::new(
+            arena_field(),
+            vec![Fighter::new("k", &d, 200, 100, -1), Fighter::new("m", &d, 40, 100, 1)],
+        );
+        let wave_def =
+            WaveDef { max: 1, heads: 10, reinforced: true, ..WaveDef::default() };
+        b.wave = Wave::open(&wave_def, None, &crate::wave::Level::default());
+        b.wave.arrived();
+        assert!(!b.settled(), "ten owed, so nothing about this is over");
+        b.fighters[0].health = 0;
+        b.fighters[0].state = State::Dead;
+        assert!(b.settled());
     }
 
     /// `SETDEMONBORD`, and the gate on it: a fight narrows to the demon's own

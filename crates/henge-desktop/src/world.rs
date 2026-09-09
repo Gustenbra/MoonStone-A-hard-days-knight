@@ -40,6 +40,11 @@ pub struct Sheet {
     pub fresh_bonus: i32,
     /// The backfire flag: the player's joystick reversed for this bout.
     pub cursed: bool,
+    /// `+0x2e` and `+0x3c` on the knight record, which are the two things
+    /// `AdjustLevel` (image `0x2824`) reads off him before it decides how many
+    /// creatures a fight holds. See `henge_core::wave`.
+    pub strength: i32,
+    pub experience: i32,
 }
 
 pub struct World {
@@ -89,6 +94,18 @@ pub struct World {
     /// What the player's knight carries into the next bout, off the run's
     /// sheet. The other knights get the ten `SetKnightEquipment` hands out.
     player_daggers: Option<u32>,
+    /// `AddCNT`, the counter `AddKnight` stands every arrival by.
+    ///
+    /// It lives here rather than on the bout because the original's lives in
+    /// BSS and nothing resets it: the rotation carries on from bout to bout, so
+    /// which of the three standing places the player's knight gets depends on
+    /// how many fighters have stood up before him.
+    arrivals: henge_core::arena::Arrivals,
+    /// `TotalMonsters` handed over by a lair: `AdjustLevel` at image `0x287e`
+    /// replaces the count its `InitKnightvs*` wrote with the lair record's own
+    /// `+4`, which is `ForestLairs`'s head count. None on the road, where the
+    /// creature's own count stands.
+    heads: Option<i32>,
     /// Tonight's moon, as `moon::Phase::key` writes it.
     ///
     /// `SetRatmenTables` reads the phase every time it sets a ratman up, so
@@ -139,6 +156,8 @@ impl World {
             bestiary,
             gore: true,
             player_daggers: None,
+            arrivals: henge_core::arena::Arrivals::default(),
+            heads: None,
             moon: String::new(),
         };
         // One person by default. Two would leave the second knight controlled by
@@ -191,16 +210,6 @@ impl World {
         self.bout.fighters.get(seat).map_or(true, |f| f.actor == "knight")
     }
 
-    /// What a seat is called: the creature's name from its definition, or
-    /// nothing for a knight, whose name is the roster's business.
-    pub fn creature_name(&self, seat: usize) -> Option<String> {
-        let f = self.bout.fighters.get(seat)?;
-        if f.actor == "knight" {
-            return None;
-        }
-        Some(self.def_of(&f.actor).display_name(&f.actor).to_string())
-    }
-
     /// Field a particular actor as the opponent. An unknown id is refused and
     /// said so, rather than silently fielding a knight.
     pub fn set_foe(&mut self, actor: &str) -> bool {
@@ -210,6 +219,10 @@ impl World {
             return false;
         }
         self.foe = actor.to_string();
+        // A new opponent is a new fight, and only a lair hands a head count
+        // over. Clearing it here means a raid's fourteen cannot leak into the
+        // next ambush on the road; the raid sets it after naming the guardian.
+        self.heads = None;
         self.reset();
         true
     }
@@ -264,6 +277,40 @@ impl World {
 
     pub fn humans(&self) -> usize {
         self.control.iter().filter(|c| matches!(c, Control::Local(_))).count()
+    }
+
+    /// `TotalMonsters` for the next bout, which a lair hands over and the road
+    /// does not: `AdjustLevel` at image `0x287e` writes the lair record's own
+    /// `+4` straight over whatever the `InitKnightvs*` routine decided.
+    ///
+    /// How many of them are on the screen at once is never this number. That is
+    /// `MaxMonsters`, which comes off the creature's own definition and through
+    /// `AdjustLevel` with it.
+    pub fn set_heads(&mut self, heads: Option<i32>) {
+        self.heads = heads;
+        self.reset();
+    }
+
+    /// What `AdjustLevel` reads off the knight, out of the sheet the run handed
+    /// over and the swing the pack gives him.
+    ///
+    /// `CalcDamage` (`0x2d67`) with the swing's kind in `+0x28` is the swing's
+    /// own `*Dam` entry plus strength plus the blade, which is exactly the
+    /// table damage plus [`Sheet::bonus`]. Without a sheet there is no run and
+    /// no knight to read, so a fresh one stands.
+    fn level(&self) -> henge_core::wave::Level {
+        let knight = &self.actors["knight"];
+        let swing = knight.attacks.get(&knight.attack).map_or(4, |a| a.damage);
+        let (strength, experience, bonus) = match self.sheet {
+            Some(s) => (s.strength, s.experience, s.bonus),
+            None => (1, 0, 1),
+        };
+        henge_core::wave::Level {
+            strength,
+            experience,
+            swing: swing + bonus,
+            players: self.humans().max(1) as i32,
+        }
     }
 
     /// Set what the player enters the next bout with. Opponents are always
@@ -404,29 +451,6 @@ impl World {
         out
     }
 
-    /// The entry a seat's plate is drawn in: the first, brightest, of the
-    /// knight's three shades, or the brightest of a creature's own block. The
-    /// strip is ours; that it names a fighter by a colour he is wearing is
-    /// what keeps it honest.
-    pub fn seat_colour(&self, seat: usize) -> u8 {
-        if self.is_knight(seat) {
-            return if self.draws_as_second(seat) {
-                battle_palette::SECOND_AT as u8
-            } else {
-                battle_palette::MAIN_KNIGHT_AT as u8
-            };
-        }
-        let Some(f) = self.bout.fighters.get(seat) else { return battle_palette::SECOND_AT as u8 };
-        let pal = &self.palette;
-        let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        self.colours
-            .creature_entries(&f.actor, self.family())
-            .into_iter()
-            .filter(|i| *i != battle_palette::BLOOD_AT)
-            .max_by_key(|i| luma(pal[*i]))
-            .unwrap_or(battle_palette::SECOND_AT) as u8
-    }
-
     /// The glow a knight's entries walk towards below ten health, and the
     /// entries: `KnightGlowOn` (0x8f8) installs three `COLOURGLOW`s on 6, 7
     /// and 8 for the main knight, the first every other frame and the other
@@ -473,6 +497,10 @@ impl World {
     }
 
     pub fn reset(&mut self) {
+        // `AddCNT` is a word of BSS nothing resets, so the rotation comes back
+        // off the bout that is ending, arrivals it made mid-fight included, and
+        // carries on into the one being built.
+        self.arrivals = self.bout.arrivals;
         let mut field = self.arena().field();
         // `InitKnightvsDemon` calls `SETDEMONBORD` before it stands anybody
         // up, so the demon's own rectangle is the ground the standing places
@@ -485,63 +513,93 @@ impl World {
         {
             field.narrow_to(g);
         }
-        let b = GLOBAL;
-        // `AddKnight` stands each arrival one quarter, one half or three
-        // quarters of the way from the deepest border down to the foot of the
-        // screen, through `FindQuarterBORD`, `FindHalfBORD` and
-        // `Find3QuarterBORD`. The three quarter row is behind our own status
-        // strip, which the original has no equivalent of, so the two nearer
-        // ones are the ones used here and the seats alternate between them.
-        let places = [field.standing_row(1), field.standing_row(2)];
+        // **The opening layout is the original's.** Each arrival takes its x and
+        // its facing out of its own seat record, through `ActorDef::seat`, and
+        // its depth out of `AddKnight`'s rotation: three quarters, one quarter,
+        // one half of the way from the deepest border down to row 200, in that
+        // order, off a counter nothing ever resets. All three places are usable
+        // now that nothing is drawn over the foot of the screen.
+        //
+        // A knight gets the knight's two records, `SetKnightCombat` at 0x2962
+        // for the first and `InitKnightvsKnight` at 0x206b for the second; a
+        // creature gets its own table from `first_seat` on. Fighters are built
+        // in seat order because that is the order the original stands them up:
+        // `SetUpDKL` calls `SetKnightCombat` and then each `InitKnightvs*` walks
+        // its table.
         let knight = self.actors["knight"].clone();
         let foe = self.actors.get(&self.foe).cloned().unwrap_or_else(|| knight.clone());
-        let n = self.control.len().max(2) as i32;
-        let span = b.right - b.left - 100;
-        let fighters = (0..n)
-            .map(|i| {
-                // Spread them across the arena, alternating which way they face
-                // so nobody starts with their back to the fight.
-                let x = b.left + 50 + span * i / (n - 1).max(1);
-                let y = places[(i % 2) as usize];
-                let facing = if i % 2 == 0 { 1 } else { -1 };
-                // People are knights. The seats the machine fills are whatever
-                // the road, or the browser, asked for.
-                match self.control.get(i as usize) {
-                    Some(Control::Ai) if self.foe != "knight" => {
-                        Fighter::new(self.foe.as_str(), &foe, x, y, facing)
-                    }
-                    _ => Fighter::new("knight", &knight, x, y, facing),
-                }
-            })
-            .collect();
-        let mut fighters: Vec<Fighter> = fighters;
+        // **How many creatures, and how many at once, is the original's.**
+        // `InitKnightvs*` writes `MaxMonsters`, `TotalMonsters` and
+        // `NumberInCombat`, `AdjustLevel` (0x2824) moves all three by what the
+        // knight has become, and `SetMonsterCombat` (0x27e4) then stands
+        // `MaxMonsters` of them up and no more. The rest arrive one at a time as
+        // the ones in front of you fall; see `henge_core::wave`.
+        //
+        // A knight has no wave, and neither has a creature the pack gives no
+        // counts for: for those the seats are whatever the caller asked for,
+        // which is what the arena browser's brawl is.
+        let level = self.level();
+        let mut wave = if self.foe != "knight" && foe.wave.max > 0 {
+            henge_core::wave::Wave::open(&foe.wave, self.heads, &level)
+        } else {
+            henge_core::wave::Wave::default()
+        };
+        let humans = self.humans().max(1);
+        let n = if wave.max > 0 {
+            humans + wave.max as usize
+        } else {
+            self.control.len().max(2)
+        };
+        if wave.max > 0 {
+            self.control =
+                (0..n).map(|i| if i < humans { Control::Local(i) } else { Control::Ai }).collect();
+        }
+        let mut fighters: Vec<Fighter> = Vec::with_capacity(n);
+        let mut nth: BTreeMap<&str, usize> = BTreeMap::new();
+        for i in 0..n {
+            // People are knights. The seats the machine fills are whatever the
+            // road, the wave, or the browser asked for.
+            let creature = matches!(self.control.get(i), Some(Control::Ai)) && self.foe != "knight";
+            let (id, def) = if creature { (self.foe.as_str(), &foe) } else { ("knight", &knight) };
+            let seat = nth.entry(id).or_insert(0);
+            // A creature in a wave takes the record `SetMonsterCombat`'s own
+            // pointer walk names, or the one `SIDE` names where the fight opens
+            // through `INITMO` instead. Everything else keeps `first_seat`: two
+            // knights is as many as the original fields, so a third and a fourth
+            // in the browser's brawl take the same two records again. The depths
+            // differ anyway, because the rotation never repeats inside three.
+            let (x, facing) = if creature && wave.max > 0 {
+                let record = wave.opening_seat(&foe.wave, *seat);
+                // `InitNewMO`'s own `add word [NumberInCombat], 1`, 0x27ee.
+                wave.arrived();
+                def.seat_at(record)
+            } else {
+                def.seat(*seat)
+            }
+            .unwrap_or((GLOBAL.left + 50, 1));
+            *seat += 1;
+            let y = field.standing_row(self.arrivals.next());
+            fighters.push(Fighter::new(id, def, x, y, facing));
+        }
         // **The dragon's set piece.** `InitKnightvsDragon` does not put a
-        // dragon in an ordinary bout: it places the head at x 80 and z 100,
-        // then builds two more actors of its own, `Claw1TABLE` and
-        // `Claw2TABLE`, at x 5 and ten rows either side of the head. The
-        // knight comes at it from the right, and the claws guard the ground
-        // in front of it. Nothing else in the game is set up this way.
+        // dragon in an ordinary bout: the head goes in at x 80 like any other
+        // arrival, and then it builds two more actors of its own, `Claw1TABLE`
+        // and `Claw2TABLE`, both at x 5, each of which goes through `AddPlayer`
+        // and so through the same rotation. `DragonMoveClaw1` then pins them
+        // either side of the head. Nothing else in the game is set up this way.
         if self.foe == "dragon" && self.actors.contains_key("dragon_claw") {
             let claw = self.actors["dragon_claw"].clone();
-            let mid = field.standing_row(2);
             fighters.retain(|f| f.actor == "knight" || f.actor == "dragon");
             fighters.truncate(2);
-            if let Some(d) = fighters.iter_mut().find(|f| f.actor == "dragon") {
-                d.x = 80;
-                d.y = mid;
-                d.facing = 1;
-            }
-            if let Some(k) = fighters.iter_mut().find(|f| f.actor == "knight") {
-                k.x = b.right - 60;
-                k.y = mid;
-                k.facing = -1;
-            }
-            // `DragonMoveClaw1`: claw one ten rows in front of the head,
-            // claw two twenty behind it, and both follow it.
-            for dz in [10, -20] {
-                let (x, y) = b.clamp(5, mid + dz);
+            let head = fighters.iter().find(|f| f.actor == "dragon").map_or(0, |f| f.y);
+            // `DragonMoveClaw1`: claw one ten rows in front of the head, claw
+            // two twenty behind it, and both follow it.
+            for (seat, dz) in [10, -20].into_iter().enumerate() {
+                let (x, _) = claw.seat(seat).unwrap_or((5, 1));
+                let (x, y) = GLOBAL.clamp(x, head + dz);
                 let mut f = Fighter::new("dragon_claw", &claw, x, y, 1);
                 f.brain.timer = dz;
+                self.arrivals.next();
                 fighters.push(f);
             }
             self.control = (0..fighters.len())
@@ -550,6 +608,8 @@ impl World {
         }
         self.bout = Bout::new(field, fighters);
         self.bout.bloodless = !self.gore;
+        self.bout.wave = wave;
+        self.bout.arrivals = self.arrivals;
         // `SETDEMONBORD`: an actor may narrow the ground the fight is fought
         // on, and one does.
         {
@@ -612,6 +672,18 @@ impl World {
         }
         if let (Some(d), Some(f)) = (self.player_daggers, self.bout.fighters.first_mut()) {
             f.record.set(field::DAGGERS, d as i32);
+        }
+        // What a creature arriving later is fielded with. `InitNewMO` calls the
+        // same `INITANIM` for every one of them, so a reinforcement is the same
+        // creature as the one it replaces; the numbers are read back off a
+        // fighter already standing rather than worked out twice.
+        if self.bout.wave.max > 0 {
+            let foe = self.foe.clone();
+            if let Some(f) = self.bout.fighters.iter().find(|f| f.actor == foe) {
+                let (health, damage) = (f.max_health, f.damage);
+                self.bout.wave.health = health;
+                self.bout.wave.damage = damage;
+            }
         }
         self.events.clear();
     }
@@ -707,7 +779,12 @@ impl World {
         let mut intents = vec![Intent::default(); self.bout.fighters.len()];
 
         for i in 0..self.bout.fighters.len() {
-            match self.control.get(i).copied() {
+            // A creature the wave walked in mid-fight has no seat in the control
+            // list, because the list was fixed when the bout was built. It is
+            // the machine's, like every other creature: `FindTABLE` hands
+            // `InitNewMO` a free actor slot and `CONTROLTABLE` decides what runs
+            // it off its kind, not off where it sits.
+            match self.control.get(i).copied().or(Some(Control::Ai)) {
                 Some(Control::Local(slot)) => {
                     intents[i] = local.get(slot).copied().unwrap_or_default();
                 }

@@ -35,9 +35,26 @@ pub struct Font {
 
 impl Font {
     pub fn new(def: &FontDef) -> Font {
+        let mut glyph: BTreeMap<char, usize> =
+            def.glyphs.chars().enumerate().map(|(i, c)| (c, i)).collect();
+        // `TextASCII` maps characters to glyphs and `FontDef::glyphs` is its
+        // inverse, so the two characters the table sends to a glyph another
+        // character already names cannot be written in it. Both are added here:
+        // 0x5f, the underscore, shares glyph 69 with the space, and 0x5c, the
+        // backslash, shares glyph 71 with the slash.
+        //
+        // The underscore is not a curiosity. `ASCIIT[0x39]` is 0x5f, so the
+        // space bar types an underscore, which is why the four default knight
+        // names are stored with one. The backslash is `CURSOR`, the caret the
+        // name typing writes into the buffer.
+        for (alias, same_as) in [('_', ' '), ('\\', '/')] {
+            if let Some(g) = glyph.get(&same_as).copied() {
+                glyph.insert(alias, g);
+            }
+        }
         Font {
             sheet: def.sheet.clone(),
-            glyph: def.glyphs.chars().enumerate().map(|(i, c)| (c, i)).collect(),
+            glyph,
             space_width: def.space_width,
             tracking: def.tracking,
             line_height: def.line_height,

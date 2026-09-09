@@ -193,7 +193,7 @@ mod tests {
         run.victories = 4;
         run.fights = 6;
         run.experience = 11;
-        run.kit.take("flask", 2);
+        run.kit.take("potion", 2);
         run.knight.name = "SIR JEFFREY".into();
         run.knight.seat = 2;
         run.knight.strength = 3;

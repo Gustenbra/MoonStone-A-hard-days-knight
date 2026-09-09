@@ -157,50 +157,6 @@ impl Landscape {
     }
 }
 
-/// Classify a map pixel by colour.
-///
-/// **Fallback, not the original's rule.** Used only when a pack carries no
-/// recovered grid. Deliberately crude and deliberately readable: dense green is
-/// forest, pale green is open ground, anything blue is swamp or water, and
-/// everything else, which is rock and scree, is wasteland.
-pub fn terrain_of(rgb: u32) -> Terrain {
-    let (r, g, b) = ((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-
-    if b > r && b >= g {
-        return Terrain::Swamp;
-    }
-    if g > r && g > b {
-        // Green. Dark and saturated reads as canopy; light reads as clearing.
-        return if max < 130 { Terrain::Forest } else { Terrain::Glade };
-    }
-    if max - min < 30 && max > 150 {
-        return Terrain::Glade; // pale, washed out ground
-    }
-    Terrain::Waste
-}
-
-/// Pick the terrain a patch of map reads as. Fallback, as above.
-pub fn terrain_of_patch(samples: impl IntoIterator<Item = u32>) -> Terrain {
-    let mut counts = [0u32; 4];
-    for rgb in samples {
-        counts[match terrain_of(rgb) {
-            Terrain::Forest => 0,
-            Terrain::Glade => 1,
-            Terrain::Swamp => 2,
-            Terrain::Waste => 3,
-        }] += 1;
-    }
-    let best = counts
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, n)| **n)
-        .map(|(i, _)| i)
-        .unwrap_or(3);
-    [Terrain::Forest, Terrain::Glade, Terrain::Swamp, Terrain::Waste][best]
-}
-
 /// What one tick of travel did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Step {
@@ -382,25 +338,6 @@ mod tests {
         land.terrain[Landscape::index(100, 100)] = Terrain::Swamp.code();
         assert_eq!(land.terrain_at(100, 100), Terrain::Swamp);
         assert_eq!(land.terrain_at(0, 0), Terrain::Glade);
-    }
-
-    #[test]
-    fn colours_classify_the_way_the_map_reads() {
-        assert_eq!(terrain_of(0x1e5a22), Terrain::Forest, "dark canopy green");
-        assert_eq!(terrain_of(0x8fd45a), Terrain::Glade, "pale open green");
-        assert_eq!(terrain_of(0x3a6fa8), Terrain::Swamp, "water blue");
-        assert_eq!(terrain_of(0x8a5a34), Terrain::Waste, "rock brown");
-        assert_eq!(terrain_of(0x000000), Terrain::Waste, "anything else");
-    }
-
-    #[test]
-    fn a_dithered_patch_reads_as_its_majority() {
-        // Canopy dithered with a few pale and rocky pixels is still forest.
-        let patch = [0x1e5a22, 0x1e5a22, 0x8fd45a, 0x1e5a22, 0x8a5a34, 0x1e5a22];
-        assert_eq!(terrain_of_patch(patch), Terrain::Forest);
-        // An even mix of water and canopy still has to answer with one of them.
-        let mixed = [0x3a6fa8, 0x3a6fa8, 0x3a6fa8, 0x1e5a22];
-        assert_eq!(terrain_of_patch(mixed), Terrain::Swamp);
     }
 
     #[test]

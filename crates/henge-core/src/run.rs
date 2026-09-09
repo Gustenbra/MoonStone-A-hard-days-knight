@@ -122,6 +122,10 @@ pub const GRUDGE_PER_DAY: u32 = 10;
 /// then `mov byte ptr [si+0x31], 5` in the routine at `0xcad0`.
 pub const LIFE_CEILING: i32 = 5;
 
+/// The life points your own village can raise you to, which is lower:
+/// `cmp byte ptr [si+0x31], 3 / jge` in `ForestVillage` at `0x112a`.
+pub const VILLAGE_CEILING: i32 = 3;
+
 /// The generator behind every magic roll, `0xbd89`, is a sixteen-bit shift
 /// register and the callers keep its low seven bits, so every chance in
 /// `_STATUS` is a count out of 128. `MagicCast` compares the hawk's roll
@@ -568,15 +572,6 @@ impl Run {
     /// nothing, in which case nothing is spent.
     fn apply(&mut self, def: &ItemDef) -> Cast {
         match &def.virtue {
-            // `DRINKPOTIONHEAL`, the henge flask: a fixed amount, and not
-            // opened on a whole man.
-            Virtue::Heal { health } => {
-                if self.health >= self.max_health {
-                    return Cast::Pointless;
-                }
-                self.health = (self.health + health).min(self.max_health);
-                Cast::Healed
-            }
             // The routine at 0xcad0: compare the two health words; when they
             // differ, health becomes the maximum; when they are equal, a life
             // point instead, and five is the most you can hold.
@@ -791,26 +786,31 @@ impl Run {
         self.seed = seed | 1;
     }
 
-    /// Days spent in someone's care. Wounds close, and the price is time.
+    /// Your own home village, which is the one thing the four corners of the
+    /// map hold. Answers whether there was a life point to give.
     ///
-    /// Days are not free, because the calendar is what the map's ambushes and
-    /// the moon are hung on. Returns the days actually spent, which is zero
-    /// when there was nothing to mend: a healer does not take a week off you to
-    /// look at an unmarked man.
+    /// **Recovered.** `ForestVillage`, `MooresVillage` and `WasteVillage` are
+    /// three public names on one routine at image `0x112a`, and all four
+    /// villages go to it (`TakingMoon`, `0xc99` to `0xcb6`, jumps every one of
+    /// the four icon frames there):
     ///
-    /// A town healer may also want coin; that price is charged by the caller
-    /// through [`Run::spend`], because whether a place asks for money is a
-    /// property of the place and not of being mended.
-    pub fn tended(&mut self, days: u32) -> u32 {
-        if !self.alive() || self.health >= self.max_health {
-            return 0;
+    /// ```text
+    /// 0112a  mov  si, [JOYSTICK1+6]      ; whose turn it is
+    /// 0112e  cmp  byte [si+0x31], 3      ; his life points
+    /// 01132  jge  EncounterDone          ; three already: nothing
+    /// 01134  add  byte [si+0x31], 1
+    /// 01138  mov  ax, 9 / call ColourStatus
+    /// ```
+    ///
+    /// So a village is one life point and no more than three of them, which is
+    /// below the five a potion may reach (`0xcad0`). Nothing is paid and no day
+    /// passes: the routine neither calls `AdjustTIME` nor touches the purse.
+    pub fn rest_at_village(&mut self) -> bool {
+        if self.lives >= VILLAGE_CEILING {
+            return false;
         }
-        self.health = self.max_health;
-        self.progress = 0;
-        for _ in 0..days {
-            self.new_day();
-        }
-        days
+        self.lives += 1;
+        true
     }
 
     /// A day turns over. Haste goes with it, since `DistanceDONE` reads the
@@ -974,9 +974,9 @@ mod tests {
         items.insert(
             "potion".into(),
             ItemDef {
-                name: "Flask of healing".into(),
+                name: "Potion of healing".into(),
                 price: 25,
-                virtue: Virtue::Heal { health: 40 },
+                virtue: Virtue::Restore,
                 consumed: true,
             },
         );
@@ -1172,23 +1172,23 @@ mod tests {
         assert_eq!(r.victories, 2);
     }
 
+    /// `ForestVillage` (0x112a), which is all four villages: one life point,
+    /// and `cmp byte [si+0x31], 3 / jge` will not take a knight past three.
     #[test]
-    fn a_healer_trades_days_for_health() {
+    fn your_own_village_is_one_life_point_and_stops_at_three() {
         let mut r = Run::new(100);
-        r.finished_fight(20, true, 0);
-        assert_eq!(r.tended(4), 4);
-        assert_eq!(r.health, 100);
-        assert_eq!(r.day, 5, "four days passed while you lay there");
-    }
-
-    #[test]
-    fn nobody_charges_a_whole_man() {
-        let mut r = Run::new(100);
-        assert_eq!(r.tended(4), 0, "nothing to mend, so no time spent");
-        assert_eq!(r.day, 1);
-        // And a dead man is past helping.
-        r.finished_fight(0, false, 0);
-        assert_eq!(r.tended(4), 0);
+        r.lives = 1;
+        let day = r.day;
+        assert!(r.rest_at_village());
+        assert_eq!(r.lives, 2);
+        assert!(r.rest_at_village());
+        assert_eq!(r.lives, 3);
+        assert!(!r.rest_at_village(), "three is the ceiling");
+        assert_eq!(r.lives, 3);
+        assert_eq!(r.day, day, "and a village costs no time");
+        assert_eq!(r.gold, 0, "nor coin");
+        // A potion may still carry a man past it, to five.
+        assert!(VILLAGE_CEILING < LIFE_CEILING);
     }
 
     #[test]
@@ -1255,37 +1255,41 @@ mod tests {
 
     // Using and losing.
 
-    /// `DRINKPOTIONHEAL`, and the everyday half of `TAKEFROMKNIGHT`: the flask
-    /// is gone afterwards.
+    /// The routine at `0xcad0`, and the everyday half of `TAKEFROMKNIGHT`: the
+    /// potion is gone afterwards.
     #[test]
-    fn drinking_a_flask_mends_you_and_empties_it() {
+    fn drinking_a_potion_mends_you_and_empties_it() {
         let (mut r, items) = (Run::new(100), shop());
         r.kit.take("potion", 2);
         r.finished_fight(30, true, 0);
         assert_eq!(r.use_item("potion", &items), Used::Did);
-        assert_eq!(r.health, 70);
-        assert_eq!(r.kit.count("potion"), 1, "one flask emptied, not both");
+        assert_eq!(r.health, 100, "the two health words differ, so health becomes the maximum");
+        assert_eq!(r.kit.count("potion"), 1, "one potion emptied, not both");
+    }
+
+    /// A whole man gains a life point instead: `inc byte [si+0x31]`, and five
+    /// is the most he may hold.
+    #[test]
+    fn a_whole_man_drinking_a_potion_gains_a_life_point_instead() {
+        let (mut r, items) = (Run::new(100), shop());
+        r.kit.take("potion", 2);
+        let lives = r.lives;
+        assert_eq!(r.use_item("potion", &items), Used::Did);
+        assert_eq!(r.health, 100);
+        assert_eq!(r.lives, (lives + 1).min(LIFE_CEILING));
     }
 
     #[test]
-    fn a_flask_never_mends_past_whole() {
+    fn a_man_at_the_life_ceiling_does_not_waste_a_potion() {
         let (mut r, items) = (Run::new(100), shop());
-        r.kit.take("potion", 1);
-        r.finished_fight(80, true, 0);
-        r.use_item("potion", &items);
-        assert_eq!(r.health, 100, "forty points offered, twenty taken");
-    }
-
-    #[test]
-    fn an_unmarked_man_does_not_waste_a_flask() {
-        let (mut r, items) = (Run::new(100), shop());
+        r.lives = LIFE_CEILING;
         r.kit.take("potion", 1);
         assert_eq!(r.use_item("potion", &items), Used::Pointless);
         assert_eq!(r.kit.count("potion"), 1, "still corked");
     }
 
     #[test]
-    fn you_cannot_drink_a_flask_you_do_not_have() {
+    fn you_cannot_drink_a_potion_you_do_not_have() {
         let (mut r, items) = (Run::new(100), shop());
         r.finished_fight(30, true, 0);
         assert_eq!(r.use_item("potion", &items), Used::HaveNone);
@@ -1438,22 +1442,6 @@ mod magic_tests {
         assert_eq!(r.cast("healing_potion", &items), Cast::Pointless, "five and no more");
         assert_eq!(r.kit.count("healing_potion"), 1, "so it stays corked");
         assert_eq!(r.use_item("healing_potion", &items), Used::Pointless);
-    }
-
-    /// The henge flask is unchanged by the recovered potion beside it: a
-    /// fixed amount, and not opened on a whole man.
-    #[test]
-    fn the_flask_still_mends_by_its_amount() {
-        let mut items = magic();
-        items.insert(
-            "potion".into(),
-            ItemDef { name: "Flask of healing".into(), price: 25, virtue: Virtue::Heal { health: 4 }, consumed: true },
-        );
-        let mut r = knight_run(&items);
-        r.kit.take("potion", 2);
-        r.finished_fight(10, true, 0);
-        assert_eq!(r.cast("potion", &items), Cast::Healed);
-        assert_eq!(r.health, 14);
     }
 
     // Item 40: the ring, the sword and the armour, on the run.

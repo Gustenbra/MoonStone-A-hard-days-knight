@@ -31,20 +31,23 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "do", rename_all = "kebab-case")]
 pub enum Effect {
-    /// Someone tends your wounds. The price is days, and in a town also coin.
-    Heal {
-        days: u32,
-        /// Coin as well as days. Zero for a hermit who wants only your time.
-        #[serde(default)]
-        gold: u32,
-        /// Said when there was something to mend.
+    /// Your own home village: one life point, and never past three.
+    ///
+    /// **Recovered.** `ForestVillage`, `MooresVillage` and `WasteVillage` are
+    /// three public names on one routine at image `0x112a`, which is all four
+    /// villages: `cmp byte [si+0x31], 3 / jge / add byte [si+0x31], 1`, then
+    /// `ColourStatus 9` and back out to the map. Nothing is bought, nothing is
+    /// sold and no day passes.
+    ///
+    /// Which village is whose is `MOON:CheckGROOC` at `0x732`: icon frames
+    /// 0x15 to 0x18 are each gated on `[di+0x20]` being 0, 1, 2 or 3, the
+    /// knight's own colour index, so a village another knight owns is not even
+    /// offered. That gate is [`PlaceDef::knight`].
+    Village {
+        /// Said when there was a life point to give.
         said: String,
-        /// Said when there was not. A healer does not take your time for nothing.
+        /// Said when there was not: three is the ceiling.
         refused: String,
-        /// Said when the purse is short. Falls back to `refused` rather than
-        /// saying nothing, so a refusal is never silent.
-        #[serde(default)]
-        too_poor: String,
     },
     /// A stall. One line, one item, at the price the item data names, so the
     /// menu and the goods can never disagree about what a thing costs.
@@ -105,11 +108,10 @@ impl Effect {
 
     /// Whether taking this option right now would do anything, given the purse
     /// and the pack. The renderer dims the rest, so a man with eight coins can
-    /// see that the flask is out of reach before he tries for it.
+    /// see that the potion is out of reach before he tries for it.
     pub fn offered(&self, items: &Items, run: &Run) -> bool {
         match self {
             Effect::Closed { .. } => false,
-            Effect::Heal { gold, .. } => run.gold >= *gold,
             Effect::Buy { item, .. } => items
                 .get(item)
                 .is_some_and(|d| run.gold >= d.price && run.kit.room() > 0),
@@ -118,6 +120,7 @@ impl Effect {
             Effect::Donate { gold } | Effect::Consult { gold } => run.gold >= *gold,
             Effect::Sell { item } => run.kit.count(item) > 0,
             Effect::Go { .. }
+            | Effect::Village { .. }
             | Effect::Wizard
             | Effect::Offer
             | Effect::Raid { .. }
@@ -131,7 +134,6 @@ impl Effect {
     pub fn cost(&self, items: &Items) -> Option<u32> {
         match self {
             Effect::Buy { item, .. } => items.get(item).map(|d| d.price),
-            Effect::Heal { gold, .. } if *gold > 0 => Some(*gold),
             // Not the wager. The tavern's five gadgets are painted `1 gold` to
             // `5 gold`, so the stake is already the label and a price column
             // beside it would print the same number twice.
@@ -206,6 +208,37 @@ pub struct PlaceDef {
     /// is `DisplayLairs` blitting frame 0x14 wherever the table puts it.
     #[serde(default)]
     pub icon: Option<usize>,
+    /// The line this place puts on the map's paper when you are standing on it.
+    ///
+    /// **Recovered.** `_MAP:OrderOpt` (image 0xaf5e) turns a stack entry's kind
+    /// into one of these: kind 2 takes `_MAP:knlair` (`Enter Lair`), kind 1
+    /// takes `_MAP:knkn` (`Battle with `) with the other knight's name after
+    /// it, and everything else indexes `_MAP:StackMessages` at `DS:0xc404` by
+    /// `kind - 0x15`. The kind is the `MI.C` frame `MOON:MapIconsTABLE` names,
+    /// so the line belongs to the place and is baked beside it.
+    ///
+    /// Empty for a place the original does not have, which then shows its
+    /// [`PlaceDef::name`] instead.
+    #[serde(default)]
+    pub line: String,
+    /// Whose place this is, by the knight's own colour index, or none for a
+    /// place anybody may walk into.
+    ///
+    /// **Recovered.** `MOON:CheckGROOC` at image `0x732` tests the icon frame
+    /// it has just matched and, for the four villages, refuses the entry unless
+    /// `[di+0x20]` agrees:
+    ///
+    /// ```text
+    /// 00732  cmp ax, 0x15 / jne +6 / cmp word [di+0x20], 0 / jne (drop it)
+    /// 0073d  cmp ax, 0x16 / jne +6 / cmp word [di+0x20], 1 / jne (drop it)
+    /// 00748  cmp ax, 0x17 / jne +6 / cmp word [di+0x20], 2 / jne (drop it)
+    /// 00753  cmp ax, 0x18 / jne +6 / cmp word [di+0x20], 3 / jne (drop it)
+    /// ```
+    ///
+    /// So the village is not refused at the door, it never reaches the paper:
+    /// the knight it does not belong to cannot see that it is there.
+    #[serde(default)]
+    pub knight: Option<usize>,
 }
 
 impl PlaceDef {
@@ -222,30 +255,26 @@ impl PlaceDef {
         spans(x, TOKEN_W, self.x, self.w) && spans(y, TOKEN_H, self.y, self.h)
     }
 
-    /// Distance squared between the middle of this place and the middle of the
-    /// token, for picking the closest of several and for naming what you are
-    /// walking towards. Squared so the simulation never needs a square root,
-    /// and so never needs a float.
-    pub fn distance2(&self, x: i32, y: i32) -> i32 {
-        let dx = (x * 2 + TOKEN_W) - (self.x * 2 + self.w);
-        let dy = (y * 2 + TOKEN_H) - (self.y * 2 + self.h);
-        (dx * dx + dy * dy) / 4
+    /// The same, for one knight: `CheckGROOC`'s `[di+0x20]` gate on top of the
+    /// overlap. A place that belongs to somebody else is not there at all.
+    pub fn covers_for(&self, x: i32, y: i32, knight: usize) -> bool {
+        self.knight.is_none_or(|whose| whose == knight) && self.covers(x, y)
+    }
+
+    /// The line the paper carries for this place: the recovered one if there is
+    /// one, and the place's own name if the original has no such place.
+    pub fn paper_line(&self) -> &str {
+        if self.line.is_empty() {
+            &self.name
+        } else {
+            &self.line
+        }
     }
 }
 
 /// Every place in the world, keyed by id. A `BTreeMap` so that iteration order
 /// is defined and two machines pick the same place out of an overlap.
 pub type Places = BTreeMap<String, PlaceDef>;
-
-/// The place you are nearest, within `range` pixels. Used to name what you are
-/// walking towards before you get there.
-pub fn nearest(places: &Places, x: i32, y: i32, range: i32) -> Option<(&str, &PlaceDef)> {
-    places
-        .iter()
-        .filter(|(_, d)| !d.hidden && d.distance2(x, y) <= range * range)
-        .min_by_key(|(id, d)| (d.distance2(x, y), id.as_str()))
-        .map(|(id, d)| (id.as_str(), d))
-}
 
 /// The terrain family of every lair the pack declares, by the lair number its
 /// [`Effect::Raid`] names, which is what [`Run::stock_lairs`] wants.
@@ -271,35 +300,107 @@ pub fn lair_families(places: &Places) -> Vec<String> {
     families
 }
 
-/// Whether the traveller is standing in a place, and whether they just walked in.
+/// How many entries the overlap stack holds: `MOON:CheckGROOC`'s walker clears
+/// five eight-byte slots at `DS:043c` before it starts
+/// (`mov bx, 0x43c; mov cx, 5`, image 0x6b5), so five is what a traveller can be
+/// standing on at once.
+pub const OVERLAP_STACK: usize = 5;
+
+/// Everything the traveller is standing on, as the original keeps it.
 ///
-/// Arriving has to be an edge rather than a state: leaving a town puts you back
-/// on top of it, so a state test would walk you straight back inside on the
-/// very next tick and you could never get out.
+/// **Recovered, and it replaces an invention.** Walking onto a place used to
+/// open it there and then, on an edge. The original does nothing of the kind.
+/// The walker at image 0x6b5, which `_MAP:FOLLOW` calls once a frame
+/// (`call 0x04dc` at 0xa2d3), clears the five slots at `DS:043c`, walks
+/// `MOON:MapIconsTABLE` three words at a pass, hands each record to
+/// `MOON:CheckGROOC` and pushes `[x][y][kind]` for every one that overlaps;
+/// `MOON:CheckEncounterDone` then pushes the rival knights and
+/// `MOON:CheckLairEncounter` the lairs. Nothing is opened. The stack is read
+/// only when fire is pressed: `_MAP:ScrollINPUT` tests `JOYS` bit 0x10 at
+/// 0xa3c9 and calls `_MAP:DisplayStack`, which counts the live slots and
+///
+/// * **none**: returns zero and the map carries on (`_MAP:NoEncounter`);
+/// * **one**: falls straight into `_MAP:StackDecision` and enters it;
+/// * **more**: draws `_MAP:CreatePaper` and waits for a number key.
+///
+/// So the stack is rebuilt from scratch every frame and holds no memory of
+/// where you were, which is why standing still after leaving a town does not
+/// walk you back in: nothing reads the stack until fire is pressed again.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub struct Approach {
-    inside: Option<String>,
+pub struct Overlaps {
+    on: Vec<String>,
 }
 
-impl Approach {
-    /// Advance to a map position. Returns the place walked into, once.
-    pub fn step(&mut self, places: &Places, x: i32, y: i32) -> Option<String> {
-        let here = places
-            .iter()
-            .filter(|(_, d)| d.covers(x, y))
-            .min_by_key(|(id, d)| (d.distance2(x, y), id.as_str()))
-            .map(|(id, _)| id.clone());
-        let arrived = match (&self.inside, &here) {
-            (Some(was), Some(id)) if was == id => None,
-            (_, Some(id)) => Some(id.clone()),
-            _ => None,
-        };
-        self.inside = here;
-        arrived
+impl Overlaps {
+    /// Rebuild the stack for a map position, which is what one frame does.
+    ///
+    /// The original walks `MapIconsTABLE` in table order and the lairs after
+    /// it. A pack is a map and not a table, so the order here is the pack's
+    /// own, which a [`Places`] makes the id order. It is only ever visible when
+    /// two boxes overlap at once.
+    /// `knight` is the traveller's own colour index, which is what
+    /// `CheckGROOC` gates the four villages on: a village another knight owns
+    /// never reaches the stack.
+    pub fn gather(&mut self, places: &Places, x: i32, y: i32, knight: usize) {
+        self.on.clear();
+        for (id, def) in places {
+            if self.on.len() == OVERLAP_STACK {
+                break;
+            }
+            if def.covers_for(x, y, knight) {
+                self.on.push(id.clone());
+            }
+        }
     }
 
-    pub fn inside(&self) -> Option<&str> {
-        self.inside.as_deref()
+    pub fn ids(&self) -> &[String] {
+        &self.on
+    }
+
+    pub fn len(&self) -> usize {
+        self.on.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.on.is_empty()
+    }
+
+    /// The only entry, when there is exactly one: `DisplayStack`'s `cmp ax, 1`
+    /// at 0xae40 goes straight to `StackDecision` without drawing anything.
+    pub fn only(&self) -> Option<&str> {
+        match self.on.as_slice() {
+            [one] => Some(one.as_str()),
+            _ => None,
+        }
+    }
+
+    /// What a number key answers with. `DisplayStack`'s reader at 0xae58 keeps
+    /// asking until the scan code is between 2 and 0x0a, which is the top row
+    /// `1` to `9`, and subtracts 2 for the slot; an empty slot is refused and
+    /// it waits again. So `1` is the first line and a number past the end of
+    /// the list does nothing at all.
+    pub fn answer(&self, number: u32) -> Option<&str> {
+        if !(1..=9).contains(&number) {
+            return None;
+        }
+        self.on.get(number as usize - 1).map(String::as_str)
+    }
+
+    /// The paper's numbered lines, as `_MAP:CreatePaper` composes them.
+    ///
+    /// Each pass writes `KEYNUM` and then a space into the line buffer
+    /// (`mov al, [KEYNUM]; mov [bp], al; inc bp; mov byte [bp], 0x20`, 0xaf24),
+    /// calls `OrderOpt` to append the words, draws the buffer and steps
+    /// `KEYNUM`, which starts at 0x31, the character `1`.
+    pub fn paper(&self, places: &Places) -> Vec<String> {
+        self.on
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let what = places.get(id).map_or(id.as_str(), |d| d.paper_line());
+                format!("{} {what}", i + 1)
+            })
+            .collect()
     }
 }
 
@@ -387,22 +488,12 @@ impl Visit {
                 self.said = said.clone();
                 Answer::Stayed { days: 0 }
             }
-            Effect::Heal { days, gold, said, refused, too_poor } => {
-                // Coin is asked for at the door, before the days are spent, so
-                // a man who cannot pay does not lose a week finding out.
-                if run.gold < *gold {
-                    self.said =
-                        if too_poor.is_empty() { refused.clone() } else { too_poor.clone() };
-                    return Answer::Stayed { days: 0 };
-                }
-                let spent = run.tended(*days);
-                if spent > 0 {
-                    run.spend(*gold);
-                    self.said = said.clone();
-                } else {
-                    self.said = refused.clone();
-                }
-                Answer::Stayed { days: spent }
+            // `ForestVillage` (0x112a): one life point, three is the ceiling,
+            // and it costs nothing at all.
+            Effect::Village { said, refused } => {
+                self.said =
+                    if run.rest_at_village() { said.clone() } else { refused.clone() };
+                Answer::Stayed { days: 0 }
             }
             Effect::Buy { item, said, too_dear, no_room } => {
                 self.said = match run.buy(item, items) {
@@ -542,18 +633,20 @@ mod tests {
         items.insert(
             "potion".into(),
             ItemDef {
-                name: "Flask of healing".into(),
+                name: "Potion of healing".into(),
                 price: 25,
-                virtue: Virtue::Heal { health: 40 },
+                virtue: Virtue::Restore,
                 consumed: true,
             },
         );
         items
     }
 
-    fn healer() -> PlaceDef {
+    /// A village, which is what the four corners of the map hold: one line that
+    /// gives a life point, and no price on it.
+    fn village() -> PlaceDef {
         PlaceDef {
-            name: "The Healer".into(),
+            name: "Village".into(),
             scene: "scene.hea".into(),
             x: 100,
             y: 100,
@@ -562,6 +655,8 @@ mod tests {
             hidden: false,
             intro: String::new(),
             icon: None,
+            line: String::new(),
+            knight: None,
             menu: [8, 8, 100, 100],
             text: None,
             dice: false,
@@ -571,13 +666,10 @@ mod tests {
                     effect: Effect::Closed { said: "Nothing to sell you.".into() },
                 },
                 Choice {
-                    label: "Tend my wounds".into(),
-                    effect: Effect::Heal {
-                        days: 3,
-                        gold: 0,
-                        said: "You are made whole.".into(),
-                        refused: "You have no need of me.".into(),
-                        too_poor: String::new(),
+                    label: "Enter Village".into(),
+                    effect: Effect::Village {
+                        said: "Your own people take you in.".into(),
+                        refused: "You are as whole as this place can make you.".into(),
                     },
                 },
                 Choice { label: "Leave".into(), effect: Effect::Leave },
@@ -585,7 +677,7 @@ mod tests {
         }
     }
 
-    /// A stall, as the pack authors one: a way in, a thing to buy, a flask to
+    /// A stall, as the pack authors one: a way in, a thing to buy, a potion to
     /// drink, and a way back to the room you came from.
     fn merchant() -> PlaceDef {
         PlaceDef {
@@ -598,6 +690,8 @@ mod tests {
             hidden: true,
             intro: String::new(),
             icon: None,
+            line: String::new(),
+            knight: None,
             menu: [8, 8, 100, 100],
             text: None,
             dice: false,
@@ -606,13 +700,13 @@ mod tests {
                     label: "Flask of healing".into(),
                     effect: Effect::Buy {
                         item: "potion".into(),
-                        said: "The flask is yours.".into(),
+                        said: "The potion is yours.".into(),
                         too_dear: "Come back with coin.".into(),
                         no_room: "You cannot carry another.".into(),
                     },
                 },
                 Choice {
-                    label: "Drink a flask".into(),
+                    label: "Drink a potion".into(),
                     effect: Effect::Use {
                         item: "potion".into(),
                         said: "You drain it.".into(),
@@ -629,8 +723,8 @@ mod tests {
 
     fn world() -> Places {
         let mut p = Places::new();
-        p.insert("healer".into(), healer());
-        let mut far = healer();
+        p.insert("village".into(), village());
+        let mut far = village();
         far.name = "Highwood".into();
         far.x = 200;
         far.y = 40;
@@ -643,9 +737,9 @@ mod tests {
     /// that option had refused you.
     #[test]
     fn the_last_message_does_not_follow_the_highlight() {
-        let def = healer();
+        let def = village();
         let mut run = Run::new(100);
-        let mut v = Visit::open("healer");
+        let mut v = Visit::open("village");
         assert!(matches!(def.options[v.cursor].effect, Effect::Closed { .. }));
         v.choose(&def, &shop(), &mut run);
         assert!(!v.said.is_empty(), "a shut option should say why");
@@ -658,7 +752,7 @@ mod tests {
     /// inside it even though the middles are further apart than either half.
     #[test]
     fn a_place_is_a_box_and_its_corners_count() {
-        let d = healer(); // 10 x 10 at (100, 100); the token is 8 x 10.
+        let d = village(); // 10 x 10 at (100, 100); the token is 8 x 10.
         assert!(d.covers(109, 109), "a single overlapping pixel is inside");
         assert!(!d.covers(110, 100), "one further and the boxes only touch");
         assert!(!d.covers(100, 110));
@@ -673,7 +767,9 @@ mod tests {
     fn the_towns_hold_the_spots_the_original_sends_a_knight_to() {
         let town = |x, y, w, h| PlaceDef {
             name: "t".into(), scene: "s".into(), x, y, w, h,
-            hidden: false, intro: String::new(), icon: None, menu: [0, 0, 0, 0],
+            hidden: false, intro: String::new(), icon: None, line: String::new(),
+            knight: None,
+            menu: [0, 0, 0, 0],
             text: None, dice: false, options: vec![],
         };
         // Highwood: icon 0x19 is 25x32, hung so that (94, 47) is in the middle.
@@ -687,95 +783,161 @@ mod tests {
         assert!(!waterdeep.covers(94, 47));
     }
 
+    /// Walking onto a place puts it on the stack and opens nothing. The walker
+    /// at image 0x6b5 only ever pushes; `_MAP:DisplayStack` is what reads, and
+    /// nothing calls it until `ScrollINPUT` sees fire.
     #[test]
-    fn a_place_is_entered_by_walking_onto_it() {
-        let mut a = Approach::default();
-        assert_eq!(a.step(&world(), 60, 60), None, "nowhere near");
-        assert_eq!(a.step(&world(), 102, 101).as_deref(), Some("healer"));
-    }
-
-    #[test]
-    fn walking_out_of_a_place_does_not_walk_you_back_in() {
+    fn standing_on_a_place_stacks_it_and_opens_nothing() {
         let places = world();
-        let mut a = Approach::default();
-        assert!(a.step(&places, 100, 100).is_some());
-        // Leaving the menu leaves you standing on the town. Standing still, or
-        // shuffling about inside it, must not re-open it.
-        assert_eq!(a.step(&places, 100, 100), None);
-        assert_eq!(a.step(&places, 102, 102), None);
-        assert_eq!(a.inside(), Some("healer"));
-        // Step off, and it becomes enterable again.
-        assert_eq!(a.step(&places, 140, 140), None);
-        assert_eq!(a.inside(), None);
-        assert_eq!(a.step(&places, 100, 100).as_deref(), Some("healer"));
+        let mut s = Overlaps::default();
+        s.gather(&places, 60, 60, 0);
+        assert!(s.is_empty(), "nowhere near");
+        assert_eq!(s.only(), None);
+        s.gather(&places, 102, 101, 0);
+        assert_eq!(s.ids(), ["village"]);
+        assert_eq!(s.only(), Some("village"), "one entry goes straight to StackDecision");
+        assert_eq!(s.answer(1), Some("village"));
     }
 
+    /// The stack is rebuilt from nothing every frame, so it carries no memory of
+    /// where you were and leaving a place cannot walk you back into it: what
+    /// keeps you out is that fire has to be pressed again.
     #[test]
-    fn stepping_straight_from_one_place_into_another_enters_the_second() {
+    fn the_stack_is_rebuilt_every_frame_and_remembers_nothing() {
         let places = world();
-        let mut a = Approach::default();
-        a.step(&places, 100, 100);
-        assert_eq!(a.step(&places, 200, 40).as_deref(), Some("highwood"));
+        let mut s = Overlaps::default();
+        s.gather(&places, 100, 100, 0);
+        assert_eq!(s.ids(), ["village"]);
+        // Standing still is the same answer, not a second arrival.
+        s.gather(&places, 100, 100, 0);
+        assert_eq!(s.ids(), ["village"]);
+        // Step off and the stack empties completely.
+        s.gather(&places, 140, 140, 0);
+        assert!(s.is_empty());
+        // Straight from one place onto another, with no edge bookkeeping.
+        s.gather(&places, 200, 40, 0);
+        assert_eq!(s.ids(), ["highwood"]);
     }
 
+    /// Two boxes at once is what the paper exists for: `DisplayStack` counts
+    /// more than one, draws `CreatePaper` and waits on a number key. The lines
+    /// are `1 `, `2 ` and so on from `KEYNUM` = `'1'`, with `OrderOpt`'s words
+    /// after the space.
     #[test]
-    fn the_healer_mends_you_and_charges_days() {
-        let def = healer();
+    fn two_places_at_once_make_a_numbered_paper() {
+        let mut places = world();
+        let mut lair = village();
+        lair.name = "Lair".into();
+        lair.line = "Enter Lair".into();
+        lair.icon = Some(0x14);
+        // Nine by five, in the corner of the village's own box, so the token
+        // overlaps both at once.
+        lair.x = 104;
+        lair.y = 96;
+        lair.w = 9;
+        lair.h = 5;
+        places.insert("lair.glade.1".into(), lair);
+        let mut s = Overlaps::default();
+        s.gather(&places, 100, 96, 0);
+        assert_eq!(s.len(), 2, "both boxes are on the stack");
+        assert_eq!(s.only(), None, "so nothing is entered without being asked");
+        assert_eq!(s.paper(&places), ["1 Enter Lair", "2 Village"]);
+        // The number keys answer, and only the live slots do.
+        assert_eq!(s.answer(1), Some("lair.glade.1"));
+        assert_eq!(s.answer(2), Some("village"));
+        assert_eq!(s.answer(3), None, "an empty slot is refused and the paper waits");
+        assert_eq!(s.answer(0), None, "scan codes below 2 are not answers");
+        assert_eq!(s.answer(10), None, "nor above 0x0a");
+    }
+
+    /// Five slots, cleared five at a time by `mov bx, 0x43c; mov cx, 5`. A
+    /// sixth thing under your feet cannot be reached, here or there.
+    #[test]
+    fn the_stack_holds_five_and_no_more() {
+        let mut places = Places::new();
+        for i in 0..7 {
+            let mut d = village();
+            d.name = format!("place {i}");
+            d.x = 100;
+            d.y = 100;
+            places.insert(format!("p{i}"), d);
+        }
+        let mut s = Overlaps::default();
+        s.gather(&places, 100, 100, 0);
+        assert_eq!(s.len(), OVERLAP_STACK);
+        assert_eq!(s.answer(5).map(str::to_string), Some("p4".to_string()));
+        assert_eq!(s.answer(6), None);
+    }
+
+    /// `OrderOpt` takes its words from `StackMessages`, not from the place's
+    /// name, and a place the original does not have has no line to take.
+    #[test]
+    fn the_paper_line_is_the_recovered_one_when_there_is_one() {
+        let mut d = village();
+        assert_eq!(d.paper_line(), "Village", "a place with no recovered line falls back to its name");
+        d.line = "Enter the city of Highwood".into();
+        assert_eq!(d.paper_line(), "Enter the city of Highwood");
+    }
+
+    /// `ForestVillage` (0x112a): one life point, free, and no day passes.
+    #[test]
+    fn your_own_village_gives_a_life_point_and_asks_nothing() {
+        let def = village();
         let mut run = Run::new(100);
+        run.lives = 1;
         run.finished_fight(30, true, 0);
-        let mut v = Visit::open("healer");
+        let mut v = Visit::open("village");
         v.move_by(&def, 1);
-        let day = run.day;
-        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 3 });
-        assert_eq!(run.health, 100, "wounds close");
-        assert_eq!(run.day, day + 3, "and time is what it cost");
-        assert_eq!(v.said, "You are made whole.");
-    }
-
-    #[test]
-    fn a_healer_will_not_take_days_for_nothing() {
-        let (def, mut run) = (healer(), Run::new(100));
-        let mut v = Visit::open("healer");
-        v.move_by(&def, 1);
-        let day = run.day;
+        let (day, gold) = (run.day, run.gold);
         assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
-        assert_eq!(run.day, day, "unwounded, so no time passes");
-        assert_eq!(v.said, "You have no need of me.");
+        assert_eq!(run.lives, 2, "one life point");
+        assert_eq!(run.health, 30, "and the routine touches nothing else");
+        assert_eq!(run.day, day, "no day passes");
+        assert_eq!(run.gold, gold, "and nothing is paid");
+        assert_eq!(v.said, "Your own people take you in.");
     }
 
-    /// A hermit in the woods takes only days. A healer inside a town wants coin
-    /// as well, and asks for it at the door rather than after the week.
+    /// `cmp byte [si+0x31], 3 / jge EncounterDone`: three is as high as a
+    /// village goes, whatever a potion may do afterwards.
     #[test]
-    fn a_town_healer_takes_coin_as_well_as_days() {
-        let mut def = healer();
-        def.options[1].effect = Effect::Heal {
-            days: 3,
-            gold: 10,
-            said: "You are made whole.".into(),
-            refused: "You have no need of me.".into(),
-            too_poor: "I do not work for nothing.".into(),
-        };
+    fn a_village_stops_at_three_life_points() {
+        let def = village();
         let mut run = Run::new(100);
-        run.finished_fight(30, true, 0);
-        let mut v = Visit::open("healer");
+        run.lives = 3;
+        let mut v = Visit::open("village");
         v.move_by(&def, 1);
-
-        let day = run.day;
         assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
-        assert_eq!(v.said, "I do not work for nothing.");
-        assert_eq!(run.health, 30, "and an empty purse buys nothing");
-        assert_eq!(run.day, day, "nor costs a week to be turned away");
+        assert_eq!(run.lives, 3);
+        assert_eq!(v.said, "You are as whole as this place can make you.");
+    }
 
-        run.earn(25);
-        assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 3 });
-        assert_eq!(run.gold, 15, "the fee changes hands");
-        assert_eq!(run.health, 100);
+    /// `CheckGROOC` at 0x732: the four village frames are each gated on
+    /// `[di+0x20]`, the knight's own colour index, so a village another knight
+    /// owns never reaches the paper at all.
+    #[test]
+    fn a_village_belongs_to_one_knight_and_the_others_cannot_see_it() {
+        let mut places = Places::new();
+        let mut mine = village();
+        mine.knight = Some(2);
+        places.insert("village.c".into(), mine);
+        let mut s = Overlaps::default();
+        s.gather(&places, 100, 100, 2);
+        assert_eq!(s.ids(), ["village.c"], "his own village is under his feet");
+        for other in [0, 1, 3] {
+            s.gather(&places, 100, 100, other);
+            assert!(s.is_empty(), "knight {other} stands on the same ground and sees nothing");
+            assert!(s.paper(&places).is_empty());
+        }
+        // And a place that belongs to nobody is everybody's.
+        places.insert("stones".into(), village());
+        s.gather(&places, 100, 100, 0);
+        assert_eq!(s.ids(), ["stones"]);
     }
 
     #[test]
     fn an_option_that_is_not_built_yet_says_so_and_costs_nothing() {
-        let (def, mut run) = (healer(), Run::new(100));
-        let mut v = Visit::open("healer");
+        let (def, mut run) = (village(), Run::new(100));
+        let mut v = Visit::open("village");
         assert!(!def.options[0].effect.available());
         assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Stayed { days: 0 });
         assert_eq!(run, Run::new(100), "the run is untouched");
@@ -783,8 +945,8 @@ mod tests {
 
     #[test]
     fn leaving_answers_that_you_left() {
-        let (def, mut run) = (healer(), Run::new(100));
-        let mut v = Visit::open("healer");
+        let (def, mut run) = (village(), Run::new(100));
+        let mut v = Visit::open("village");
         v.move_by(&def, -1);
         assert_eq!(v.cursor, 2, "up from the top wraps to the bottom");
         assert_eq!(v.choose(&def, &shop(), &mut run), Answer::Left);
@@ -792,7 +954,7 @@ mod tests {
 
     #[test]
     fn the_highlight_is_a_ring() {
-        let (def, mut v) = (healer(), Visit::open("healer"));
+        let (def, mut v) = (village(), Visit::open("village"));
         for expect in [1, 2, 0, 1] {
             v.move_by(&def, 1);
             assert_eq!(v.cursor, expect);
@@ -801,19 +963,25 @@ mod tests {
         assert_eq!(v.cursor, 1, "standing still moves nothing");
     }
 
+    /// Near is not on. The original has no notion of approaching a place at all:
+    /// `CheckGROOC` overlaps two boxes and there is nothing between outside and
+    /// inside, so a token a couple of pixels short of a box is on nothing.
     #[test]
-    fn the_nearest_place_is_the_one_you_are_walking_towards() {
+    fn nearly_standing_on_a_place_is_standing_on_nothing() {
         let places = world();
-        assert_eq!(nearest(&places, 110, 105, 20).map(|(id, _)| id), Some("healer"));
-        assert_eq!(nearest(&places, 110, 105, 4), None, "out of range");
+        let mut s = Overlaps::default();
+        s.gather(&places, 110, 105, 0);
+        assert!(s.is_empty(), "two pixels clear of the box is clear of the box");
+        s.gather(&places, 109, 105, 0);
+        assert_eq!(s.ids(), ["village"], "one pixel of overlap is inside");
     }
 
     #[test]
     fn a_place_survives_serialization() {
-        let def = healer();
+        let def = village();
         let json = serde_json::to_string(&def).unwrap();
         assert_eq!(serde_json::from_str::<PlaceDef>(&json).unwrap(), def);
-        assert!(json.contains("\"do\":\"heal\""), "effects are tagged in the data");
+        assert!(json.contains("\"do\":\"village\""), "effects are tagged in the data");
     }
 
     // The merchant.
@@ -826,8 +994,8 @@ mod tests {
         let mut v = Visit::open("highwood.merchant");
         assert_eq!(v.choose(&def, &items, &mut run), Answer::Stayed { days: 0 });
         assert_eq!(run.gold, 35, "twenty five went across the counter");
-        assert_eq!(run.kit.count("potion"), 1, "and a flask came back");
-        assert_eq!(v.said, "The flask is yours.");
+        assert_eq!(run.kit.count("potion"), 1, "and a potion came back");
+        assert_eq!(v.said, "The potion is yours.");
     }
 
     #[test]
@@ -855,7 +1023,7 @@ mod tests {
         assert_eq!(def.options[2].effect.cost(&items), None, "a door is free");
     }
 
-    /// A man with eight coins should be able to see that the flask is out of
+    /// A man with eight coins should be able to see that the potion is out of
     /// reach before he chooses it.
     #[test]
     fn what_you_cannot_afford_is_not_offered() {
@@ -865,14 +1033,14 @@ mod tests {
         assert!(!def.options[0].effect.offered(&items, &run), "but not to a pauper");
         run.earn(25);
         assert!(def.options[0].effect.offered(&items, &run));
-        // Nor is a flask you are not carrying.
+        // Nor is a potion you are not carrying.
         assert!(!def.options[1].effect.offered(&items, &run));
         run.kit.take("potion", 1);
         assert!(def.options[1].effect.offered(&items, &run));
     }
 
     #[test]
-    fn drinking_at_the_stall_mends_you_and_empties_the_flask() {
+    fn drinking_at_the_stall_mends_you_and_empties_the_potion() {
         let (def, items) = (merchant(), shop());
         let mut run = Run::new(100);
         run.kit.take("potion", 1);
@@ -880,8 +1048,10 @@ mod tests {
         let mut v = Visit::open("m");
         v.move_by(&def, 1);
         v.choose(&def, &items, &mut run);
-        assert_eq!(run.health, 80);
-        assert!(run.kit.is_empty(), "the flask is gone");
+        // The recovered potion: `cmp` the two health words, and when they
+        // differ health becomes the maximum outright (0xcad0).
+        assert_eq!(run.health, 100);
+        assert!(run.kit.is_empty(), "the potion is gone");
         assert_eq!(v.said, "You drain it.");
     }
 
@@ -904,9 +1074,10 @@ mod tests {
     fn a_hidden_place_is_not_on_the_map() {
         let mut places = world();
         places.insert("highwood.merchant".into(), merchant());
-        let mut a = Approach::default();
-        assert_eq!(a.step(&places, 0, 0), None, "standing on its coordinates finds nothing");
-        assert_eq!(nearest(&places, 0, 0, 40).map(|(id, _)| id), None);
+        let mut s = Overlaps::default();
+        s.gather(&places, 0, 0, 0);
+        assert!(s.is_empty(), "standing on its coordinates finds nothing");
+        assert!(s.paper(&places).is_empty(), "and it puts no line on the paper");
     }
 
     /// The run's lair table is built from the pack, and each lair keeps the
@@ -915,7 +1086,7 @@ mod tests {
     #[test]
     fn the_lair_table_is_read_off_the_pack_by_number() {
         let lair = |n: usize, family: &str| {
-            let mut d = healer();
+            let mut d = village();
             d.name = "Lair".into();
             d.options = vec![Choice {
                 label: "Enter Lair".into(),
@@ -967,6 +1138,8 @@ mod tests {
             hidden: false,
             intro: String::new(),
             icon: Some(0x1c),
+            line: "Enter Valley of the Gods".into(),
+            knight: None,
             menu: [8, 12, 168, 40],
             text: None,
             dice: false,

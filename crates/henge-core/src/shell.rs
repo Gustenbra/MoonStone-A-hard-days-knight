@@ -15,6 +15,15 @@
 //! (`Chosen`), and one pass per player (`choose_loop`). Left and right step over
 //! knights already taken and stop at the ends rather than wrapping, which is the
 //! original's own behaviour and not a simplification of it.
+//!
+//! **And fire does not finish a seat's turn; it starts the typing.**
+//! `ChooseFIRE` at image 0x16be writes the chosen knight's name buffer into
+//! `NAMEy` and calls `TypeName` at 0x13f0, and only when that returns does it
+//! clear the knight's bit in `choose_knight`. `ChooseKnight`'s loop then
+//! decrements `choose_loop`, steps `choose_player` on by 0x62 and calls
+//! `FindChosen`. So the knight being named is still drawn, still free and still
+//! framed while the name is being typed, and [`Select::take`] and
+//! [`Select::name_done`] are those two halves.
 
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +110,71 @@ impl Title {
     }
 }
 
+/// How long a name may get. `TypeName`'s own limit:
+/// `cmp word ptr [SPACE], 0xd; jl` accepts a character only while the caret is
+/// below thirteen, and above it the routine beeps and drops the key.
+pub const NAME_MAX: usize = 13;
+
+/// `CURSOR`, the caret. `TypeName` writes 0x5c into `CURSOR` at 0x1405 and
+/// `Cursor` at 0x14ac stamps it into the buffer at the caret before every
+/// redraw. `GFX:TextASCII` maps 0x5c and 0x2f both to glyph 71, so it draws as
+/// the stroke.
+pub const CARET: char = '\\';
+
+/// Typing a name over the knight's own. `MOON:TypeName` at image 0x13f0.
+///
+/// The original keeps a 21-byte buffer per knight (`BNAME`, `GNAME`, `ENAME`,
+/// `RNAME`), a caret index in `SPACE`, and nothing else. On entry it finds the
+/// caret by scanning the buffer for the first space; the default names are
+/// stored with an underscore where their space goes, because `TextASCII` draws
+/// 0x5f as the blank and the scan would otherwise stop in the middle of
+/// `SIR GODBER`. The space bar types one of those underscores too:
+/// `ASCIIT[0x39]` is 0x5f.
+///
+/// So the caret is always at the end of the live text and everything from it on
+/// is blank. That is why this holds the live text alone: a caret kept as state
+/// needs no scan, and `NameDone` writes a NUL at the caret, which is the same
+/// truncation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Typing {
+    /// Whose name. `ChooseFIRE` picks the buffer `NAMEy` points at from the
+    /// knight index, one branch each.
+    pub knight: usize,
+    /// Everything before the caret, which is the whole of the name.
+    pub text: String,
+}
+
+impl Typing {
+    /// `SPACE`: where the next character lands.
+    pub fn caret(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    /// One character off `ASCIIKEY`. Dropped when the caret has reached
+    /// thirteen, which is `ScanKEYS` taking the beep branch.
+    pub fn type_char(&mut self, c: char) -> bool {
+        if self.caret() >= NAME_MAX {
+            return false;
+        }
+        self.text.push(c);
+        true
+    }
+
+    /// `BACKSPACE` at image 0x1485: blank the cell, step the caret back, blank
+    /// the cell it lands on. It stops at zero, so a name can be emptied.
+    pub fn backspace(&mut self) {
+        self.text.pop();
+    }
+
+    /// What `ChooseRefresh` draws: the buffer with `CURSOR` written in at the
+    /// caret. Everything past the caret is blank, so nothing follows it.
+    pub fn shown(&self) -> String {
+        let mut s = self.text.clone();
+        s.push(CARET);
+        s
+    }
+}
+
 /// Choosing knights, one player at a time.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Select {
@@ -114,6 +188,8 @@ pub struct Select {
     free: [bool; SEATS],
     /// Which knight each player took, in seat order.
     taken: [Option<usize>; SEATS],
+    /// `TypeFLAG` and `NAMEy` together: the name being typed, while one is.
+    pub typing: Option<Typing>,
 }
 
 impl Select {
@@ -124,6 +200,7 @@ impl Select {
             cursor: 0,
             free: [true; SEATS],
             taken: [None; SEATS],
+            typing: None,
         }
     }
 
@@ -158,7 +235,7 @@ impl Select {
 
     /// One press of left or right.
     fn step(&mut self, dir: i32) {
-        if dir == 0 || self.done() {
+        if dir == 0 || self.done() || self.typing.is_some() {
             return;
         }
         let mut at = self.cursor as i32;
@@ -174,15 +251,35 @@ impl Select {
         }
     }
 
-    /// Take the highlighted knight for the current player.
+    /// Fire on the highlighted knight: `ChooseFIRE`.
     ///
-    /// Returns the knight taken. Afterwards the highlight sits on the lowest
-    /// still-free knight, which is `FindChosen`.
-    pub fn take(&mut self) -> Option<usize> {
-        if self.done() || !self.free[self.cursor] {
+    /// It does not finish the seat's turn. It writes the knight's name buffer
+    /// into `NAMEy` and calls `TypeName`, so the knight is still free and still
+    /// framed and the name is now being typed over. `default` is what the
+    /// buffer holds, which is that knight's own name.
+    ///
+    /// Returns the knight whose name is being typed.
+    pub fn take(&mut self, default: &str) -> Option<usize> {
+        if self.done() || self.typing.is_some() || !self.free[self.cursor] {
             return None;
         }
         let knight = self.cursor;
+        // `TypeName` scans for the first space and the default names carry an
+        // underscore where theirs goes, so the caret lands past the whole name
+        // however long it is. Thirteen is as much as the routine will ever hold.
+        let text: String = default.chars().take(NAME_MAX).collect();
+        self.typing = Some(Typing { knight, text });
+        Some(knight)
+    }
+
+    /// `NameDone` at 0x14bb and what `ChooseFIRE` does after it: the NUL at the
+    /// caret, `and word ptr [choose_knight], ...`, and then `ChooseKnight`'s
+    /// own `sub word ptr [choose_loop], 1` and `FindChosen`.
+    ///
+    /// Returns the knight and the name that was typed.
+    pub fn name_done(&mut self) -> Option<(usize, String)> {
+        let typing = self.typing.take()?;
+        let knight = typing.knight;
         self.free[knight] = false;
         self.taken[self.seat] = Some(knight);
         self.seat += 1;
@@ -191,7 +288,7 @@ impl Select {
                 self.cursor = next;
             }
         }
-        Some(knight)
+        Some((knight, typing.text))
     }
 }
 
@@ -249,10 +346,15 @@ mod tests {
         assert!(!s.done());
         s.move_by(2);
         assert_eq!(s.cursor, 2);
-        assert_eq!(s.take(), Some(2));
+        // Fire starts the typing and leaves the seat where it is, which is
+        // `ChooseFIRE` calling `TypeName` before it clears the knight's bit.
+        assert_eq!(s.take("SIR JEFFREY"), Some(2));
+        assert!(!s.done(), "the seat is still choosing while the name is typed");
+        assert_eq!(s.take("SIR JEFFREY"), None, "and fire again does nothing");
+        assert_eq!(s.name_done(), Some((2, "SIR JEFFREY".into())));
         assert!(s.done());
         assert_eq!(s.chosen(), vec![2]);
-        assert_eq!(s.take(), None, "and nothing more can be taken");
+        assert_eq!(s.take("SIR JEFFREY"), None, "and nothing more can be taken");
     }
 
     /// `ChooseLoop`: the highlight steps over knights already spoken for.
@@ -260,10 +362,71 @@ mod tests {
     fn the_highlight_steps_over_a_knight_already_taken() {
         let mut s = Select::new(3);
         s.move_by(1);
-        s.take(); // knight 1 goes
+        s.take("SIR RICHARD"); // knight 1 goes
+        s.name_done();
         assert_eq!(s.cursor, 0, "the lowest still free");
         s.move_by(1);
         assert_eq!(s.cursor, 2, "one is gone, so right lands on two");
+    }
+
+    /// `ChooseFIRE` clears `choose_knight` only after `TypeName` returns, so
+    /// the knight being named is still drawn and still framed.
+    #[test]
+    fn the_knight_being_named_is_still_free_until_the_name_is_done() {
+        let mut s = Select::new(2);
+        s.take("SIR GODBER");
+        assert!(s.free(0), "still a bit set in choose_knight");
+        assert_eq!(s.cursor, 0, "and still the one the frame is on");
+        // And nothing moves: `TypeName` owns the input until Enter or fire.
+        s.move_by(2);
+        assert_eq!(s.cursor, 0);
+        s.name_done();
+        assert!(!s.free(0));
+    }
+
+    /// `TypeName`, `ScanKEYS`, `BACKSPACE` and `NameDone`, end to end.
+    #[test]
+    fn a_name_is_typed_over_the_knights_own() {
+        let mut s = Select::new(1);
+        s.take("SIR GODBER");
+        let t = s.typing.as_mut().expect("TypeFLAG is set");
+        // The caret sits past the whole default name, because the original's
+        // buffer holds an underscore where its space goes and the scan for the
+        // first real space runs past it.
+        assert_eq!(t.caret(), 10);
+        assert_eq!(t.shown(), "SIR GODBER\\");
+        // Ten backspaces empty it, and an eleventh does nothing: the original
+        // clamps `SPACE` at zero.
+        for _ in 0..11 {
+            t.backspace();
+        }
+        assert_eq!(t.caret(), 0);
+        assert_eq!(t.shown(), "\\");
+        for c in "SIR ALAN".chars() {
+            assert!(t.type_char(c));
+        }
+        assert_eq!(t.shown(), "SIR ALAN\\");
+        assert_eq!(s.name_done(), Some((0, "SIR ALAN".into())));
+        assert!(s.typing.is_none(), "TypeFLAG is clear again");
+    }
+
+    /// `cmp word ptr [SPACE], 0xd; jl`: thirteen characters and no more.
+    #[test]
+    fn a_name_stops_at_thirteen_characters() {
+        let mut s = Select::new(1);
+        s.take("SIR GODBER");
+        let t = s.typing.as_mut().unwrap();
+        for c in "XYZ".chars() {
+            assert!(t.type_char(c));
+        }
+        assert_eq!(t.caret(), NAME_MAX);
+        assert!(!t.type_char('!'), "the routine beeps and drops the key");
+        assert_eq!(t.text, "SIR GODBERXYZ");
+        assert_eq!(t.caret(), NAME_MAX);
+        // A default longer than the field is cut to it rather than overflowing.
+        let mut s = Select::new(1);
+        s.take("SIR CHRISTOPHER");
+        assert_eq!(s.typing.as_ref().unwrap().text, "SIR CHRISTOPH");
     }
 
     #[test]
@@ -282,9 +445,10 @@ mod tests {
     #[test]
     fn a_move_with_nowhere_to_go_changes_nothing() {
         let mut s = Select::new(4);
-        s.take(); // 0
-        s.take(); // 1
-        s.take(); // 2
+        for _ in 0..3 {
+            s.take("SIR GODBER");
+            s.name_done();
+        }
         assert_eq!(s.cursor, 3);
         s.move_by(-1);
         assert_eq!(s.cursor, 3, "the three below are taken");
@@ -298,7 +462,8 @@ mod tests {
         let mut picked = Vec::new();
         while !s.done() {
             s.move_by(1);
-            picked.push(s.take().expect("a free knight to take"));
+            picked.push(s.take("SIR GODBER").expect("a free knight to take"));
+            s.name_done();
         }
         picked.sort();
         assert_eq!(picked, vec![0, 1, 2, 3]);
@@ -309,7 +474,7 @@ mod tests {
     fn a_select_survives_serialization() {
         let mut s = Select::new(2);
         s.move_by(1);
-        s.take();
+        s.take("SIR RICHARD");
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Select>(&json).unwrap(), s);
     }

@@ -3,7 +3,6 @@
 //! Release builds contain no original-game data. `--features research` adds a
 //! viewer for studying the 1991 files, which is a development tool only.
 
-mod ending;
 mod framebuffer;
 mod input;
 mod map;
@@ -26,7 +25,7 @@ use henge_core::item::{Items, Loss};
 use henge_core::knight::{Ability, Knight, Knights, MAX_ABILITY};
 use henge_core::intro::Intro;
 use henge_core::message::{Message, Messages};
-use henge_core::place::{Answer, Approach, Places};
+use henge_core::place::{Answer, Overlaps, Places};
 use henge_core::pointer::{Gadgets, Pointer};
 use henge_core::run::{Cast, Challenge, Run};
 use henge_core::save::Save;
@@ -209,6 +208,14 @@ impl Script {
     /// Drive one tick: steer while there is still ground to cover, then start
     /// feeding key presses.
     fn drive(&self, app: &mut App, fed: &mut usize) {
+        // The between-days screen waits on fire, as `WaitFIRE` does, so a walk
+        // long enough to turn a day over needs someone to press it. The script
+        // stands in for the player here as it does everywhere else.
+        if app.interlude > 0 {
+            app.keys = [false; 256];
+            app.pressed[6] = true;
+            return;
+        }
         if let Some((gx, gy)) = self.goto {
             match app.mode {
                 // Ambushes happen on the way, and a traveller who never swings
@@ -447,9 +454,26 @@ fn main() -> anyhow::Result<()> {
                     for p in &w.bout.parries {
                         who.push(format!("{} blocked {} with {}", p.target, p.attacker, p.with.name()));
                     }
+                    // How many more the fight owes and how many it holds at
+                    // once, which is `TotalMonsters`, `MaxMonsters` and
+                    // `NumberInCombat`: a wave arriving is only checkable if
+                    // the three counts are on the line.
+                    let wave = &w.bout.wave;
+                    let owing = if wave.max > 0 {
+                        format!(" owed{:>3} max{} in{} ", wave.total, wave.max, wave.in_combat)
+                    } else {
+                        String::new()
+                    };
                     // The arena's own name as well as its family, because which of
                     // the eight a family rotates to is now a thing worth seeing.
-                    format!("{:>5}  COMBAT  {:<5} {:<8} {}", t, w.name(), w.family(), who.join(" | "))
+                    format!(
+                        "{:>5}  COMBAT  {:<5} {:<8}{} {}",
+                        t,
+                        w.name(),
+                        w.family(),
+                        owing,
+                        who.join(" | ")
+                    )
                 }
             } };
             let key = line[7..].to_string();
@@ -687,7 +711,7 @@ struct App {
     /// Everywhere there is to go, and whether we are standing in one of them.
     places: Places,
     /// What there is to buy, carry and drink. Shared by every stall, because a
-    /// flask is the same flask in Highwood as in Waterdeep.
+    /// potion is the same potion in Highwood as in Waterdeep.
     items: Items,
     /// The four knights, in select order.
     knights: Knights,
@@ -695,7 +719,11 @@ struct App {
     select: Option<shell::SelectScene>,
     /// Whether the character sheet is up over whatever else is on screen.
     sheet: bool,
-    approach: Approach,
+    /// Everything the traveller's token overlaps, rebuilt every frame, which is
+    /// the five-entry stack at `DS:043c`.
+    overlaps: Overlaps,
+    /// Whether `_MAP:CreatePaper`'s panel is up, waiting on a number key.
+    paper: bool,
     visiting: Option<place::PlaceScene>,
     mode: Mode,
     audio: Box<dyn Sink>,
@@ -718,14 +746,15 @@ struct App {
     /// `Fix_JoyStick`, when it is running.
     calibrating: Option<(usize, input::Calibrating)>,
     run: Run,
-    /// The last thing a cutpurse took, for the map to say so. The map has no
-    /// message line of its own, so the notice rides on the purse plate in the
-    /// corner, beside the number it just changed.
-    robbed: String,
-    /// Ticks the robbery notice has left on screen.
-    robbed_for: u32,
-    /// Ticks since the run ended, so the tally can be read before it restarts.
+    /// Ticks since the run ended. Only a debounce: `WaitFIRE` at 0x8251 waits
+    /// for a press and then for a release, so the press that ended the run
+    /// cannot also clear the message it put up.
     run_over_for: u32,
+    /// The character `ASCIIKEY` gave for whatever was pressed this tick, for the
+    /// one screen in the game that reads letters.
+    typed: Option<char>,
+    /// What each player typed over their knight's name, in the order they chose.
+    named: Vec<(usize, String)>,
     /// Aloft on the gem or the hawk. Desktop state rather than the run's,
     /// like the map position it belongs with: `GemXY` in the original is
     /// beside the token, not on the knight record.
@@ -746,8 +775,13 @@ struct App {
     ///
     /// `_MAP:NextWHICH` puts it up the moment the last knight has had his
     /// turn, so it sits between one day and the next and nothing else runs
-    /// while it is there.
+    /// while it is there. Non-zero is up; it waits on fire rather than counting
+    /// down, which is what `WaitFIRE` at 0x8251 does.
     interlude: u32,
+    /// `FADEOUTDAY`, the fade the between-days screen goes out on, counted down
+    /// once fire has been pressed: `NextWHICH` calls the screen, then `WaitFIRE`,
+    /// then the fade out at 0x5b65, and only then is the map back.
+    interlude_out: u32,
     /// Which of the fourteen hints is next. `_LOADER:WaitCOUNT`, which the
     /// original steps every time it shows one and wraps at fourteen.
     hint: usize,
@@ -889,10 +923,31 @@ fn slot_of(seat: usize, a: input::Action) -> usize {
 ///
 /// The ten seat slots are gone from here: they come out of `input::Bindings`
 /// now, so that changing them is editing a file rather than editing this match.
+/// Where the nine number keys start. `_MAP:DisplayStack`'s reader takes scan
+/// codes 2 to 0x0a, which are the top row's `1` to `9`, so the nine of them are
+/// a block of slots of their own, clear of the ten the seats own and of the
+/// developer keys beside them.
+const NUMBER_SLOT: usize = 16;
+
+/// `ScanKEYS` at 0x1447: `cmp ax, 0xe; je BACKSPACE`, which is the scancode of
+/// the backspace key, tested before `ASCIIKEY` is ever called.
+const BACKSPACE_SLOT: usize = 15;
+
 fn key_index(c: KeyCode) -> usize {
     match c {
         KeyCode::BracketLeft => 4,
         KeyCode::BracketRight => 5,
+        KeyCode::Backspace => BACKSPACE_SLOT,
+        // The number keys the map's paper is answered with.
+        KeyCode::Digit1 => NUMBER_SLOT,
+        KeyCode::Digit2 => NUMBER_SLOT + 1,
+        KeyCode::Digit3 => NUMBER_SLOT + 2,
+        KeyCode::Digit4 => NUMBER_SLOT + 3,
+        KeyCode::Digit5 => NUMBER_SLOT + 4,
+        KeyCode::Digit6 => NUMBER_SLOT + 5,
+        KeyCode::Digit7 => NUMBER_SLOT + 6,
+        KeyCode::Digit8 => NUMBER_SLOT + 7,
+        KeyCode::Digit9 => NUMBER_SLOT + 8,
         // Enter takes a menu option. The original had only fire, but everyone
         // arriving at a menu presses Enter first, and finding that it does
         // nothing reads as a broken menu rather than as a different key.
@@ -904,6 +959,38 @@ fn key_index(c: KeyCode) -> usize {
         KeyCode::Period => 14,
         _ => 255,
     }
+}
+
+/// `ASCIIKEY` at image 0x14e8, which is `mov bx, ASCIIT; xlatb`: the scancode to
+/// character table the name typing reads its letters through.
+///
+/// `ASCIIT` at image 0x14f2 is that table, and these are its own entries, in its
+/// own scancode order. It is uppercase throughout, it has no shift and it maps
+/// **the space bar to 0x5f**, the underscore, which `TextASCII` draws as the
+/// blank: a space typed into a name is an underscore, which is why the default
+/// names carry one. A scancode with a zero entry types nothing.
+///
+/// The entries for 0x0e and 0x1c, backspace and Enter, are never reached:
+/// `ScanKEYS` tests both before it calls this.
+fn typed_char(c: KeyCode) -> Option<char> {
+    use KeyCode::*;
+    Some(match c {
+        Digit1 => '1', Digit2 => '2', Digit3 => '3', Digit4 => '4', Digit5 => '5',
+        Digit6 => '6', Digit7 => '7', Digit8 => '8', Digit9 => '9', Digit0 => '0',
+        Minus => '-', Equal => '=',
+        KeyQ => 'Q', KeyW => 'W', KeyE => 'E', KeyR => 'R', KeyT => 'T',
+        KeyY => 'Y', KeyU => 'U', KeyI => 'I', KeyO => 'O', KeyP => 'P',
+        BracketLeft => '[', BracketRight => ']',
+        KeyA => 'A', KeyS => 'S', KeyD => 'D', KeyF => 'F', KeyG => 'G',
+        KeyH => 'H', KeyJ => 'J', KeyK => 'K', KeyL => 'L',
+        Semicolon => ';', Quote => '\'', Backslash => '\\',
+        KeyZ => 'Z', KeyX => 'X', KeyC => 'C', KeyV => 'V', KeyB => 'B',
+        KeyN => 'N', KeyM => 'M',
+        Comma => ',', Period => '.', Slash => '/',
+        // Scancode 0x39, and the table's entry for it is 0x5f.
+        Space => '_',
+        _ => return None,
+    })
 }
 
 /// Packs live next to the executable in a release build, or in the working
@@ -1030,7 +1117,8 @@ impl App {
             title: shell::TitleScene::default(),
             select: None,
             sheet: false,
-            approach: Approach::default(),
+            overlaps: Overlaps::default(),
+            paper: false,
             visiting: None,
             audio,
             voices: Voices::new(),
@@ -1043,15 +1131,16 @@ impl App {
             bounce: [input::Debounce::default(); 2],
             calibrating: None,
             run: Run::new(100),
-            robbed: String::new(),
-            robbed_for: 0,
             run_over_for: 0,
+            typed: None,
+            named: Vec::new(),
             flight: None,
             sheet_cursor: 0,
             raiding: None,
             questing: false,
             raid_place: String::new(),
             interlude: 0,
+            interlude_out: 0,
             hint: 0,
             practice: false,
             pointer: Pointer::centred(),
@@ -1107,6 +1196,13 @@ impl App {
         if i < 256 {
             if down && !self.keys[i] {
                 self.pressed[i] = true;
+            }
+        }
+        // `ASCIIKEY`, for `TypeName`. A key that the table has no character for
+        // types nothing, and the screens that do not read letters never look.
+        if down {
+            if let Some(c) = typed_char(code) {
+                self.typed = Some(c);
             }
         }
         {
@@ -1222,7 +1318,7 @@ impl App {
         self.palette_tick();
         self.music_tick();
         self.pressed = [false; 256];
-        self.robbed_for = self.robbed_for.saturating_sub(1);
+        self.typed = None;
     }
 
     /// The name of the screen that is up. Compared frame to frame, so that
@@ -1279,13 +1375,15 @@ impl App {
         self.knight_glow_tick();
         self.fx.tick();
         // `FADEOUTDAY`, and the fade a message chain ends on. Both are screens
-        // that go out on their own rather than being walked away from, which
-        // is the only kind of fade out a shell with no loading time can honour:
-        // the original's other fades cover a disk read that does not happen
-        // here. `NextWHICH` fades the between days screen and all three of
+        // that go out when they are dismissed rather than being walked away
+        // from, which is the only kind of fade out a shell with no loading time
+        // can honour: the original's other fades cover a disk read that does not
+        // happen here. `NextWHICH` calls the between-days screen, then
+        // `WaitFIRE`, then the fade, which is `FADEOUTDAY`; all three of
         // `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` fade the chain.
         let leaving = if self.interlude > 0 {
-            Some(self.interlude)
+            // Zero while it is still waiting, which leaves the screen fully lit.
+            (self.interlude_out > 0).then_some(self.interlude_out)
         } else if self.showing.is_some() {
             Some(self.showing_for)
         } else {
@@ -1412,14 +1510,29 @@ impl App {
             return;
         }
 
-        // The between-days screen is modal, the way `NextWHICH` puts it up
-        // before anything else runs. It clears on a press, or on its own after
-        // a few seconds, so a run left alone still goes on.
+        // The between-days screen is modal, and it waits. `_MAP:NextWHICH` at
+        // image 0xa454 is three calls in a row: the screen at 0x8e5b, then
+        // `WaitFIRE` at 0x8251, which is `call 0x81ec; test bx, 0x10; je` until
+        // fire is down and then the same until it is up again, and then the fade
+        // out at 0x5b65, which is `FADEOUTDAY`. So it stays up for as long as
+        // nobody presses anything and then goes out over sixteen frames.
         if self.interlude > 0 {
-            self.interlude -= 1;
-            if self.pressed.iter().any(|p| *p) {
-                self.interlude = 0;
+            if self.interlude_out > 0 {
+                self.interlude_out -= 1;
+                if self.interlude_out == 0 {
+                    self.interlude = 0;
+                }
+            } else if self.pressed.iter().any(|p| *p) {
+                self.interlude_out = henge_assets::palette::FADE_STEPS as u32;
             }
+            return;
+        }
+
+        // `_MAP:CreatePaper`'s panel is modal too, and more so: `DisplayStack`
+        // draws it and then sits in a key loop with exactly one way out, which
+        // is a number naming something the token is standing on.
+        if self.paper {
+            self.paper_tick();
             return;
         }
 
@@ -1436,15 +1549,18 @@ impl App {
             Mode::Title => self.title_tick(),
             Mode::Select => self.select_tick(),
             Mode::Map => {
-                // A run that is over, won or lost. The tally holds until it is
-                // taken, and then the game goes back to where the original's
-                // own two endings go: `jmp StartAgain` for a loss, and for a
-                // win an exit to DOS, which here is the same screen because
-                // there is nowhere else to exit to.
+                // A run that is over, won or lost. Both of the original's
+                // endings are one message and then `WaitFIRE` at 0x8251, which
+                // waits for a press and then for a release, so the box is up
+                // until somebody presses fire and no longer. A loss then does
+                // `jmp StartAgain`, which is the title, and a win exits to DOS
+                // with [`henge_core::quest::Tally::code`] in `al` for `INTR.EXE`
+                // to read; there is nowhere to exit to here, so both go to the
+                // title. A six hundred tick timeout used to clear the screen on
+                // its own, and there is no such thing in either routine.
                 if self.run.ending().is_some() {
                     self.run_over_for += 1;
-                    let taken = self.run_over_for > 30 && self.takes();
-                    if self.run_over_for > 600 || taken {
+                    if self.run_over_for > 1 && self.takes() {
                         self.run_over_for = 0;
                         self.run.restart();
                         // A new run is a new board: the lairs a dead knight
@@ -1482,11 +1598,22 @@ impl App {
                 // its grid while either flag is up.
                 if self.flight.is_some() {
                     self.fly(dx, dy);
+                    // `FOLLOW` still calls the walk while a map effect flag is
+                    // up, and the walk skips `MapIconsTABLE` and the rival
+                    // knights for `CheckLairEncounter` when it is
+                    // (`cmp [0xcca0], 0; je`, image 0x6f9), so aloft only the
+                    // lairs are stacked. Nothing reads the stack in the air
+                    // here, and the lairs are all it is drawn from, so gathering
+                    // the lot leaves the same marks on the same ground.
+                    if let Some(m) = self.map.as_ref() {
+                        let (x, y) = (m.state.x, m.state.y);
+                        self.overlaps.gather(&self.places, x, y, self.run.knight.seat);
+                    }
                     return;
                 }
                 let mut start: Option<String> = None;
                 let mut day_before = 0;
-                let mut arrived: Option<String> = None;
+                let mut at: Option<(i32, i32)> = None;
                 if let Some(m) = self.map.as_mut() {
                     day_before = m.state.day;
                     // `DistanceDONE`: the day is as long as the stride says,
@@ -1498,7 +1625,12 @@ impl App {
                     if step.encounter && !self.peaceful {
                         start = Some(m.last_terrain.family().to_string());
                     }
-                    arrived = self.approach.step(&self.places, m.state.x, m.state.y);
+                    at = Some((m.state.x, m.state.y));
+                }
+                // `_MAP:FOLLOW` walks the whole overlap table once a frame and
+                // pushes what the token is standing on; nothing is opened here.
+                if let Some((x, y)) = at {
+                    self.overlaps.gather(&self.places, x, y, self.run.knight.seat);
                 }
                 // Walking is how you mend, and also how you meet trouble. The
                 // same action both repairs and risks you.
@@ -1510,16 +1642,14 @@ impl App {
                     if !self.peaceful {
                         match self.run.waylaid() {
                             Some(Loss::Gold(n)) => {
-                                self.robbed = format!("{n} gold taken");
-                                self.robbed_for = 180;
+                                self.notice(format!("{n} gold taken"));
                             }
                             Some(Loss::Item(id)) => {
                                 let what = self
                                     .items
                                     .get(&id)
                                     .map_or(id.clone(), |d| d.name.clone());
-                                self.robbed = format!("{what} taken");
-                                self.robbed_for = 180;
+                                self.notice(format!("{what} taken"));
                                 // A ring taken is twenty health gone with it.
                                 self.run.refresh(&self.items);
                             }
@@ -1533,13 +1663,13 @@ impl App {
                         self.begin_interlude();
                     }
                 }
-                // A town is somewhere you arrive at, not somewhere you get
-                // jumped outside of: walking through the gate beats the ambush
-                // roll taken on the same step.
-                if let Some(id) = arrived {
-                    if self.enter(&id) {
-                        return;
-                    }
+                // `_MAP:ScrollINPUT`, image 0xa3c6: `mov ax, [JOYS];
+                // test ax, 0x10; je` and, with fire down, `call DisplayStack`.
+                // So nothing is ever walked into. A town is somewhere you stand
+                // on and then ask to enter, and asking beats the ambush roll
+                // taken on the same step.
+                if self.takes() && self.display_stack() {
+                    return;
                 }
                 // A scroll of protection hanging over the run answers the
                 // ambush first, the way `KnightProtection` is asked before
@@ -1647,7 +1777,14 @@ impl App {
                             let pick = self.run.next_arena(&family, w.rotation_len(&family));
                             w.set_family(&family, pick);
                         }
-                        w.set_seats(self.title.state.players.max(1), count.max(1) as usize);
+                        // `AdjustLevel` (0x287e) takes a lair's own head count
+                        // out of the lair record and writes it over
+                        // `TotalMonsters`. How many of them stand in front of
+                        // you at once is `MaxMonsters`, which is the creature's
+                        // own and never this; the rest walk in as the ones
+                        // before them fall. See `henge_core::wave`.
+                        w.set_seats(self.title.state.players.max(1), 1);
+                        w.set_heads(Some(count.max(1) as i32));
                         self.raiding = (lair != usize::MAX).then_some(lair);
                         self.raid_place = here.unwrap_or_default();
                         self.visiting = None;
@@ -1854,13 +1991,41 @@ impl App {
         }
     }
 
-    /// Choosing knights, one player at a time.
+    /// Choosing knights, one player at a time, and typing a name over each.
+    ///
+    /// `ChooseLoop` at 0x15a0 reads the stick; fire goes to `ChooseFIRE`, which
+    /// hands the knight's own name buffer to `TypeName` at 0x13f0. `TypeName`
+    /// owns the input from there: `ScanKEYS` at 0x142e takes fire (`bx & 0x10`)
+    /// or scancode 0x1c, Enter, as the end of it, scancode 0x0e as a backspace,
+    /// and anything `ASCIIKEY` gives a character for as a character.
     fn select_tick(&mut self) {
         let (left, right, take) = (self.pressed[2], self.pressed[3], self.takes());
+        let typed = self.typed.take();
+        let back = self.pressed[BACKSPACE_SLOT];
+        let defaults: Vec<String> = self.knights.iter().map(|k| k.name.clone()).collect();
         let Some(select) = self.select.as_mut() else {
             self.mode = Mode::Title;
             return;
         };
+        if select.state.typing.is_some() {
+            // Fire or Enter is `NameDone`; everything else goes into the buffer.
+            if take {
+                if let Some((knight, name)) = select.state.name_done() {
+                    self.named.push((knight, name));
+                }
+            } else if let Some(t) = select.state.typing.as_mut() {
+                if back {
+                    t.backspace();
+                }
+                if let Some(c) = typed {
+                    t.type_char(c);
+                }
+            }
+            if select.state.done() {
+                self.begin_quest();
+            }
+            return;
+        }
         if left {
             select.state.move_by(-1);
         }
@@ -1868,7 +2033,8 @@ impl App {
             select.state.move_by(1);
         }
         if take {
-            select.state.take();
+            let default = defaults.get(select.state.cursor).cloned().unwrap_or_default();
+            select.state.take(&default);
         }
         if select.state.done() {
             self.begin_quest();
@@ -1883,7 +2049,7 @@ impl App {
             return;
         }
         let players = self.title.state.players.min(self.knights.len());
-        self.select = Some(shell::SelectScene::new(&self.reg, players, &self.knights));
+        self.select = Some(shell::SelectScene::new(&self.reg, players));
         self.mode = Mode::Select;
     }
 
@@ -1919,6 +2085,17 @@ impl App {
         }
         self.practice = false;
         self.take_knight(mine, roster);
+        // What was typed over the knight's own name, which is the whole point of
+        // `TypeName`. Only seat zero's reaches the run, because a run belongs to
+        // one knight here; an emptied name is left as the default, because
+        // `Knight::named` uses the name as the flag for a knight having been
+        // chosen at all, which the original keeps as a separate bitmask.
+        if let Some((_, name)) = self.named.iter().find(|(k, _)| *k == mine) {
+            if !name.is_empty() {
+                self.run.knight.name = name.clone();
+            }
+        }
+        self.named.clear();
         self.select = None;
         self.mode = if self.map.is_some() { Mode::Map } else { Mode::Combat };
     }
@@ -1985,6 +2162,10 @@ impl App {
             bonus: self.run.knight.damage_bonus(&self.items),
             fresh_bonus: fresh,
             cursed: self.run.is_cursed(),
+            // `AdjustLevel` reads `+0x2e` and `+0x3c` off the knight record
+            // before it decides how many creatures a fight holds.
+            strength: self.run.knight.strength,
+            experience: self.run.experience as i32,
         }
     }
 
@@ -2086,6 +2267,8 @@ impl App {
         self.raiding = None;
         self.sheet = false;
         self.interlude = 0;
+        self.interlude_out = 0;
+        self.paper = false;
         self.showing = None;
         self.run_over_for = 0;
         self.mode = Mode::Map;
@@ -2155,8 +2338,11 @@ impl App {
             status::sheet_menu_rects(n, Some(self.sheet_cursor))
         } else {
             match self.mode {
-                Mode::Title => shell::title_rects(),
-                Mode::Select => shell::select_rects(),
+                // The title and the select have no gadgets and no pointer:
+                // `DoOptions` and `ChooseLoop` poll the stick themselves and
+                // the six routines that blit `PO.CEL` are the town menus, the
+                // tavern, the wizard's donation and the status screen. See
+                // `shell::draw_pointer`.
                 Mode::Place => self
                     .visiting
                     .as_ref()
@@ -2187,14 +2373,6 @@ impl App {
         // for whatever the pointer has reached.
         match self.mode {
             _ if self.sheet => self.sheet_cursor = over,
-            Mode::Title => self.title.state.row = over,
-            Mode::Select => {
-                if let Some(sel) = self.select.as_mut() {
-                    if sel.state.free(over) {
-                        sel.state.cursor = over;
-                    }
-                }
-            }
             Mode::Place => {
                 if let Some(s) = self.visiting.as_mut() {
                     s.visit.cursor = over;
@@ -2208,10 +2386,20 @@ impl App {
         }
     }
 
-    /// A line on the map's corner plate, where the cutpurse's notice goes.
+    /// One line to say something happened, in the box the original says things
+    /// in.
+    ///
+    /// This used to be a line on a plate in the corner of the map, beside a
+    /// purse. The original has neither: `MAP.CMP` is one 320x200 picture and
+    /// nothing is drawn over it but the tokens, the lairs and the paper. What it
+    /// does have is `OCCURMESSAGE`, a chain over `MESSAGE.PIV` that is modal
+    /// until fire clears it, so a one-line chain at y 95 is where a line goes.
     fn notice(&mut self, line: impl Into<String>) {
-        self.robbed = line.into();
-        self.robbed_for = 180;
+        use henge_core::message::{Kind, Line, Message, FLAG_CENTRE};
+        self.show_message(Message {
+            kind: Kind::Occurrence,
+            lines: vec![Line::new(&line.into(), 0, 95, FLAG_CENTRE)],
+        });
     }
 
     /// The character sheet's menu: the three `Increase` gadgets in the
@@ -2363,14 +2551,6 @@ impl App {
         self.fb.blit(&px, w, h, x, y - 4, false);
     }
 
-    /// How long the between-days screen stays up on its own.
-    ///
-    /// The original waits on a key. Ours does too, but it also gives up after
-    /// a few seconds: this game is walked with a direction held down, and a
-    /// screen that needs a separate press to clear would stop the walk dead
-    /// every day.
-    const INTERLUDE_TICKS: u32 = 150;
-
     /// A day has turned over. Put the moon up, and take a hint off the pile.
     ///
     /// The moon's own numbers move here rather than in the drawing, because
@@ -2378,7 +2558,8 @@ impl App {
     /// one of the fourteen and wraps at fourteen, and a counter stepped by a
     /// renderer would step again on every frame.
     fn begin_interlude(&mut self) {
-        self.interlude = Self::INTERLUDE_TICKS;
+        self.interlude = 1;
+        self.interlude_out = 0;
         self.hint = (self.hint + 1) % self.messages.wait_len();
         // What waits in an arena depends on the night the fight starts, so the
         // phase is pushed the moment it can change.
@@ -2432,13 +2613,78 @@ impl App {
             .collect()
     }
 
+    /// Every lair the token is standing on, which takes `MI.C` frame 0x1f on
+    /// top of its own: `MOON:CheckLairEncounter` blits it at the lair's corner
+    /// before it pushes the entry, image 0x88f.
+    fn lairs_here(&self) -> Vec<(i32, i32)> {
+        self.overlaps
+            .ids()
+            .iter()
+            .filter_map(|id| self.places.get(id))
+            .filter(|d| d.icon == Some(map::LAIR_FRAME))
+            .map(|d| (d.x, d.y))
+            .collect()
+    }
+
+    /// `_MAP:DisplayStack`, image 0xae27.
+    ///
+    /// It counts the live slots of the five-entry stack at `DS:043c` and does
+    /// one of three things: none and it returns zero, so the map carries on
+    /// (`NoEncounter`, 0xae7e); one and it falls straight into `StackDecision`
+    /// (`cmp ax, 1; je`, 0xae40) and enters it with nothing drawn; more and it
+    /// draws `CreatePaper` and sits in its key loop. Returns whether the map
+    /// gave way to something, which is the `or ax, ax` `ScrollINPUT` tests.
+    fn display_stack(&mut self) -> bool {
+        if self.overlaps.is_empty() {
+            return false;
+        }
+        if let Some(id) = self.overlaps.only().map(str::to_string) {
+            return self.enter(&id);
+        }
+        self.paper = true;
+        true
+    }
+
+    /// The paper's key loop: `call 0x8149` until the scan code is one of the top
+    /// row's `1` to `9` and names a live slot, image 0xae58.
+    ///
+    /// There is no way out of it in the original and there is none here: the
+    /// loop has exactly one exit and it is a number that names something under
+    /// your feet. Every entry on the stack is a place with its own way out, so
+    /// the paper can never strand you.
+    fn paper_tick(&mut self) {
+        for n in 1..=9u32 {
+            if !self.pressed[NUMBER_SLOT + n as usize - 1] {
+                continue;
+            }
+            let Some(id) = self.overlaps.answer(n).map(str::to_string) else { continue };
+            self.paper = false;
+            self.enter(&id);
+            return;
+        }
+    }
+
     /// Walk into a place and open its menu.
+    ///
+    /// A village has no menu and no picture: `_MAP:StackDecision` hands its kind
+    /// to `TakingMoon`, which jumps frames 0x15 to 0x18 straight to
+    /// `ForestVillage` (0xc99 to 0xcb6, all four to 0x112a), and that gives the
+    /// life point and returns through `ColourStatus` to the map. Nothing on the
+    /// path loads a backdrop, so this does not change screens either.
     fn enter(&mut self, id: &str) -> bool {
         let Some(def) = self.places.get(id) else {
             let known: Vec<&str> = self.places.keys().map(String::as_str).collect();
             eprintln!("no place called {id}. The pack has: {}", known.join(", "));
             return false;
         };
+        if let Some(henge_core::place::Effect::Village { said, refused }) =
+            def.options.first().map(|o| &o.effect)
+        {
+            let (said, refused) = (said.clone(), refused.clone());
+            let line = if self.run.rest_at_village() { said } else { refused };
+            self.notice(line);
+            return true;
+        }
         match place::PlaceScene::open(&mut self.reg, def, id) {
             Ok(scene) => {
                 self.visiting = Some(scene);
@@ -2458,13 +2704,35 @@ impl App {
     /// same way, through `pressed`, so this exercises the game and not a stub.
     fn drive(&mut self, c: Option<char>) {
         self.keys = [false; 256];
+        // The name typing is the one screen that reads letters, and the driver
+        // has one character per press and no modifiers, so while it is up an
+        // uppercase letter or a digit is that character and `<` is the
+        // backspace. Fire and Enter still end it, as `ScanKEYS` does.
+        if self.select.as_ref().is_some_and(|s| s.state.typing.is_some()) {
+            match c {
+                Some(ch @ ('A'..='Z' | '0'..='9')) => {
+                    self.typed = Some(ch);
+                    return;
+                }
+                Some('<') => {
+                    self.pressed[BACKSPACE_SLOT] = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match c {
             Some('u') => self.pressed[0] = true,
             Some('d') => self.pressed[1] = true,
             // Fire is held as well as pressed, so that in an arena it swings
             // and in a menu it takes.
             Some('s') => { self.keys[6] = true; self.pressed[6] = true; }
-            // The numpad chords: a direction held with fire.
+            // The numpad chords: a direction held with fire. The same character
+            // also presses the number key of that digit, which is what the map's
+            // paper is answered with: a real keyboard has two keys for a digit
+            // and this driver has one character, and the two cannot collide
+            // because the chord holds fire without pressing it and the paper is
+            // modal over the walking the chord would do.
             Some(c @ '1'..='9') => {
                 let n = c as u8 - b'0';
                 self.keys[6] = true;
@@ -2472,6 +2740,7 @@ impl App {
                 self.keys[1] = matches!(n, 1 | 2 | 3);
                 self.keys[2] = matches!(n, 1 | 4 | 7);
                 self.keys[3] = matches!(n, 3 | 6 | 9);
+                self.pressed[NUMBER_SLOT + n as usize - 1] = true;
             }
             // 'e' is Enter, so the headless driver can prove Enter takes a menu
             // option and not only that space does.
@@ -2502,19 +2771,21 @@ impl App {
         self.keys[1] = y < gy;
     }
 
-    /// The end of a run, won or lost: the original's own heading and the tally
-    /// under it. `ending::draw` is where the pixels go.
+    /// The end of a run, won or lost, which in the original is one message and
+    /// nothing else.
+    ///
+    /// `KnightWonGame` hands `VICTORY` to `OCCURMESSAGE` and the routine at
+    /// 0x617 hands `GameOverMes` to `INSTRUCTMESSAGE`, so both go over
+    /// `MESSAGE.PIV` through the same door every other message in the game uses
+    /// and there is no ending screen to draw. A page of seven counted lines over
+    /// `bg8.piv` used to be here. `Tally::message` is the chain.
     fn draw_run_over(&mut self) {
         let Some(tally) = self.run.tally() else { return };
-        let bold = self.fonts.remove("bold");
-        let small = self.fonts.remove("small");
-        ending::draw(&mut self.reg, &mut self.fb, bold.as_ref(), small.as_ref(), &tally);
-        if let Some(f) = bold {
-            self.fonts.insert("bold".into(), f);
-        }
-        if let Some(f) = small {
-            self.fonts.insert("small".into(), f);
-        }
+        let fonts = shell::Fonts {
+            bold: self.fonts.get("bold"),
+            small: self.fonts.get("small"),
+        };
+        shell::draw_message(&mut self.reg, &mut self.fb, &fonts, &tally.message());
     }
 
     /// Draw a line of text over the current frame, for checking the font.
@@ -2553,47 +2824,6 @@ impl App {
         }
         enc.write_header()?.write_image_data(&rgb)?;
         Ok(())
-    }
-
-    /// One fighter's plate, for each seat in the bout.
-    ///
-    /// Seat zero is the person at this keyboard, so it reads the live sheet on
-    /// the run; the rest read the definitions, because nothing yet tracks what
-    /// another knight has been through.
-    fn combat_plates(&self) -> Vec<status::Plate> {
-        let Some(w) = self.world.as_ref() else { return Vec::new() };
-        w.bout
-            .fighters
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let which = w.knight_at(i);
-                let def = self.knights.get(which);
-                let mine = i == 0 && self.run.knight.named();
-                // A creature's plate carries its own name and no lives: a
-                // troll has no sheet to read them off.
-                let creature = w.creature_name(i);
-                status::Plate {
-                    name: if let Some(c) = creature.clone() {
-                        c
-                    } else if mine {
-                        self.run.knight.name.clone()
-                    } else {
-                        def.map_or_else(|| format!("Knight {}", which + 1), |d| d.name.clone())
-                    },
-                    colour: w.seat_colour(i),
-                    health: f.health,
-                    max_health: f.max_health,
-                    lives: if creature.is_some() {
-                        0
-                    } else if mine {
-                        self.run.lives
-                    } else {
-                        def.map_or(0, |d| d.life)
-                    },
-                }
-            })
-            .collect()
     }
 
     /// The scene, and then the character sheet over it if it is up.
@@ -2636,11 +2866,7 @@ impl App {
                 bold: self.fonts.get("bold"),
                 small: self.fonts.get("small"),
             };
-            let note = self.run.is_toad().then_some("You are a toad, and a toad has no turn");
-            shell::draw_interlude(
-                &mut self.reg, &mut self.fb, &fonts, self.run.day, self.run.moon.phase(),
-                self.messages.wait(self.hint), note,
-            );
+            shell::draw_interlude(&mut self.reg, &mut self.fb, &fonts, self.run.moon.phase());
             return;
         }
         // A message box sits over everything else for the same reason: it is
@@ -2682,7 +2908,7 @@ impl App {
                     bold: self.fonts.get("bold"),
                     small: self.fonts.get("small"),
                 };
-                select.render(&mut self.reg, &mut self.fb, &fonts, &self.knights, &self.items);
+                select.render(&mut self.reg, &mut self.fb, &fonts);
                 self.select = Some(select);
                 return;
             }
@@ -2706,14 +2932,17 @@ impl App {
             // Take the map out of self for the duration of the draw, so it can
             // borrow the registry and the fonts alongside it.
             if let Some(m) = self.map.take() {
-                let near = henge_core::place::nearest(&self.places, m.state.x, m.state.y, 16)
-                    .map(|(_, d)| d.name.clone());
-                let notice = (self.robbed_for > 0).then_some(self.robbed.as_str());
                 let icons = self.map_icons();
+                let marked = self.lairs_here();
+                let lines = self.overlaps.paper(&self.places);
                 let marks = map::Marks {
-                    here: near.as_deref(),
-                    notice,
                     icons: &icons,
+                    marked: &marked,
+                    paper: self.paper.then(|| map::Paper {
+                        knight: self.run.knight.name.as_str(),
+                        seat: self.run.knight.seat,
+                        lines: &lines,
+                    }),
                 };
                 let ok = m
                     .render(&mut self.reg, &mut self.fb, &self.fonts, &self.run, &marks)
@@ -2731,11 +2960,10 @@ impl App {
             None => false,
         };
         if drawn {
-            // The plates go on after the arena, so they sit over the ground
-            // rather than under the fighters.
-            let plates = self.combat_plates();
-            let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
-            status::draw_plates(&mut self.reg, &mut self.fb, font, &plates);
+            // Nothing goes over the arena. The original's fight loop, `Combat`
+            // at image 0x351, is ten calls and not one of them draws a readout;
+            // the whole of the screen from the tree line to row 199 is ground a
+            // fighter can stand on.
             return;
         }
         // Nothing loaded: a slow sweep, so it is obvious the window and timing
@@ -2796,6 +3024,27 @@ mod tests {
                      KeyCode::Comma, KeyCode::Period] {
             let i = key_index(code);
             assert!(!(0..=3).contains(&i) && !(6..=11).contains(&i), "{code:?} took slot {i}");
+        }
+    }
+
+    /// The map's paper is answered with the top row's `1` to `9`, which is what
+    /// `_MAP:DisplayStack` reads: scan codes 2 to 0x0a, minus two for the slot.
+    /// They have to be nine slots of their own, clear of the ten the seats own,
+    /// or answering the paper would also walk or swing.
+    #[test]
+    fn the_number_keys_are_nine_slots_of_their_own() {
+        let b = input::Bindings::default();
+        let digits = [
+            KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4,
+            KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        for (n, code) in digits.iter().enumerate() {
+            assert_eq!(key_index(*code), NUMBER_SLOT + n, "{code:?} lost its slot");
+            assert!(slots_for(&b, *code).is_empty(), "{code:?} is bound as a control");
+            let i = key_index(*code);
+            assert!(!(0..=3).contains(&i) && !(6..=11).contains(&i), "{code:?} took slot {i}");
+            assert!(i < 256, "and it has to be a slot that exists");
         }
     }
 

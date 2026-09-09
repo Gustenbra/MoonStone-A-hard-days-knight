@@ -57,9 +57,6 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "does", rename_all = "kebab-case")]
 pub enum Virtue {
-    /// Mends wounds on the spot, by a fixed amount, up to your full health.
-    /// Ours: the henge flask, which predates the recovered potion below.
-    Heal { health: i32 },
     /// The original's potion, from the routine at image `0xcad0`: health is
     /// set to its maximum, and a man who is already whole gains a life point
     /// instead, `inc byte [si+0x31]`, capped at five.
@@ -117,7 +114,7 @@ pub struct ItemDef {
     pub price: u32,
     /// What using one does.
     pub virtue: Virtue,
-    /// Whether using it uses it up. A flask is emptied; a key is not.
+    /// Whether using it uses it up. A potion is emptied; a key is not.
     #[serde(default)]
     pub consumed: bool,
 }
@@ -132,7 +129,7 @@ impl ItemDef {
     /// string carried for two lines.
     pub fn action_line(&self) -> String {
         let verb = match &self.virtue {
-            Virtue::Heal { .. } | Virtue::Restore => "Drink",
+            Virtue::Restore => "Drink",
             Virtue::Weapon { .. } => "Wield",
             Virtue::Armour { .. } | Virtue::Ward { .. } => "Wear",
             Virtue::Sight { returns: true, .. } => "Use",
@@ -179,7 +176,7 @@ pub enum Loss {
 
 /// What you are carrying.
 ///
-/// Counts rather than a flat list of ids: four flasks is one line on a menu and
+/// Counts rather than a flat list of ids: four potions is one line on a menu and
 /// one entry here, and the ordering is the id ordering, which is defined.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Inventory {
@@ -263,7 +260,7 @@ impl Inventory {
     /// One thing, chosen by a roll, taken off you. Returns what went.
     ///
     /// The roll picks across everything held rather than across kinds, so a man
-    /// carrying four flasks and one key most often loses a flask. Deterministic
+    /// carrying four potions and one key most often loses a potion. Deterministic
     /// given the roll, because the simulation's randomness is carried in its
     /// state and never taken from the system.
     pub fn take_one(&mut self, roll: u32) -> Option<String> {
@@ -292,9 +289,9 @@ mod tests {
 
     fn potion() -> ItemDef {
         ItemDef {
-            name: "Flask of healing".into(),
-            price: 25,
-            virtue: Virtue::Heal { health: 40 },
+            name: "Potion of healing".into(),
+            price: 20,
+            virtue: Virtue::Restore,
             consumed: true,
         }
     }
@@ -343,7 +340,7 @@ mod tests {
         let mut kit = Inventory::default();
         kit.take("key", 1);
         kit.take("potion", 3);
-        // Four things held: the key is first in id order, then three flasks.
+        // Four things held: the key is first in id order, then three potions.
         let mut a = kit.clone();
         assert_eq!(a.take_one(0).as_deref(), Some("key"));
         let mut b = kit.clone();
@@ -365,7 +362,7 @@ mod tests {
         let p = potion();
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<ItemDef>(&json).unwrap(), p);
-        assert!(json.contains("\"does\":\"heal\""), "virtues are tagged in the data");
+        assert!(json.contains("\"does\":\"restore\""), "virtues are tagged in the data");
     }
 
     /// The original's own menu lines, `st5` and `st9`, come out of the name

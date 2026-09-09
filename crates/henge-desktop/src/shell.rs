@@ -50,9 +50,10 @@
 //! are blitted with their own indices, and the black bands that used to sit
 //! behind them are gone.
 //!
-//! **Attract mode** cycles the other ten plates. Those eleven screens have been
-//! sitting in the pack unused since the baker first decoded them; showing them
-//! is the whole of it.
+//! **There is no attract mode.** One was invented here and cycled ten of the
+//! intro's files as though each were a picture; the note further down says why
+//! it went and what it looked like. `DoOptions` sits on the title until
+//! somebody presses something.
 //!
 //! **The select, and it has no picture behind it.** This screen was drawn over
 //! `CH.PIV` here for a long time and the original draws it over nothing at all.
@@ -85,11 +86,8 @@
 
 use crate::framebuffer::Framebuffer;
 use crate::sprite;
-use crate::status;
 use crate::text::Font;
 use henge_assets::Registry;
-use henge_core::item::Items;
-use henge_core::knight::Knights;
 use henge_core::shell::{Row, Select, Title, SEATS};
 use henge_core::{SCREEN_H, SCREEN_W};
 
@@ -210,7 +208,6 @@ impl TitleScene {
                 fb.palette[i as usize] = rgb;
             }
         }
-        let (_, light) = status::extremes(fb);
 
         // In its own pixels, at its own corner. The wordmark is artwork with a
         // drawn outline and a shaded face; flattened to one colour all of that
@@ -247,7 +244,6 @@ impl TitleScene {
         // No credit lines. `0x890c` restores the picture the loader copied
         // before it blitted them, and `DisplaySelect` adds only the wordmark,
         // the arrow and the six records.
-        let _ = light;
     }
 
 }
@@ -277,15 +273,26 @@ fn show(reg: &mut Registry, fb: &mut Framebuffer, scene: &str) {
 /// Both are recovered. `CCOL` is in the bottom of DGROUP, which the unpacker
 /// used to leave stale and now does not, and it holds 12, 88, 164 and 240: a
 /// twelve pixel margin on the left, sixty four wide portraits and a step of
-/// seventy six.
+/// seventy six. The width is the cel's own and nothing here needs it: the blit
+/// takes it out of `SEL.CEL`'s header, and the boxes that used to be measured
+/// against it were the gadgets this screen has none of.
 const PORTRAIT_Y: i32 = 80;
-const PORTRAIT_W: i32 = 64;
 const PORTRAIT_X: [i32; SEATS] = [12, 88, 164, 240];
 
 /// `MOON:CRText`, the one message chain this screen puts up: `Select a Knight`,
 /// flags 1, which is `TextPTop`'s centre bit, at y 5.
 const HEADING: &str = "Select a Knight";
 const SELECT_HEADING_Y: i32 = 5;
+
+/// Where the name being typed over goes.
+///
+/// `ChooseRefresh` at 0x1697: `cmp word ptr [TypeFLAG], 0; je` past it, else
+/// `mov si, [NAMEy]; mov ax, 0x32; mov bx, 0x32; xor cx, cx; call 0x7a70`.
+/// That routine builds a one-record chain at `DS:0x7ff2` out of `si`, `ax`,
+/// `bx` and `cx` and falls into the walker, so `ax` is the string's x, `bx` its
+/// y and `cx` its flags: (50, 50), left aligned, in whatever font is current,
+/// which on this screen is the bold one the heading is set in.
+const NAME_AT: (i32, i32) = (50, 50);
 
 pub struct SelectScene {
     pub state: Select,
@@ -294,7 +301,7 @@ pub struct SelectScene {
 }
 
 impl SelectScene {
-    pub fn new(reg: &Registry, players: usize, _knights: &Knights) -> SelectScene {
+    pub fn new(reg: &Registry, players: usize) -> SelectScene {
         // `palette.select` is `MOON:SelectPAL`, baked out of the executable.
         // A pack made before the baker could read it has none, and then the
         // screen falls back to the plate it used to stand on rather than
@@ -307,10 +314,7 @@ impl SelectScene {
         SelectScene { state: Select::new(players), palette }
     }
 
-    pub fn render(
-        &self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, knights: &Knights,
-        items: &Items,
-    ) {
+    pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts) {
         // `ChooseRefresh`'s own first act: `mov ax, 0xf02; out dx, ax` to the
         // sequencer's map mask and `rep stosw` of zero over 0x2000 words, which
         // is every plane of every pixel set to palette entry 0. There is no
@@ -324,20 +328,12 @@ impl SelectScene {
         if let Some(bold) = fonts.bold {
             bold.draw_own_centred(reg, fb, HEADING, SELECT_HEADING_Y);
         }
-        // **Ours**, and the only things on this screen that are: whose turn it
-        // is, the name under each portrait, the `Player N` left where a taken
-        // knight was, and the stat line along the bottom. The original draws
-        // none of them. What it draws once a knight is taken is that knight's
-        // name at (50, 50) out of `NAMEy`, which is a different thing again.
-        if let Some(small) = fonts.small {
-            let line = if self.state.done() {
-                "Ride out".to_string()
-            } else {
-                format!("Player {}", self.state.seat + 1)
-            };
-            small.draw_own_centred(reg, fb, &line, 40);
-        }
-
+        // A whose-turn line, a name under each portrait, `Player N` in the gap
+        // a taken knight left and a stat line along the bottom all used to be
+        // here, and `ChooseRefresh` draws none of them. It clears the screen,
+        // walks `CRText`, blits the portraits still free, blits the frame on
+        // the chosen one, and draws the name being typed if `TypeFLAG` is set.
+        // That is the whole routine: there is nothing else on this screen.
         for i in 0..SEATS {
             let x = PORTRAIT_X[i];
             if self.state.free(i) {
@@ -348,18 +344,10 @@ impl SelectScene {
                 // painted blue, gold, emerald and red in `SelectPAL`, and a
                 // recolour on top of that was colouring coloured artwork.
                 sprite::draw(reg, fb, SEL, FIRST_PORTRAIT + i, x, PORTRAIT_Y, false);
-            } else {
-                // Taken, so not drawn: `ChooseRefresh` only ever draws the bits
-                // still set. Who took them goes in the empty slot instead.
-                if let Some(small) = fonts.small {
-                    let seat = (0..SEATS).find(|s| self.state.taken_by(*s) == Some(i));
-                    if let Some(s) = seat {
-                        let line = format!("Player {}", s + 1);
-                        let w = small.width(reg, &line);
-                        small.draw_own(reg, fb, &line, x + (PORTRAIT_W - w) / 2, PORTRAIT_Y + 32);
-                    }
-                }
             }
+            // A knight already taken leaves an empty space and nothing is put
+            // in it: `ChooseRefresh`'s loop does `test byte ptr [choose_knight],
+            // al; je` past the blit, and the routine has no second pass.
             if i == self.state.cursor && !self.state.done() {
                 // The hollow frame, in its own pixels like everything else.
                 // Every pixel of cel 1 is index 15, and `ChooseRefresh` blits
@@ -369,75 +357,64 @@ impl SelectScene {
                 // screen that moves.
                 sprite::draw(reg, fb, SEL, BORDER, x, PORTRAIT_Y, false);
             }
-            if let (Some(small), Some(k)) = (fonts.small, knights.get(i)) {
-                let w = small.width(reg, &k.name);
-                small.draw_own(reg, fb, &k.name, x + (PORTRAIT_W - w) / 2, PORTRAIT_Y + 80);
-            }
         }
 
-        // The highlighted knight's block, along the bottom. Four stat blocks at
-        // once would not fit under a 64-pixel portrait, and this is the one the
-        // player is deciding about.
-        let Some(small) = fonts.small else { return };
-        let Some(k) = knights.get(self.state.cursor) else { return };
-        let live = henge_core::knight::Knight::from_def(k, self.state.cursor);
-        let line = format!(
-            "Str {}   Con {}   End {}   {} health   {} gold   {}",
-            k.strength,
-            k.constitution,
-            k.endurance,
-            live.max_health(items),
-            k.gold,
-            live.weapon_name(items),
-        );
-        small.draw_own_centred(reg, fb, &line, 178);
+        // The name being typed over, while `TypeFLAG` is set. One string at
+        // (50, 50), left aligned, with `CURSOR` standing in the buffer at the
+        // caret, which is what `Typing::shown` puts there.
+        if let (Some(bold), Some(typing)) = (fonts.bold, self.state.typing.as_ref()) {
+            bold.draw_own(reg, fb, &typing.shown(), NAME_AT.0, NAME_AT.1);
+        }
     }
 }
 
-/// Where the title's four rows and the select's four portraits are, as boxes a
-/// pointer can be over.
-///
-/// The numbers are the same ones the drawing uses, taken from one place so a
-/// row can never be lit in one and hit in the other.
-pub fn title_rects() -> Vec<(usize, i32, i32, i32, i32)> {
-    // A row's box starts at the arrow that marks it and runs the width of the
-    // list, tall enough for one line of the bold face. `ARR` and the records
-    // put the four rows 25, 40 and 20 pixels apart, so the boxes do not meet.
-    (0..ROW_LABEL.len())
-        .map(|i| {
-            let top = ROW_Y[i].min(ARROW_Y[i]) - 1;
-            (i, ARROW_X, top, 260 - ARROW_X, 19)
-        })
-        .collect()
-}
-
-pub fn select_rects() -> Vec<(usize, i32, i32, i32, i32)> {
-    (0..SEATS).map(|i| (i, PORTRAIT_X[i], PORTRAIT_Y, PORTRAIT_W, 80)).collect()
-}
+// Where the title's four rows and the select's four portraits are, as boxes a
+// pointer can be over, used to be two functions here.
+//
+// **There are no such boxes.** Both screens had one per row so that a mouse
+// could drive them, and neither screen in the original has a pointer on it at
+// all: `DoOptions` at 0x1241 polls the stick itself (`test bx, 8` for up,
+// `test bx, 4` for down, `test bx, 0x10` for fire) with no `CLEARGADGETS`, no
+// `ADDGADGET` and no `CHECKGADGET` anywhere in it, and `ChooseLoop` at 0x15a0
+// does the same. The six places that blit the pointer are listed on
+// `draw_pointer`, and the title and the select are not among them.
+//
+// The y table and the portrait corners the boxes were built from are still
+// above, where the drawing uses them.
 
 /// The pointer, over whatever is drawn.
 ///
-/// `PO.CEL` is one 16 by 18 frame, and the packs have carried it decoded and
-/// unused since the first day; `SHOWPOINTER` blits it at the pointer's own
-/// coordinates with nothing subtracted, so its hot spot is its top left corner
-/// and so is the point [`henge_core::pointer::Gadget::covers`] tests.
+/// `PO.CEL` is one 16 by 18 frame. `SHOWPOINTER` is the routine at image 0xcf31:
 ///
-/// Drawn as a silhouette with a halo under it, for the reason every other
-/// sprite over a foreign palette is: the pointer has to read over a sunlit town
-/// and over a stone circle at midnight, and its own indices mean nothing in
-/// either.
+/// ```text
+/// push es
+/// les si, ptr [0x892f]      ; PO.CEL's bank
+/// sub ax, ax                ; cel 0
+/// mov bx, [0xe492]          ; the pointer's x
+/// mov cx, [0xe494]          ; and its y
+/// call 0x5d7f               ; the cel blit every other sprite goes through
+/// pop es
+/// ret
+/// ```
+///
+/// So it is **one plain blit of one cel in its own pixels**, at the pointer's own
+/// coordinates with nothing subtracted, which is why its hot spot is its top
+/// left corner and so is the point [`henge_core::pointer::Gadget::covers`]
+/// tests. A flat silhouette with an eight-direction dark halo under it used to
+/// stand here; `PO.CEL` is drawn artwork and the halo was invented to make a
+/// flattened version of it read.
+///
+/// **And it is only on the screens that call this.** Scanning every call in the
+/// image gives six: `MOON:WDLOOP+66` and `MOON:HWLOOP+66`, which are the two
+/// town menus; `_TAVERN:TavernLoop+57`; `_WIZARD:DonateLoop+52`;
+/// `_STATUS:StatLOOP+19`; and `_STATUS:FiDisplay+10`. `MovePointer` at 0xcead,
+/// which is what moves it two pixels a tick, is called from `StatLOOP` alone.
+/// The title and the select screens are not in either list.
 pub fn draw_pointer(reg: &mut Registry, fb: &mut Framebuffer, p: &henge_core::pointer::Pointer) {
     if !p.woken {
         return;
     }
-    let (dark, light) = status::extremes(fb);
-    // Outlined in the darkest colour the screen has rather than a middle one:
-    // the arrow is sixteen pixels wide and has to read over a knight in white
-    // armour as well as over a night sky.
-    for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
-        sprite::draw_mask(reg, fb, POINTER, 0, p.x + ox, p.y + oy, dark);
-    }
-    sprite::draw_mask(reg, fb, POINTER, 0, p.x, p.y, light);
+    sprite::draw(reg, fb, POINTER, 0, p.x, p.y, false);
 }
 
 /// `PO.CEL`, the original's pointer.
@@ -644,45 +621,26 @@ const MOON_AT: (i32, i32) = (119, 12);
 /// sky the select screen also uses. `[0x8989]` is `Moons[MoonCount]`, which is
 /// tonight's phase.
 ///
-/// **Ours:** the day number under the heading, and the hint below it. The hint
-/// is one of `WAITMESSAGE`'s fourteen, taken through `henge_core::message`, and
-/// the original's own hint screen has its lines at y 75, 95, 115 and 135; here
-/// the heading takes its recovered 95 and the hint follows underneath, because
-/// both cannot have y 95 and a bold line is nineteen pixels tall. The
-/// `Loading...` line every one of the fourteen ends on is left out, because
-/// nothing here loads.
+/// **Nothing else is on it.** A day number, and one of the fourteen `WaitMES`
+/// hints, used to be. The fourteen belong to `WAITMESSAGE`, which is a different
+/// screen: `MESSAGE.PIV` with the chain over it, shown while a disk is read, and
+/// its four callers are `PracticeCombat5`, `InitKnightvsDemon`, `SetUpDKL` and
+/// `LoadWizard`. The routine at 0x8e5b walks `NextDayMes` and blits one cel, and
+/// there is no second chain, no number and no note anywhere in it.
 ///
-/// Every line is drawn in its own indices rather than flattened to one colour.
+/// The heading is drawn in its own indices rather than flattened to one colour.
 /// `TextP` hands a glyph to the same blitter every other cel goes through, and
 /// `CH.PIV` carries the bold face's five entries: black at 5, then `fed`,
 /// `dc9`, `c95`, `832` at 9 to 12. Flattened, `Next Day` came out as a row of
 /// blobs with its counters closed.
 const HEADING_Y: i32 = 95;
-const DAY_Y: i32 = 118;
-const HINT_Y: i32 = 136;
-const HINT_STEP: i32 = 14;
 
 pub fn draw_interlude(
-    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, day: u32, phase: henge_core::moon::Phase,
-    hint: &henge_core::message::Message, note: Option<&str>,
+    reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts, phase: henge_core::moon::Phase,
 ) {
     show(reg, fb, "scene.ch");
     sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
     if let Some(bold) = fonts.bold {
         bold.draw_own_centred(reg, fb, "Next Day", HEADING_Y);
-    }
-    let Some(small) = fonts.small else { return };
-    small.draw_own_centred(reg, fb, &format!("Day {day}   {}", phase.name()), DAY_Y);
-    let mut y = HINT_Y;
-    // A day the run had no say in says so, in the hint's place: being turned
-    // into a toad and losing three turns is the sort of thing a player has to
-    // be told about, and this is the screen those three days go past on.
-    if let Some(note) = note {
-        small.draw_own_centred(reg, fb, note, y);
-        return;
-    }
-    for line in hint.shown() {
-        small.draw_own_centred(reg, fb, &line.text, y);
-        y += HINT_STEP;
     }
 }

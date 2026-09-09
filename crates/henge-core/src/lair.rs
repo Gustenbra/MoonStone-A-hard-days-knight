@@ -62,10 +62,15 @@
 //! `ColourBackdrop` the record's landscape and never asks the map.
 //!
 //! `ForestLairs`'s head count is `TotalMonsters`, everything that comes at you
-//! before a lair is clear, and it runs from three to fourteen. The original
-//! feeds it into the arena in waves; this project fields what a bout seats,
-//! so the number is carried through the pack unrounded and the arena takes
-//! what it can hold. Waves are **not built**.
+//! before a lair is clear, and it runs from three to fourteen. **The waves are
+//! built**, and they are [`crate::wave`]: `AdjustLevel` (image `0x2824`) writes
+//! this number over `TotalMonsters` at `0x287e` and then takes the creature's
+//! own row of `lev_adjust` off it, `SetMonsterCombat` (`0x27e4`) stands
+//! `MaxMonsters` of them up, which is one for everything but the ratmen, and
+//! `CountTheDead` (`0x213`) sends the next one in on the frame the last one's
+//! death script reaches its `TASKGOSUB`. So a lair of fourteen is fourteen
+//! fights one after another, not a crowd, and the pack carries the number
+//! unrounded because the arena no longer has to hold it all at once.
 
 use crate::item::Items;
 use crate::moon::Key;
@@ -274,7 +279,7 @@ impl Run {
 
     /// Carry out what will fit. What will not stays on the floor, which is why
     /// a beaten lair can still be worth coming back to. The key is small and
-    /// goes first, so the quest is never blocked by a pack full of flasks.
+    /// goes first, so the quest is never blocked by a pack full of potions.
     fn strip_lair(&mut self, index: usize, items: &Items) -> Spoils {
         let Some(lair) = self.lairs.get(index).cloned() else { return Spoils::default() };
         let mut got = Spoils { gold: lair.gold, ..Spoils::default() };
