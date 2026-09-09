@@ -397,11 +397,28 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
         6. The knight: `ControlKnight` writes 1 at 0x3f77 when right is held and 3
            at 0x3f86 when left is, before `CheckBorder` and `SBORD` get to refuse
            the step, and nothing else in his controller writes it. `KnightSLAP`
-           (0x44e5) sets it to `SLAP` on a slap, which is a dragon's claw
-           (always 1, `ClawHit+9` 0x3b9f and `ClawStruck1+9` 0x43dc) or a
-           Balok's uppercut (the Balok's own `+8`, 0x3639). `DemonSlap`
-           (0x437f) turns its victim and writes neither `SLAP` nor `SLAPY`, so
-           a demon's slap throws nobody. **Built**, as `Bout::knight_slap`. `SetKnightCombat` (0x2962, the facing store at 0x297d)
+           (0x44e5) sets it to `SLAP` on a slap. Eight instructions write
+           `SLAP`, and every one of them belongs to a striker that can put the
+           knight on `Knight_SwSlapped`: a dragon's claw (always 1, `ClawHit+9`
+           0x3b9f and `ClawStruck1+9` 0x43dc), a Balok's uppercut (the Balok's
+           own `+8`, 0x363c), the troll's bunt (0x5697), the demon's slap
+           (0x505c) and the demon's whip (0x50a1, and again in the two follow
+           routines at 0x50d0 and 0x510b). An earlier note here read
+           `DemonSlap` (0x437f) writing neither `SLAP` nor `SLAPY` as a demon's
+           slap throwing nobody; **that was wrong**. `DemonSlap` is the struck
+           side of the blow and only turns its victim; the direction and the
+           table are written a frame earlier by `DemonAttack` (0x5059..0x5062),
+           on the controller's side, exactly as `ControlBalok` and `TrollBunt`
+           write theirs — and `InitKnightvsDemon+40` (0x2765) puts
+           `Knight_SwSlapped` on the knight's kind-0x10 row, so the slap does
+           throw him. `SLAPY` is a pointer and takes two values, both inside
+           `BalokSLAP`: five of its six writers name the table's first word and
+           `DemonAttack`'s whip branch (0x50a4) names `DemonWHIP`, which is
+           `BalokSLAP + 10` and so the negative tail — the whip drags the
+           knight towards the demon. **Built**, as `Bout::knight_slap`,
+           `monster::Shared::slap_y` and `monster::slap_y`; the whip's own
+           hand-off of `Knight_SwSlapped` (`DemonOWhipFollow` 0x50de,
+           `DemonUWhipFollow` 0x5119) is **not built**. `SetKnightCombat` (0x2962, the facing store at 0x297d)
            stands him at x 250, y 0, z 100, facing 3; the creatures come from the
            spawn tables `InitNewMO` (0x27ee) walks, eight bytes `[x][y][z][facing]`:
            `TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3),

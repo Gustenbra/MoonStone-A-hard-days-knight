@@ -289,6 +289,13 @@ pub struct Fighter {
     /// held and `xor ax, 3` when left or right is. Fire is left alone.
     #[serde(default)]
     pub cursed: bool,
+    /// The rows this encounter's `InitKnightvs*` routine wrote over the
+    /// knight's `*Att` table (the record's `+0x16`, `KnightAttSw`), by the
+    /// name of the attack kind: see [`crate::bout::Bout::knight_att_rows`] for
+    /// which fight writes what and [`Fighter::attack_script`] for the read.
+    /// Empty for everyone else and for every fight that writes none.
+    #[serde(default)]
+    pub att_rows: std::collections::BTreeMap<String, String>,
     /// The controller state of a creature that has one of its own: the
     /// cooldown, timer and flags the original keeps in the actor record at
     /// `+0x0a`, `+0x0b`, `+0x48`, `+0x49` and `+0x4a`. See [`crate::monster`].
@@ -387,6 +394,7 @@ impl Fighter {
             restart: false,
             bonus: 0,
             cursed: false,
+            att_rows: std::collections::BTreeMap::new(),
             brain: crate::monster::Brain::default(),
             ordered: None,
             drive: Intent::default(),
@@ -683,7 +691,7 @@ impl Fighter {
             // which only knows one button, does too.
             let forward = intent.dx * self.facing;
             let wanted = Attack::for_direction(forward, intent.dy).unwrap_or(Attack::Swing);
-            match def.attack_for(wanted) {
+            match self.attack_script(def, wanted) {
                 Some((script, kind)) => {
                     let state = if kind.is_guard() {
                         State::Guard
@@ -1266,6 +1274,25 @@ impl Fighter {
         }
         self.script = script;
         true
+    }
+
+    /// `KnightAttSw[kind]` as this fight has it: the row the actor's own
+    /// `Set*Tables` routine wrote, unless this encounter's `InitKnightvs*`
+    /// wrote over it.
+    ///
+    /// **Recovered.** `KnightAttack` reads the table at the record's `+0x16`
+    /// by the kind the joystick picked and hands the task what it finds; the
+    /// kind is unchanged, only the script. Three fights write rows over it
+    /// before the first frame — see [`crate::bout::Bout::knight_att_rows`] —
+    /// and because the table is indexed by the kind asked for, the override is
+    /// read at that kind and not at whatever [`ActorDef::attack_for`]'s
+    /// fallback would have settled on. The knight has all nine rows, so the
+    /// two never disagree for him.
+    pub fn attack_script(&self, def: &ActorDef, wanted: Attack) -> Option<(String, Attack)> {
+        if let Some(script) = self.att_rows.get(wanted.name()) {
+            return Some((script.clone(), wanted));
+        }
+        def.attack_for(wanted)
     }
 
     /// `CheckBlock`. Does what the defender is holding stop this blow?

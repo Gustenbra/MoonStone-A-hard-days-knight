@@ -17,6 +17,7 @@ use crate::sound::{self, SoundCall};
 use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
 use crate::wave::Wave;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Reported so a caller can play a sound, shake the screen, or log a replay,
 /// without the simulation knowing any of those things exist.
@@ -1209,6 +1210,9 @@ impl Bout {
             // next frame of the script. Both are built; the later one wins.
             (Controller::Claw, Some(Attack::RThrust)) => {
                 self.shared.slap = 1;
+                // 03ba5 / 043e1  mov word [SLAPY], BalokSLAP, the same pair of
+                // stores on the same blow and for the same reason.
+                self.shared.slap_y = crate::monster::slap_y::BALOK_SLAP;
                 "Knight_SwSlapped"
             }
             _ => return,
@@ -1243,6 +1247,242 @@ impl Bout {
             return;
         }
         self.hit_row(target, "Knight_SwSlapped", t_def);
+    }
+
+    /// The two rows `InitKnightvsBeast` (0x2280) writes over the knight's own
+    /// `*Hit` table (`+0x14`), which are not the row it wrote a moment earlier
+    /// over his `*Att` table:
+    ///
+    /// ```text
+    /// 002274  mov di, [0x77e8]
+    /// 002278  mov si, [di+0x16]           ; the *Att* table, KnightAttSw
+    /// 00227b  mov word [si+0xe], 0x11ce   ; kind 0xe: Knight_SwEvade
+    /// 002280  mov si, [di+0x14]           ; si RELOADED: the *Hit* table
+    /// 002283  mov word [si+0x10], 0x31d0  ; kind 0x10: Beast_BackToss
+    /// 002288  mov word [si+0xe], 0x31d0   ; kind 0xe:  Beast_BackToss
+    /// ```
+    ///
+    /// The reload at 0x2280 is the whole point: `KnightAttSw` is at DS:`0x69b0`
+    /// and `KnightHitSw` at DS:`0x69c2` (`SetKnightSwTables`, 0x1f6a), so the
+    /// writes at `+0xe` either side of it land in different tables and the
+    /// second does not overwrite the first. See
+    /// [`Bout::knight_att_rows`] for the `*Att` half.
+    ///
+    /// `ControlBeast+17` (0x2fb2) writes 0x10 into `+0x28` on every tick of
+    /// the beast's controller and nothing in a beast fight ever writes 0xe, so
+    /// the second row cannot be reached by the shipped game; it is built
+    /// because it is what the routine writes.
+    ///
+    /// `Beast_BackToss` is a knight script kept in the beast's namespace: it
+    /// opens `TASKCELBUF 2` to draw the tossed knight out of the beast's own
+    /// banks and `Beast_ChestToss` closes with `TASKCELBUF 1` and
+    /// `TASKGOTO Knight_GetUp`, which is the knight's.
+    fn beast_struck_knight(
+        &mut self,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Knight || a_def.controller() != Controller::Beast {
+            return;
+        }
+        // 02283 kind 0x10, 02288 kind 0xe.
+        if !matches!(kind, Some(Attack::Chop) | Some(Attack::Evade)) {
+            return;
+        }
+        self.hit_row(target, "Beast_BackToss", t_def);
+    }
+
+    /// The one row `InitKnightvsTroll` (0x26b3) writes over the knight's own
+    /// `*Hit` table (`+0x14`):
+    ///
+    /// ```text
+    /// 0026b3  mov di, [0x77ea]            ; Opponent
+    /// 0026b7  mov di, [di+0x14]
+    /// 0026ba  mov word [di+4], 0x1596     ; kind 4: Knight_SwSlapped
+    /// ```
+    ///
+    /// Kind 4 is the club: `TrollBunt` (0x5689) writes 4 into the troll's
+    /// `+0x28`, and the two instructions after it write `SLAP` off the troll's
+    /// own `+8` and `SLAPY` off `BalokSLAP` — so the bunt throws the knight
+    /// the way a Balok's uppercut does, which is [`crate::monster::troll`].
+    /// The overhead chop is kind 0x10 and has no row of its own.
+    ///
+    /// **The global this routine reaches the knight through is `Opponent`
+    /// (DS:`0x77ea`), not `[0x77e8]`**, and the common setup preamble never
+    /// refreshes it: `SetKnightCombat` (0x2962) writes `[0x77e8]` into
+    /// `KnightTable` and `[0x8979]` and leaves `Opponent` alone.
+    /// `InitGameStart+0` (0x1c55) points it at DS:`0x6c9e`, the first of the
+    /// four player records it goes on to fill, and after that only the
+    /// creatures' own controllers write it — twelve stores between 0x2dee and
+    /// 0x55d8, of which nine write `KnightTable`, one writes `[0x897b]` (the
+    /// challenged knight of a duel) and three write the record a target search
+    /// returned. Every one of those is a knight record, and all four player
+    /// records are given the same `+0x14` by `SetKnightSwTables` (0x1f6f,
+    /// `KnightHitSw` at DS:`0x69c2`), so the write lands on the one global hit
+    /// table whichever knight `Opponent` happens to name. It is the knight's
+    /// row either way, and `InitKnightvsBalok` (0x2585) reaches it the same
+    /// way.
+    fn troll_struck_knight(
+        &mut self,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Knight
+            || a_def.controller() != Controller::Troll
+            || kind != Some(Attack::Swing)
+        {
+            return;
+        }
+        self.hit_row(target, "Knight_SwSlapped", t_def);
+    }
+
+    /// The one row `InitKnightvsDemon` (0x275e) writes over the knight's own
+    /// `*Hit` table (`+0x14`):
+    ///
+    /// ```text
+    /// 00275e  mov di, [0x77e8]
+    /// 002762  mov di, [di+0x14]
+    /// 002765  mov word [di+0x10], 0x1596  ; kind 0x10: Knight_SwSlapped
+    /// 00276a  call 0x2a12                 ; a new di: the demon's own record
+    /// 002771  mov word [di+0x10], 0x5d1a  ; Demon_Evolve, its stance slot
+    /// 002776  mov word [di+0x12], 0x5f28  ; Demon_Stance1, its recovery
+    /// ```
+    ///
+    /// Kind 0x10 is the slap — `DemonAttack`'s branch at 0x504e writes it —
+    /// so **a demon's slap throws the knight**, on the direction and table
+    /// `DemonAttack` put in `SLAP` and `SLAPY` five instructions later
+    /// ([`crate::monster::demon`]). `DemonSlap` (0x437f), the struck side of
+    /// the same blow, only turns him ([`crate::monster::struck_facing`]);
+    /// reading that as the slap throwing nobody was wrong, and this row is
+    /// what settles it. The whip is kind 2 and keeps
+    /// `Knight_SwShoulderHit`; the zap is kind 4 and keeps the waist.
+    ///
+    /// The demon's own two slots at 0x2771 and 0x2776 are built already: they
+    /// are `Fighter::new`'s `UNBORN` flag and the recovery the pack carries.
+    fn demon_struck_knight(
+        &mut self,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Knight
+            || a_def.controller() != Controller::Demon
+            || kind != Some(Attack::Chop)
+        {
+            return;
+        }
+        self.hit_row(target, "Knight_SwSlapped", t_def);
+    }
+
+    /// The rows an encounter's `InitKnightvs*` routine writes over the
+    /// knight's `*Att` table, the `KnightAttSw` at his record's `+0x16`, by
+    /// the name of the attack kind each row is.
+    ///
+    /// **Recovered.** Three of the thirteen routines write there, and all
+    /// three write only the two guard kinds — 8, the block, and 0xe, the
+    /// evade — because `SetUpKnight` (0x17ab, 0x17b0) is what put
+    /// `Knight_SwEvade` and `Knight_SwBlock` in them:
+    ///
+    /// ```text
+    /// InitKnightvsTroggSpear:
+    /// 0021d1  mov di, [0x77e8]; mov si, [di+0x16]
+    /// 0021d8  mov word [si+0xe], 0x11ce   ; Knight_SwEvade (the row already there)
+    /// 0021dd  mov word [si+8],   0x11ce   ; Knight_SwEvade over the block
+    ///
+    /// InitKnightvsBeast:
+    /// 002274  mov di, [0x77e8]; mov si, [di+0x16]
+    /// 00227b  mov word [si+0xe], 0x11ce   ; Knight_SwEvade (the row already there)
+    ///
+    /// InitKnightvsRatmen:
+    /// 002326  mov di, [0x978]; mov si, [di+0x16]    ; KnightTable, the knight
+    /// 00232d  mov word [si+8],   0x115e   ; Knight_SwOThrust over the block
+    /// 002332  mov word [si+0xe], 0x10ba   ; Knight_SwDThrust over the evade
+    /// ```
+    ///
+    /// So against the spear trogg the block plays the evade as well, against
+    /// the ratmen the block becomes an overhead thrust and the evade a
+    /// downward one, and the beast's single write puts back the script that
+    /// was there — the table is global and `SetKnightAnims` refills it for
+    /// every fight, so it changes nothing and is kept because it is what the
+    /// routine does.
+    ///
+    /// `Knight_SwOThrust` (DS:`0x115e`) and `Knight_SwDThrust` (DS:`0x10ba`)
+    /// are in no other table in the image: the ratmen fight is the only place
+    /// either is reachable.
+    ///
+    /// **What these rows are not** is the block table. That is `KnightBloSw`
+    /// at the record's `+0x1e` (`SetKnightSwTables`, 0x1f7e), its rows hold
+    /// guard *kinds* rather than script addresses, and no `InitKnightvs*`
+    /// touches it — so a spear trogg's swing is still stopped by the block and
+    /// its lunge by the evade ([`crate::combat::Fighter::blocks`]); only what
+    /// the knight is shown doing changes. `+0x16` is `KnightAttSw`, which is
+    /// why these writes are indexed by the knight's own guard kinds and hold
+    /// script addresses.
+    pub fn knight_att_rows(foe: Controller) -> BTreeMap<String, String> {
+        let rows: &[(Attack, &str)] = match foe {
+            // 0021d8, 0021dd
+            Controller::TroggSpear => &[
+                (Attack::Evade, "Knight_SwEvade"),
+                (Attack::Block, "Knight_SwEvade"),
+            ],
+            // 00227b
+            Controller::Beast => &[(Attack::Evade, "Knight_SwEvade")],
+            // 00232d, 002332
+            Controller::Ratman => &[
+                (Attack::Block, "Knight_SwOThrust"),
+                (Attack::Evade, "Knight_SwDThrust"),
+            ],
+            _ => &[],
+        };
+        rows.iter()
+            .map(|(a, s)| (a.name().to_string(), s.to_string()))
+            .collect()
+    }
+
+    /// `SetKnightCombat` (0x2962) and the `*Att` writes of the
+    /// `InitKnightvs*` that follows it: the rows go on every knight in the
+    /// arena, because the table they are written into is one global that every
+    /// knight record's `+0x16` points at.
+    ///
+    /// The routine the original runs is chosen by the encounter; here the
+    /// encounter is who the knight is standing against, which is the first
+    /// fighter in the bout that is not a knight. A fight with no creature in
+    /// it — `InitKnightvsKnight`, the practice duel — writes nothing, and
+    /// neither does this.
+    ///
+    /// A script a knight's definition has not got is left out, so a pack that
+    /// ships no `Knight_SwOThrust` keeps the row it had rather than attacking
+    /// with nothing.
+    pub fn init_knight_att<'a, F>(&mut self, def_of: F)
+    where
+        F: Fn(&str) -> &'a ActorDef,
+    {
+        let foe = self
+            .fighters
+            .iter()
+            .map(|f| def_of(&f.actor).controller())
+            .find(|c| *c != Controller::Knight);
+        let Some(foe) = foe else { return };
+        let rows = Bout::knight_att_rows(foe);
+        if rows.is_empty() {
+            return;
+        }
+        for f in &mut self.fighters {
+            let def = def_of(&f.actor);
+            if def.controller() != Controller::Knight {
+                continue;
+            }
+            f.att_rows = rows
+                .iter()
+                .filter(|(_, s)| def.animation.contains_key(*s))
+                .map(|(k, s)| (k.clone(), s.clone()))
+                .collect();
+        }
     }
 
     /// `KnightSAnim` 0x44c5: `mov [0x783a], ax`, over whatever
@@ -1353,8 +1593,10 @@ impl Bout {
         if crate::arena::check_border(&mut probe, wanted) & wanted == 0 {
             return;
         }
-        // 04504 / 04538  bx = SLAPY[SLAPCNT].
-        let Some(entry) = crate::monster::slap_entry(self.shared.slap_cnt) else {
+        // 04504 / 04538  bx = SLAPY[SLAPCNT], from whichever word of
+        // `BalokSLAP` the striker pointed `SLAPY` at.
+        let Some(entry) = crate::monster::slap_entry(self.shared.slap_y, self.shared.slap_cnt)
+        else {
             return;
         };
         // 04513 / 04547, with the clamp on the leftward side only.
@@ -1722,7 +1964,7 @@ impl Bout {
                 if let Some(script) = spawn {
                     self.breathe(me, &script, def);
                 }
-                match def.attack_for(kind) {
+                match self.fighters[me].attack_script(def, kind) {
                     Some((script, k)) => {
                         let state = if k.is_guard() {
                             State::Guard
@@ -2300,6 +2542,14 @@ impl Bout {
                     // over the knight's `*Hit` table, which is the same
                     // `Knight_SwSlapped` and so the same throw.
                     self.balok_struck_knight(target, blow.attack, a_def, t_def);
+                    // The same thing again for the three fights whose rows had
+                    // been read off the image but not built: the beast's toss
+                    // (`InitKnightvsBeast+21`, 0x2283 and 0x2288), the troll's
+                    // club (`InitKnightvsTroll+16`, 0x26ba) and the demon's
+                    // slap (`InitKnightvsDemon+40`, 0x2765).
+                    self.beast_struck_knight(target, blow.attack, a_def, t_def);
+                    self.troll_struck_knight(target, blow.attack, a_def, t_def);
+                    self.demon_struck_knight(target, blow.attack, a_def, t_def);
                     self.dragon_struck(blow.missile.is_some(), blow.attack, a_def, t_def);
                     let fatal = !self.fighters[target].alive();
                     events.push(HitEvent {
@@ -3154,7 +3404,10 @@ mod tests {
         // Past the table's eleventh word the original reads `SLAPY` itself;
         // nothing in the image can reach it and nothing is built for it, so
         // the step is skipped. See `monster::slap_entry`.
-        assert_eq!(crate::monster::slap_entry(11), None);
+        assert_eq!(
+            crate::monster::slap_entry(crate::monster::slap_y::BALOK_SLAP, 11),
+            None
+        );
         b.knight_slap(0, knight);
         assert_eq!(b.fighters[0].x, x, "off the end of the table: no step");
         assert_eq!(b.shared.slap_cnt, 11, "and the count still went up");
@@ -3316,13 +3569,429 @@ mod tests {
         );
     }
 
+    /// A knight who has the scripts the five remaining `InitKnightvs*`
+    /// routines hand him, and the creature definitions those fights field.
+    fn override_defs() -> BTreeMap<String, ActorDef> {
+        use crate::taskvm::{part_flags, End, Instr, Part, Script};
+        let mut defs = dragon_defs();
+        let knight = defs.get_mut("k").expect("the knight");
+        for name in ["Beast_BackToss", "Knight_SwOThrust", "Knight_SwDThrust"] {
+            knight.animation.insert(
+                name.into(),
+                Script::new(vec![
+                    Instr::Hold { count: 4 },
+                    Instr::Part(Part {
+                        table: 1,
+                        bank: 0,
+                        cel: 9,
+                        x: -8,
+                        y: 0,
+                        flags: part_flags::BODY,
+                    }),
+                    Instr::EndFrame { end: End::Stop },
+                ]),
+            );
+        }
+        for (id, controller) in [
+            ("beast", "beast"),
+            ("troll", "troll"),
+            ("demon", "demon"),
+            ("spear", "trogg_spear"),
+            ("rat", "ratman"),
+        ] {
+            let mut c = defs["d"].clone();
+            c.controller = controller.into();
+            defs.insert(id.to_string(), c);
+        }
+        defs
+    }
+
+    /// The rows the three `*Att` writers put over `KnightAttSw`, and the two
+    /// things they are not: they do not change the kind the knight is holding,
+    /// so `CheckBlock` still stops what it stopped, and they are not the block
+    /// table, which is `KnightBloSw` at `+0x1e` and which no `InitKnightvs*`
+    /// touches.
+    ///
+    /// `SetUpKnight` (0x17ab, 0x17b0) fills `KnightAttSw[8]` with
+    /// `Knight_SwBlock` and `[0xe]` with `Knight_SwEvade`, so of the five
+    /// writes only three change anything; all five are built because all five
+    /// are what the routines do.
+    #[test]
+    fn each_fight_writes_its_own_guard_scripts_over_the_knights_att_table() {
+        let row = |c: Controller, k: Attack| Bout::knight_att_rows(c).get(k.name()).cloned();
+        // 0021d8, 0021dd
+        assert_eq!(
+            row(Controller::TroggSpear, Attack::Evade).as_deref(),
+            Some("Knight_SwEvade"),
+            "0021d8: the row already there"
+        );
+        assert_eq!(
+            row(Controller::TroggSpear, Attack::Block).as_deref(),
+            Some("Knight_SwEvade"),
+            "0021dd: the block plays the evade"
+        );
+        // 00227b
+        assert_eq!(
+            row(Controller::Beast, Attack::Evade).as_deref(),
+            Some("Knight_SwEvade"),
+            "00227b: the one *Att write the beast makes"
+        );
+        // 00232d, 002332
+        assert_eq!(
+            row(Controller::Ratman, Attack::Block).as_deref(),
+            Some("Knight_SwOThrust"),
+            "00232d: the overhead thrust"
+        );
+        assert_eq!(
+            row(Controller::Ratman, Attack::Evade).as_deref(),
+            Some("Knight_SwDThrust"),
+            "002332: the downward thrust"
+        );
+        // The other ten routines write no `*Att` row at all.
+        for c in [
+            Controller::Trogg,
+            Controller::Troll,
+            Controller::Mudman,
+            Controller::Balok,
+            Controller::Demon,
+            Controller::Dragon,
+            Controller::Claw,
+            Controller::Knight,
+        ] {
+            assert!(
+                Bout::knight_att_rows(c).is_empty(),
+                "{c:?} writes nothing over the *Att table"
+            );
+        }
+        // And no writer touches anything but the two guard kinds.
+        for c in [
+            Controller::TroggSpear,
+            Controller::Beast,
+            Controller::Ratman,
+        ] {
+            for (k, _) in Bout::knight_att_rows(c) {
+                let kind = Attack::from_name(&k).expect("an attack kind");
+                assert!(
+                    kind.is_guard(),
+                    "{c:?} wrote over {k}, which is not a guard"
+                );
+            }
+        }
+        // `KnightAttack` reads the row at the kind it asked for, and the kind
+        // it reports is unchanged: the override is the script only.
+        let defs = override_defs();
+        let knight = &defs["k"];
+        let mut f = Fighter::new("k", knight, 100, 100, 1);
+        assert_eq!(
+            f.attack_script(knight, Attack::Block),
+            Some(("block".to_string(), Attack::Block)),
+            "the knight's own row before any fight writes over it"
+        );
+        f.att_rows = Bout::knight_att_rows(Controller::Ratman);
+        assert_eq!(
+            f.attack_script(knight, Attack::Block),
+            Some(("Knight_SwOThrust".to_string(), Attack::Block)),
+            "00232d: the script changes and the kind does not"
+        );
+        assert_eq!(
+            f.attack_script(knight, Attack::Swing),
+            Some(("swing".to_string(), Attack::Swing)),
+            "a kind no row was written for is the knight's own"
+        );
+        // `CheckBlock` reads `KnightBloSw` at `+0x1e`, which none of the
+        // thirteen routines writes, against the kind the knight is holding —
+        // and the kind is still the block, so it still stops a swing.
+        f.state = State::Guard;
+        f.attack = Some(Attack::Block);
+        f.facing = 1;
+        assert!(
+            f.blocks(knight, -1, Attack::Swing),
+            "the ratmen's row does not move KnightBloSw"
+        );
+    }
+
+    /// `SetKnightCombat` and the `*Att` half of the `InitKnightvs*` after it:
+    /// the rows go on every knight in the arena, because the table is one
+    /// global that every knight record's `+0x16` points at, and a script the
+    /// definition has not got is left out rather than handed over.
+    #[test]
+    fn the_att_rows_go_on_every_knight_and_only_for_scripts_he_has() {
+        let defs = override_defs();
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &defs["k"], 100, 100, 1),
+                Fighter::new("k", &defs["k"], 200, 100, -1),
+                Fighter::new("rat", &defs["rat"], 50, 100, 1),
+            ],
+        );
+        b.init_knight_att(|n| &defs[n]);
+        for i in [0, 1] {
+            assert_eq!(
+                b.fighters[i].att_rows,
+                Bout::knight_att_rows(Controller::Ratman),
+                "both knights read the one table"
+            );
+        }
+        assert!(
+            b.fighters[2].att_rows.is_empty(),
+            "a creature has a table of its own and no rows written over it"
+        );
+        // A pack with no `Knight_SwOThrust` keeps the row it had.
+        let mut bare = defs.clone();
+        let k = bare.get_mut("k").expect("the knight");
+        k.animation.remove("Knight_SwOThrust");
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &bare["k"], 100, 100, 1),
+                Fighter::new("rat", &bare["rat"], 50, 100, 1),
+            ],
+        );
+        b.init_knight_att(|n| &bare[n]);
+        assert_eq!(
+            b.fighters[0].att_rows.get("block"),
+            None,
+            "a script the definition has not got is left out"
+        );
+        assert_eq!(
+            b.fighters[0].att_rows.get("evade").map(String::as_str),
+            Some("Knight_SwDThrust"),
+            "and the other row still goes on"
+        );
+        // A fight with no creature in it writes nothing: that is
+        // `InitKnightvsKnight`, which has no `*Att` writes of its own.
+        let mut duel = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &defs["k"], 100, 100, 1),
+                Fighter::new("k", &defs["k"], 200, 100, -1),
+            ],
+        );
+        duel.init_knight_att(|n| &defs[n]);
+        assert!(duel.fighters[0].att_rows.is_empty());
+    }
+
+    /// **`InitKnightvsBeast` writes two tables and not one.** `si` is loaded
+    /// from `[di+0x16]` for the first write and reloaded from `[di+0x14]` for
+    /// the next two, and the two writes at `+0xe` either side of that reload
+    /// land in different tables — `KnightAttSw` is DS:`0x69b0` and
+    /// `KnightHitSw` DS:`0x69c2`. Fold them together either way round and this
+    /// test fails.
+    #[test]
+    fn the_beast_writes_the_knights_att_table_and_his_hit_table_separately() {
+        let defs = override_defs();
+        let (knight, beast) = (&defs["k"], &defs["beast"]);
+        let att = Bout::knight_att_rows(Controller::Beast);
+        // 00227b went into the *Att* table: the evade, and it is the evade.
+        assert_eq!(
+            att.get("evade").map(String::as_str),
+            Some("Knight_SwEvade"),
+            "00227b is an *Att row and holds Knight_SwEvade, not the toss"
+        );
+        assert_eq!(
+            att.get("chop"),
+            None,
+            "002283 is a *Hit row: folding the tables would have put it here"
+        );
+        assert_eq!(att.len(), 1, "one *Att write and no more");
+        // 002283 and 002288 went into the *Hit* table: both the toss.
+        for (kind, site) in [(Attack::Chop, "002283"), (Attack::Evade, "002288")] {
+            let mut b = dragon_bout(60);
+            b.fighters[0].struck(knight, 5, Some(kind));
+            b.beast_struck_knight(0, Some(kind), beast, knight);
+            assert_eq!(
+                b.fighters[0].script, "Beast_BackToss",
+                "{site}: the *Hit row is the toss and not the evade"
+            );
+        }
+        // And the two do not reach into each other: a knight with the beast's
+        // `*Att` row on him, on the toss, still guards with the evade.
+        let mut b = dragon_bout(60);
+        b.fighters[0].att_rows = att;
+        b.fighters[0].struck(knight, 5, Some(Attack::Evade));
+        b.beast_struck_knight(0, Some(Attack::Evade), beast, knight);
+        assert_eq!(b.fighters[0].script, "Beast_BackToss");
+        assert_eq!(
+            b.fighters[0].attack_script(knight, Attack::Evade),
+            Some(("Knight_SwEvade".to_string(), Attack::Evade)),
+            "the *Att row is still the evade"
+        );
+        // The beast writes no other row: its charge is 0x10 and nothing in a
+        // beast fight writes 0xe, but the lunge, the swing and the rest keep
+        // whatever `Fighter::struck` chose.
+        for kind in [Attack::Lunge, Attack::Swing, Attack::RThrust] {
+            let mut b = dragon_bout(60);
+            b.fighters[0].struck(knight, 5, Some(kind));
+            b.beast_struck_knight(0, Some(kind), beast, knight);
+            assert_ne!(
+                b.fighters[0].script, "Beast_BackToss",
+                "{kind:?} has no row"
+            );
+        }
+    }
+
+    /// `InitKnightvsTroll+16` (0x26ba) and `InitKnightvsDemon+40` (0x2765):
+    /// the club and the slap throw the knight by the very same
+    /// `Knight_SwSlapped` a claw and an uppercut do, and the other kinds each
+    /// creature has keep the rows `SetUpKnight` wrote.
+    ///
+    /// The demon's is the row that settles an earlier mistake: `DemonSlap`
+    /// (0x437f) writes neither `SLAP` nor `SLAPY` and was read as a demon's
+    /// slap throwing nobody. It is the struck side of the blow; this row is
+    /// what puts him on the script, and `DemonAttack` (0x5059..0x5062) is what
+    /// writes the direction and the table.
+    #[test]
+    fn the_trolls_club_and_the_demons_slap_throw_the_knight() {
+        let defs = override_defs();
+        let knight = &defs["k"];
+        // 0026ba: kind 4, the bunt.
+        let mut b = dragon_bout(60);
+        b.fighters[0].struck(knight, 5, Some(Attack::Swing));
+        b.troll_struck_knight(0, Some(Attack::Swing), &defs["troll"], knight);
+        assert_eq!(b.fighters[0].script, "Knight_SwSlapped", "0026ba: kind 4");
+        // The overhead chop is kind 0x10 and has no row.
+        let mut b = dragon_bout(60);
+        b.fighters[0].struck(knight, 5, Some(Attack::Chop));
+        b.troll_struck_knight(0, Some(Attack::Chop), &defs["troll"], knight);
+        assert_ne!(
+            b.fighters[0].script, "Knight_SwSlapped",
+            "the chop has no row of its own"
+        );
+        // 002765: kind 0x10, the slap.
+        let mut b = dragon_bout(60);
+        b.fighters[0].struck(knight, 5, Some(Attack::Chop));
+        b.demon_struck_knight(0, Some(Attack::Chop), &defs["demon"], knight);
+        assert_eq!(
+            b.fighters[0].script, "Knight_SwSlapped",
+            "002765: kind 0x10, so a demon's slap does throw him"
+        );
+        // The whip is kind 2 and the zap kind 4, and neither has a row.
+        for kind in [Attack::Lunge, Attack::Swing] {
+            let mut b = dragon_bout(60);
+            b.fighters[0].struck(knight, 5, Some(kind));
+            b.demon_struck_knight(0, Some(kind), &defs["demon"], knight);
+            assert_ne!(
+                b.fighters[0].script, "Knight_SwSlapped",
+                "{kind:?} keeps the row SetUpKnight wrote"
+            );
+        }
+        // And none of the three rows is written for anybody but the knight, or
+        // by anybody but the creature whose routine wrote it.
+        let mut b = dragon_bout(60);
+        b.fighters[0].struck(knight, 5, Some(Attack::Chop));
+        b.troll_struck_knight(0, Some(Attack::Chop), &defs["demon"], knight);
+        b.demon_struck_knight(0, Some(Attack::Swing), &defs["troll"], knight);
+        b.beast_struck_knight(0, Some(Attack::Chop), &defs["troll"], knight);
+        assert_ne!(b.fighters[0].script, "Knight_SwSlapped");
+        assert_ne!(b.fighters[0].script, "Beast_BackToss");
+    }
+
+    /// `TrollBunt` (0x5694..0x569a) and `DemonAttack` (0x5059..0x5062 and
+    /// 0x509e..0x50a4): the two controllers that were read as writing no
+    /// `SLAP` at all, and the whip's own table.
+    ///
+    /// `SLAPY` is a pointer, and the image's six stores give it two values:
+    /// `BalokSLAP` itself and `DemonWHIP`, which is `BalokSLAP + 10`. So it is
+    /// an index into [`crate::monster::BALOK_SLAP`] here, not a constant.
+    #[test]
+    fn the_bunt_and_the_slap_write_the_throws_direction_and_its_table() {
+        use crate::monster::{slap_entry, slap_y, Act, Shared, Sight};
+        let plain = def();
+        let run = |controller: &str, facing: i32, gap: i32| -> (Act, i32, i32) {
+            let mut me_def = def();
+            me_def.controller = controller.into();
+            // `+0x52`, wide enough that `MonsterTrack` is inside its approach
+            // and hands the controller the attack branch rather than a step;
+            // the distance the branch is chosen by is `FindDistance`'s, which
+            // is `gap`.
+            me_def.approach = 400;
+            let mut me = Fighter::new("m", &me_def, 100, 100, facing);
+            // `Fighter::new` gives a demon the `UNBORN` flag, and its first
+            // script is the arrival; the branch under test is the one after it.
+            me.brain.flags &= !crate::monster::flag::UNBORN;
+            let foe = Fighter::new("k", &plain, 100 + gap * facing, 100, -facing);
+            let (mut brain, mut shared, mut seed, mut f) =
+                (me.brain, Shared::default(), 1u16, facing);
+            let sight = Sight {
+                me: &me,
+                foe: &foe,
+                def: &me_def,
+                bounds: GLOBAL,
+                gore: true,
+                body: false,
+                decapped: false,
+                progression: 0,
+                perch: None,
+                foe_blow: 0,
+                head_health: None,
+            };
+            let act = crate::monster::decide(
+                &sight,
+                &mut brain,
+                &mut seed,
+                &mut f,
+                &mut shared,
+                &mut (0, 0),
+            );
+            (act, shared.slap, shared.slap_y)
+        };
+        // 05689: the bunt is kind 4 inside a hundred, and 05697 writes the
+        // troll's own `+8` — 1 facing right, 3 facing left.
+        let (act, slap, y) = run("troll", 1, 60);
+        assert_eq!(
+            act,
+            Act::Attack {
+                kind: Attack::Swing,
+                spawn: None
+            },
+            "05689: the bunt"
+        );
+        assert_eq!(slap, 1, "05697: mov [SLAP], al with al = 1");
+        assert_eq!(y, slap_y::BALOK_SLAP, "0569a: mov [SLAPY], BalokSLAP");
+        let (_, slap, _) = run("troll", -1, 60);
+        assert_eq!(slap, 3, "and 3 facing left");
+        // 0504e: the demon's slap is kind 0x10 inside a hundred, and 0505c
+        // and 0505f write the same pair.
+        let (act, slap, y) = run("demon", 1, 60);
+        assert_eq!(
+            act,
+            Act::Attack {
+                kind: Attack::Chop,
+                spawn: None
+            },
+            "0504e: the slap"
+        );
+        assert_eq!(slap, 1, "0505c: mov [SLAP], al");
+        assert_eq!(y, slap_y::BALOK_SLAP, "0505f: mov [SLAPY], BalokSLAP");
+        // 0508e: the whip is kind 2 out to a hundred and forty, and 050a4
+        // points `SLAPY` at `DemonWHIP` instead — the same storage, five
+        // words in, so every entry is negative and the knight is dragged in.
+        let (act, slap, y) = run("demon", 1, 138);
+        assert_eq!(
+            act,
+            Act::Attack {
+                kind: Attack::Lunge,
+                spawn: None
+            },
+            "0508e: the whip"
+        );
+        assert_eq!(slap, 1, "050a1: mov [SLAP], al");
+        assert_eq!(y, slap_y::DEMON_WHIP, "050a4: mov [SLAPY], DemonWHIP");
+        // 04504: and the read is `SLAPY[SLAPCNT]`, from whichever word that is.
+        let four = |base: i32| -> Vec<i32> { (0..4).filter_map(|c| slap_entry(base, c)).collect() };
+        assert_eq!(four(slap_y::BALOK_SLAP), vec![30, 25, 20, 20], "a throw");
+        assert_eq!(four(slap_y::DEMON_WHIP), vec![-7, -3, -1, 0], "a drag");
+    }
+
     /// The script's own gosubs, end to end. `Knight_SwSlapped` (DS:0x1596) is
     /// two frames, each `TASKHOLD 02` with the gosub after the hold, and
     /// `TASKHOLD`'s resume point (0x9ac5: `add word [di+2], 2`) is the
     /// instruction after itself — so the gosub runs on both shows of each
     /// frame, `KnightSLAP` runs four times, and the throw is 30 + 25 + 20 + 20
-    /// before `TASKGOTO Knight_GetUp`. The last seven words of `BalokSLAP` are
-    /// never read by anything.
+    /// before `TASKGOTO Knight_GetUp`. Words 4, 9 and 10 of `BalokSLAP` are
+    /// never read by anything: a throw takes 0 to 3 and the demon's whip,
+    /// whose `SLAPY` is `DemonWHIP`, takes 5 to 8.
     #[test]
     fn the_slap_script_runs_the_slap_four_times_and_no_more() {
         use crate::taskvm::{End, Instr, Part, Script};

@@ -156,9 +156,38 @@ const KNIGHT_FINISHES: &[(&str, &str)] = &[
 /// And the rows one fight writes over his `*Hit` table: `InitKnightvsDragon`
 /// (0x244d, 0x2452, 0x2457) puts `Knight_Burn` at kinds 4 and 0x10 and
 /// `Knight_SwSlapped` at kind 0xa, and `InitKnightvsBalok` (0x258c) the slap
-/// at kind 4. `Knight_Burn` draws from `KN5.OB`, slot 4 of his own table,
-/// and carries `Knight_BurnDeath` under its `TASKDEAD`.
-const KNIGHT_SPAWNED: &[&str] = &["SpeedKnife", "Knife", "Knight_Burn", "Knight_SwSlapped"];
+/// at kind 4, as do `InitKnightvsTroll` (0x26ba) at kind 4 and
+/// `InitKnightvsDemon` (0x2765) at kind 0x10. `Knight_Burn` draws from
+/// `KN5.OB`, slot 4 of his own table, and carries `Knight_BurnDeath` under its
+/// `TASKDEAD`.
+///
+/// And the rows three fights write over his `*Att` table, which is
+/// `henge_core::bout::Bout::knight_att_rows`: `InitKnightvsRatmen` (0x232d,
+/// 0x2332) is the only place in the image either `Knight_SwOThrust` or
+/// `Knight_SwDThrust` is reachable from, so neither is in the closure of his
+/// own tables and both have to be named here. Both draw from banks 0, 1 and 3
+/// of table 1, which is the knight's own.
+//
+// TODO: `InitKnightvsBeast` (0x2283, 0x2288) puts `Beast_BackToss` on two of
+// his `*Hit` rows, and that script is not named here because it cannot be
+// drawn as this bake lays banks out. It opens `TASKCELBUF 2`, and table 2 is
+// "whichever creature the encounter loaded" — the beast's two banks in the
+// beast's own definition, but the knight's five in his, because `bank_tables`
+// gives every actor its own pair and the knight gets the knight in both. For
+// the knight's task to draw the tossed knight the beast's table 2 would have
+// to reach his definition, which means either a per-encounter knight or a bank
+// table that is not per-actor. `Bout::beast_struck_knight` builds the row and
+// `hit_row` leaves it alone for a definition that has not got the script, so
+// the mechanism is there and waiting for the banks. Unresolved: which of the
+// two the pack should become.
+const KNIGHT_SPAWNED: &[&str] = &[
+    "SpeedKnife",
+    "Knife",
+    "Knight_Burn",
+    "Knight_SwSlapped",
+    "Knight_SwOThrust",
+    "Knight_SwDThrust",
+];
 
 /// The spray `AddBlood` starts, on bank table 4. Every part of it is gated.
 const BLOOD: &str = "Blood1";
