@@ -926,6 +926,126 @@ pub fn trogg_hit(brain: &mut Brain) {
     brain.cooldown = 0xa;
 }
 
+/// `KnightGotStruck`, image 0x4267: what a landed blow does to the facing of
+/// whoever took it.
+///
+/// ```text
+/// 04267  mov si, [di+0xe]          ; di took the blow, si landed it
+/// 0426a  xor ax, ax
+/// 0426c  mov al, [si+0x35]         ; the striker's kind
+/// 0426f  mov bx, 0x7843
+/// 04272  add bx, ax
+/// 04274  jmp [bx]                  ; into the striker's own *Struck1
+/// ```
+///
+/// Only three of the table's entries touch `+8`, and one of the three cannot
+/// be reached:
+///
+/// ```text
+/// DemonStruck1:
+/// 04360  cmp word [si+0x28], 0x10
+/// 04364  jne 0436c
+/// 04366  sub word [di+0x38], 0xa
+/// 0436a  jmp DemonSlap
+/// 0436c  cmp word [si+0x28], 2
+/// 04370  jne 04378
+/// 04372  sub word [di+0x38], 8
+/// 04376  jmp DemonSlap
+/// 04378  sub word [di+0x38], 0xa
+/// 0437c  jmp KnightSAnim           ; any other kind: the facing is left alone
+/// DemonSlap:
+/// 0437f  mov al, [si+8]
+/// 04382  xor al, 2
+/// 04384  mov [di+8], al            ; turned to face the demon
+///
+/// ClawStruck1:
+/// 043d3  mov ax, 0xa
+/// 043d6  call TalismanWrym
+/// 043d9  sub word [di+0x38], ax
+/// 043dc  mov byte [0x7832], 1      ; the slap goes rightward
+/// 043e7  mov word [0x783a], 0x1596 ; Knight_SwSlapped
+/// 043ed  mov byte [di+8], 3        ; and he is left facing left
+///
+/// BalokStruck1:
+/// 04276  mov word [si+0x28], 4
+/// 0427b  jne 04285                 ; ZF is still `add bx, ax`'s, and
+/// 0427d  mov al, [si+8]            ; 0x7843 + kind is never zero, so the
+/// 04280  xor al, 2                 ; jump is always taken and these three
+/// 04282  mov [di+8], al            ; instructions are dead code
+/// 04285  sub word [di+0x38], 5
+/// ```
+///
+/// So a demon's slap and a dragon's claw turn whoever they land on, a balok's
+/// slap does not, and no other striker writes `+8` from here. Answers the new
+/// `+8` for the fighter that took the blow, 1 right and -1 left, or `None`
+/// when this striker's entry leaves it as it was.
+///
+/// `kind` is the striker's `+0x28`, and `striker_facing` its `+8`.
+pub fn struck_facing(
+    striker: Controller,
+    kind: Option<Attack>,
+    striker_facing: i32,
+) -> Option<i32> {
+    match striker {
+        // 04360..04384: kinds 0x10 and 2 fall into `DemonSlap`, nothing else
+        // does. `xor al, 2` on 1 gives 3 and on 3 gives 1.
+        Controller::Demon => match kind {
+            Some(Attack::Chop) | Some(Attack::Lunge) => {
+                Some(if striker_facing < 0 { 1 } else { -1 })
+            }
+            _ => None,
+        },
+        // 043ed  mov byte ptr [di + 8], 3
+        Controller::Claw => Some(-1),
+        _ => None,
+    }
+}
+
+/// `RatmanHit`, image 0x34f0: the `+0xc` branch of `ControlRatmen`, which is
+/// the one place in the game a creature turns something it has hit.
+///
+/// ```text
+/// 034f0  mov si, [di+0xc]          ; what it hit
+/// 034f3  cmp byte [si+0x35], 0x12
+/// 034f7  jne 034fc
+/// 034f9  jmp ControlRatCollide     ; another ratman: nothing happens
+/// 034fc  test byte [di+0x48], 1
+/// 03500  jne RatLeapHit            ; the leap has its own branch
+/// 03502  test byte [di+0x48], 8
+/// 03506  jne RatTailHit            ; so has the tail from a tree
+/// 03508  mov word [0x783a], 0xffff
+/// 0350e  mov word [di+0x48], 0
+/// 03513  mov word [HitDelay], 0xf
+/// 03519  mov al, [si+8]
+/// 0351c  cmp al, [di+8]
+/// 0351f  jne 03524
+/// 03521  call FlipKnight           ; both facing the same way: turn him round
+/// ```
+///
+/// and `FlipKnight`, image 0x3d13, which turns the knight's task rather than
+/// the record and lets `perdone` carry it back:
+///
+/// ```text
+/// 03d1a  mov ax, [KnightTable]
+/// 03d1d  call FINDTASK
+/// 03d20  mov si, ax
+/// 03d24  je  03d34                 ; no task: nothing
+/// 03d26  xor byte [si+0x14], 2     ; the mirror bit
+/// 03d2e  mov al, [si+0x14]
+/// 03d31  mov byte [di+8], al       ; and the record follows it
+/// ```
+///
+/// `same_kind` is the `0x12` test and `busy` the two flag branches, which are
+/// the leap and the tail. Answers whether whoever was hit is flipped.
+pub fn ratman_flips(same_kind: bool, busy: bool, victim_facing: i32, ratman_facing: i32) -> bool {
+    // 034f3..034f9, then 034fc..03506.
+    if same_kind || busy {
+        return false;
+    }
+    // 03519  mov al, [si+8]; 0351c cmp al, [di+8]; 0351f jne
+    victim_facing.signum() == ratman_facing.signum()
+}
+
 /// `ControlTroll` and `TrollAttack`: the club inside a hundred, the overhead
 /// chop from further out, and never two chops running.
 fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
@@ -1831,6 +1951,70 @@ mod tests {
         assert_eq!(b.cooldown, 0);
         trogg_hit(&mut b);
         assert_eq!(b.cooldown, 10);
+    }
+
+    /// `KnightGotStruck` (0x4267) and the three entries of its table that
+    /// name `+8`, including the one that cannot be reached.
+    #[test]
+    fn only_a_demon_slap_and_a_dragon_claw_turn_what_they_hit() {
+        // DemonStruck1 (0x4360): kind 0x10 and kind 2 fall into `DemonSlap`.
+        for kind in [Attack::Chop, Attack::Lunge] {
+            // 0437f  mov al, [si+8]; 04382 xor al, 2; 04384 mov [di+8], al
+            assert_eq!(
+                struck_facing(Controller::Demon, Some(kind), 1),
+                Some(-1),
+                "{kind:?}: turned to face a demon that faces right"
+            );
+            assert_eq!(struck_facing(Controller::Demon, Some(kind), -1), Some(1));
+        }
+        // 04378: any other kind of the demon's leaves the facing alone.
+        for kind in [Attack::Swing, Attack::Knife, Attack::RThrust] {
+            assert_eq!(struck_facing(Controller::Demon, Some(kind), 1), None);
+        }
+        // ClawStruck1+26 (0x43ed): `mov byte ptr [di + 8], 3`, whichever way
+        // the claw itself faces.
+        assert_eq!(
+            struck_facing(Controller::Claw, Some(Attack::Swing), 1),
+            Some(-1)
+        );
+        assert_eq!(struck_facing(Controller::Claw, None, -1), Some(-1));
+        // BalokStruck1's own flip (0x427d) is dead code: the `jne` at 0x427b
+        // reads the flags `add bx, ax` left at 0x4272, and `0x7843 + kind` is
+        // never zero, so the jump over it is always taken.
+        assert_eq!(
+            struck_facing(Controller::Balok, Some(Attack::Swing), 1),
+            None
+        );
+        // Nothing else in the table writes `+8`.
+        for c in [
+            Controller::Trogg,
+            Controller::TroggSpear,
+            Controller::Troll,
+            Controller::Ratman,
+            Controller::Mudman,
+            Controller::Beast,
+            Controller::Dragon,
+            Controller::Knight,
+        ] {
+            assert_eq!(struck_facing(c, Some(Attack::Swing), 1), None, "{c:?}");
+        }
+    }
+
+    /// `RatmanHit` (0x34f0): the claw that spins a knight caught with his
+    /// back to it, and the three ways out before it.
+    #[test]
+    fn a_ratmans_claw_flips_whoever_it_catches_facing_the_same_way() {
+        // 03519..03521: the two facings equal, so `call FlipKnight`.
+        assert!(ratman_flips(false, false, 1, 1));
+        assert!(ratman_flips(false, false, -1, -1));
+        // 0351f  jne 03524: facing each other, nothing happens.
+        assert!(!ratman_flips(false, false, -1, 1));
+        assert!(!ratman_flips(false, false, 1, -1));
+        // 034f3  cmp byte [si+0x35], 0x12: one of its own is not turned.
+        assert!(!ratman_flips(true, false, 1, 1));
+        // 034fc and 03502: the leap and the tail take their own branch and
+        // never reach the flip.
+        assert!(!ratman_flips(false, true, 1, 1));
     }
 
     /// `MoveBACK` (0x5783), all four corners and the vertical case.

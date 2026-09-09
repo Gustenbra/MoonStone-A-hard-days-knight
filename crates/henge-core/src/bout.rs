@@ -502,6 +502,57 @@ impl Bout {
         }
     }
 
+    /// The rest of the `+0xc` branch, for the one controller whose blow turns
+    /// what it hit: `RatmanHit` (0x34f0) calls `FlipKnight` (0x3d13) when the
+    /// two are facing the same way, which is the ratman spinning a knight it
+    /// has clawed in the back. See [`crate::monster::ratman_flips`].
+    ///
+    /// `FlipKnight` writes the *task*'s `+0x14` and lets `perdone` (0x99d2)
+    /// carry it into the record, so the fighter and the task are both turned
+    /// here; leaving the task alone would have shown the old mirror until the
+    /// next hand-over.
+    ///
+    /// The `+0x48` branches the original takes before this are the leap and
+    /// the tail from a tree. Neither is a flag on the brain here, and the
+    /// script the ratman is on is what tells them apart, so that is what is
+    /// asked.
+    fn ratman_hit(&mut self, attacker: usize, target: usize, def: &ActorDef) {
+        if def.controller() != Controller::Ratman {
+            return;
+        }
+        let busy = def
+            .scripts_for("leap")
+            .iter()
+            .any(|s| *s == self.fighters[attacker].script);
+        let same_kind = self.fighters[attacker].actor == self.fighters[target].actor;
+        let (victim, ratman) = (self.fighters[target].facing, self.fighters[attacker].facing);
+        if !crate::monster::ratman_flips(same_kind, busy, victim, ratman) {
+            return;
+        }
+        let f = &mut self.fighters[target];
+        f.facing = -victim;
+        if let Some(t) = f.task.as_mut() {
+            // 03d26  xor byte ptr [si + 0x14], 2
+            t.facing ^= 2;
+        }
+    }
+
+    /// `KnightGotStruck` (0x4267): the facing its table writes into whoever
+    /// took the blow, which is a demon's slap and a dragon's claw and nothing
+    /// else. See [`crate::monster::struck_facing`].
+    ///
+    /// The write is `mov [di+8], al` on the record, and the task takes it on
+    /// the same frame because the blow-taken script is a hand-over: the
+    /// original's `TASKHANDLE` (0x9741) and this engine's `restart` both put
+    /// the new script and the new facing on the task together.
+    fn turn_struck(&mut self, attacker: usize, target: usize, a_def: &ActorDef) {
+        let kind = self.fighters[attacker].attack;
+        let facing = self.fighters[attacker].facing;
+        if let Some(turned) = crate::monster::struck_facing(a_def.controller(), kind, facing) {
+            self.fighters[target].facing = turned;
+        }
+    }
+
     /// The task loop's `+0xe` branch: `TroggStruck` (0x2f19) zeroes `+0x4a`
     /// (0x2f1c) beside picking the blow-taken script, which
     /// [`Fighter::struck`] already did. No `FaceKnight` on this path either.
@@ -970,6 +1021,13 @@ impl Bout {
                     let evading = self.fighters[target].guarding() == Some(Attack::Evade);
                     self.fighters[target].struck(t_def, damage, blow.attack);
                     self.got_struck(target, t_def);
+                    // `KnightGotStruck` (0x4267) dispatches on the striker's
+                    // own kind, so it is the blow of a body and not of a
+                    // thrown thing: a knife has a task of its own and never
+                    // reaches this table.
+                    if blow.missile.is_none() {
+                        self.turn_struck(attacker, target, a_def);
+                    }
                     // `DragonStruck` sets `DragonFLAGS` bit 7 the moment a
                     // knight lands anything, and from then on the dragon
                     // breathes rather than bites. Nothing else reads the bit.
@@ -1016,6 +1074,7 @@ impl Bout {
                     }
                     if blow.missile.is_none() {
                         self.hit_something(attacker, a_def);
+                        self.ratman_hit(attacker, target, a_def);
                     }
                     break;
                 }
@@ -1486,6 +1545,95 @@ mod tests {
         assert_eq!(other.state_hash(), b.state_hash());
         other.fighters[1].brain.cooldown = 3;
         assert_ne!(other.state_hash(), b.state_hash(), "a brain is state");
+    }
+
+    /// `RatmanHit` (0x34f0) calling `FlipKnight` (0x3d13): a ratman's claw on
+    /// someone facing the same way turns him round, task and record together,
+    /// so the mirror the blit reads turns with him.
+    ///
+    /// The three ways out of it are covered by
+    /// `monster::ratman_flips`'s own test; this is the wiring.
+    #[test]
+    fn a_ratmans_claw_spins_a_knight_caught_facing_away() {
+        use crate::combat::tests::depth_def;
+        let mut rat = depth_def();
+        rat.controller = "ratman".into();
+        let knight = depth_def();
+        let pick = |name: &str| -> &ActorDef {
+            match name {
+                "rat" => Box::leak(Box::new(rat.clone())),
+                _ => Box::leak(Box::new(knight.clone())),
+            }
+        };
+        // The rat is behind him: both face right, so its claw comes at his
+        // back and the two `+8` bytes are equal.
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &knight, 100, 100, 1),
+                Fighter::new("rat", &rat, 70, 100, 1),
+            ],
+        );
+        b.fighters[1].facing = 1;
+        let mut landed = false;
+        for _ in 0..60 {
+            let ev = b.step_with(
+                pick,
+                &[
+                    Intent::default(),
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                ],
+            );
+            if ev.iter().any(|e| e.attacker == 1 && e.target == 0) {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "the claw landed");
+        assert_eq!(
+            b.fighters[0].facing, -1,
+            "FlipKnight: 03d26 xor byte [si+0x14], 2, 03d31 into the record"
+        );
+        assert_eq!(
+            b.fighters[0].task.as_ref().map(|t| t.mirror()),
+            Some(true),
+            "and the blit's mirror turned with it"
+        );
+
+        // Facing each other, `0351f jne 03524` skips the call and nothing
+        // about the knight's facing changes.
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("k", &knight, 100, 100, -1),
+                Fighter::new("rat", &rat, 70, 100, 1),
+            ],
+        );
+        b.fighters[1].facing = 1;
+        for _ in 0..60 {
+            let ev = b.step_with(
+                pick,
+                &[
+                    Intent::default(),
+                    Intent {
+                        dx: 0,
+                        dy: 0,
+                        attack: true,
+                    },
+                ],
+            );
+            if ev.iter().any(|e| e.attacker == 1 && e.target == 0) {
+                break;
+            }
+        }
+        assert_eq!(
+            b.fighters[0].facing, -1,
+            "no flip when they face each other"
+        );
     }
 
     /// The two branches of `ControlTrogg` the controller itself does not take,

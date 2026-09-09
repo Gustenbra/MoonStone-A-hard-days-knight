@@ -339,10 +339,35 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
            right; facing left, only one to his left), with the body boxes
            `+0x22`/`+0x24` and `+0x4e`/`+0x50`. **Not built**: `Bout::separate`
            pushes overlapping fighters apart instead, which is ours
+        8. A blow turns whoever takes it in exactly three places, and the whole
+           table was read to say so. `KnightGotStruck` (0x4267) picks a
+           `*Struck1` entry out of DS:0x7843 by the *striker's* kind
+           (`mov si, [di+0xe]; mov al, [si+0x35]`), and of the entries only
+           `DemonStruck1` (0x4360) through `DemonSlap` (0x437f,
+           `mov al, [si+8]; xor al, 2; mov [di+8], al`, on kinds 0x10 and 2
+           and no other) and `ClawStruck1+26` (0x43ed, `mov byte [di+8], 3`)
+           write `+8`. `BalokStruck1`'s own copy of the demon's three
+           instructions (0x427d) is **dead code**: the `jne` at 0x427b reads
+           the flags `add bx, ax` left at 0x4272 and `0x7843 + kind` is never
+           zero, so the jump over them is always taken and a balok's slap does
+           not turn the knight. **Built**, as `monster::struck_facing` and
+           `Bout::turn_struck`
+        9. And one striker turns its victim from its own side of the blow:
+           `RatmanHit` (0x34f0), the `+0xc` branch of `ControlRatmen`, compares
+           `[si+8]` with `[di+8]` at 0x351c and calls `FlipKnight` (0x3d13)
+           when they match, which is a knight clawed in the back being spun
+           round. `FlipKnight` writes the *task* (`xor byte [si+0x14], 2`) and
+           copies it into the record (0x3d31), so both turn together. The leap
+           (`+0x48 & 1`) and the tail from a tree (`+0x48 & 8`) take their own
+           branches first and never reach it, and a ratman that hits one of its
+           own kind (`+0x35 == 0x12`) does nothing at all. **Built**, as
+           `monster::ratman_flips` and `Bout::ratman_hit`
         What the video of the trogg swinging away from the knight showed was a
         rule of ours, since removed: turning a creature toward the step it was
         taking, which turned a trogg giving ground to the right to face right and
-        chop at nothing. There is no such rule in the original; see 2
+        chop at nothing. There is no such rule in the original; see 2. The chain
+        was walked again against the image afterwards and 1 to 7 all still read
+        as the listings do; 8 and 9 are what that pass added.
       - **Trogg with spear**: the kind 0x10 branch, one lunge inside 130, twenty frames
       - **Troll** (`TrollAttack`): the club inside a hundred, the overhead from a
         hundred to a hundred and fifty, and never two overheads running, because it

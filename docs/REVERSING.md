@@ -550,8 +550,60 @@ original fights over the whole of it and has no status panel along the bottom at
 `KnightSLAP`. `MonsterWalk` (`0x4e8b`) calls neither, and DS:`0x88ff` is read at combat
 time by `SBORD` and by nothing else. In the DOS game a troll walks through the tree line.
 
+Henge runs every fighter through the same gate, which is ours and is said so in
+`Fighter::walk`. It has one consequence worth naming, because it is visible: a creature
+whose seat record puts it off the right edge (`TroggTABLE`'s second record is x 360) wants
+to stand its `+0x54` away from the knight, and when the knight is far enough right there is
+no such column inside the arena. In the original it walks past the border and stands; here
+it walks into the border and stops. While the step gate and the write-back disagreed about
+where the edge was, it did worse than stop: `CheckBorder`'s limits are `X_LOW`..`X_HIGH`
+(10..320) and four of the shipped arena headers name a rectangle that reaches past 320, so
+the step landed outside and `run_task`'s own clamp pulled it back on the next script frame,
+two pixels out and ten back for the rest of the fight. Both gates now use the same pair.
+
 `bord` (`0x5828`) is not part of any of this: it writes attribute controller register
 `0x11`, the overscan colour.
+
+### Every write to an actor's facing, found by scanning rather than by reading around
+
+`+8` is one byte, so every store to it is `C6 /r 08 imm` or `88 /r 08`, and scanning the
+whole image for those two shapes gives the complete list. There are twenty one immediate
+stores and eight `mov [reg+8], al`, and no other instruction anywhere touches the byte:
+
+```
+01da0 InitGameStart+403   02019 InitPractice+43     0207a InitKnightvsKnight+32
+02485 InitKnightvsDragon  02573 SetUpDragonTables   025f7 SetBalokTables+34
+027ab InitKnightvsDemon   0297d SetKnightCombat+27  02ff8 BeastCharge+18
+03009 BeastChargeLeft+11  035fe ControlBalok+101    03604 ControlBalok+107
+03c1f TrackKnight+55      03d05 FaceKnight+18       03d0c FaceKnight+25
+03f77 ControlKnight+179   03f86 ControlKnight+194   043ed ClawStruck1+26
+05480 MudmenAppear+21     0548b MudmenAppear+32     079c9 FlipXL+189 (a blit record)
+02811 InitNewMO+35        03d31 FlipKnight+30       04282 BalokStruck1+12
+04384 DemonSlap+5         044e5 KnightSLAP+19       099d5 perdone+24
+09a85 TASK_FLIP+24        0a607 ContinueDragon+84
+```
+
+Three of them were missing from the account of the chain and are now built: `FlipKnight`
+(reached only from `RatmanHit+49`), `DemonSlap` and `ClawStruck1+26`. One of them is
+unreachable and it is worth saying why, because the listing reads as though it turns the
+knight: `BalokStruck1` is
+
+```text
+04276  mov word [si+0x28], 4
+0427b  jne 04285
+0427d  mov al, [si+8]
+04280  xor al, 2
+04282  mov byte [di+8], al
+04285  sub word [di+0x38], 5
+```
+
+and the only instruction before the `jne` that sets flags is `add bx, ax` at 0x4272 in
+`KnightGotStruck`, where `bx` is `0x7843` and `ax` the striker's kind. That sum is never
+zero, so the jump is always taken. A balok's slap does not turn the knight.
+
+`KnightSLAP+19` (`044e5`) sets the slapped knight's `+8` from DS:0x7832, the direction the
+slap goes. It is not built: the slap itself is not built, and `InitSLAP` and `KnightSLAP`
+are named in `taskvm.rs` as `TASKGOSUB` targets and no more.
 
 ### The fight loop draws no readout, and it is short enough to say so exhaustively
 

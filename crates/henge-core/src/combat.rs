@@ -760,6 +760,18 @@ impl Fighter {
             self.x += dx;
             moved = true;
         }
+        // `CheckBorder` (0x40d0) holds the column inside `X_LOW`..`X_HIGH` as
+        // well as inside the arena's own rectangles, and `run_task` below
+        // clamps every fighter to the same pair when the script's position is
+        // carried back out. An arena whose border rectangle reaches past 320
+        // let a step land outside them, and the clamp then pulled it back on
+        // the next script frame: a creature seated off the right edge walked
+        // two pixels out and ten back for the rest of the fight instead of
+        // standing. The two gates answer the same question, so they use the
+        // same limits.
+        let (cx, cy) = GLOBAL.clamp(self.x, self.y);
+        self.x = cx;
+        self.y = cy;
         (moved, wanted & !ok)
     }
 
@@ -1536,6 +1548,45 @@ pub(crate) mod tests {
             bottom: 60,
             top: 10,
         }])
+    }
+
+    /// The step gate and the write-back agree about the edge.
+    ///
+    /// `CheckBorder` (0x40d0) holds the column inside `X_LOW`..`X_HIGH`, and
+    /// `run_task` clamps to the same pair when the script's position is
+    /// carried out. Four of the shipped arena headers name a rectangle that
+    /// reaches past 320, and while the two gates disagreed a fighter walking
+    /// into that strip stepped two pixels out on every tick and was pulled
+    /// ten back on every script frame, which is a creature seated off the
+    /// right edge jittering there for the rest of the fight rather than
+    /// standing at the edge.
+    #[test]
+    fn a_step_never_lands_outside_the_bounds_the_task_is_clamped_to() {
+        let d = scripted_def();
+        // A border that reaches well past `X_HIGH`, as `wa3` and its kin do.
+        let wide = Field::new(vec![crate::arena::Border {
+            left: 0,
+            right: 400,
+            bottom: 60,
+            top: 10,
+        }]);
+        let mut f = Fighter::new("a", &d, 318, 100, 1);
+        for _ in 0..8 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 1,
+                    dy: 0,
+                    attack: false,
+                },
+                &wide,
+            );
+        }
+        assert_eq!(f.x, crate::arena::limit::X_HIGH, "held at the edge");
+        // And the task the blit reads is at the same column, so nothing is
+        // pulled back on the next script frame.
+        let ox = d.origin[0] as i32;
+        assert_eq!(f.task.as_ref().map(|t| t.x - ox), Some(f.x));
     }
 
     #[test]
