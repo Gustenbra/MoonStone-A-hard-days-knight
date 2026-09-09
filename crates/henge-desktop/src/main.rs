@@ -4693,6 +4693,19 @@ mod tests {
         Some(app)
     }
 
+    /// The same, but only when the pack it loaded is a real one baked from
+    /// the user's own copy of the game: `App::new` always succeeds, packless
+    /// or not, so a test that needs an actual arena to enter (`self.map` and
+    /// `self.world` both `Some`, which only a real `data.overworld` and
+    /// `data.arenas` give it) has to check for that itself rather than take
+    /// `Some(app)` as proof of it. Absent in a fresh checkout and in CI,
+    /// since the original game's data is never committed; skipped there the
+    /// way `henge-bake`'s own pack-dependent checks already are.
+    fn quest_app_with_a_real_pack() -> Option<App> {
+        let app = quest_app()?;
+        (app.map.is_some() && app.world.is_some()).then_some(app)
+    }
+
     /// `knight_fight`'s `Challenged::Walkover` arm: a grave under the
     /// player's own token wins outright and opens the trade page, with no
     /// bout ever fought (`self.mode` stays `Map`, never `Combat`).
@@ -4711,7 +4724,9 @@ mod tests {
     /// tick's own settling code (main.rs, above) knows whose fight it is.
     #[test]
     fn a_live_rival_is_a_real_bout_set_up_as_a_duel() {
-        let Some(mut app) = quest_app() else { return };
+        let Some(mut app) = quest_app_with_a_real_pack() else {
+            return;
+        };
         app.mode = Mode::Map;
         app.knight_fight(0, 1);
         assert_eq!(app.mode, Mode::Combat);
@@ -4724,7 +4739,9 @@ mod tests {
     /// except a person's own win, which opens the trade page instead.
     #[test]
     fn a_settled_challenge_opens_the_trade_page_only_for_a_players_win() {
-        let Some(mut app) = quest_app() else { return };
+        let Some(mut app) = quest_app_with_a_real_pack() else {
+            return;
+        };
         app.mode = Mode::Combat;
         app.knight_fight_settled(None);
         assert_eq!(app.mode, Mode::Map);
@@ -4814,7 +4831,9 @@ mod tests {
     /// of frames rather than running forever.
     #[test]
     fn rival_tick_walks_a_computer_knight_and_his_turn_ends() {
-        let Some(mut app) = quest_app() else { return };
+        let Some(mut app) = quest_app_with_a_real_pack() else {
+            return;
+        };
         app.mode = Mode::Map;
         app.run.which = 1;
         for frame in 0..10_000 {
