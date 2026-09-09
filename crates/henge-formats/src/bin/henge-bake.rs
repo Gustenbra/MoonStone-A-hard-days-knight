@@ -1511,6 +1511,14 @@ fn bank_tables(lib: &Library, hits: &Collide) -> BTreeMap<String, BankTables> {
     let mut henge = BankTables::new();
     henge.insert(1, vec![bank_of(lib, "Hen1.c", hits, &mut cache)]);
     out.insert("henge".to_string(), henge);
+    // **The dice table's own table**, the same shape and the same handle:
+    // `_TAVERN:load_DiceBACK` at 0xaffd loads `dice.piv` and then `dice.cel`
+    // into `DiceHANDLE` (0xb045 `mov dx, Tav3; call ObjLoadV`), and
+    // `_TAVERN:ShakeDice` at 0xb18a hands `bp` that address to its `ADDTASK`,
+    // so `DD_ShakeDice` and `DD_ThrowDice` index through one bank.
+    let mut dice = BankTables::new();
+    dice.insert(1, vec![bank_of(lib, "dice.cel", hits, &mut cache)]);
+    out.insert("dice".to_string(), dice);
     out
 }
 

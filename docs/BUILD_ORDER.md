@@ -856,7 +856,13 @@ Independent of everything. Makes it feel like a game rather than a demo.
       extension, which is the only reason nothing had baked it. And **the intro is the
       first half of `INTR.EXE`, the ending the second**: given a command tail it plays
       `The End`, `co.sti` and `bg5`, `bg7`, `bg8` instead, so those three plates are
-      deliberately not in the intro. **Ours:** how long the logo and each credit screen
+      deliberately not in the intro. **The ending half is built too**: the ten scenes at
+      0x00fa in `henge_core::ending`, `CO.STI` baked as a second 320x1200 panorama beside
+      `INTRO.STI`, the ending's own fifteen cast scripts read out of the same image with
+      the ending's bank table, the rise off `bg7` on the eight decelerating frames
+      `0x3ddb` gosubs, and the two recolourings the exit byte drives (0x3b9d on the
+      knight nibble, 0x3b23 on the moon's). `--start ending` puts it up headlessly.
+      **Ours:** how long the logo and each credit screen
       holds, since in the original that is a floppy's seek time; the rounding of 9.1033
       frames a second onto the engine's 70.0863 ticks, which is 7.70 and so eight; and the
       dark ring round a caption, standing in for the glyph shading silhouette text throws
@@ -995,10 +1001,12 @@ the southern woods was the last one and the original has no such place, so he is
       apart, then `LairFill` rolling `MOON:LairRND` for each floor (half gold, a fifth
       magic, the rest both, and nothing empty because the fourth threshold falls through
       to the third's call). Gold is the wizard's own gift routine called with `dx` set,
-      ten to thirty one; magic is his bestowal called twice. `LairWon` pays a point of
-      experience the first time only, and `CheckLairClear` writes 0xffff over a lair
-      that is beaten *and* stripped, so one you could not carry out of is still on the
-      map to come back to. **`MOON:LairFile` is recovered**, which is more than the
+      ten to thirty one; magic is his bestowal called twice. `LairWon` (0x05ac) pays a point of
+      experience the first time only and then **falls into `LairGEM` (0x05c3), which is
+      `mov ax, 2` and the status panel**: the lair's own page, `StatTYPE` 2, is where the
+      floor is handed over and there is nowhere else. `CheckLairClear` writes 0xffff over
+      a lair that is beaten *and* stripped, so one you could not carry out of is still on
+      the map to come back to. **`MOON:LairFile` is recovered**, which is more than the
       record had: it sits four bytes past the end of the stale duplicate and gives the
       24 arena layouts in order, `fol1`..`fol6`, `wal1`..`wal6`, `swl1`..`swl6`,
       `gll1`..`gll6`. That order is also the key order, so lairs 0 to 5 are the
@@ -1076,8 +1084,14 @@ the southern woods was the last one and the original has no such place, so he is
       have got it wrong. The purse saturates at a hundred and fifty. The three faces are
       blitted at (115, 15), (49, 38) and (75, 88) over `DICE.PIV`, which is a picture of
       three dice already on the wood, and the words go on the plank beside them where
-      `BETLOSER`, `PLAYERPOT` and `CONT` are written. **Not built**: the shake, which is
-      `DD_ShakeDice` and `DD_ThrowDice`, two animation scripts of a hand over the table
+      `BETLOSER`, `PLAYERPOT` and `CONT` are written. **The shake is built too**:
+      `DD_ShakeDice` (`DS:0xce59`) and `DD_ThrowDice` (`DS:0xce6d`) run on `dice.cel` in
+      `DiceHANDLE`, `ShakeDice` (0xb18a) adds the task with `dl` 0x22 and the handler at
+      0xb1a1 is the whole state machine, `TavernLoop` (0xb137) runs it, and `DiceRND`
+      (0xb21d) does not roll or draw until `DiceTHROW` reaches 2, so the faces arrive
+      when the hand lets go. `henge_core::dice`. **Still not right**: the five stake
+      gadgets belong on `dice.piv`, where `load_DiceBACK` adds them, and this pack keeps
+      them on the tavern screen's menu
 
 ## Phase 7: the quest
 
@@ -1137,14 +1151,15 @@ three life points, the stone circle on the stone's own night, the victory page o
       second digit and patches four twelve bit words into a plate's palette, red for 1,
       blue for 2, gold for 3, green for 4. `KnightWonGame`'s high nibble is 3 -> 1,
       0 -> 2, 1 -> 3, 2 -> 4, and seats 3, 0, 1 and 2 are the red, blue, gold and emerald
-      knights: four for four. `Tally::code` is the byte, and it has somewhere to go as soon
-      as the ending sequence is built. It is not built.
-      **So the ending is one message and nothing else.** `OCCURMESSAGE` calls 0x8e90
-      first, which is the `rep movsb` that puts `MESSAGE.PIV` back, so a win is the same
-      stone circle every other message goes over. `bg8.piv` sits in MOON's text pool
-      between the victory lines and the next message and **nothing in the image refers to
-      its address**; it is one of the three plates `INTR.EXE`'s ending half uses, not
-      MOON's. An ending screen over `bg8` used to stand here and is gone
+      knights: four for four. `Tally::code` is the byte, **and it now has somewhere to
+      go**: a win puts `VICTORY` up, waits for fire the way `WaitFIRE` does, and hands the
+      byte to `Ending::new`, which is `INTR.EXE` run with it as a command tail (item 55).
+      `OCCURMESSAGE` calls 0x8e90 first, which is the `rep movsb` that puts `MESSAGE.PIV`
+      back, so the victory message itself is the same stone circle every other message
+      goes over. `bg8.piv` sits in MOON's text pool between the victory lines and the next
+      message and **nothing in the image refers to its address**; it is one of the three
+      plates `INTR.EXE`'s ending half uses, not MOON's. An ending screen over `bg8` used
+      to stand here and is gone: the real one is the ending sequence's own last scene
 - [x] 73. **Scoring and the final tally. There is none, and now there is none here
       either.** `GAMEOVER`, `GAMETABLE`, `TOTALS`, `PPOINT`, `PINDEX`, `FMEM_POINTS` and
       `FMEM_COLAREA` are PUBLIC names carrying no addresses, so there was never a page to
@@ -1439,8 +1454,13 @@ Any time. None of it blocks anything.
 
 ## If you only did three things
 
-**Nothing is left but 55**, which is half done: the other half is the intro's tile maps
-and its animated cast, and neither is built or faked.
+**55 is finished, both halves.** The intro's tile maps and its animated cast were the
+half that was open, and `INTR.EXE`'s ending half went in beside them: `CO.STI` as a
+second panorama, the ten scenes at 0x00fa, and the exit byte `MOON:KnightWonGame` builds
+handed straight to them. Item 69's shake went in with it: `DD_ShakeDice` and `DD_ThrowDice` are baked
+and `henge_core::dice` is the loop that runs them. What is left on the list is the panel
+pages nobody opens yet, which are the merchant's and the mystic's, and the dice screen's
+own stake gadgets, which this pack still keeps on the tavern's menu.
 
 **75, 76 and 77 were the last three, and all three were translation.** The plan
 allowed for commissioning new music; it was not needed. `xTUNEn.BIN` looked like an
@@ -1471,9 +1491,10 @@ so finishing them means designing and playtesting, not translating. Worth knowin
 anyone estimates the end of this list.
 
 **The ending screen and the final tally were on this list and are not any more**, and not
-because they were recovered: because there is nothing there. Both endings are one message
-over `MESSAGE.PIV` and `WaitFIRE`, and nothing in the original counts anything. What was
-designed here has been removed rather than finished.
+because they were recovered: because there is nothing there **in `MAIN.EXE`**. Both of its
+endings are one message over `MESSAGE.PIV` and `WaitFIRE`, and nothing in it counts
+anything. What was designed here has been removed rather than finished. The real ending is
+in the other executable and is built: see item 55.
 
 **The status panel's menu, the town front doors' menu and the donation's three amounts
 were all here, and none of them survived a grep either.** The panel's menu was replaced by

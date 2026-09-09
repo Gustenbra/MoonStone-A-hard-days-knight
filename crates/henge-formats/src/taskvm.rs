@@ -106,7 +106,17 @@ const SCRIPT_PREFIXES: [&str; 12] = [
 /// them. `SpeedKnife`, `Knife` and `Blood1` are spawned by other scripts;
 /// `Torches` is the stone circle's, handed to `ADDTASK` at image 0xb3a6 beside
 /// `Knight_LiftMagic`, and it is the flames on the ten stones.
-const SPAWNED_SCRIPTS: [&str; 4] = ["SpeedKnife", "Knife", "Blood1", "Torches"];
+/// `DD_ShakeDice` and `DD_ThrowDice` are the tavern's, handed to `ADDTASK` by
+/// `_TAVERN:ShakeDice` (0xb18a) and written into the task by `ThrowDice`
+/// (0xb205); both run on `dice.cel` in `DiceHANDLE`.
+const SPAWNED_SCRIPTS: [&str; 6] = [
+    "SpeedKnife",
+    "Knife",
+    "Blood1",
+    "Torches",
+    "DD_ShakeDice",
+    "DD_ThrowDice",
+];
 
 fn is_script_name(name: &str) -> bool {
     if SPAWNED_SCRIPTS.contains(&name) {

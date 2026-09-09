@@ -498,6 +498,10 @@ pub enum Answer {
         guardian: String,
         count: u32,
     },
+    /// The lair's own page. `MOON:LairGEM` at 0x05c3: `mov ax, 2` and the
+    /// panel, which is where a lair's floor is handed over, one gadget at a
+    /// time. See [`crate::lair::Page`].
+    Floor { lair: usize },
     /// Open the donation bowl over this screen. `DonateLoop`, which is a loop
     /// of its own with `MovePointer` and `CHECKGADGET` in it and two ways out.
     Bowl { consult: bool },
@@ -692,7 +696,7 @@ impl Visit {
                 family,
                 guardian,
                 count,
-            } => match run.raid(*lair, items) {
+            } => match run.raid(*lair) {
                 Raid::Guardian => Answer::Fight {
                     lair: *lair,
                     arena: arena.clone(),
@@ -700,14 +704,10 @@ impl Visit {
                     guardian: guardian.clone(),
                     count: *count,
                 },
-                Raid::Spoils(s) => {
-                    self.said = s.describe(items);
-                    Answer::Stayed { days: 0 }
-                }
-                Raid::Bare => {
-                    self.said = "Nothing but bones.".into();
-                    Answer::Stayed { days: 0 }
-                }
+                // `0x0574` runs on into `LairGEM` for a lair already beaten,
+                // and that is the panel on `StatTYPE` 2. Nothing is said here
+                // because the original says nothing: it draws the floor.
+                Raid::Floor => Answer::Floor { lair: *lair },
             },
             Effect::Valley {
                 arena,
@@ -727,13 +727,6 @@ impl Visit {
                 },
             },
         }
-    }
-
-    /// The guardian is down and the floor is yours: what to say about it, and
-    /// the lair marked. The desktop calls this on the way back from the bout.
-    pub fn won_lair(&mut self, lair: usize, items: &Items, run: &mut Run) {
-        let spoils = run.lair_won(lair, items);
-        self.said = format!("The guardian is slain. {}", spoils.describe(items));
     }
 
     /// The Valley's Guardian is down: the keys are spent and a moonstone is in

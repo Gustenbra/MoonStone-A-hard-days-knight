@@ -259,6 +259,11 @@ impl Panel {
                     id: EXIT_ID,
                     payload: Payload::default(),
                 });
+                // `side` is read by icon index, so a pillar has to take a
+                // place in it too or every icon after it reads the wrong
+                // array. `EXIT` is its own record and `line` never gets this
+                // far for one, so which side it is put on does not matter.
+                self.side.push(0);
             }
         }
     }
@@ -820,7 +825,9 @@ pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
 
     // `ReDisplay` 0xbeb6: `RESP` becomes `Response2` and `StatsOffset` 0x96
     // before the type's own page. The branches are the routine's, in its order.
-    panel.tables.push(screen.right_table(false));
+    panel
+        .tables
+        .push(screen.right_table(other.is_some_and(|o| o.scouted)));
     let right = henge_core::status::RIGHT_OFFSET;
     let hoard = other.map_or_else(Hoard::default, |o| o.hoard);
     let gold = other.map_or(0, |o| o.gold);
@@ -847,6 +854,11 @@ pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
 pub struct Other {
     pub hoard: Hoard,
     pub gold: u32,
+    /// `EffectFLAG+4`, which `_STATUS:Paper2` at 0xd3ed reads before it picks
+    /// the right arch's array: a lair looked at from the air gets `Identify`
+    /// and so carries no permission bit, and nothing on the floor can be
+    /// taken. See `henge_core::lair::Page`.
+    pub scouted: bool,
 }
 
 /// The original's whole status screen, laid out and painted.

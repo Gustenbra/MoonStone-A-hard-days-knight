@@ -72,13 +72,15 @@ fn carrying(run: &Run) -> String {
 ///   --goto <x>,<y>    walk there first, the way a held key would
 ///   --input <script>  one key press per tick afterwards:
 ///                     u/d move the highlight, s takes the option,
-///                     h/j/k/l walk, . waits
+///                     h/j/k/l walk, c the character sheet, . waits
 ///   --hurt <hp>       start the run already wounded, so a healer has something
 ///                     to do without first having to win and lose a fight
 ///   --gold <n>        start the run with coin, so a stall can be reached
 ///                     without first winning the fights that pay for it
 ///   --keys <0..4>     start holding that many of the four lair keys
 ///   --stone <name>    start carrying one of the four moonstones
+///   --floor <n>       open lair n's own page, which is `MOON:LairGEM`.
+///                     With --scouted it is the page a gem flight ends on
 ///   --lives <n>       how many life points to ride out with
 ///   --start <screen>  title, select, map or arena. Defaults to the map, so
 ///                     every recipe written before the shell existed still does
@@ -299,12 +301,15 @@ impl Script {
                 }
                 Mode::Map => {
                     // `is_none_or` would read better but postdates the crate's
-                    // minimum Rust version.
+                    // minimum Rust version. A flight is not a walk: once the
+                    // gem or the hawk is up, the script stops steering towards
+                    // the point it was given, or it would drag the token back
+                    // out of the air every tick.
                     let there = match app.map.as_ref() {
                         Some(m) => m.state.x == gx && m.state.y == gy,
                         None => true,
                     };
-                    if !there {
+                    if !there && app.flight.is_none() {
                         app.keys = [false; 256];
                         app.steer(gx, gy);
                         return;
@@ -364,6 +369,25 @@ fn prepare(app: &mut App, a: &[String]) {
     // nobody can reach in testing is a screen nobody checks.
     if a.iter().any(|s| s == "--won") {
         app.run.won = true;
+    }
+    // `--floor <n>`: put the lair's own page up, which in play is one won
+    // guardian away and, on the gem, a whole flight away. `--scouted` with it
+    // is the same page as `EffectFLAG+4` leaves it: `Identify` rather than
+    // `Take`, and nothing on the floor can be lifted.
+    if let Some(n) = a
+        .iter()
+        .position(|s| s == "--floor")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if app.run.lairs.is_empty() {
+            app.stock_lairs();
+        }
+        let scouted = a.iter().any(|s| s == "--scouted");
+        if !scouted {
+            app.run.lair_beaten(n);
+        }
+        app.open_lair_page(n, scouted);
     }
     // `--stones`: put the stone circle's set piece up straight away. The
     // offering that reaches it in play is the wizard's gift given back, which
@@ -985,11 +1009,25 @@ struct App {
     /// Whether `0x50d`'s three glows are in, which `0x3531` gosubs part way
     /// through the ceremony and `0x547` takes out again at the end of it.
     ending_glows: bool,
+    /// The lair page, while it is up. `MOON` image 0x05c3 `LairGEM`: the panel
+    /// opened on `StatTYPE` 2, which is the only place a lair's floor is
+    /// handed over, and the only place a gem flight ends.
+    lair_page: Option<henge_core::lair::Page>,
     /// The stone circle's set piece, while `HengeLOOP` is running it. Modal,
     /// like everything else the original puts up and sits in a loop over.
     stones: Option<Stones>,
     /// The circle's own one-bank table, `DiceHANDLE` with `Hen1.c` in it.
     stones_banks: Option<henge_core::taskvm::BankTables>,
+    /// The hand over the dice table, while `TavernLoop` is running it, and the
+    /// throw it is holding back until `DiceDone`.
+    dice_table: Option<henge_core::dice::Table>,
+    /// What `DiceRND` would draw when the animation lands: the three faces and
+    /// the line the payout is said in. `RollDice` is called *after* the throw
+    /// in the original and there is nothing to draw before it, so nothing is
+    /// drawn before it here either.
+    dice_held: Option<([u8; 3], String)>,
+    /// The dice table's own one-bank table, `dice.cel` in `DiceHANDLE`.
+    dice_banks: Option<henge_core::taskvm::BankTables>,
     /// Every animation script, which the circle's two tasks run on. The bout
     /// has its own copy; this is the shell's.
     scripts: henge_core::taskvm::ScriptSet,
@@ -1327,6 +1365,12 @@ impl App {
         // one-bank table, which the baker writes beside every creature's.
         let scripts: henge_core::taskvm::ScriptSet =
             reg.read_data("data.scripts").unwrap_or_default();
+        let dice_banks = reg
+            .read_data::<std::collections::BTreeMap<String, henge_core::taskvm::BankTables>>(
+                "data.banks",
+            )
+            .ok()
+            .and_then(|mut b| b.remove(henge_core::dice::BANKS));
         let stones_banks = reg
             .read_data::<std::collections::BTreeMap<String, henge_core::taskvm::BankTables>>(
                 "data.banks",
@@ -1399,8 +1443,12 @@ impl App {
             ending: Ending::new(0x24),
             ending_cast,
             ending_glows: false,
+            lair_page: None,
             stones: None,
             stones_banks,
+            dice_table: None,
+            dice_held: None,
+            dice_banks,
             scripts,
             snapshot_path: snapshot_path_arg(&args_of()),
             status,
@@ -1931,8 +1979,9 @@ impl App {
                     return;
                 }
                 // The sheet is the original's status screen: modal, and
-                // where the casting and the levelling are done.
-                if self.sheet {
+                // where the casting and the levelling are done. So is the
+                // lair's page, which is the same panel on `StatTYPE` 2.
+                if self.sheet || self.lair_page.is_some() {
                     self.sheet_tick();
                     return;
                 }
@@ -2071,6 +2120,13 @@ impl App {
                     self.bowl_tick();
                     return;
                 }
+                // `TavernLoop` at 0xb137 is a loop of its own too: the hand
+                // over the table runs and nothing else on the dice screen
+                // happens until `DiceTHROW` reaches 2.
+                if self.dice_table.is_some() {
+                    self.dice_tick();
+                    return;
+                }
                 // A run that ended while you were indoors, which is what a
                 // lair's guardian or the Valley's does: back out onto the map,
                 // where the tally is. Nothing in a place is any use to a
@@ -2087,6 +2143,7 @@ impl App {
                 let mut raid: Option<(usize, String, String, String, u32)> = None;
                 let mut quest: Option<(String, String, String, u32)> = None;
                 let mut bowl: Option<bool> = None;
+                let mut floor: Option<usize> = None;
                 if let Some(s) = self.visiting.as_mut() {
                     if let Some(def) = self.places.get(&s.visit.place) {
                         if up {
@@ -2117,6 +2174,10 @@ impl App {
                                 } => {
                                     quest = Some((arena, family, guardian, count));
                                 }
+                                // `0x0574` for a lair already beaten runs
+                                // straight on into `LairGEM`, which is the
+                                // panel on `StatTYPE` 2 over the map.
+                                Answer::Floor { lair } => floor = Some(lair),
                                 Answer::Bowl { consult } => bowl = Some(consult),
                             }
                             // `MOON:Henge` does not hand a line back and stop:
@@ -2131,6 +2192,14 @@ impl App {
                     } else {
                         leave = true;
                     }
+                }
+                // `LairGEM`: `mov ax, 2` and the panel, which owns the
+                // screen. The place the lair's door was is left behind,
+                // because in the original there is no such door: the map
+                // walks onto the lair and `StackDecision` runs it.
+                if let Some(lair) = floor {
+                    self.open_lair_page(lair, false);
+                    return;
                 }
                 // `InitDonation`: the purse moves into `GOLDP` and the bowl
                 // opens empty.
@@ -2197,6 +2266,9 @@ impl App {
                     } else if let (Some(s), Some(v)) = (self.visiting.as_mut(), carried) {
                         s.visit = v;
                     }
+                    // `TavernOpenScene`: the dice screen opens on the hand, not
+                    // on the faces.
+                    self.open_dice_table();
                 }
                 // Time spent indoors has to move the map's calendar too, or the
                 // day on the status bar would disagree with the day of the run.
@@ -2325,28 +2397,15 @@ impl App {
                             // lair as it was, with the guardian still in it.
                             match self.raiding.take() {
                                 Some(lair) if won && self.run.alive() => {
-                                    // Back to the lair's own page, and the
-                                    // floor read there: `MOON:LairWon` marks
-                                    // the lair, pays the one point of
-                                    // experience the first win is worth, and
-                                    // opens the page for the taking.
-                                    let place = self.raid_place.clone();
-                                    if self.enter(&place) {
-                                        let mut visit =
-                                            self.visiting.as_ref().map(|s| s.visit.clone());
-                                        if let Some(v) = visit.as_mut() {
-                                            v.won_lair(lair, &self.items, &mut self.run);
-                                        }
-                                        if let (Some(s), Some(v)) = (self.visiting.as_mut(), visit)
-                                        {
-                                            s.visit = v;
-                                        }
-                                    } else {
-                                        self.run.lair_won(lair, &self.items);
-                                        if self.map.is_some() {
-                                            self.mode = Mode::Map;
-                                        }
-                                    }
+                                    // `MOON:LairWon` at 0x05ac marks the lair
+                                    // and pays the one point of experience the
+                                    // first win is worth, and then falls
+                                    // straight into `LairGEM`, which puts the
+                                    // panel up on `StatTYPE` 2. The floor is
+                                    // handed over there, a gadget at a time,
+                                    // and nowhere else.
+                                    self.run.lair_beaten(lair);
+                                    self.open_lair_page(lair, false);
                                     self.refresh_lairs();
                                 }
                                 _ => {
@@ -2399,6 +2458,75 @@ impl App {
     /// `HengeLOOP`. One frame every three vertical retraces until the lift's
     /// animation ends, and there is no way to cut it short: the loop tests
     /// nothing but `HengeFLAG`.
+    /// `TavernOpenScene` 0xb12e: `DiceTHROW = 0` and `ShakeDice`.
+    ///
+    /// The stake was taken on the way in, because in this pack the five stake
+    /// gadgets sit on the tavern's own screen rather than on `dice.piv` where
+    /// `load_DiceBACK` puts them; `SetBET` at 0xb1e8 has already been through
+    /// the purse by the time the room opens, so the table is told the stake is
+    /// pending and the handler at 0xb1a1 takes it on the next `ff ff`,
+    /// exactly as it takes one from `ThrowDice`.
+    ///
+    /// `DiceRND` at 0xb21d is what rolls and draws, and it does not run until
+    /// `DiceTHROW` is 2, so the faces and the payout line are held back until
+    /// the animation lands rather than being on the screen before it.
+    fn open_dice_table(&mut self) {
+        let showing_dice = self
+            .visiting
+            .as_ref()
+            .and_then(|s| self.places.get(&s.visit.place))
+            .is_some_and(|d| d.dice);
+        if !showing_dice || self.dice_banks.is_none() {
+            return;
+        }
+        let Some(scene) = self.visiting.as_mut() else {
+            return;
+        };
+        let Some(dice) = scene.visit.dice.take() else {
+            return;
+        };
+        let said = std::mem::take(&mut scene.visit.said);
+        self.dice_held = Some((dice, said));
+        let mut table = henge_core::dice::Table::new();
+        table.stake_taken();
+        self.dice_table = Some(table);
+    }
+
+    /// One tick of `TavernLoop`, and `DiceRND` on the tick it lands.
+    fn dice_tick(&mut self) {
+        // The loop belongs to the dice screen. Anything that takes the screen
+        // away takes the loop with it, and whatever `DiceRND` was going to
+        // draw goes back onto the visit rather than being lost.
+        let here = self
+            .visiting
+            .as_ref()
+            .and_then(|s| self.places.get(&s.visit.place))
+            .is_some_and(|d| d.dice);
+        if !here {
+            self.dice_table = None;
+            if let (Some((dice, said)), Some(scene)) =
+                (self.dice_held.take(), self.visiting.as_mut())
+            {
+                scene.visit.dice = Some(dice);
+                scene.visit.said = said;
+            }
+            return;
+        }
+        let Some(table) = self.dice_table.as_mut() else {
+            return;
+        };
+        table.tick(&self.scripts);
+        if !table.landed() {
+            return;
+        }
+        self.dice_table = None;
+        // `DiceRND`: the faces go down and the payout is said.
+        if let (Some((dice, said)), Some(scene)) = (self.dice_held.take(), self.visiting.as_mut()) {
+            scene.visit.dice = Some(dice);
+            scene.visit.said = said;
+        }
+    }
+
     fn stones_tick(&mut self) {
         let Some(stones) = self.stones.as_mut() else {
             return;
@@ -2816,8 +2944,8 @@ impl App {
         // Modal on the map, which is where `ReDisplay` and `StatLOOP` sit; over
         // an arena or a doorway the sheet is a card held up, and whatever is
         // behind it keeps its own gadgets.
-        if self.sheet && self.mode == Mode::Map {
-            let panel = status::lay_out(&self.run, SheetScreen::Sheet, None);
+        if let Some((screen, other)) = self.panel_now().filter(|_| self.mode == Mode::Map) {
+            let panel = status::lay_out(&self.run, screen, other.as_ref());
             for g in panel.gadgets(&mut self.reg) {
                 self.gadgets.add(g);
             }
@@ -3022,10 +3150,40 @@ impl App {
         // `AddClickSound` and `ExitFLAG = 1`, which ends `StatLOOP`.
         if hit.id == henge_core::status::EXIT_ID {
             self.audio.play(CLICK_SOUND);
-            self.sheet = false;
+            if self.lair_page.is_some() {
+                self.close_lair_page();
+            } else {
+                self.sheet = false;
+            }
             return;
         }
         let Some(op) = hit.op() else { return };
+        // The lair's page. `HotGadget` reaches `HGTakeMagic` for `STRP` 1 and
+        // `TakeGold` for the rest through `test ax, 0x20`, and `HGCastMagic`
+        // at 0xca8d falls into `HGTakeMagic` itself when the array carries no
+        // `0x10`, which the right arch's `Take` does not. So every lit gadget
+        // on this page is a take, whatever its low nibble says.
+        if let Some(page) = self.lair_page {
+            if !hit.lit {
+                // `Identify` has no permission bit: a lair seen from the air.
+                return;
+            }
+            let moved = match op {
+                Op::Take => self.run.take_lair_gold(page.lair) > 0,
+                Op::TakeMagic | Op::Cast => {
+                    self.run
+                        .take_from_lair(page.lair, hit.payload.field, &self.items)
+                }
+                Op::Raise | Op::Buy => false,
+            };
+            if moved {
+                // `HGTakeDone`: `inc [TakeCNT]`, the knight's numbers redone
+                // and `ReDisplay`.
+                self.audio.play(CLICK_SOUND);
+                self.sync_sheet();
+            }
+            return;
+        }
         let Some(slot) = henge_core::status::slot_of(hit.id) else {
             return;
         };
@@ -3100,10 +3258,25 @@ impl App {
     }
 
     /// A tick aloft. The token moves where it is steered, a pixel a tick,
-    /// inside `HawkBorders`; fire lands it: the gem's flight goes back to
-    /// where it began, the hawk's stays put. In the original a gem flight
-    /// ends only by looking into a lair, which restores the position on the
-    /// way out (`LairGEM`); with no lair to look into, fire does it here.
+    /// inside `HawkBorders`, and fire is `_MAP:ScrollINPUT` at 0xa3c6:
+    ///
+    /// ```text
+    /// a3c6  mov ax, [JOYS]
+    /// a3c9  test ax, 0x10; je DragonEncounter    ; no fire, fly on
+    /// a3ce  cmp word ptr [EffectFLAG+2], 0       ; the hawk
+    /// a3d3  je 0xa3d8
+    /// a3d5  call 0xa962                          ; inside RESTOREGEM, past
+    ///                                            ; the two words that put the
+    ///                                            ; position back: the hawk
+    ///                                            ; lands where it is
+    /// a3d8  call DisplayStack
+    /// ```
+    ///
+    /// and `DisplayStack` at 0xae45 sends a stack of more than one to
+    /// `GEMEncounter` while the gem's flag is up, which walks the stack for the
+    /// entry of type 2 and hands it to `StackDecision`. **So a gem flight ends
+    /// nowhere but at a lair**: `RESTOREGEM` has one caller, `LairGEM+19`, and
+    /// fire over open ground does nothing at all.
     fn fly(&mut self, dx: i32, dy: i32) {
         use henge_core::overworld::{MAX_X, MAX_Y};
         let landing = self.takes();
@@ -3113,14 +3286,36 @@ impl App {
         };
         m.state.x = (m.state.x + dx).clamp(0, MAX_X);
         m.state.y = (m.state.y + dy).clamp(0, MAX_Y);
-        if landing {
-            if let Some(fl) = self.flight.take() {
-                if fl.returns {
-                    m.state.x = fl.from.0;
-                    m.state.y = fl.from.1;
+        if !landing {
+            return;
+        }
+        match self.flight {
+            // `a3d5`: the hawk's three flags down, and no `GemXY` written
+            // back, so it comes down where it is.
+            Some(fl) if !fl.returns => self.flight = None,
+            // `GEMEncounter` at 0xae81: the lair under the token, or nothing.
+            Some(_) => {
+                if let Some(lair) = self.lair_under_the_token() {
+                    self.open_lair_page(lair, true);
                 }
             }
+            None => {}
         }
+    }
+
+    /// `GEMEncounter`'s `cmp word ptr ds:[bp+4], 2`: the entry of the stack
+    /// that is a lair, which is the only kind a gem flight can land on.
+    fn lair_under_the_token(&self) -> Option<usize> {
+        self.overlaps.ids().iter().find_map(|id| {
+            self.places
+                .get(id)?
+                .options
+                .iter()
+                .find_map(|c| match c.effect {
+                    henge_core::place::Effect::Raid { lair, .. } => Some(lair),
+                    _ => None,
+                })
+        })
     }
 
     /// The crystal or the hawk over the token while aloft: `_MAP:SHOW` draws
@@ -3363,6 +3558,12 @@ impl App {
             // 'e' is Enter, so the headless driver can prove Enter takes a menu
             // option and not only that space does.
             Some('e') => self.pressed[12] = true,
+            // 'c' is the sheet, which is the C key on a keyboard here and
+            // space on the original's map (`ScrollINPUT` 0xa399: scancode
+            // 0x39, then `mov ax, 9` and the panel). Without it a headless
+            // recipe cannot reach anything the panel casts, and the gem is
+            // cast from there and nowhere else.
+            Some('c') => self.sheet = !self.sheet,
             // Seat two's fire, which is the pointer's button: `p` for point.
             Some('p') => {
                 self.keys[11] = true;
@@ -3475,6 +3676,68 @@ impl App {
         Ok(())
     }
 
+    /// `mov ax, 2; call ColourStatus`, which is all three of `LairGEM`'s own
+    /// instructions. The panel owns the screen while it is up, so the map is
+    /// what is behind it and the place the lair's door was is gone.
+    fn open_lair_page(&mut self, lair: usize, scouted: bool) {
+        self.lair_page = Some(henge_core::lair::Page { lair, scouted });
+        self.visiting = None;
+        self.sheet = false;
+        self.mode = Mode::Map;
+        // `StatusSetup` opens with the pointer at (0xa0, 0x64), which is what
+        // `0xbe01` writes into `Address` before `SetUpStatus` runs.
+        self.point_at(0xa0, 0x64);
+    }
+
+    /// `LairGEM+6` onwards: the panel has left, so `CheckLairClear` runs and
+    /// then, if this page was reached from the air, `RESTOREGEM`.
+    ///
+    /// ```text
+    /// 0x05c9  call CheckLairClear
+    /// 0x05cf  cmp word ptr [EffectFLAG+4], 0
+    /// 0x05d4  je 0x05d9
+    /// 0x05d6  call 0xa950            ; RESTOREGEM
+    /// ```
+    fn close_lair_page(&mut self) {
+        let Some(page) = self.lair_page.take() else {
+            return;
+        };
+        // `CheckLairClear`: an emptied, beaten lair leaves the map.
+        self.refresh_lairs();
+        if !page.scouted {
+            return;
+        }
+        // `RESTOREGEM` at 0xa950: `GemXY` back into the knight's `+0x5c` and
+        // `+0x5e`, and the three flags down.
+        if let Some(fl) = self.flight.take() {
+            if let Some(m) = self.map.as_mut() {
+                m.state.x = fl.from.0;
+                m.state.y = fl.from.1;
+            }
+        }
+    }
+
+    /// Which page of the panel is up, and what is in its right arch.
+    ///
+    /// `ColourStatus` is handed one `StatTYPE` and `ReDisplay` branches on it,
+    /// so there is one panel and one page of it at a time. The lair's page
+    /// wins because `LairGEM` puts it up over whatever the map was doing, the
+    /// way every other modal loop in the original does.
+    fn panel_now(&self) -> Option<(SheetScreen, Option<status::Other>)> {
+        if let Some(page) = self.lair_page {
+            let (hoard, gold) = self.run.lair_floor(page.lair);
+            return Some((
+                SheetScreen::Lair,
+                Some(status::Other {
+                    hoard,
+                    gold,
+                    scouted: page.scouted,
+                }),
+            ));
+        }
+        self.sheet.then_some((SheetScreen::Sheet, None))
+    }
+
     /// The scene, and then the character sheet over it if it is up.
     fn render(&mut self) {
         self.draw_scene();
@@ -3483,14 +3746,14 @@ impl App {
         // straight after the picture. Anything seeded a frame early is seeded
         // again here rather than breathing between the wrong two colours.
         self.fx.reseed(&self.fb.palette);
-        if self.sheet {
+        if let Some((screen, other)) = self.panel_now() {
             // The sheet brings its own palette (`_STATUS:STAPAL`), so the ink
             // does not come off whatever was on screen behind it. `ReDisplay`
             // lays the panel out and draws it in one pass; this does the same,
             // off the same routine `gadgets_tick` registered from.
             let small = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
             let bold = self.fonts.get("bold");
-            let panel = status::lay_out(&self.run, SheetScreen::Sheet, None);
+            let panel = status::lay_out(&self.run, screen, other.as_ref());
             let said = self.sheet_said.clone();
             status::draw_sheet(
                 &mut self.reg,
@@ -3612,6 +3875,17 @@ impl App {
                         )
                         .is_ok()
                     {
+                        // `TavernLoop` draws the tasks over the picture every
+                        // frame, and the hand is the only one on this screen.
+                        if let Some(table) = self.dice_table.clone() {
+                            let banks = self.dice_banks.clone();
+                            shell::draw_dice_hand(
+                                &mut self.reg,
+                                &mut self.fb,
+                                &table,
+                                banks.as_ref(),
+                            );
+                        }
                         return;
                     }
                 }

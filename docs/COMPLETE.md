@@ -890,16 +890,72 @@ What this replaced: twenty four hand-sited lairs, a median of 51 pixels and as m
 from where the original puts them, and twenty four invented guardians of which five
 happened to be right.
 
+**`LairGEM` and `DisplayLair` are one mechanism, and it is built.** The whole of a lair's
+aftermath is one routine, `MOON` image 0x0574 to 0x05dc, which `_MAP:StackDecision+41`
+(0xaec8) reaches for a stack entry of type 2:
+
+```text
+0x0574  mov word ptr [dragonbodge3], 0
+0x057a  mov [0x6962], di                  ; the lair record
+0x057e  call 0xa554                       ; the map's own glows taken down
+0x0581  cmp word ptr [EffectFLAG+4], 0    ; INITGEM's flag
+0x0586  jne LairGEM                       ; aloft: look, and do not fight
+0x0588  call ClearCombat
+0x058b  call InitLair
+0x058e  call InitCombat                   ; the guardian
+0x0597  test word ptr [KnightDeath], 1
+0x059d  je LairWon
+0x059f  mov ax, 9; call the panel         ; a death opens the character sheet
+LairWon 0x05ac
+0x05b0  cmp word ptr [di+8], 0; jne LairGEM
+0x05b6  mov word ptr [di+8], 1            ; the lair is marked
+0x05bf  add word ptr [di+0x36], 1         ; and worth one point of experience
+LairGEM 0x05c3
+0x05c3  mov ax, 2                         ; StatTYPE 2, which is `Screen::Lair`
+0x05c6  call the panel                    ; and it runs until `ExitFLAG`
+0x05c9  call CheckLairClear
+0x05cf  cmp word ptr [EffectFLAG+4], 0
+0x05d4  je 0x05d9
+0x05d6  call 0xa950                       ; RESTOREGEM
+```
+
+So **the page a won lair opens and the page a gem flight ends on are the same three
+instructions**, and the only difference between them is `EffectFLAG+4`: `_STATUS:Paper2`
+at 0xd3ed reads that flag and hands the right arch `Identify` instead of `Take`, which
+carries no permission bit, so `HGTakeMagic`'s `test ax, 0x20` at 0xcbb7 returns and a
+lair seen from the air can be read and not emptied.
+
+**The floor is handed over a gadget at a time, and nowhere else.** `_STATUS:HGTakeMagic`
+(0xcba2) is `dec byte ptr [bx+di]; inc byte ptr [bx+si]`, one thing per press, with the
+keys and the moonstones going as whole bit fields through `HGTakeMoonstone` (0xcbe4) and
+the sword through `TakeSword` (0xccd4). `_STATUS:TKGP` (0xccfa) is the one routine in the
+program that knows a lair page has a floor of its own: `cmp word ptr [StatTYPE], 2`, then
+`lea di, [di+6]` for the lair's gold, then `dec [di]; inc [si+0x32]` round a loop that
+stops dead at a purse of 0x96. So the pile moves whole unless the purse fills, and what is
+over the ceiling stays on the ground.
+
+**What this replaced:** an automatic sweep of the floor into the pack on the way out of a
+bout, and a sentence of ours saying what had been picked up. `Run::raid`,
+`Run::lair_won`, `Run::strip_lair`, `Raid::Spoils`, `Spoils` and `Place::won_lair` are all
+gone; `Run::lair_beaten`, `Run::lair_floor`, `Run::take_from_lair` and
+`Run::take_lair_gold` are the routines above.
+
+**The gem's flight ends nowhere else.** `RESTOREGEM` (0xa950) has exactly one caller,
+`LairGEM+19`, and `INITGEM` (0xa937) saves the knight's `+0x5c` and `+0x5e` into `GemXY`
+for it to put back. Fire on the map is `_MAP:ScrollINPUT` 0xa3c6: `test ax, 0x10`, then
+`cmp word ptr [EffectFLAG+2], 0` and, for the **hawk only**, a call into the middle of
+`RESTOREGEM` at 0xa962, past the two words that restore the position. So the hawk lands
+where it is and the gem does not land at all until it finds a lair. `DisplayStack`
+(0xae27) sends a stack of more than one to `GEMEncounter` (0xae81) while the gem's flag is
+up, and `GEMEncounter` walks the stack for the entry whose `[bp+4]` is 2.
+
 - [x] Lair placement, entry, contents, the guardian fight
-- [ ] `LairGEM`, which is the one thing a gem flight is for in the original: looking into
-      a lair from the air, and being put back where you started on the way out. Here a
-      gem flight ends on fire instead
-- [ ] `_STATUS:DisplayLair` (0xc67f), the panel page that draws the floor as icons. The
-      routine is transcribed in `status::display_lair` -- three cels of a hoard at
-      (0x3a, 0x2e), (0x4c, 0x21) and (0x3a, 0x3c) plus `StatsOffset` 0x96, then
-      `DisplayGold`, `DisplayMSword` and `DisplayMagic` over the lair's own record -- but
-      nothing opens the panel on a lair yet, so a lair still says what is on its floor in
-      words
+- [x] `LairGEM`, which is the one thing a gem flight is for in the original: looking into
+      a lair from the air, and being put back where you started on the way out
+- [x] `_STATUS:DisplayLair` (0xc67f), the panel page that draws the floor as icons: three
+      cels of a hoard at (0x3a, 0x2e), (0x4c, 0x21) and (0x3a, 0x3c) plus `StatsOffset`
+      0x96, then `DisplayGold`, `DisplayMSword` and `DisplayMagic` over the lair's own
+      record. `--floor <n>` puts it up headlessly, `--scouted` in the gem's version
 
 ## 4.4 Time and the moon `done`
 
@@ -1081,11 +1137,24 @@ slot twice running. The fourteen `WizardText` lines are cycled by `WIZGOLD_CNT` 
 - [x] Temple and mystic services
 - [x] The wizard: abilities, gold and magic bestowal
 - [x] What the stone circle does, and its relationship to the moon
-- [ ] The shake before the throw, `DD_ShakeDice` and `DD_ThrowDice`, two animation
-      scripts of a hand over the table. The result is drawn; the roll is not animated.
-      Still not built
-- [ ] `HengeControl` and `HengeLOOP`, the circle's own set piece: `ColourEn4Knight`,
-      the thunder, and `Knight_LiftMagic`
+- [x] The shake before the throw, `DD_ShakeDice` (`DS:0xce59`, two frames) and
+      `DD_ThrowDice` (`DS:0xce6d`, fourteen), the hand over the table.
+      `_TAVERN:ShakeDice` at 0xb18a is `ADDTASK` with `bp = DiceHANDLE`, ax 0xa0, bx 0,
+      cx 0x64, dh 1 and **`dl` 0x22**, so slot 0x22 of the end-of-animation table is the
+      handler, and that handler is the whole state machine: at 0xb1a1 it tests
+      `DiceTHROW`, goes to `DiceDone` (0xb20e, `DiceTHROW = 2`) when the throw has
+      played, and otherwise re-points `0x783a` at `DD_ShakeDice` (0xb1bb) unless fire was
+      over a stake, when `SetBET` (0xb1e8) pays the purse, writes `DiceTHROW = 1` and
+      points `0x783a` at `DD_ThrowDice` (0xb205). `TavernLoop` (0xb137) runs the task and
+      calls `DiceRND` (0xb21d) on the frame `DiceTHROW` reaches 2, which is why the faces
+      are not on the screen before then. `henge_core::dice`, and the two scripts and
+      `dice.cel` are baked (recipe 21).
+      **One difference, and it is this pack's place graph rather than the routine:** the
+      five stake gadgets belong on `dice.piv` where `load_DiceBACK` adds them, and here
+      they are still the tavern screen's menu, so the shake shows its last frame on the
+      way into the throw rather than looping while a stake is chosen
+- [x] `HengeControl` and `HengeLOOP`, the circle's own set piece: `ColourEn4Knight`,
+      the thunder, and `Knight_LiftMagic`. `henge_core::stones`, `--stones`
 - [x] The donation bowl the healer and the mystic both take their fee through.
       `_WIZARD:InitDonation` at image 0xbb34 adds four gadgets, all with `STPL` 0x32, whose
       `[si+0x10]` is 4 at (0x90, 0xa9), 5 at (0xa2, 0xa9), 3 at (0x83, 0xb9) and 2 at
@@ -1119,8 +1188,8 @@ gem. What is left here is the quest's own tokens, which are section 7's.
 
 | Original | What it is | Status |
 |---|---|---|
-| `GEM`, `INITGEM`, `RESTOREGEM` | a gem item with state | done: a flight that returns you to where it began |
-| `HAWK`, `INITHAWK`, `RESTOREHAWK`, `INITCURSEHAWK` | a hawk, and a cursed variant | done but for the cursed one: the hawk's flight lands where you put it |
+| `GEM`, `INITGEM`, `RESTOREGEM` | a gem item with state | done: `INITGEM` 0xa937 saves `GemXY`, `RESTOREGEM` 0xa950 puts it back, and its one caller is `LairGEM` |
+| `HAWK`, `INITHAWK`, `RESTOREHAWK`, `INITCURSEHAWK` | a hawk, and a cursed variant | done: `INITHAWK` is 0xa975 and `INITCURSEHAWK` 0xa98a, and `MagicCast` 0xcb42 rolls between them |
 | `HASTE` | a haste effect | done: `DistanceDONE` doubles the day's step budget, `NextWHICH` clears it |
 | `PCURSED`, `ControlKnight`'s inverted joystick | player cursed state | done: a backfired scroll of protection, one bout, cleared at the end of `Combat` |
 | `CAST_MAGIC`, `MagicCast`, `MagicName`, `MagicPrices` | casting | done, from the character sheet as the original does it from the status screen |
@@ -1153,7 +1222,11 @@ and a test in the baker asserts it.
       fire right once per talisman and floors it at five, and the Scroll of the Wyrm sets
       `WyrmFLAG` so `KnightWyrm` can send the dragon after a rival. Both act on the
       dragon, and the dragon's set piece is 3.3
-- [ ] `INITCURSEHAWK`, the hawk that drops you somewhere you did not choose
+- [x] `INITCURSEHAWK` (0xa98a), the hawk that drops you somewhere you did not choose:
+      `call RND; and ax, 0xff; [si+0x5c] = ax + 0x20` across and
+      `call RND; and ax, 0x7f; [si+0x5e] = ax + 0x24` down. `MagicCast` at 0xcb42 makes
+      the roll (`call 0xbda9; cmp ax, 0xf; jle`) and takes 0xa98a on sixteen of a hundred
+      and twenty eight, 0xa975 otherwise. `Run::lost_and_found`
 - [x] The moonstones, which the Valley of the Gods hands out for four keys. Section 7.
       The prices every counter knows (`Buy Moonstone for 20 GP`, `Sell Moonstone for 10
       GP`, `Buy Key for 12 GP`, `Sell Key for 6 GP`) are on the items, and no counter in
@@ -1280,11 +1353,16 @@ is `Tally`, which holds the ending and the seat, and `Tally::code`.
 - [x] Win condition and ending: two messages, `WaitFIRE`, and the exit byte
 - [x] Scoring and the final tally: there is none in the original, so there is none here
 - [x] Losing properly: a life point a death, and the title after the last
-- [ ] The Guardian is the demon, and the demon has no set piece: 250 hit points and a
-      single slap. Section 3.2's item 33 is what turns the end of the game from a wall
-      into a fight
-- [ ] `HengeControl` and `HengeLOOP`, the circle's own set piece, which is where the
-      winning moment should actually happen. Listed in section 5 too
+- [x] The Guardian is the demon, and the demon now has its whole repertoire, which is
+      what `MOON:FightDemon` (0xfe4) actually amounts to: it calls `InitKnightvsDemon`
+      (0x273d) and `InitCombat` and nothing else, so there is no set piece around the
+      fight to build. The set piece is the demon itself. `InitKnightvsDemon` writes
+      `[di+0x10] = Demon_Evolve` (the materialisation), `[di+0x38] = 0xfa`, x 100, y 5,
+      z 100 and a second task record at `WhirlTABLE` for `AddDemonWhirl`; `ControlDemon`
+      (0x4f33) and `DemonAttack` (0x5029) run the slap, the zap and the four-phase whip.
+      All of it is in `henge_core::monster::demon` and the pack's `demon` entry
+- [x] `HengeControl` and `HengeLOOP`, the circle's own set piece, which is where the
+      winning moment actually happens. `henge_core::stones`. Listed in section 5 too
 - [x] Four villages, one per knight: built, see 4.1
 - [ ] Pillaging a dead rival's grave, which needs the rival knights on the map that henge
       does not have. Recovered in 4.1 with addresses
@@ -1918,8 +1996,10 @@ digit is the low nibble, which is the moon, and it colours the stone.
 The sequence itself is at 0xfa: the `CEREMONY` card at `DS:0x13b9`, then the plate loads at
 0x3a00, then four scene routines at 0x547, 0x628, 0x6db and 0x778, then `The End` at
 `DS:0x0002` held for 0x64 retraces. `And so, the tale of the Moonstone...` at `DS:0x1459`
-is inside the last of the four. **Not built**: it wants `co.sti` baked as a second
-panorama, the eight cast scripts those four routines spawn, and a mode of its own.
+is inside the last of the four. **Built**: `co.sti` is baked as a second 320x1200 panorama
+beside `INTRO.STI`, the ending's own cast is baked out of the same image with the ending's
+bank table (`data.ending`), and `henge_core::ending` is the ten scenes with a mode of
+their own.
 
 **Built:** the logo, the wordmark and the publisher's card, the seven credit screens, the
 pan, and the plates in the order the scene routines hand them to the blitter, with the cast
@@ -1931,9 +2011,19 @@ held, because in the original each is up for exactly as long as the next file ta
 off a floppy; the rounding of the intro's 9.1033 frames a second onto this engine's 70.0863
 ticks, which is 7.70 and so eight;
 and the dark ring drawn round a caption, which stands in for the glyph shading this engine's
-silhouette text throws away. The ending's own sequence is recovered above but not built: a
-win shows `VICTORY`, waits for fire and goes to the title, which is as far as it can go
-while there is nothing to hand the exit byte to.
+silhouette text throws away.
+
+**The ending is built.** `henge_core::ending` is the sequence at `INTR.EXE`'s 0x00fa,
+scene by scene: the `CEREMONY` card over `MESSAGE.PIV`, `bg2a` with the stone and its
+three `COLOURGLOW` records, `bg3` and the ten druids, the dubbing over `bg5`, three more
+scenes, the rise up `CO.STI` off `bg7`, `And so, the tale of the Moonstone...` over `bg8`,
+and `The End`. `CO.STI` is baked as a second 320x1200 panorama beside `INTRO.STI`, the
+ending's fifteen cast scripts are baked out of the same image with the ending's own bank
+table, and `ColourMoonstone`'s two recolouring routines (0x3b9d on the knight nibble,
+0x3b23 on the moon nibble) are `ending::knight_ink` and `ending::moonstone_ink`.
+**And the handover is wired**: a won run computes `Tally::code` and hands it to
+`Ending::new`, exactly as `MOON:KnightWonGame` hands it to DOS and `play.bat` hands it
+back to `INTR.EXE`. `--start ending` puts it up headlessly.
 
 ## 8.7 There is no save, and the serialisation is the test harness's `done`
 
@@ -1979,11 +2069,15 @@ feature. Reading and writing the file is `henge-desktop`'s, because core does no
 - [x] A real status panel, which is a screen of its own and the only place the knight's
       numbers are drawn. Nothing is drawn over a bout; see 8.3
 - [x] Typing your own name over the knight's: `TypeName`, `ASCIIT`, `CURSOR` and the
-      thirteen-character field. The panel's other pages are still not built
+      thirteen-character field. Of the panel's other pages, `StatTYPE` 2, the lair's
+      floor, is built (4.3); the merchant's and the mystic's are not
 - [x] Mouse pointer and clickable widgets
 - [x] The message system: three distinct kinds (wait, occurrence, instruction)
 - [x] The intro sequence. `INTR.EXE`'s image expanded, the `.STI` tile map decoded, the
       pan, the cast, the credits and the captions' own coordinates all recovered
+- [x] The ending sequence, which is the same executable's other half: the ten scenes at
+      0x00fa, `CO.STI`'s pan off `bg7`, the plates `bg2a`, `bg3`, `bg5`, `bg5a` and
+      `bg8`, and the exit byte colouring the winning knight and his moon
 - [x] Save and load **deleted**: the original has none, and the serialisation is now the
       test harness's alone
 

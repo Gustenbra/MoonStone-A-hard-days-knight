@@ -71,11 +71,35 @@
 //! death script reaches its `TASKGOSUB`. So a lair of fourteen is fourteen
 //! fights one after another, not a crowd, and the pack carries the number
 //! unrounded because the arena no longer has to hold it all at once.
+//!
+//! **The gem's own flight.**
+//! `INITGEM` at image 0xa937 and `RESTOREGEM` at 0xa950, which are the two
+//! halves of a gem flight:
+//!
+//! ```text
+//! INITGEM     a937  mov word ptr [EffectFLAG+4], 1
+//!             a93d  mov si, [JOYSTICK1+6]
+//!             a941  push [si+0x5c]; pop [GemXY]      ; where you were
+//!             a948  push [si+0x5e]; pop [GemXY+2]
+//! RESTOREGEM  a950  mov si, [JOYSTICK1+6]
+//!             a954  push [GemXY];   pop [si+0x5c]    ; and where you are again
+//!             a95b  push [GemXY+2]; pop [si+0x5e]
+//!             a962  mov word ptr [EffectFLAG+4], 0
+//!             a968  mov word ptr [EffectFLAG+2], 0
+//!             a96e  mov word ptr [EffectFLAG+6], 0
+//! ```
+//!
+//! **`RESTOREGEM` has exactly one caller**, `LairGEM+19`, so a gem flight ends
+//! nowhere but at a lair. Fire on the map enters at `0xa962` instead
+//! (`_MAP:ScrollINPUT+71`, and only when `EffectFLAG+2` is up), which clears
+//! the three flags without restoring the position: that is the hawk landing
+//! where it is, and it is why the gem does not.
 
 use crate::item::Items;
 use crate::moon::Key;
 use crate::run::Run;
 use crate::service::{gold_from, magic_item};
+use crate::status::Hoard;
 use serde::{Deserialize, Serialize};
 
 /// How many lairs there are. `mov cx, 0x18` in the initialiser,
@@ -116,57 +140,16 @@ impl Lair {
     }
 }
 
-/// What came of walking in.
+/// What came of walking in. `MOON` image 0x0581: the gem's flag or the
+/// guardian, and nothing else, because a lair has no third answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Raid {
     /// The guardian is waiting. The caller starts the bout; the floor is only
     /// yours once it is won.
     Guardian,
-    /// Already beaten, and there was something on the floor.
-    Spoils(Spoils),
-    /// Beaten and stripped. The original takes such a lair off the map; this
-    /// is what it says if a pack keeps one there.
-    Bare,
-}
-
-/// What was carried out of a lair.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Spoils {
-    pub gold: u32,
-    /// Item ids taken. Fewer than were on the floor if the pack filled up.
-    pub magic: Vec<String>,
-    pub key: Option<Key>,
-    /// Left behind because there was no room.
-    pub left: usize,
-}
-
-impl Spoils {
-    pub fn anything(&self) -> bool {
-        self.gold > 0 || !self.magic.is_empty() || self.key.is_some()
-    }
-
-    /// What to say about it. The original's lair page is a picture of the
-    /// floor; a menu has to say it in words, so the words are ours.
-    pub fn describe(&self, items: &Items) -> String {
-        if !self.anything() {
-            return "Nothing but bones.".into();
-        }
-        let mut parts: Vec<String> = Vec::new();
-        if self.gold > 0 {
-            parts.push(format!("{} gold", self.gold));
-        }
-        for id in &self.magic {
-            parts.push(items.get(id).map_or_else(|| id.clone(), |d| d.name.clone()));
-        }
-        if let Some(k) = self.key {
-            parts.push(format!("the {}", k.name()));
-        }
-        let mut said = format!("You take {}.", parts.join(", "));
-        if self.left > 0 {
-            said.push_str(" More lies here than you can carry.");
-        }
-        said
-    }
+    /// Beaten already, so `0x0574` runs straight on to `LairGEM` and the page
+    /// goes up over the floor. See [`Page`].
+    Floor,
 }
 
 impl Run {
@@ -248,25 +231,44 @@ impl Run {
             .is_none_or(|l| !(l.cleared && l.empty()))
     }
 
-    /// Walk in. Either the guardian is up, or the floor is yours.
-    pub fn raid(&mut self, index: usize, items: &Items) -> Raid {
-        if index >= self.lairs.len() {
-            return Raid::Bare;
-        }
-        if !self.lairs[index].cleared {
-            return Raid::Guardian;
-        }
-        let spoils = self.strip_lair(index, items);
-        if spoils.anything() {
-            Raid::Spoils(spoils)
-        } else {
-            Raid::Bare
+    /// Walk in. `MOON` image 0x0581 tests the lair's `+8` through `LairWon`
+    /// and `0x0586` the gem's flag: either the guardian is up, or the page
+    /// goes over the floor. Nothing is carried out here, because in the
+    /// original nothing is: the floor is handed over a gadget at a time on the
+    /// page itself.
+    pub fn raid(&mut self, index: usize) -> Raid {
+        match self.lairs.get(index) {
+            Some(lair) if !lair.cleared => Raid::Guardian,
+            _ => Raid::Floor,
         }
     }
 
-    /// The guardian is down. `MOON:LairWon`: the first win marks the lair and
-    /// is worth a point of experience; the floor is yours either way.
-    pub fn lair_won(&mut self, index: usize, items: &Items) -> Spoils {
+    /// Which keys the run carries, as `Valley` reads them: all four bits set
+    /// is `0xf`, and the Valley wants all four.
+    pub fn keys_held(&self) -> Vec<Key> {
+        Key::ALL
+            .into_iter()
+            .filter(|k| self.kit.count(k.item()) > 0)
+            .collect()
+    }
+
+    /// The guardian is down, and nothing has been carried out yet.
+    ///
+    /// `MOON:LairWon` at image 0x05ac, which is the whole of it:
+    ///
+    /// ```text
+    /// 0x05ac  mov di, [0x6962]          ; the lair record the entry stored
+    /// 0x05b0  cmp word ptr [di+8], 0    ; beaten before?
+    /// 0x05b4  jne LairGEM               ; then it is worth nothing more
+    /// 0x05b6  mov word ptr [di+8], 1
+    /// 0x05bb  mov di, [JOYSTICK1+6]
+    /// 0x05bf  add word ptr [di+0x36], 1 ; and one point of experience
+    /// ```
+    ///
+    /// and then it falls into `LairGEM`, which opens the page. Nothing is
+    /// swept off the floor here: the floor is handed over a gadget at a time
+    /// by [`Run::take_from_lair`] and [`Run::take_lair_gold`].
+    pub fn lair_beaten(&mut self, index: usize) -> Page {
         let first = match self.lairs.get_mut(index) {
             Some(lair) if !lair.cleared => {
                 lair.cleared = true;
@@ -278,54 +280,230 @@ impl Run {
             // `add word ptr [di+0x36], 1`, the same field a won bout pays into.
             self.earned_experience(1);
         }
-        self.strip_lair(index, items)
+        Page {
+            lair: index,
+            scouted: false,
+        }
     }
 
-    /// Carry out what will fit. What will not stays on the floor, which is why
-    /// a beaten lair can still be worth coming back to. The key is small and
-    /// goes first, so the quest is never blocked by a pack full of potions.
-    fn strip_lair(&mut self, index: usize, items: &Items) -> Spoils {
-        let Some(lair) = self.lairs.get(index).cloned() else {
-            return Spoils::default();
+    /// What the right arch draws: the floor as a record of counts, and the
+    /// pile of coin beside it.
+    ///
+    /// `ReDisplay` hands `DisplayLair` the lair's own 24-byte item record at
+    /// `fmem_LairMagic` and `DisplayGold` the word at `+6`, so this is that
+    /// record built out of what the run keeps on the floor instead.
+    pub fn lair_floor(&self, index: usize) -> (Hoard, u32) {
+        let Some(lair) = self.lairs.get(index) else {
+            return (Hoard::default(), 0);
         };
-        let mut got = Spoils {
-            gold: lair.gold,
-            ..Spoils::default()
-        };
-        if got.gold > 0 {
-            self.earn(got.gold);
-            self.lairs[index].gold = 0;
+        let mut floor = crate::item::Inventory::new(u32::MAX);
+        for id in &lair.magic {
+            floor.take(id, 1);
         }
         if let Some(key) = lair.key {
-            if self.kit.take(key.item(), 1) > 0 {
-                got.key = Some(key);
-                self.lairs[index].key = None;
-            } else {
-                got.left += 1;
-            }
+            floor.take(key.item(), 1);
         }
-        let mut left_behind = Vec::new();
-        for id in lair.magic {
-            if self.kit.take(&id, 1) > 0 {
-                got.magic.push(id);
-            } else {
-                got.left += 1;
-                left_behind.push(id);
-            }
-        }
-        self.lairs[index].magic = left_behind;
-        self.refresh(items);
-        got
+        let sword = floor.count(MAGIC_SWORD) > 0;
+        (Hoard::of(&floor, sword), lair.gold)
     }
 
-    /// Which keys the run carries, as `Valley` reads them: all four bits set
-    /// is `0xf`, and the Valley wants all four.
-    pub fn keys_held(&self) -> Vec<Key> {
-        Key::ALL
-            .into_iter()
-            .filter(|k| self.kit.count(k.item()) > 0)
-            .collect()
+    /// One gadget on the lair page, pressed. `_STATUS:HGTakeMagic` at 0xcba2:
+    ///
+    /// ```text
+    /// 0xcba2  si = StatMAGIC1           ; the knight's record
+    /// 0xcba6  di = StatMAGIC2           ; the floor's
+    /// 0xcbb4  test ax, 0x20; je ret     ; the right arch's permission bit,
+    ///                                   ; which `Identify` does not carry
+    /// 0xcbbc  cmp bx, 0x16; je HGTakeMoonstone
+    /// 0xcbc1  cmp bx, 0x14; je HGTakeMoonstone   ; the keys, a whole field
+    /// 0xcbc6  cmp bx, 4;    je TakeSword
+    /// 0xcbce  dec byte ptr [bx+di]      ; otherwise one off the floor
+    /// 0xcbd0  inc byte ptr [bx+si]      ; and one onto the knight
+    /// 0xcbd2  cmp bx, 6; jne            ; a ring, and only a ring, is
+    /// 0xcbd7  add word ptr [si+0x38], 0x14 ; twenty points of health at once
+    /// 0xcbdf  call 0x28d                ; and the maximum recomputed
+    /// ```
+    ///
+    /// `field` is the gadget's `STPL`, which is the byte offset into the
+    /// record it moves. Returns whether anything moved, which is what
+    /// `TakeCNT` counts.
+    ///
+    /// **Ours:** a pack that can be full. The original's knight record has a
+    /// fixed field per kind and cannot refuse, and this one has
+    /// [`crate::item::Inventory::capacity`], so a floor with no room to go to
+    /// stays a floor.
+    pub fn take_from_lair(&mut self, index: usize, field: u16, items: &Items) -> bool {
+        // `cmp bx, 0x16; je HGTakeMoonstone` and `cmp bx, 0x14; je` are the
+        // first two tests the routine makes, and both go to the arm that moves
+        // a whole bit field rather than one count. A lair's floor never holds
+        // a moonstone (`LairFill` puts gold and magic on it and nothing else),
+        // so of the two only the keys ever have anything to move.
+        if field == KEYS_FIELD || field == STONES_FIELD {
+            return field == KEYS_FIELD && self.take_lair_key(index, items);
+        }
+        let Some(slot) = slot_of_field(field) else {
+            return false;
+        };
+        let Some(id) = crate::status::SLOT_TABLE[slot].item else {
+            return false;
+        };
+        let Some(lair) = self.lairs.get(index) else {
+            return false;
+        };
+        let Some(at) = lair.magic.iter().position(|held| held == id) else {
+            return false;
+        };
+        if self.kit.take(id, 1) == 0 {
+            return false;
+        }
+        self.lairs[index].magic.remove(at);
+        // `cmp bx, 6`: the ring is the one field that pays as it is picked up.
+        self.refresh(items);
+        true
     }
+
+    /// The key, which `HGTakeMoonstone` moves as a whole bit field.
+    fn take_lair_key(&mut self, index: usize, items: &Items) -> bool {
+        let Some(key) = self.lairs.get(index).and_then(|l| l.key) else {
+            return false;
+        };
+        if self.kit.take(key.item(), 1) == 0 {
+            return false;
+        }
+        self.lairs[index].key = None;
+        self.refresh(items);
+        true
+    }
+
+    /// The pile of coin, pressed. `_STATUS:TKGP` at 0xccfa, which is the only
+    /// place in the program that knows a lair page has a floor of its own:
+    ///
+    /// ```text
+    /// 0xccfd  cmp word ptr [StatTYPE], 2   ; the lair page
+    /// 0xcd02  jne 0xcd12
+    /// 0xcd04  mov di, [0x6962]             ; the lair record
+    /// 0xcd08  lea di, [di+6]               ; and its gold
+    /// 0xcd0b  cmp word ptr [di], 0; je out
+    /// 0xcd1a  cmp word ptr [si+0x32], 0x96 ; a purse of a hundred and fifty
+    /// 0xcd1f  je  0xcd2b                   ; is as much as anyone carries
+    /// 0xcd21  dec word ptr [di]            ; one coin
+    /// 0xcd23  inc word ptr [si+0x32]
+    /// 0xcd26  cmp word ptr [di], 0; jne 0xcd1a
+    /// ```
+    ///
+    /// So the whole pile goes over a coin at a time and stops dead at the
+    /// ceiling, and what is over the ceiling stays on the floor. Returns how
+    /// many coins moved.
+    pub fn take_lair_gold(&mut self, index: usize) -> u32 {
+        let Some(lair) = self.lairs.get(index) else {
+            return 0;
+        };
+        let mut floor = lair.gold;
+        let mut moved = 0;
+        while floor > 0 && self.gold < crate::service::PURSE_CEILING {
+            floor -= 1;
+            self.gold += 1;
+            moved += 1;
+        }
+        self.lairs[index].gold = floor;
+        moved
+    }
+}
+
+/// The lair page, which is where a lair's floor is actually handed over.
+///
+/// **The whole of it is one routine**, `MOON` image 0x0574 to 0x05dc, which
+/// the map reaches through `_MAP:StackDecision+41` when the thing under the
+/// token is of type 2:
+///
+/// ```text
+/// 0x0574  mov word ptr [dragonbodge3], 0
+/// 0x057a  mov [0x6962], di                  ; the lair record
+/// 0x057e  call 0xa554                       ; the map's own glows taken down
+/// 0x0581  cmp word ptr [EffectFLAG+4], 0    ; INITGEM's flag
+/// 0x0586  jne LairGEM                       ; aloft: look, and do not fight
+/// 0x0588  call ClearCombat
+/// 0x058b  call InitLair
+/// 0x058e  call InitCombat                   ; the guardian
+/// 0x0597  test word ptr [KnightDeath], 1
+/// 0x059d  je LairWon
+/// 0x059f  mov ax, 9; call the panel         ; a death opens the sheet instead
+/// 0x05a8  mov ax, 1; ret
+/// LairWon 0x05ac                            ; see `Run::lair_beaten`
+/// LairGEM 0x05c3
+/// 0x05c3  mov ax, 2                         ; StatTYPE 2, and `Screen::Lair`
+/// 0x05c6  call the panel                    ; which runs until `ExitFLAG`
+/// 0x05c9  call CheckLairClear               ; empty and beaten leaves the map
+/// 0x05cf  cmp word ptr [EffectFLAG+4], 0
+/// 0x05d4  je 0x05d9
+/// 0x05d6  call 0xa950                       ; RESTOREGEM, below
+/// 0x05d9  mov ax, 1; ret
+/// ```
+///
+/// So **the page a gem flight ends on and the page a won lair opens are the
+/// same page**, reached by the same three instructions, and the only
+/// difference between them is `EffectFLAG+4`: `_STATUS:Paper2` at 0xd3ed reads
+/// that flag and gives the right arch `Identify` instead of `Take`, so a lair
+/// seen from the air can be read and not emptied.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Page {
+    /// Which lair. `[0x6962]`, the record `0x057a` stored.
+    pub lair: usize,
+    /// `EffectFLAG+4`, the gem's own flag.
+    pub scouted: bool,
+}
+
+/// `StatCheckKeys`' own field, `STPL` 0x16: the moonstones as bits, which
+/// `HGTakeMoonstone` moves whole.
+pub const STONES_FIELD: u16 = 0x16;
+
+/// `StatCheckKeys`' own field, `STPL` 0x14: the four keys as bits.
+pub const KEYS_FIELD: u16 = 0x14;
+
+/// The pack id of the one thing the record keeps that is also worn, which
+/// `DisplayMSword` draws and `TakeSword` moves.
+pub const MAGIC_SWORD: &str = "sword_of_sharpness";
+
+/// Which slot of the panel a gadget's `STPL` works on.
+///
+/// The offsets are the ones `DisplayMagic`, `DisplayMSword` and
+/// `StatPlaceScroll` write into their gadgets, and they are the fields of the
+/// 24-byte record in the order [`Hoard`] carries them.
+// Hand-aligned: the record's own byte offset, then the panel slot it draws at.
+#[rustfmt::skip]
+pub const FIELD_SLOTS: [(u16, usize); 10] = [
+    (0x00, 18),  // potions
+    (0x02, 19),  // gems
+    (0x04, 13),  // the magic sword
+    (0x06, 20),  // rings
+    (0x08, 21),  // talismans
+    (0x0a, 22),  // haste
+    (0x0c, 23),  // hawk
+    (0x0e, 24),  // aquisition
+    (0x10, 25),  // wyrm
+    (0x12, 26),  // protection
+];
+
+/// The slot a `STPL` names, or nothing for a field that is not one of them.
+pub fn slot_of_field(field: u16) -> Option<usize> {
+    FIELD_SLOTS
+        .iter()
+        .find(|(f, _)| *f == field)
+        .map(|(_, slot)| *slot)
+}
+
+/// The same table read the other way: which gadget on the page carries a
+/// slot. The keys are slot 17 and their field is [`KEYS_FIELD`], because
+/// `StatCheckKeys` gives all four the one field and tells them apart by the
+/// bit in `STRP`'s high nibble.
+pub fn field_of_slot(slot: usize) -> Option<u16> {
+    if slot == 17 {
+        return Some(KEYS_FIELD);
+    }
+    FIELD_SLOTS
+        .iter()
+        .find(|(_, s)| *s == slot)
+        .map(|(f, _)| *f)
 }
 
 #[cfg(test)]
@@ -496,58 +674,124 @@ mod tests {
         }
     }
 
+    /// What a lair's floor hands over when a gadget on the page is pressed.
+    /// `Run::take_from_lair` wants the `STPL` the gadget carries, and the
+    /// panel builds that off the slot, so a test reaches it the same way.
+    fn take(r: &mut Run, at: usize, id: &str, items: &Items) -> bool {
+        let slot = crate::status::slot_for_item(id).expect(id);
+        let field = field_of_slot(slot).expect(id);
+        r.take_from_lair(at, field, items)
+    }
+
+    /// Everything on one floor, gadget by gadget, which is the only way
+    /// anything comes off it.
+    fn empty_it(r: &mut Run, at: usize, items: &Items) {
+        r.take_lair_gold(at);
+        if r.lairs[at].key.is_some() {
+            r.take_from_lair(at, KEYS_FIELD, items);
+        }
+        for id in r.lairs[at].magic.clone() {
+            take(r, at, &id, items);
+        }
+    }
+
+    /// `MOON` 0x0581 and `LairWon` at 0x05ac: walking in fights, and beating
+    /// the guardian marks the lair and pays one point of experience, once.
+    /// **Nothing at all comes off the floor**, which is the whole difference
+    /// between the page and the sweep that used to stand here.
     #[test]
-    fn the_guardian_is_up_until_it_is_beaten() {
-        let (mut r, items) = run(7);
+    fn the_guardian_is_up_until_it_is_beaten_and_the_floor_is_untouched() {
+        let (mut r, _items) = run(7);
         let before = r.gold;
-        assert_eq!(r.raid(0, &items), Raid::Guardian);
+        assert_eq!(r.raid(0), Raid::Guardian);
         assert_eq!(r.gold, before, "walking in takes nothing off the floor");
         let floor = r.lairs[0].clone();
-        let spoils = r.lair_won(0, &items);
-        assert!(spoils.anything());
-        assert_eq!(spoils.gold, floor.gold);
-        assert_eq!(r.gold, before + floor.gold);
+        let page = r.lair_beaten(0);
+        assert_eq!(page.lair, 0);
+        assert!(!page.scouted, "a lair fought for is not a lair flown over");
         assert!(r.lairs[0].cleared);
         assert_eq!(r.experience, 1, "the first kill is worth a point");
-        r.lair_won(0, &items);
+        assert_eq!(r.gold, before, "and the gold is still on the floor");
+        assert_eq!(
+            r.lairs[0],
+            Lair {
+                cleared: true,
+                ..floor
+            }
+        );
+        r.lair_beaten(0);
         assert_eq!(r.experience, 1, "and only the first");
+        assert_eq!(r.raid(0), Raid::Floor, "and the guardian stays down");
+    }
+
+    /// `_STATUS:TKGP` at 0xccfa: `dec [di]; inc [si+0x32]` round a loop that
+    /// stops dead at a purse of 0x96, so what is over the ceiling stays where
+    /// it is.
+    #[test]
+    fn the_gold_goes_over_a_coin_at_a_time_and_stops_at_the_ceiling() {
+        let (mut r, _items) = run(7);
+        let at = (0..LAIRS).find(|i| r.lairs[*i].gold > 0).unwrap();
+        let pile = r.lairs[at].gold;
+        r.lair_beaten(at);
+        r.gold = crate::service::PURSE_CEILING - 1;
+        assert_eq!(r.take_lair_gold(at), 1, "one coin, and the purse is full");
+        assert_eq!(r.gold, crate::service::PURSE_CEILING);
+        assert_eq!(r.lairs[at].gold, pile - 1, "the rest is still on the floor");
+        assert_eq!(r.take_lair_gold(at), 0, "and a full purse takes nothing");
+        r.gold = 0;
+        assert_eq!(r.take_lair_gold(at), pile - 1);
+        assert_eq!(r.lairs[at].gold, 0);
+        assert_eq!(r.take_lair_gold(at), 0, "an empty floor pays nothing");
     }
 
     #[test]
     fn a_lair_leaves_the_map_only_when_it_is_beaten_and_stripped() {
         let (mut r, items) = run(11);
         assert!(r.lair_on_the_map(0));
-        r.lair_won(0, &items);
+        r.lair_beaten(0);
+        assert!(
+            r.lair_on_the_map(0) || r.lairs[0].empty(),
+            "a beaten lair with a floor is still on the map"
+        );
+        empty_it(&mut r, 0, &items);
         assert!(r.lairs[0].empty());
         assert!(!r.lair_on_the_map(0), "beaten and stripped is off the map");
-        assert_eq!(r.raid(0, &items), Raid::Bare);
+        assert_eq!(r.raid(0), Raid::Floor);
         assert!(
             r.lair_on_the_map(99),
             "a lair the run has not stocked is still on it"
         );
     }
 
+    /// `HGTakeMagic` moves one thing per press, and a pack with no room takes
+    /// nothing: the floor keeps it, which is why a beaten lair is worth
+    /// coming back to.
     #[test]
-    fn a_full_pack_leaves_the_magic_on_the_floor_but_never_the_key() {
+    fn a_full_pack_leaves_the_magic_on_the_floor_but_the_key_still_comes_out() {
         let (mut r, items) = run(3);
         let key_at = r.lairs[..PER_FAMILY]
             .iter()
             .position(|l| l.key.is_some())
             .unwrap();
-        // Room for the key and nothing else.
-        r.kit.capacity = r.kit.carried() + 1;
         let floor = r.lairs[key_at].clone();
-        let spoils = r.lair_won(key_at, &items);
-        assert_eq!(spoils.key, floor.key, "the key came out");
+        r.lair_beaten(key_at);
+        // Room for the key and nothing else, and the key pressed first.
+        r.kit.capacity = r.kit.carried() + 1;
+        assert!(
+            r.take_from_lair(key_at, KEYS_FIELD, &items),
+            "the key came out"
+        );
         assert!(r.lairs[key_at].key.is_none());
         assert_eq!(r.keys_held(), vec![floor.key.unwrap()]);
+        assert!(
+            !r.take_from_lair(key_at, KEYS_FIELD, &items),
+            "and there is no second key to press"
+        );
+        for id in &floor.magic {
+            assert!(!take(&mut r, key_at, id, &items), "{id} should not fit");
+        }
+        assert_eq!(r.lairs[key_at].magic, floor.magic);
         if !floor.magic.is_empty() {
-            assert_eq!(
-                spoils.left,
-                floor.magic.len(),
-                "and what would not fit is still there"
-            );
-            assert_eq!(r.lairs[key_at].magic, floor.magic);
             assert!(r.lair_on_the_map(key_at));
         }
     }
@@ -559,16 +803,54 @@ mod tests {
         let (mut r, items) = run(5);
         let at = (0..LAIRS).find(|i| !r.lairs[*i].magic.is_empty()).unwrap();
         r.kit.capacity = r.kit.carried();
-        r.lair_won(at, &items);
+        r.lair_beaten(at);
         let left = r.lairs[at].magic.len();
         assert!(left > 0, "nothing fitted");
         r.kit.capacity = 200;
-        match r.raid(at, &items) {
-            Raid::Spoils(s) => assert_eq!(s.magic.len(), left),
-            other => panic!("the guardian should stay down: {other:?}"),
-        }
+        assert_eq!(r.raid(at), Raid::Floor, "the guardian should stay down");
+        empty_it(&mut r, at, &items);
         assert!(r.lairs[at].empty());
         assert!(!r.lair_on_the_map(at));
+    }
+
+    /// `ReDisplay` hands `DisplayLair` the lair's own record, so what the page
+    /// draws is the floor and not the pack.
+    #[test]
+    fn the_page_draws_the_floor_and_not_the_pack() {
+        let (mut r, items) = run(13);
+        let at = (0..LAIRS)
+            .find(|i| r.lairs[*i].magic.iter().any(|m| m == "potion"))
+            .unwrap();
+        r.kit.take("potion", 3);
+        let (hoard, gold) = r.lair_floor(at);
+        let on_the_floor = r.lairs[at].magic.iter().filter(|m| *m == "potion").count();
+        assert_eq!(u32::from(hoard.potions), on_the_floor as u32);
+        assert_eq!(gold, r.lairs[at].gold);
+        r.lair_beaten(at);
+        assert!(take(&mut r, at, "potion", &items));
+        assert_eq!(
+            u32::from(r.lair_floor(at).0.potions),
+            on_the_floor as u32 - 1,
+            "one press, one potion"
+        );
+    }
+
+    /// The `STPL` table, which is the only thing between a gadget and the
+    /// field it moves.
+    #[test]
+    fn every_field_the_page_can_carry_names_a_slot() {
+        for (field, slot) in FIELD_SLOTS {
+            assert_eq!(slot_of_field(field), Some(slot));
+            assert_eq!(field_of_slot(slot), Some(field));
+        }
+        // Slot 17 is the four keys as bits and its field is `StatCheckKeys`'.
+        assert_eq!(field_of_slot(17), Some(KEYS_FIELD));
+        assert_eq!(
+            slot_of_field(0x32),
+            None,
+            "gold is `TKGP`, not `HGTakeMagic`"
+        );
+        assert_eq!(slot_of_field(0x99), None);
     }
 
     #[test]
@@ -582,19 +864,30 @@ mod tests {
         assert_ne!(a.lairs, c.lairs, "and a different seed a different one");
     }
 
+    /// A lair looked at from the air. `_STATUS:Paper2` at 0xd3ed reads
+    /// `EffectFLAG+4` and gives the right arch `Identify`, which carries no
+    /// permission bit, so `HGTakeMagic` returns at its `test ax, 0x20` and
+    /// nothing moves. The page still draws the floor.
     #[test]
-    fn spoils_are_said_in_words() {
-        let items = goods();
-        let s = Spoils {
-            gold: 12,
-            magic: vec!["potion".into()],
-            key: Some(Key::Swamp),
-            left: 1,
+    fn a_lair_seen_from_the_air_is_read_and_not_emptied() {
+        let (r, _) = run(21);
+        let at = (0..LAIRS).find(|i| !r.lairs[*i].empty()).unwrap();
+        let page = Page {
+            lair: at,
+            scouted: true,
         };
+        assert!(page.scouted);
         assert_eq!(
-            s.describe(&items),
-            "You take 12 gold, potion, the Key of the marsh. More lies here than you can carry."
+            crate::status::Screen::Lair.right_table(page.scouted),
+            crate::status::Table::Identify
         );
-        assert_eq!(Spoils::default().describe(&items), "Nothing but bones.");
+        assert!(
+            !crate::status::Screen::Lair.right_table(page.scouted).acts(),
+            "no permission bit, so nothing on the floor can be taken"
+        );
+        assert!(crate::status::Screen::Lair.right_table(false).acts());
+        // And the floor is still drawn: the page is a look, not a blank.
+        let (hoard, gold) = r.lair_floor(at);
+        assert!(gold > 0 || hoard != crate::status::Hoard::default());
     }
 }

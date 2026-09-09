@@ -737,6 +737,22 @@ pub fn draw_stones(
     }
 }
 
+/// The hand over the dice table, `TavernLoop`'s one task.
+///
+/// `_TAVERN:ShakeDice` at 0xb18a adds it at (0xa0, 0, 0x64) facing 1 on
+/// `dice.cel` in `DiceHANDLE`, and the screen behind it is `dice.piv`, which
+/// the place has already drawn. `henge_core::dice` says the rest.
+pub fn draw_dice_hand(
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    table: &henge_core::dice::Table,
+    banks: Option<&henge_core::taskvm::BankTables>,
+) {
+    if let Some(banks) = banks {
+        draw_task(reg, fb, &table.task, banks);
+    }
+}
+
 /// One task's last frame, placed the way `TASKRIGHT` places it.
 fn draw_task(
     reg: &mut Registry,

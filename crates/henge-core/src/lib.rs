@@ -9,6 +9,7 @@ pub mod battle_palette;
 pub mod bout;
 pub mod combat;
 pub mod content;
+pub mod dice;
 pub mod ending;
 pub mod harness;
 pub mod intro;
