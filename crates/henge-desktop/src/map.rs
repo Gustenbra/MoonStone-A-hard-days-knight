@@ -23,6 +23,16 @@ const MAP_SCENE: &str = "scene.map";
 /// skipped when the record's x has gone negative.
 pub const LAIR_FRAME: usize = 0x14;
 
+/// `MI.C` frame 0x21, the gravestone: `DisplayOtherKnights+33` (0xa24d) puts
+/// it over a record whose `+0x31` is gone, and `CheckEncounterDone+53`
+/// (0x7cd) pushes the same number as the stack's kind, which `StackMessages`
+/// makes `Pillage knight's grave`. Eight by ten, like the tokens.
+pub const GRAVE_FRAME: usize = 0x21;
+
+/// `DisplayOtherKnights+44` (0xa258): `add ax, 0x2b` over a record whose
+/// `+0x3a` says he is a toad, so frames 0x2b to 0x2e are the four toads.
+pub const TOAD_FRAME: usize = 0x2b;
+
 /// `MI.C` frame 0x1f, which `MOON:CheckLairEncounter` blits at the lair the
 /// traveller is standing on: `mov bx, [si+0xa]; mov cx, [si+0xc];
 /// mov ax, 0x1f; les si, [0x8975]; call <blit>` at image 0x88f. It is nine by
@@ -68,6 +78,13 @@ pub struct Marks<'a> {
     /// `_MAP:DisplayLairs`: every place whose pack gives it an `MI.C` frame, as
     /// `[x, y, frame]`.
     pub icons: &'a [(i32, i32, usize)],
+    /// `_MAP:DisplayOtherKnights` (0xa22c): the three records that are not
+    /// the one whose turn it is, as `[x, y, frame]`, the frame already
+    /// decided by `+0x20`, `+0x31` and `+0x3a`.
+    pub others: &'a [(i32, i32, usize)],
+    /// `_MAP:SHOW` (0xa1f0): the record whose turn it is, `[x, y, colour]`,
+    /// drawn in its colour plus five, which is the glowing token.
+    pub shown: (i32, i32, usize),
     /// The lairs the traveller's token overlaps, which take frame 0x1f on top.
     pub marked: &'a [(i32, i32)],
     /// The paper, when there is more than one thing under your feet.
@@ -120,6 +137,12 @@ impl MapScene {
         self.state.terrain(&self.land)
     }
 
+    /// The recovered `MapType`/`MapSLOW` grids, for whoever needs to walk a
+    /// computer knight over them too: [`henge_core::rival::Board::land`].
+    pub(crate) fn land(&self) -> &Landscape {
+        &self.land
+    }
+
     /// One tick.
     pub fn update(&mut self, dx: i32, dy: i32) -> Step {
         let step = self.state.travel(dx, dy, &self.land);
@@ -144,7 +167,10 @@ impl MapScene {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
         self.draw_icons(reg, fb, world.icons, world.marked);
-        self.draw_token(reg, fb, run.knight.seat);
+        self.draw_others(reg, fb, world.others);
+        let (x, y, colour) = world.shown;
+        self.draw_token(reg, fb, x, y, colour);
+        let _ = run;
         if let Some(paper) = world.paper.as_ref() {
             self.draw_paper(reg, fb, fonts.get("small"), paper);
         }
@@ -186,20 +212,43 @@ impl MapScene {
         }
     }
 
-    /// Draw the traveller, as `_MAP:SHOW` draws him: his own token, in his own
-    /// colours, at his own top left corner, with nothing added.
+    /// Draw the knight whose turn it is, as `_MAP:SHOW` draws him: his own
+    /// token, in his own colours, at his own top left corner, with nothing
+    /// added. On a computer knight's turn that is the purple token, glowing.
     ///
     /// The halo this used to draw underneath was a compensation for the wrong
     /// frame. `MI.C` is authored against `MAP.CMP`'s own palette, which is the
     /// palette loaded here, and the seat plus five carries index 31, the entry
     /// `MapEffects` glows. So the token lifts off the ground by breathing,
     /// which is the original's answer and not an outline.
-    fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer, seat: usize) {
+    fn draw_token(&self, reg: &mut Registry, fb: &mut Framebuffer, x: i32, y: i32, seat: usize) {
         let frame = TOKEN_FIRST + seat.min(4);
-        let (x, y) = (self.state.x, self.state.y);
         // The original's map position is the token's own top-left corner, which
         // is what `_MAP:SHOW` hands the blitter, so there is nothing to offset.
         crate::sprite::draw(reg, fb, TOKEN_SHEET, frame, x, y, false);
+    }
+
+    /// `_MAP:DisplayOtherKnights`, image 0xa22c: the other three records,
+    /// every frame, before `SHOW`.
+    ///
+    /// ```text
+    /// 0a22d  mov si, 0x6c9e; mov di, [0x77e8]; mov cx, 4
+    /// 0a237  cmp di, si; je next                  ; not the one whose turn it is
+    /// 0a23e  mov ax, [si+0x20]                    ; his colour's token
+    /// 0a241  mov bx, [si+0x5c]; mov cx, [si+0x5e]
+    /// 0a247  cmp byte [si+0x31], 0; jg 0a252
+    /// 0a24d  mov ax, 0x21; jmp 0a25b              ; no life in him: the grave
+    /// 0a252  cmp byte [si+0x3a], 0; je 0a25b
+    /// 0a258  add ax, 0x2b                         ; a toad
+    /// 0a25b  les si, [0x8975]; call the blit
+    /// 0a265  add si, 0x62; loop
+    /// ```
+    ///
+    /// The frame is decided by the caller off the record; this only blits.
+    fn draw_others(&self, reg: &mut Registry, fb: &mut Framebuffer, others: &[(i32, i32, usize)]) {
+        for (x, y, frame) in others {
+            crate::sprite::draw(reg, fb, TOKEN_SHEET, *frame, *x, *y, false);
+        }
     }
 
     /// `_MAP:CreatePaper`, image 0xaed4, line for line.

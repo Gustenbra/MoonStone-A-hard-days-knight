@@ -63,7 +63,12 @@ pub const MAGIC: &str = "henge-harness";
 /// Two: the run carries the dragon over the map (`Run::dragon`, `wyrm_seed`)
 /// and both go into its fingerprint, so a snapshot from before them would
 /// read as corrupt rather than as old.
-pub const FORMAT: u32 = 2;
+///
+/// Three: the run carries the three computer knights (`Run::rivals`), whose
+/// turn it is (`Run::which`) and the dragon's hoard, and the generator is
+/// `rnd_seed`; all of it is in the fingerprint, and a run with no rivals in
+/// it is a different game.
+pub const FORMAT: u32 = 3;
 
 /// Why a snapshot could not be loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -19,6 +19,8 @@ use crate::dragon::Flight;
 use crate::item::{Inventory, ItemDef, Items, Purchase, Virtue};
 use crate::knight::{Ability, Knight, KnightDef};
 use crate::moon::Moon;
+use crate::rival::{Rival, Turn};
+use crate::status::Hoard;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -292,17 +294,37 @@ pub struct Run {
     /// [`crate::dragon`].
     #[serde(default)]
     pub dragon: Flight,
-    /// `_WIZARD:RND`'s register as the flight rolls it: `ContinueDragon+131`
-    /// (0xa63b) picks the knight the dragon is after off it. The original
-    /// has one register for the whole game at DS:`0xe22f`; this run keeps its
-    /// own generator for everything else, and the dragon's rolls are kept
-    /// apart so that adding them changed nothing that was already rolled.
-    #[serde(default = "default_wyrm_seed")]
-    pub wyrm_seed: u16,
+    /// `_WIZARD:RND`'s register, DS:`0xe22f`, as `_MAP` rolls it:
+    /// `ContinueDragon+131` (0xa63b) picks the knight the dragon is after
+    /// off it, and every roll a computer knight's day makes (0xa7e0, 0xa8f7,
+    /// 0xa908, 0xb7f7, 0x4ba) goes through the same routine at 0xbd89. The
+    /// original has the one register for the whole game; this run keeps its
+    /// own generator for the casts, and the map's rolls are kept apart so
+    /// that adding them changed nothing that was already rolled.
+    #[serde(default = "default_rnd_seed", alias = "wyrm_seed")]
+    pub rnd_seed: u16,
+    /// The three computer knights, records one to three at DS:`0x6c9e`. See
+    /// [`crate::rival`]. Empty until [`Run::for_knight`] or
+    /// [`Run::seat_the_rivals`] fills it.
+    #[serde(default)]
+    pub rivals: Vec<Rival>,
+    /// `WHICH`, DS:`0xcc96`: whose turn it is, 0 for the player and 1 to 3
+    /// for the computer knights. `NextWHICH` steps it and masks it to four.
+    #[serde(default)]
+    pub which: usize,
+    /// The words in `_MAP` a computer knight's turn is kept in: the closest
+    /// lair, the route, the shopping list. `NextWHICH` clears them.
+    #[serde(default)]
+    pub turn: Turn,
+    /// The dragon's own magic record, `[0x6e26+0x44]`: what `_dragon_won`
+    /// (0xd23) takes off a knight goes in here, and `DisplayDragon` draws it
+    /// on `StatTYPE` 0xa when the dragon is killed.
+    #[serde(default)]
+    pub dragon_hoard: Hoard,
 }
 
 /// Any non-zero start, the same one a bout opens on.
-fn default_wyrm_seed() -> u16 {
+fn default_rnd_seed() -> u16 {
     0x2f1d
 }
 
@@ -338,7 +360,11 @@ impl Run {
             temple: crate::status::Hoard::default(),
             arena_turn: BTreeMap::new(),
             dragon: Flight::default(),
-            wyrm_seed: default_wyrm_seed(),
+            rnd_seed: default_rnd_seed(),
+            rivals: Vec::new(),
+            which: 0,
+            turn: Turn::default(),
+            dragon_hoard: Hoard::default(),
         }
     }
 
@@ -364,16 +390,22 @@ impl Run {
     /// anybody rides out with twenty. Doing the same means the number on the
     /// panel is the number the arithmetic produces rather than one written
     /// beside it.
+    ///
+    /// The player is record 0 of the four: `ChooseKnight` (0x1567) starts
+    /// `choose_player` at DS:`0x6c9e`, so with one player the three records
+    /// after his are the computer knights `InitGameStart` left there.
     pub fn for_knight(def: &KnightDef, seat: usize, items: &Items) -> Run {
         let knight = Knight::from_def(def, seat);
         let max_health = knight.max_health(items);
-        Run {
+        let mut run = Run {
             gold: def.gold,
             lives: def.life,
             max_lives: def.life,
             knight,
             ..Run::new(max_health)
-        }
+        };
+        run.seat_the_rivals(items);
+        run
     }
 
     pub fn alive(&self) -> bool {
@@ -645,12 +677,14 @@ impl Run {
             Virtue::Seize => Cast::Pointless,
             // `MagicCast` slot 0x10 (0xcb60): `WyrmFLAG` up and the knight
             // picker opened by `InitAKnight` (0xc90d), whose `NextKnight`
-            // offers the seats in order from the one after nought and skips
-            // the caster's own; `StatusDone` (0xbe57) then copies the seat
-            // taken into the dragon's `+0x46`. The picker's page is not
-            // built, so the seat taken is the first one it offers.
+            // (0xc913) steps `SelectCNT` over `KnightTAB`, the four records
+            // in order, from the one after nought and skipping the caster's
+            // own; `StatusDone` (0xbe57) then copies the record taken into
+            // the dragon's `+0x46`. The picker's page is not built, so the
+            // record taken is the first one it offers, which for the player
+            // in record 0 is record 1.
             Virtue::Wyrm => {
-                let seat = if self.knight.seat == 1 { 2 } else { 1 };
+                let seat = 1;
                 self.dragon.target = Some(seat);
                 Cast::Wyrm { seat }
             }
@@ -791,63 +825,6 @@ impl Run {
         true
     }
 
-    /// `BKwon` (0x49f) and `BKAddstuff` (0x4b0): the duel's own experience,
-    /// which is the only levelling that happens inside a bout rather than on
-    /// the status screen.
-    ///
-    /// ```text
-    /// BKwon:
-    /// 0049f  add word [si+0x36], 1        ; a point for putting him down
-    /// 004a3  mov word [si+0x46], 0
-    /// 004a8  call BKAddstuff
-    /// BKAddstuff:
-    /// 004b1  mov ax, [si+0x36]
-    /// 004b4  cmp ax, [0x718]
-    /// 004b8  jl  ret                      ; not enough yet
-    /// 004ba  call RND
-    /// 004bd  and ax, 3
-    /// 004c0  cmp ax, 2; jle; mov ax, 2    ; three in four is the last one
-    /// 004c8  mov bx, ax
-    /// 004ca  inc byte [bx+si+0x2e]        ; and no ceiling is asked about
-    /// 004cd  cmp bx, 1; jne 004d6
-    /// 004d2  add word [si+0x38], 0xa      ; constitution also adds ten now
-    /// 004d6  mov cx, [si+0x36]; sub cx, [0x718]; mov [si+0x36], cx
-    /// 004e0  call the two health routines
-    /// ```
-    ///
-    /// Three things it does that the status screen's `HGAbility` does not.
-    /// The roll is flat and **not** the weighted one `WIZABL` holds, so the
-    /// three abilities are 1, 1 and 2 in four rather than the wizard's
-    /// weighting. It **skips no ability that is already at five**: the
-    /// increment at 0x4ca is unconditional, which is the one way in the game
-    /// past the ceiling. And the ten hit points at 0x4d2 are added before the
-    /// maximum is recomputed at 0x4e0, so a point of constitution pays twice
-    /// on the frame it lands.
-    ///
-    /// Returns the ability the roll picked, or `None` when there was not
-    /// enough experience to spend.
-    pub fn duel_won(&mut self, items: &Items) -> Option<Ability> {
-        // 0049f  add word ptr [si + 0x36], 1
-        self.experience = self.experience.saturating_add(1);
-        // 004b4  cmp ax, [0x718]; 004b8 jl
-        if self.experience < self.xp_per_level {
-            return None;
-        }
-        // 004bd  and ax, 3; 004c0 cmp ax, 2; jle; mov ax, 2
-        let bx = (self.next_random() & 3).min(2) as usize;
-        let which = Ability::ALL[bx];
-        self.knight.raise_unchecked(which);
-        // 004cd  cmp bx, 1; 004d2 add word ptr [si + 0x38], 0xa
-        if bx == 1 {
-            self.health += 10;
-        }
-        // 004d9  sub cx, [0x718]
-        self.experience -= self.xp_per_level;
-        // 004e0 / 004e3: the two routines that put the maximum back together.
-        self.refresh(items);
-        Some(which)
-    }
-
     /// The same, with the ability picked by the original's own weighting
     /// rather than by the player: what `KnightXP` does for a computer knight.
     pub fn spend_experience_rolled(&mut self, items: &Items) -> Option<Ability> {
@@ -963,37 +940,27 @@ impl Run {
         (self.day.saturating_sub(1) / crate::moon::DAYS_PER_PHASE) as i32
     }
 
-    /// `+0x31 > 0` for each of the four knight records, as `ContinueDragon`
-    /// rolls over them: this knight while the run is on, and the other three
-    /// always, since nothing on this map kills them.
-    pub fn knights_alive(&self) -> [bool; 4] {
-        let mut alive = [true; 4];
-        if let Some(mine) = alive.get_mut(self.knight.seat) {
-            *mine = !self.over;
-        }
-        alive
-    }
-
-    /// `MapEffects+63` (0xa545) at the start of this knight's turn: the
-    /// dragon into the air, or on across the map after a knight rolled for.
+    /// `MapEffects+63` (0xa545) at the start of a knight's turn, and again
+    /// at every return to the map at 0xa2d7: the dragon into the air, or on
+    /// across the map after a knight rolled for. The four it rolls over are
+    /// [`Run::knights_alive`], the player's record and the three computer
+    /// knights'.
     pub fn dragon_turn_begins(&mut self) {
         let alive = self.knights_alive();
         let day = self.moon_moves();
-        self.dragon.turn_begins(day, alive, &mut self.wyrm_seed);
+        self.dragon.turn_begins(day, alive, &mut self.rnd_seed);
     }
 
     /// One frame of the dragon over the map, as `DragonWander` (0xa66b) and
-    /// `CheckEncounterDone+128` (0x816) run it: `homes` is where each of the
-    /// four knights stands, this one's own token at `at`. Returns the script
-    /// the frame is drawn on, or nothing when it is not in the air.
-    pub fn dragon_frame(&mut self, at: (i32, i32), homes: [(i32, i32); 4]) -> Option<String> {
+    /// `CheckEncounterDone+128` (0x816) run it, on the player's turn: `at`
+    /// is the player's own token, record 0's `+0x5c` and `+0x5e`, and the
+    /// other three records are where their turns left them. Returns the
+    /// script the frame is drawn on, or nothing when it is not in the air.
+    pub fn dragon_frame(&mut self, at: (i32, i32)) -> Option<String> {
         if !self.dragon.aloft {
             return None;
         }
-        let mut positions = homes;
-        if let Some(mine) = positions.get_mut(self.knight.seat) {
-            *mine = at;
-        }
+        let positions = self.positions(at);
         // 0a6a2  mov ax, [di+0x5e]: the row of the knight it is after, and
         // its own row when `+0x46` is nought, which reads the free record.
         let row = self
@@ -1007,9 +974,9 @@ impl Run {
         Some(script)
     }
 
-    /// `DragonEncounter` (0xa3e2) for this knight.
+    /// `DragonEncounter` (0xa3e2) for the player, who is record 0.
     pub fn dragon_comes_down(&self, aloft_on_magic: bool) -> bool {
-        self.dragon.comes_down_on(self.knight.seat, aloft_on_magic)
+        self.dragon.comes_down_on(0, aloft_on_magic)
     }
 
     /// Start again. A finished run is read, then cleared.
@@ -1070,11 +1037,36 @@ impl Run {
             self.magic_last as i64,
             self.sword_out as i64,
             self.seed as i64,
-            self.wyrm_seed as i64,
+            self.rnd_seed as i64,
+            self.which as i64,
         ] {
             mix(h, v);
         }
         self.dragon.hash_into(&mut |v| mix(h, v));
+        for r in &self.rivals {
+            text(h, &r.knight.name);
+            for v in [
+                r.x as i64,
+                r.y as i64,
+                r.lives as i64,
+                r.health as i64,
+                r.max_health as i64,
+                r.gold as i64,
+                r.experience as i64,
+                r.knight.strength as i64,
+                r.knight.constitution as i64,
+                r.knight.endurance as i64,
+                r.knight.daggers as i64,
+                r.toad as i64,
+                r.target.map_or(-1, |t| t as i64),
+                r.hoard.keys as i64,
+                r.hoard.moonstones as i64,
+            ] {
+                mix(h, v);
+            }
+            text(h, &r.knight.weapon);
+            text(h, &r.knight.armour);
+        }
         text(h, &self.knight.name);
         for v in [
             self.knight.seat as i64,
@@ -1341,49 +1333,6 @@ mod tests {
         assert_eq!(r.experience, 0);
         assert_eq!(r.health, 40);
         assert!(r.alive());
-    }
-
-    /// `BKwon` (0x49f) and `BKAddstuff` (0x4b0): the point a duel pays is
-    /// spent where it is earned, and the ceiling is not asked about.
-    #[test]
-    fn a_won_duel_pays_a_point_and_spends_it_on_the_spot() {
-        let items = Items::new();
-        let mut r = Run::new(40);
-        // 004b8: three wins before the first one lands, `XPlevels[0]`.
-        assert_eq!(r.xp_per_level, 3);
-        assert_eq!(r.duel_won(&items), None);
-        assert_eq!(r.duel_won(&items), None);
-        assert_eq!(r.experience, 2);
-        let before: Vec<i32> = Ability::ALL.iter().map(|a| r.knight.ability(*a)).collect();
-        let got = r.duel_won(&items).expect("the third pays");
-        assert_eq!(r.experience, 0, "004d9: the cost comes straight off");
-        for (i, a) in Ability::ALL.iter().enumerate() {
-            let want = before[i] + i32::from(*a == got);
-            assert_eq!(r.knight.ability(*a), want, "004ca: one point, into {a:?}");
-        }
-        // 004ca has no ceiling: a knight who keeps winning goes past five,
-        // which `Knight::raise` would refuse and this does not.
-        let mut r = Run::new(40);
-        r.knight.strength = 5;
-        r.knight.constitution = 5;
-        r.knight.endurance = 5;
-        assert!(r.knight.maxed());
-        let mut raised = 0;
-        for _ in 0..30 {
-            if r.duel_won(&items).is_some() {
-                raised += 1;
-            }
-        }
-        assert_eq!(raised, 10, "thirty wins at three a point");
-        let highest = Ability::ALL
-            .iter()
-            .map(|a| r.knight.ability(*a))
-            .max()
-            .unwrap_or(0);
-        assert!(
-            highest > crate::knight::MAX_ABILITY,
-            "0x4ca asks no ceiling: {highest}"
-        );
     }
 
     /// `BKwon`: a knight put down is worth a point, and a fight you lost is

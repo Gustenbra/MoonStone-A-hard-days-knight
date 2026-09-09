@@ -1678,16 +1678,21 @@ Any time. None of it blocks anything.
       design. `MapSLOW` read out of DS:`0xc42a`: 308 cells of mask 1, 165 of 2, 145 of 3,
       382 open; all but eight forest cells are 1; the wastes are 0, 2 and 3; the swamp is
       89 open, 57 of 1, 45 of 2, 29 of 3; the top row is 3 and the two side columns 2.
-      **Not built, and recovered:** the three computer knights. `InitGameStart` (0x1c0d)
-      fills all four records at DS:0x6c9e with `Enemy1Name` to `Enemy4Name`, kind 8
+      **Built:** the three computer knights. `InitGameStart` (0x1c0d) fills all four
+      records at DS:0x6c9e with `Enemy1Name` to `Enemy4Name`, kind 8
       (`ControlBlackKnight`), `[+0x20] = 4` and the corners (15, 100), (300, 100), (160,
       20), (160, 180); `ChooseKnight` turns the first `NUM_PLAYERS` of them into people and
       `InitKnights` (0x157) moves those to their villages. `DisplayOtherKnights` (0xa22c)
       then draws the other three every frame: frame `[si+0x20]` (4 is the purple token),
       0x21 for a grave when `[si+0x31]` is gone, `+0x2b` for a toad. They take turns
-      (`MapLOOP+19` to `TrackLair`), fight lairs, heal, level and challenge you. Drawing
-      them where `InitGameStart` left them would be true for one day and false after, so
-      nothing is drawn until their turns are built
+      (`MapLOOP+19` to `TrackLair`), fight lairs, heal, level and challenge you. All of it
+      is `henge_core::rival`: `Run::seat_the_rivals`, `Run::rival_frame` and
+      `Run::next_which` run the three seats' own days, `App::rival_tick` in henge-desktop
+      drives it once a frame, and `App::knight_fight`/`knight_fight_settled` carry a
+      challenge through `Combat+102` (0x3b7) to `Knight1Won`/`BothKnightsDied`. This is
+      also what makes `Run::knights_alive` honest, which the dragon's own target roll
+      (`ContinueDragon`) reads: it used to answer `true` for a rival seat with nobody in
+      it, which is why the dragon would fly at an empty corner instead of the player
       **This mattered because every recovered duration in the tree is a frame count**, so
       sixty ran all of them about fourteen percent slow: every cooldown, every script
       frame, every sixteen-step fade. Two numbers moved with the clock rather than against

@@ -25,6 +25,7 @@ pub mod overworld;
 pub mod place;
 pub mod pointer;
 pub mod quest;
+pub mod rival;
 pub mod run;
 pub mod service;
 pub mod shell;

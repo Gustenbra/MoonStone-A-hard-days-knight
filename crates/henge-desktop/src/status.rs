@@ -99,6 +99,7 @@ use crate::framebuffer::Framebuffer;
 use crate::sprite;
 use crate::text::Font;
 use henge_assets::Registry;
+use henge_core::knight::Knight;
 use henge_core::pointer::Gadget;
 use henge_core::run::Run;
 use henge_core::status::{Hoard, Payload, Screen, Table, EXIT_ID, SCROLL_SLOTS};
@@ -371,14 +372,66 @@ impl Panel {
     }
 }
 
+/// The fields `DisplayKnight` reads off `[si]`, whichever record `si` is:
+/// the run's own, for the knight whose sheet this is, or a computer
+/// knight's, for the second one on a trading screen.
+struct KnightSheet<'a> {
+    knight: &'a Knight,
+    experience: u32,
+    gold: u32,
+    health: i32,
+    max_health: i32,
+    lives: i32,
+    /// `[si + 0x3a] > 0`, read as a `cel + 2` rather than a day count here.
+    toad: bool,
+    /// `[si + 0x44]`, already a `Hoard` on a computer knight's own record;
+    /// `Run` keeps it as an inventory instead, so `Hoard::of` builds one.
+    hoard: Hoard,
+}
+
+impl<'a> KnightSheet<'a> {
+    fn of_run(run: &'a Run) -> KnightSheet<'a> {
+        KnightSheet {
+            knight: &run.knight,
+            experience: run.experience,
+            gold: run.gold,
+            health: run.health,
+            max_health: run.max_health,
+            lives: run.lives,
+            toad: run.is_toad(),
+            hoard: Hoard::of(&run.kit, run.knight.weapon == "sword_of_sharpness"),
+        }
+    }
+
+    fn of_rival(r: &'a henge_core::rival::Rival) -> KnightSheet<'a> {
+        KnightSheet {
+            knight: &r.knight,
+            experience: r.experience,
+            gold: r.gold,
+            health: r.health,
+            max_health: r.max_health,
+            lives: r.lives,
+            toad: r.toad > 0,
+            hoard: r.hoard,
+        }
+    }
+}
+
 /// `DisplayKnight` at `0xc0c2`, and `DisplayMagic` after it because it falls
 /// through.
 ///
 /// `acel` is `StatACEL`: 0 for the knight whose sheet this is and 1 for the
-/// second knight in the other arch.
+/// second knight in the other arch (`_displayknight`'s second arm).
 #[allow(clippy::too_many_arguments)]
-fn display_knight(panel: &mut Panel, side: usize, offset: i32, run: &Run, acel: usize, name: &str) {
-    let k = &run.knight;
+fn display_knight(
+    panel: &mut Panel,
+    side: usize,
+    offset: i32,
+    sheet: &KnightSheet,
+    acel: usize,
+    name: &str,
+) {
+    let k = sheet.knight;
     // The name, `[si + 0x4c]`, at (0x3c + StatsOffset, 0x18).
     panel.words(name, NAME_AT.0 + offset, NAME_AT.1);
 
@@ -422,8 +475,12 @@ fn display_knight(panel: &mut Panel, side: usize, offset: i32, run: &Run, acel: 
     // `[si + 0x36]` at (0x70, 0x23), `[si + 0x32]` at (0x70, 0x2a), then the
     // three ability bytes down `SROW` from 0x23 in steps of seven at 0x3f, and
     // `[si+0x38]/[si+0x3c]` at (0x70, 0x31).
-    panel.words(run.experience.to_string(), COLUMN_X + offset, ROW_TOP);
-    panel.words(run.gold.to_string(), COLUMN_X + offset, ROW_TOP + ROW_STEP);
+    panel.words(sheet.experience.to_string(), COLUMN_X + offset, ROW_TOP);
+    panel.words(
+        sheet.gold.to_string(),
+        COLUMN_X + offset,
+        ROW_TOP + ROW_STEP,
+    );
     for (i, value) in [k.strength, k.constitution, k.endurance].iter().enumerate() {
         panel.words(
             value.to_string(),
@@ -432,18 +489,18 @@ fn display_knight(panel: &mut Panel, side: usize, offset: i32, run: &Run, acel: 
         );
     }
     panel.words(
-        format!("{}/{}", run.health.max(0), run.max_health),
+        format!("{}/{}", sheet.health.max(0), sheet.max_health),
         COLUMN_X + offset,
         ROW_TOP + 2 * ROW_STEP,
     );
 
     // Life points: cel `StatACEL + 0x11`, two more for a toad, at (0x29, 0x3b)
     // every 0x13. `cl` is `[si + 0x31]` and a negative one is taken as none.
-    let life = run.lives.max(0) as u32;
+    let life = sheet.lives.max(0) as u32;
     panel.place(
         side,
         life,
-        0x11 + acel + if run.is_toad() { 2 } else { 0 },
+        0x11 + acel + if sheet.toad { 2 } else { 0 },
         0x29 + offset,
         0x3b,
         0x13,
@@ -487,12 +544,7 @@ fn display_knight(panel: &mut Panel, side: usize, offset: i32, run: &Run, acel: 
         );
     }
     // `push [si + 0x44]; pop [Address]` and fall into `DisplayMagic`.
-    display_magic(
-        panel,
-        side,
-        offset,
-        &Hoard::of(&run.kit, k.weapon == "sword_of_sharpness"),
-    );
+    display_magic(panel, side, offset, &sheet.hoard);
 }
 
 /// `DisplayMagic` at `0xc38e` and `StatCheckKeys` after it, which it also falls
@@ -836,7 +888,7 @@ pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
     } else {
         "No knight".to_string()
     };
-    display_knight(&mut panel, 0, offset, run, 0, &name);
+    display_knight(&mut panel, 0, offset, &KnightSheet::of_run(run), 0, &name);
 
     // `ReDisplay` 0xbeb6: `RESP` becomes `Response2` and `StatsOffset` 0x96
     // before the type's own page. The branches are the routine's, in its order.
@@ -857,16 +909,30 @@ pub fn lay_out(run: &Run, screen: Screen, other: Option<&Other>) -> Panel {
             display_msword(&mut panel, 1, right, &run.temple);
         }
         Screen::Acquire | Screen::AcquirePair => display_acquire(&mut panel),
-        // A second knight in the other arch, which one traveller on a map never
-        // has: `_displayknight` wants a second record and there is not one.
+        // `_displayknight`'s second arm: the loser of a knight fight, in the
+        // other arch, `StatACEL` 1. `other.loser` names his record, off the
+        // run's own `rivals`, since a duel's loser is always a computer
+        // knight (`Run::challenge` never lets two of them fight).
+        Screen::Trade => {
+            if let Some(r) = other
+                .and_then(|o| o.loser)
+                .and_then(|idx| run.rivals.get(idx.wrapping_sub(1)))
+            {
+                let name = other
+                    .and_then(|o| o.loser)
+                    .map_or_else(String::new, |idx| run.record_name(idx));
+                display_knight(&mut panel, 1, right, &KnightSheet::of_rival(r), 1, &name);
+            }
+        }
         // The stone circle's page is one arch and draws nothing on the right.
-        Screen::Trade | Screen::Henge | Screen::Sheet => {}
+        Screen::Henge | Screen::Sheet => {}
     }
     panel
 }
 
 /// Whatever is in the other arch: a lair's floor, a dragon's hoard, the
-/// mystic's stock. `StatMAGIC2` and the record's own purse.
+/// mystic's stock, or a second knight. `StatMAGIC2` and the record's own
+/// purse.
 pub struct Other {
     pub hoard: Hoard,
     pub gold: u32,
@@ -875,6 +941,10 @@ pub struct Other {
     /// and so carries no permission bit, and nothing on the floor can be
     /// taken. See `henge_core::lair::Page`.
     pub scouted: bool,
+    /// The trade page's second knight, by record index: `_displayknight`
+    /// wants a second record, and now there is one. `None` for every other
+    /// screen, none of which puts a second knight in the other arch.
+    pub loser: Option<usize>,
 }
 
 /// The original's whole status screen, laid out and painted.

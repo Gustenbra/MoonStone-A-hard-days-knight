@@ -116,6 +116,25 @@ pub struct Sheet {
     pub talismans: i32,
 }
 
+/// What a computer knight brings into a knight against knight bout, off his
+/// own record rather than `SetKnightEquipment`'s: `+0x38` and `+0x3c`, the
+/// strength and the blade `CalcDamage` adds, `+0x34` the daggers and `+8` of
+/// his magic record the talismans.
+#[derive(Clone, Copy, Debug)]
+pub struct RivalSheet {
+    pub health: i32,
+    pub max_health: i32,
+    pub bonus: i32,
+    pub daggers: u32,
+    pub talismans: i32,
+    /// He is `[0x8979]`, the challenger: `Combat+115` (0x3c4) writes the
+    /// record whose turn it is there, and `SetKnightCombat` stands that one
+    /// at x 250 facing left in the main knight's banks and colours, with
+    /// `[0x897b]` at x 30 in the second knight's. When the player is the
+    /// one challenged, he is the second knight.
+    pub challenger: bool,
+}
+
 pub struct World {
     arenas: Arenas,
     families: Families,
@@ -165,6 +184,9 @@ pub struct World {
     /// What the player's knight carries into the next bout, off the run's
     /// sheet. The other knights get the ten `SetKnightEquipment` hands out.
     player_daggers: Option<u32>,
+    /// The second knight's own record, when the bout is against one of the
+    /// three computer knights off the map rather than a fresh one.
+    rival: Option<RivalSheet>,
     /// `AddCNT`, the counter `AddKnight` stands every arrival by.
     ///
     /// It lives here rather than on the bout because the original's lives in
@@ -234,6 +256,7 @@ impl World {
             bestiary,
             gore: true,
             player_daggers: None,
+            rival: None,
             arrivals: henge_core::arena::Arrivals::default(),
             heads: None,
             moon: String::new(),
@@ -471,6 +494,18 @@ impl World {
         }
     }
 
+    /// The second knight off the map, or nobody: a fresh knight again.
+    /// Takes effect on the next reset.
+    pub fn set_rival(&mut self, rival: Option<RivalSheet>) {
+        self.rival = rival;
+    }
+
+    /// Whether the player's seat is the challenged one, standing where
+    /// `InitKnightvsKnight` stands `[0x897b]`.
+    fn player_is_second(&self) -> bool {
+        self.foe == "knight" && self.rival.is_some_and(|r| r.challenger)
+    }
+
     /// Which knight sits in which seat. Colours follow it, so the knight chosen
     /// on the select screen is the one that walks into the arena.
     pub fn set_roster(&mut self, roster: Vec<usize>) {
@@ -484,9 +519,20 @@ impl World {
         self.roster.get(seat).copied().unwrap_or(seat % 4)
     }
 
-    /// The seat drawn as the first knight, in entries 6 to 8. Seat zero
-    /// whenever a knight is in it, which is every bout but the browser's.
+    /// The seat drawn as the first knight, in entries 6 to 8: `[0x8979]`,
+    /// the record whose turn it is. Seat zero whenever a knight is in it and
+    /// the player is the challenger, which is every bout but a computer
+    /// knight's challenge off the map and the browser's.
     fn main_knight_seat(&self) -> Option<usize> {
+        if self.player_is_second() {
+            return self
+                .bout
+                .fighters
+                .iter()
+                .enumerate()
+                .position(|(i, f)| i != 0 && f.actor == "knight")
+                .or_else(|| self.bout.fighters.iter().position(|f| f.actor == "knight"));
+        }
         self.bout.fighters.iter().position(|f| f.actor == "knight")
     }
 
@@ -700,18 +746,35 @@ impl World {
             // knights is as many as the original fields, so a third and a fourth
             // in the browser's brawl take the same two records again. The depths
             // differ anyway, because the rotation never repeats inside three.
+            // A knight against knight bout the other knight began:
+            // `Combat+115` (0x3c4) puts him in `[0x8979]` and the player in
+            // `[0x897b]`, so the player takes the second knight's record and
+            // the challenger the first's.
+            let record = if !creature && self.player_is_second() && n == 2 {
+                1 - *seat
+            } else {
+                *seat
+            };
             let (x, facing) = if creature && wave.max > 0 {
                 let record = wave.opening_seat(&foe.wave, *seat);
                 // `InitNewMO`'s own `add word [NumberInCombat], 1`, 0x27ee.
                 wave.arrived();
                 def.seat_at(record)
             } else {
-                def.seat(*seat)
+                def.seat(record)
             }
             .unwrap_or((GLOBAL.left + 50, 1));
             *seat += 1;
             let y = field.standing_row(self.arrivals.next_place());
             fighters.push(Fighter::new(id, def, x, y, facing));
+        }
+        // `SetKnightCombat` stands `[0x8979]` first and `InitKnightvsKnight`
+        // `[0x897b]` after, so the challenger takes the first place off
+        // `AddCNT` and the challenged the second.
+        if self.player_is_second() && fighters.len() == 2 {
+            let (a, b) = (fighters[0].y, fighters[1].y);
+            fighters[0].y = b;
+            fighters[1].y = a;
         }
         // **The dragon's set piece.** `InitKnightvsDragon` does not put a
         // dragon in an ordinary bout: the head goes in at x 80 like any other
@@ -810,17 +873,29 @@ impl World {
                 // Seat zero fights on the run's sheet; every other knight is
                 // fresh off `SetKnightEquipment`, twenty health and one of
                 // strength, because nothing tracks what they have been through.
-                let (max, bonus, talismans) = match self.sheet {
-                    Some(s) if i == 0 => (s.max_health, s.bonus, s.talismans),
-                    Some(s) => (ORIGINAL_KNIGHT_HEALTH, s.fresh_bonus, 0),
-                    None => (knight.health, 0, 0),
+                // A computer knight off the map brings his own record:
+                // `InitKnightvsKnight` reads `[0x897b]` as it stands, wounds
+                // and purchases and all.
+                let (max, bonus, talismans) = match (self.sheet, self.rival) {
+                    (Some(s), _) if i == 0 => (s.max_health, s.bonus, s.talismans),
+                    (Some(_), Some(r)) if i == 1 => (r.max_health, r.bonus, r.talismans),
+                    (Some(s), _) => (ORIGINAL_KNIGHT_HEALTH, s.fresh_bonus, 0),
+                    (None, _) => (knight.health, 0, 0),
                 };
                 f.max_health = max;
                 f.health = max;
                 f.bonus = bonus;
                 f.talismans = talismans;
-                // `SetKnightEquipment`: ten daggers on the belt.
-                f.record.set(field::DAGGERS, 10);
+                // `SetKnightEquipment`: ten daggers on the belt, or what a
+                // record off the map has left on his.
+                let daggers = match self.rival {
+                    Some(r) if i == 1 => r.daggers as i32,
+                    _ => 10,
+                };
+                f.record.set(field::DAGGERS, daggers);
+                if let (Some(r), true) = (self.rival, i == 1) {
+                    f.health = r.health.clamp(1, max);
+                }
             } else {
                 let scale = |v: i32| (v * scale_to / ORIGINAL_KNIGHT_HEALTH).max(1);
                 // What the moon makes of it, before anything is scaled: a
@@ -878,13 +953,6 @@ impl World {
             .filter(|(i, f)| *i != 0 && !f.alive())
             .map(|(_, f)| self.def_of(&f.actor).bounty)
             .sum()
-    }
-
-    /// Whether this bout is a knight against a knight, which is the one the
-    /// original pays through `BKwon` (0x49f) rather than through the road's
-    /// own tally.
-    pub fn is_duel(&self) -> bool {
-        self.foe == "knight"
     }
 
     /// What the fallen were worth in experience, the same way.

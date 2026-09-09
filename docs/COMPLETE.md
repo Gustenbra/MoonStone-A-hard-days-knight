@@ -946,29 +946,31 @@ henge opens it where the traveller stands.
       byte times sixteen, every held frame counted whether the ground or the edge took it,
       the spending step not walked, every encounter spending the rest. The ambush roll and
       the fixed-length day that stood here were ours and are gone
-- [ ] The three computer knights. **Recovered and not built.** `InitGameStart` (0x1c0d)
-      fills all four records at DS:0x6c9e as kind 8 (`ControlBlackKnight`), `[+0x20] = 4`,
-      named `Enemy1Name` to `Enemy4Name`, at (15, 100), (300, 100), (160, 20) and (160,
-      180); `ChooseKnight` makes the first `NUM_PLAYERS` of them people and `InitKnights`
-      (0x157) moves those to their villages. `_MAP:DisplayOtherKnights` (0xa22c) draws the
-      other three every frame, frame `[si+0x20]` (the purple fifth token for a computer
-      knight), 0x21 for a grave, `+0x2b` for a toad; `MapLOOP+19` gives each a turn through
+- [x] The three computer knights. **Built.** `InitGameStart` (0x1c0d) fills all four
+      records at DS:0x6c9e as kind 8 (`ControlBlackKnight`), `[+0x20] = 4`, named
+      `Enemy1Name` to `Enemy4Name`, at (15, 100), (300, 100), (160, 20) and (160, 180);
+      `ChooseKnight` makes the first `NUM_PLAYERS` of them people and `InitKnights` (0x157)
+      moves those to their villages. `_MAP:DisplayOtherKnights` (0xa22c) draws the other
+      three every frame, frame `[si+0x20]` (the purple fifth token for a computer knight),
+      0x21 for a grave, `+0x2b` for a toad; `MapLOOP+19` (0xa319) gives each a turn through
       `KnightXP`, `KnightHeal`, `FindKnight`, `KnightAquire`, `KnightWyrm`, `KnightHaste`,
-      `KnightSupplies`, `KnightGoesToTown`, `BKCollision` and `TrackLair`. Drawing them
-      where `InitGameStart` left them would be right for one day and wrong after, so they
-      wait for their turns to be built, and the grave with them
-- [ ] Pillaging a dead rival's grave (`kngrave`, `StackMessages[0x21 - 0x15]`,
-      `Pillage knight's grave`). **Recovered and not built, because there is nobody to
-      pillage.** It is not a place: `MOON:CheckEncounterDone` (0x798) walks the other three
-      knight records at DS:0x6c9e, overlaps their tokens with yours, and pushes kind 1
-      (`Battle with `) for a living one and kind 0x21 for one whose life points are gone
-      (`cmp byte [si+0x31], 0 / jg`, 0x7c7); `_MAP:DisplayOtherKnights` (0xa22c) draws
-      `MI.C` frame 0x21 over him instead of his own colour for the same reason, so 0x21 is
-      a gravestone. Choosing it goes to 0x3b7, the same entry a challenge does, which sees
-      the zero at `[di+0x31]` and jumps straight to `Knight1Won` and `TakeALL` (0xbc5),
-      the field-by-field transfer of everything he was carrying. henge has one knight to a
-      run and no rival tokens on the map, so there is no grave to stand on; building one
-      would mean inventing the rival
+      `KnightSupplies`, `KnightGoesToTown`, `BKCollision` and `TrackLair`. All of it is
+      `henge_core::rival`: `Run::rivals`, `Run::rival_frame` and `Run::next_which`
+      (`NextWHICH`, 0xa434) run the three seats' turns in place of the keyboard, and
+      `Run::knights_alive` is what the dragon's own target roll (`ContinueDragon`) now
+      reads honestly instead of the placeholder that used to answer `true` for a rival with
+      no seat behind it
+- [x] Pillaging a dead rival's grave (`kngrave`, `StackMessages[0x21 - 0x15]`, `Pillage
+      knight's grave`). **Built.** It is not a place: `MOON:CheckEncounterDone` (0x798)
+      walks the other three knight records at DS:0x6c9e, overlaps their tokens with yours,
+      and pushes kind 1 (`Battle with `) for a living one and kind 0x21 for one whose life
+      points are gone (`cmp byte [si+0x31], 0 / jg`, 0x7c7); `_MAP:DisplayOtherKnights`
+      (0xa22c) draws `MI.C` frame 0x21 over him instead of his own colour for the same
+      reason, so 0x21 is a gravestone. Choosing either kind goes to 0x3b7 the same way a
+      challenge does (`henge_core::place::Overlaps::gather_knights`, `Run::challenge`),
+      which sees the zero at `[di+0x31]` and jumps straight to `Knight1Won` and `TakeALL`
+      (0xbc5), the field-by-field transfer of everything he was carrying — `Run::walkover`
+      resolves it the same way for a live challenge that never has to fight
 
 ## 4.2 Arena generation `done`
 
@@ -1270,8 +1272,8 @@ token like the knights' own. `MapIconsTABLE` is sixty bytes, and reading it conf
 shape: nine records of three words, one for each of the fixed places above, and a
 terminator. Its coordinates are in 4.1.
 
-**The four villages are built** (see 4.1); pillaging a dead rival's grave is recovered and
-not built, because with one knight to a run there is no rival token to stand on.
+**The four villages are built** (see 4.1); pillaging a dead rival's grave is built too, now
+that the three rivals (`henge_core::rival`) ride the map and can leave one.
 
 ### The paper, in full, and what it replaces `done`
 
@@ -1439,7 +1441,7 @@ gem. What is left here is the quest's own tokens, which are section 7's.
 | `CAST_MAGIC`, `MagicCast`, `MagicName`, `MagicPrices` | casting | done, from the character sheet as the original does it from the status screen |
 | `DRINKPOTIONHEAL` | potions | done, as an item virtue in the data |
 | `BESTOWGOLD`, `BESTOWMAGIC`, `GETABILITY` | acquisition | done: off the fallen, out of a lair, and over the wizard's balcony |
-| `TAKEFROMKNIGHT` | losing items | done: spent when used and given to the druids. The cutpurse was ours and is gone; the routine's own callers are `TakeGold`, `TakeArmour` and `TakeALL` (0xb8e to 0xbc5), a rival's pillage, which waits on the rivals |
+| `TAKEFROMKNIGHT` | losing items | done: spent when used and given to the druids. The cutpurse was ours and is gone; the routine's own callers are `TakeGold`, `TakeArmour` and `TakeALL` (0xb8e to 0xbc5), a rival's pillage, now built as `Run::take_between`/`take_from_the_fallen` in `henge_core::rival` |
 | `AdjustLevel`, `XPlevels` | levelling | done: three `Increase` gadgets on the sheet, lit as `0xd3a7` lights them |
 
 **The ten magic slots are the seam between the engine and the pack**, and they have to
@@ -1613,8 +1615,8 @@ is `Tally`, which holds the ending and the seat, and `Tally::code`.
 - [x] `HengeControl` and `HengeLOOP`, the circle's own set piece, which is where the
       winning moment actually happens. `henge_core::stones`. Listed in section 5 too
 - [x] Four villages, one per knight: built, see 4.1
-- [ ] Pillaging a dead rival's grave, which needs the rival knights on the map that henge
-      does not have. Recovered in 4.1 with addresses
+- [x] Pillaging a dead rival's grave, now that the three rival knights ride the map
+      (`henge_core::rival`). Built in 4.1 with addresses
 
 ---
 
@@ -1847,9 +1849,10 @@ four knights until now, are `Enemy1Name`..`Enemy4Name` at image 0x18cd2. `InitGa
 writes them into the four knight records before anybody chooses, with colour index 4, the
 dark purple, and the corners (15, 100), (300, 100), (160, 20) and (160, 180). A seat a
 person takes is overwritten by `ChooseFIRE` and `InitKnights`; a seat nobody takes keeps
-the enemy name and the purple. **So they are the computer knights' names**, and henge has
-no computer knights to give them to yet: nothing uses them, which is the right amount of
-use for them, and the four in `knights.json` are now the player names.
+the enemy name and the purple. **So they are the computer knights' names**, and they are
+now given to them: `henge_core::rival::ENEMY_NAMES`, the same three that keep their
+corners in `henge_core::rival::ENEMY_CORNERS`; the four in `knights.json` are the player
+names.
 
 ## 8.3 The status panel `done`
 

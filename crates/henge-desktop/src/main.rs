@@ -28,6 +28,7 @@ use henge_core::knight::{Ability, Knight, Knights};
 use henge_core::message::{Message, Messages};
 use henge_core::place::{Answer, Overlaps, Places};
 use henge_core::pointer::{Gadgets, Pointer};
+use henge_core::rival::{Board, Challenged, Frame, Settled};
 use henge_core::run::{Cast, Run};
 use henge_core::shell::Start;
 use henge_core::status::{Op, Screen as SheetScreen};
@@ -41,7 +42,7 @@ use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
-use world::{Sheet, World};
+use world::{RivalSheet, Sheet, World};
 
 fn args_of() -> Vec<String> {
     std::env::args().collect()
@@ -1040,9 +1041,19 @@ struct App {
     /// `DrBuffer`, the five slots `ContinueDragon` (0xa5cd) points at `MI.C`:
     /// the dragon's bank table 5, which its eight flight scripts draw from.
     dragon_banks: Option<henge_core::taskvm::BankTables>,
-    /// The fight on is the dragon's, which the routine at 0xcf6 answers for
+    /// The fight on is the dragon's, which the routine at 0xcf3 answers for
     /// on its way out: `_dragon_won` or the `0xffff` into the dragon's `+0x31`.
     dragon_fight: bool,
+    /// The fight on is a knight against knight: `[0x8979]` and `[0x897b]` as
+    /// `Combat+115` (0x3c4) wrote them, the attacker first.
+    duel: Option<(usize, usize)>,
+    /// How the last knight fight settled, kept from the tick it settled on
+    /// to the tick the bout ends on, when `Knight1Won` and the rest run.
+    duel_settled: Option<henge_core::rival::Settled>,
+    /// The trade page, `StatTYPE` 1, while it is up: the loser's record and
+    /// `TakeCNT`, which `ReDisplay` (0xbee6) reads to turn the page into the
+    /// winner's own sheet once one thing has come off a living loser.
+    trade_page: Option<(usize, bool)>,
     /// The dice table's own one-bank table, `dice.cel` in `DiceHANDLE`.
     dice_banks: Option<henge_core::taskvm::BankTables>,
     /// Every animation script, which the circle's two tasks run on. The bout
@@ -1067,6 +1078,11 @@ enum Mode {
     Combat,
     Place,
 }
+
+/// A token's `(x, y, colour or frame)`, as [`map::Marks`] draws one: `SHOW`
+/// (0xa1f0) for the record whose turn it is, `DisplayOtherKnights` (0xa22c)
+/// for the rest.
+type KnightMark = (i32, i32, usize);
 
 /// A flight over the map, `EffectFLAG+2` and `+4` in `_MAP`: the gem's comes
 /// back to where it began, the hawk's lands where it is when fire is pressed.
@@ -1467,6 +1483,9 @@ impl App {
             ending_cast,
             ending_glows: false,
             lair_page: None,
+            duel: None,
+            duel_settled: None,
+            trade_page: None,
             stones: None,
             stones_banks,
             dragon_banks,
@@ -2016,8 +2035,10 @@ impl App {
                                 self.run.restart();
                                 // A new run is a new board: the lairs a dead
                                 // knight emptied are full and back on the map,
-                                // keys and all.
+                                // keys and all, and the three computer knights
+                                // are back in their corners (`InitGameStart`).
                                 self.stock_lairs();
+                                self.run.seat_the_rivals(&self.items);
                                 if let Some(w) = self.world.as_mut() {
                                     w.set_player_health(self.run.health_for_fight());
                                     w.set_moon(self.run.moon.phase().key());
@@ -2031,22 +2052,26 @@ impl App {
                 // The sheet is the original's status screen: modal, and
                 // where the casting and the levelling are done. So is the
                 // lair's page, which is the same panel on `StatTYPE` 2.
-                if self.sheet || self.lair_page.is_some() {
+                if self.sheet || self.lair_page.is_some() || self.trade_page.is_some() {
                     self.sheet_tick();
+                    return;
+                }
+                // `MapLOOP+13` (0xa313): a kind 4 record's frame is the
+                // computer knight's own day, and nothing the keyboard does
+                // reaches it.
+                if self.run.which != 0 {
+                    self.rival_tick();
                     return;
                 }
                 // A toad has no turn. `_MAP:NextWHICH` tests `[si+0x3a]` and
                 // goes straight round to the next knight when it is set, so
                 // the wizard's curse costs its three days rather than being a
-                // counter nothing reads: the day turns over and no step is
-                // taken.
+                // counter nothing reads: the turn passes and no step is taken.
                 if self.run.is_toad() {
                     if let Some(m) = self.map.as_mut() {
                         m.state.pass_days(1);
                     }
-                    self.run.new_day();
-                    self.run.dragon_turn_begins();
-                    self.begin_interlude();
+                    self.end_turn();
                     return;
                 }
                 // Aloft, the map is crossed without steps or slow ground:
@@ -2092,21 +2117,21 @@ impl App {
                 }
                 // `_MAP:FOLLOW` walks the whole overlap table once a frame and
                 // pushes what the token is standing on; nothing is opened here.
+                // `CheckEncounterDone` (0x798) pushes the other three records
+                // after the places.
                 if let Some((x, y)) = at {
                     self.overlaps
                         .gather(&self.places, x, y, self.run.knight.seat);
+                    let tokens = self.knight_tokens();
+                    self.overlaps.gather_knights(&tokens, x, y);
                 }
-                // `NextWHICH+26` (0xa44e): the day turns when the distance is
-                // spent, and the routine at 0x1148 and the between-days screen
-                // at 0x8e5b follow.
+                // `GoTheDistance` (0xa422) into `NextWHICH` (0xa434): the
+                // turn passes when the distance is spent. The three computer
+                // knights have theirs, and when `WHICH` wraps the routine at
+                // 0x1148 and the between-days screen at 0x8e5b follow.
                 if let Some(m) = self.map.as_ref() {
                     if m.state.day != day_before {
-                        self.run.new_day();
-                        // `MapEffects+63` (0xa545), at the top of the turn
-                        // `FOLLOW+100` (0xa303) begins: the dragon into the
-                        // air from the second moon on, or on its way.
-                        self.run.dragon_turn_begins();
-                        self.begin_interlude();
+                        self.end_turn();
                         return;
                     }
                 }
@@ -2347,18 +2372,37 @@ impl App {
                         let survivor = w.bout.fighters.first();
                         let health = survivor.map_or(0, |f| if f.alive() { f.health } else { 0 });
                         let won = w.bout.winner() == Some(0);
-                        // What the fallen were carrying, and what they were
-                        // worth. The run decides whether it is collected; a
-                        // corpse collects nothing.
-                        // `BKwon` (0x49f) pays the duel's own point and
-                        // spends it on the spot through `BKAddstuff`; the
-                        // road's tally pays for everything else. One or the
-                        // other, never both.
-                        let duel = w.is_duel();
-                        let xp = if duel { 0 } else { w.experience() };
-                        self.run.finished_fight_worth(health, won, w.purse(), xp);
-                        if duel && won {
-                            self.run.duel_won(&self.items);
+                        if let Some((attacker, defender)) = self.duel {
+                            // A knight against a knight: `WhoLived` (0xabe)
+                            // on both records and `InitKnightBattle+65`
+                            // (0x440) onwards. Nothing is collected off the
+                            // ground: a computer knight takes through
+                            // `BKwon` and a person through the trade page.
+                            let other = w.bout.fighters.get(1).map_or(0, |f| {
+                                if f.alive() {
+                                    f.health
+                                } else {
+                                    0
+                                }
+                            });
+                            let (a, d) = if attacker == 0 {
+                                (health, other)
+                            } else {
+                                (other, health)
+                            };
+                            let settled =
+                                self.run
+                                    .knight_fight_over(attacker, defender, a, d, &self.items);
+                            self.duel_settled = Some(settled);
+                            if let Some(r) = self.run.rivals.get_mut(defender.max(attacker) - 1) {
+                                r.knight.daggers = w.daggers_left(1);
+                            }
+                        } else {
+                            // What the fallen were carrying, and what they were
+                            // worth. The run decides whether it is collected; a
+                            // corpse collects nothing.
+                            let xp = w.experience();
+                            self.run.finished_fight_worth(health, won, w.purse(), xp);
                         }
                         // The routine at 0xcf6 on its way out: `_dragon_won`
                         // (0xd23) leaves it flying; 0xd38 to 0xd50 ground it
@@ -2374,11 +2418,15 @@ impl App {
                         self.run.knight.daggers = w.daggers_left(0);
                         // `Combat+60` (0x38d): `mov dx, [0xccac]; mov [0xcc98],
                         // dx` the moment `WhoLived` has been asked, so a fight
-                        // is the last thing the day holds.
-                        let budget = self.run.day_steps(&self.items);
-                        if let Some(m) = self.map.as_mut() {
-                            m.state.steps_per_day = budget;
-                            m.state.end_turn();
+                        // is the last thing the turn holds. `[0xcc98]` is the
+                        // turn's, so a computer knight's challenge spends his
+                        // day (`BKCollision+94`, 0xab0f) and not the player's.
+                        if self.run.which == 0 {
+                            let budget = self.run.day_steps(&self.items);
+                            if let Some(m) = self.map.as_mut() {
+                                m.state.steps_per_day = budget;
+                                m.state.end_turn();
+                            }
                         }
                     }
                     // A finisher on a fallen knight is allowed to play out, as
@@ -2396,7 +2444,15 @@ impl App {
                                 w.set_player_health(self.run.health_for_fight());
                             }
                             let won = w.bout.winner() == Some(0);
+                            w.set_rival(None);
                             w.reset();
+                            // `Knight1Won` (0x465) and `BothKnightsDied`
+                            // (0x48d), once the bout is done.
+                            if self.duel.take().is_some() {
+                                let settled = self.duel_settled.take();
+                                self.knight_fight_settled(settled);
+                                return;
+                            }
                             // The Valley's Guardian, which is neither a lair
                             // nor the road: winning spends the four keys and
                             // pays a moonstone, losing costs two more life
@@ -3195,6 +3251,8 @@ impl App {
                 self.close_door();
             } else if self.lair_page.is_some() {
                 self.close_lair_page();
+            } else if self.trade_page.is_some() {
+                self.close_trade_page();
             } else {
                 self.sheet = false;
             }
@@ -3250,6 +3308,31 @@ impl App {
                 // `HGTakeDone`: `inc [TakeCNT]`, the knight's numbers redone
                 // and `ReDisplay`.
                 self.audio.play(CLICK_SOUND);
+                self.sync_sheet();
+            }
+            return;
+        }
+        // The trade page. Gold, the weapon and the armour all carry `STRP`
+        // 2 off `display_knight`, the rest of the magic record `STRP` 1 or
+        // 5, and every one of them reaches `Run::trade_take` off its own
+        // `STPL`; only the left arch, the winner's own sheet, is `Identify`
+        // and so never lit. `Op::Raise`/`Op::Buy` are the ability, dagger
+        // and life-point icons `display_knight` also draws on this side,
+        // which `HotGadget`'s own decode has no case for either.
+        if let Some((loser, _)) = self.trade_page {
+            if !hit.lit {
+                return;
+            }
+            let moved = match op {
+                Op::Take | Op::TakeMagic | Op::Cast => {
+                    self.run.trade_take(loser, hit.payload.field, &self.items)
+                }
+                Op::Raise | Op::Buy => false,
+            };
+            if moved {
+                self.audio.play(CLICK_SOUND);
+                // `HGTakeDone`: `inc [TakeCNT]`.
+                self.trade_page = Some((loser, true));
                 self.sync_sheet();
             }
             return;
@@ -3398,7 +3481,7 @@ impl App {
     /// `GEMEncounter`'s `cmp word ptr ds:[bp+4], 2`: the entry of the stack
     /// that is a lair, which is the only kind a gem flight can land on.
     fn lair_under_the_token(&self) -> Option<usize> {
-        self.overlaps.ids().iter().find_map(|id| {
+        self.overlaps.ids().into_iter().find_map(|id| {
             self.places
                 .get(id)?
                 .options
@@ -3410,31 +3493,55 @@ impl App {
         })
     }
 
-    /// The crystal or the hawk over the token while aloft: `_MAP:SHOW` draws
-    /// the token's frame plus five with the gem flag up and plus ten with the
-    /// hawk's, which in `MI.C` is the crystal row and the hawk row, one per
-    /// knight's colour.
-    /// `[si+0x5c]` and `[si+0x5e]` of the four knight records: this one's
-    /// token where it stands, the other three at the corners `InitKnights`
-    /// put them in, since nothing on this map moves them.
-    fn knight_homes(&self) -> [(i32, i32); 4] {
-        let mut homes = [(0, 0); 4];
-        for (i, h) in homes.iter_mut().enumerate() {
-            if let Some(k) = self.knights.get(i) {
-                *h = (k.home[0], k.home[1]);
+    /// The four knight records' tokens as the map draws them this frame:
+    /// `DisplayOtherKnights` (0xa22c) for every record but `[0x77e8]`, in
+    /// its colour's frame, 0x21 for a grave and `+0x2b` for a toad; and
+    /// `SHOW` (0xa1f0) for `[0x77e8]`, whose colour the scene adds five to.
+    fn map_knights(&self, m: &MapScene) -> (Vec<KnightMark>, KnightMark) {
+        let which = self.run.which;
+        let mut others = Vec::new();
+        let mut shown = (m.state.x, m.state.y, self.run.knight.seat);
+        for record in 0..henge_core::rival::RECORDS {
+            let (x, y, colour, alive, toad) = if record == 0 {
+                (
+                    m.state.x,
+                    m.state.y,
+                    self.run.knight.seat,
+                    !self.run.over,
+                    self.run.is_toad(),
+                )
+            } else {
+                match self.run.rivals.get(record - 1) {
+                    Some(r) => (r.x, r.y, r.knight.seat, r.alive(), r.toad > 0),
+                    None => continue,
+                }
+            };
+            if record == which {
+                shown = (x, y, colour);
+                continue;
             }
+            // 0a247  cmp byte [si+0x31], 0; jg; mov ax, 0x21
+            // 0a252  cmp byte [si+0x3a], 0; je; add ax, 0x2b
+            let frame = if !alive {
+                map::GRAVE_FRAME
+            } else if toad {
+                colour + map::TOAD_FRAME
+            } else {
+                colour
+            };
+            others.push((x, y, frame));
         }
-        homes
+        (others, shown)
     }
 
     /// One frame of `DragonWander` (0xa66b) and the shadow table
-    /// `CheckEncounterDone+128` (0x816) rebuilds, for the token where it
-    /// stands now.
+    /// `CheckEncounterDone+128` (0x816) rebuilds, on the player's turn, for
+    /// the token where it stands now and the other three where their turns
+    /// left them.
     fn dragon_frame(&mut self) {
         if let Some(m) = self.map.as_ref() {
             let at = (m.state.x, m.state.y);
-            let homes = self.knight_homes();
-            self.run.dragon_frame(at, homes);
+            self.run.dragon_frame(at);
         }
     }
 
@@ -3457,6 +3564,201 @@ impl App {
             w.set_family(&family, pick);
             self.dragon_fight = true;
             self.mode = Mode::Combat;
+        }
+    }
+
+    /// `Combat+102` (0x3b7) up to `InitKnightBattle`: `attacker` is `si` and
+    /// `defender` is `di`, record indices 0 to 3, one of which is always the
+    /// human (`Combat+159`, 0x3f0, sends two computer knights straight to
+    /// `HeadBattleDone` before `FindKnight` can ever name one for the other,
+    /// so [`Challenged::Nothing`] cannot actually arise off either caller of
+    /// this).
+    ///
+    /// `Combat+60` (0x38d) is `mov dx, [0xccac]; mov [0xcc98], dx`, on the
+    /// way in and ahead of every branch below, so the player's own entry
+    /// spends his day whatever the challenge comes to; a computer knight's
+    /// own entry is through `BKCollision+85` (0xab06), past `Combat+60`
+    /// entirely, because `BKCollision` has already spent his day itself
+    /// (0xab0f) before making this call. [`Self::spend_day`] is
+    /// `EncounterAllDone`, the same move [`Self::end_turn`]'s caller uses to
+    /// end a toad's turn.
+    fn knight_fight(&mut self, attacker: usize, defender: usize) {
+        if attacker == 0 {
+            self.spend_day();
+        }
+        match self.run.challenge(attacker, defender) {
+            // `Combat+159` (0x3f0): nothing happens, and whoever's day this
+            // was has already had it spent, above or in `bk_collision`.
+            // `KnightProtection` turned him away; likewise nothing further.
+            Challenged::Nothing | Challenged::Averted => {}
+            // `Knight1Won` entered directly at 0x3d5 or 0x3cc: the defender
+            // never fought, so there is a `Settled` with no bout behind it.
+            Challenged::Walkover => {
+                let settled = self.run.walkover(attacker, defender, &self.items);
+                self.knight_fight_settled(Some(settled));
+            }
+            Challenged::Fight { cursed } => self.begin_knight_fight(attacker, defender, cursed),
+        }
+    }
+
+    /// `InitKnightBattle` (0x440): the arena set up for a real bout between
+    /// two knight records, on the ground the map square gives every fight
+    /// (`SetUpDKL`), exactly as [`Self::begin_dragon_fight`] does for the
+    /// dragon.
+    fn begin_knight_fight(&mut self, attacker: usize, defender: usize, cursed: bool) {
+        self.sync_sheet();
+        // Whichever of the two is not the human: `Combat+115` (0x3c4) wrote
+        // both into `[0x8979]`/`[0x897b]`, and one of them always is, per
+        // `knight_fight`'s own doc.
+        let rival_index = if attacker == 0 { defender } else { attacker };
+        let sheet = self
+            .run
+            .rivals
+            .get(rival_index.wrapping_sub(1))
+            .map(|r| RivalSheet {
+                health: r.health,
+                max_health: r.max_health,
+                bonus: r.knight.damage_bonus(&self.items),
+                daggers: r.knight.daggers,
+                talismans: i32::from(r.hoard.talismans),
+                challenger: attacker != 0,
+            });
+        let family = self.map.as_ref().map_or_else(
+            || "forest".to_string(),
+            |m| m.last_terrain.family().to_string(),
+        );
+        if let Some(w) = self.world.as_mut() {
+            let pick = self.run.next_arena(&family, w.rotation_len(&family));
+            w.set_player_health(self.run.health_for_fight());
+            w.set_player_daggers(self.run.knight.daggers);
+            // `KnightProtection`'s backfire: the caster's controls reversed
+            // for this one bout, which [`Run::finished_fight_worth`] (called
+            // from [`Self::knight_fight_settled`]'s way in, through
+            // `Run::knight_fight_over`) already clears when it settles.
+            w.set_player_cursed(cursed);
+            w.set_rival(sheet);
+            if !w.set_foe("knight") {
+                return;
+            }
+            w.set_family(&family, pick);
+            w.set_seats(self.title.state.players.max(1), 1);
+            self.duel = Some((attacker, defender));
+            self.mode = Mode::Combat;
+        }
+    }
+
+    /// `Knight1Won` (0x465) and `BothKnightsDied` (0x48d), once a knight
+    /// against knight challenge has settled, whether or not a bout was
+    /// fought for it: [`Challenged::Walkover`] settles at once, and
+    /// [`Challenged::Fight`] settles on the tick its bout ends, in the
+    /// combat tick's own cleanup right above where this is called.
+    fn knight_fight_settled(&mut self, settled: Option<Settled>) {
+        match settled {
+            // `BothKnightsDied`: both records' own bookkeeping already ran,
+            // inside `Run::knight_fight_over`. Nothing for a person to do.
+            None | Some(Settled::BothDied) => {
+                if self.map.is_some() {
+                    self.mode = Mode::Map;
+                }
+            }
+            // `Knight1Won+6` (0x46b): a person takes through the trade
+            // page, `StatTYPE` 1, and nothing is taken for him.
+            //
+            // TODO: `ReDisplay` (0xbee6) reads `TakeCNT` to decide something
+            // more about how the page redraws once one thing has come off a
+            // living loser ("turn the page into the winner's own sheet"),
+            // and the bytes at 0xbee6 are not transcribed anywhere in this
+            // codebase to say exactly what. `trade_page`'s bool tracks
+            // `TakeCNT` faithfully (set from `Run::trade_take`'s own
+            // return); nothing further is done with it here rather than
+            // guessing at a screen change no cited disassembly describes.
+            Some(Settled::PlayerWon { loser }) => {
+                self.trade_page = Some((loser, false));
+                self.mode = Mode::Map;
+                // `StatusSetup` opens with the pointer at (0xa0, 0x64).
+                self.point_at(0xa0, 0x64);
+            }
+            // `BKwon`: the computer knight already took his point and his
+            // loot, inside `Run::bk_won`/`Run::walkover`. `BKAddstuff` and
+            // `WhoLived+57` show nothing on screen for it, so neither does
+            // this.
+            Some(Settled::RivalWon { .. }) => {
+                if self.map.is_some() {
+                    self.mode = Mode::Map;
+                }
+            }
+        }
+    }
+
+    /// Close the trade page and go back to the map. `Knight1Won`'s trade
+    /// page has no routine of its own the way `LairGEM+6` does for a lair's:
+    /// what a gadget took has already been written back, gadget by gadget,
+    /// so there is nothing left to settle on the way out.
+    fn close_trade_page(&mut self) {
+        self.trade_page = None;
+    }
+
+    /// `MapLOOP+19` (0xa319) round to `NextWHICH`, for whichever computer
+    /// knight's turn `self.run.which` names: one frame of
+    /// [`Run::rival_frame`], and then whatever the frame came to.
+    ///
+    /// `going` is `SlowDELAY`, "one word for everybody", which is
+    /// [`henge_core::overworld::Overworld::going_counter`] — the same
+    /// counter the player's own walk uses, not a second one. It is copied
+    /// out and back in rather than borrowed straight through, because
+    /// [`Board::land`] has to borrow `self.map` for the whole call and a
+    /// live borrow of the same field cannot also be taken mutably for the
+    /// counter.
+    fn rival_tick(&mut self) {
+        let Some(m) = self.map.as_ref() else { return };
+        let land = m.land();
+        let player_at = (m.state.x, m.state.y);
+        let mut going = m.state.going_counter;
+        let board = Board {
+            land,
+            places: &self.places,
+            items: &self.items,
+            player_at,
+        };
+        let frame = self.run.rival_frame(&board, &mut going);
+        if let Some(m) = self.map.as_mut() {
+            m.state.going_counter = going;
+        }
+        match frame {
+            // The map's own drawing reads `Run::positions` fresh every
+            // frame, so a pixel walked needs nothing further here.
+            Frame::Walked => {}
+            // `GoTheDistance` (0xa422): the day is spent.
+            Frame::TurnOver => self.end_turn(),
+            // `BKCollision+40` (0xaad9) and `+117` (0xab26): the day is
+            // spent and, per their own doc comments in `rival.rs`, the
+            // original shows nothing on screen for either.
+            Frame::Shopped | Frame::AtLair => self.end_turn(),
+            // `DragonEncounter+54` (0xa41b) into 0xcf3: the day is spent,
+            // and a computer knight's own brush with the dragon has no
+            // fight or animation the way the player's does.
+            Frame::Dragon(_loot) => self.end_turn(),
+            // `BKCollision+85` (0xab06): standing on the knight he is
+            // after. `self.run.which` is captured before the call because
+            // `knight_fight` can enter a real bout, and nothing past this
+            // point should read `which` assuming it is still the same seat.
+            Frame::Challenge { target } => {
+                let attacker = self.run.which;
+                self.knight_fight(attacker, target);
+            }
+        }
+    }
+
+    /// `NextWHICH` (0xa434): the next living, non-toad seat's turn begins,
+    /// and the between-days screen goes up first when the four have had
+    /// theirs. `None` is a lone human player dead, which the top of the
+    /// map's own tick already catches on `Run::ending` and needs nothing
+    /// further here.
+    fn end_turn(&mut self) {
+        if let Some(begins) = self.run.next_which() {
+            if begins.day_turned {
+                self.begin_interlude();
+            }
         }
     }
 
@@ -3574,7 +3876,7 @@ impl App {
     fn lairs_here(&self) -> Vec<(i32, i32)> {
         self.overlaps
             .ids()
-            .iter()
+            .into_iter()
             .filter_map(|id| self.places.get(id))
             .filter(|d| d.icon == Some(map::LAIR_FRAME))
             .map(|d| (d.x, d.y))
@@ -3606,11 +3908,47 @@ impl App {
         if self.overlaps.is_empty() {
             return false;
         }
-        if let Some(id) = self.overlaps.only().map(str::to_string) {
-            return self.enter(&id);
+        if let Some(entry) = self.overlaps.only_entry().cloned() {
+            return self.stack_decision(&entry);
         }
         self.paper = true;
         true
+    }
+
+    /// `_MAP:StackDecision`, image 0xae9f: kind 1 or 0x21 to `Combat+102`
+    /// (0x3b7), the knight fight or the grave; everything else to its place.
+    ///
+    /// Both kinds call `knight_fight` alike, and that is already right: a
+    /// grave is `alive: false` and `Run::challenge` reads exactly that
+    /// (`003d5` in its own doc comment) to answer `Challenged::Walkover`
+    /// without a blow struck, which is `_MAP:StackDecision`'s "the grave"
+    /// arm. There is no separate pillage path to add.
+    fn stack_decision(&mut self, entry: &henge_core::place::Entry) -> bool {
+        match entry {
+            henge_core::place::Entry::Place(id) => {
+                let id = id.clone();
+                self.enter(&id)
+            }
+            henge_core::place::Entry::Knight { record, .. } => {
+                self.knight_fight(0, *record);
+                true
+            }
+        }
+    }
+
+    /// The other three records' tokens, for `CheckEncounterDone`.
+    fn knight_tokens(&self) -> Vec<henge_core::place::KnightToken> {
+        self.run
+            .rivals
+            .iter()
+            .enumerate()
+            .map(|(n, r)| henge_core::place::KnightToken {
+                record: n + 1,
+                x: r.x,
+                y: r.y,
+                alive: r.alive(),
+            })
+            .collect()
     }
 
     /// The paper's key loop: `call 0x8149` until the scan code is one of the top
@@ -3625,11 +3963,11 @@ impl App {
             if !self.pressed[NUMBER_SLOT + n as usize - 1] {
                 continue;
             }
-            let Some(id) = self.overlaps.answer(n).map(str::to_string) else {
+            let Some(entry) = self.overlaps.answer_entry(n).cloned() else {
                 continue;
             };
             self.paper = false;
-            self.enter(&id);
+            self.stack_decision(&entry);
             return;
         }
     }
@@ -3913,6 +4251,18 @@ impl App {
                     hoard,
                     gold,
                     scouted: page.scouted,
+                    loser: None,
+                }),
+            ));
+        }
+        if let Some((loser, _)) = self.trade_page {
+            return Some((
+                SheetScreen::Trade,
+                Some(status::Other {
+                    hoard: henge_core::status::Hoard::default(),
+                    gold: 0,
+                    scouted: false,
+                    loser: Some(loser),
                 }),
             ));
         }
@@ -4090,9 +4440,15 @@ impl App {
             if let Some(m) = self.map.take() {
                 let icons = self.map_icons();
                 let marked = self.lairs_here();
-                let lines = self.overlaps.paper(&self.places);
+                let names = |n: usize| self.run.record_name(n);
+                let lines = self.overlaps.paper_with(&self.places, &names);
+                // `DisplayOtherKnights` (0xa22c) for the records that are not
+                // `[0x77e8]`, and `SHOW` (0xa1f0) for the one that is.
+                let (others, shown) = self.map_knights(&m);
                 let marks = map::Marks {
                     icons: &icons,
+                    others: &others,
+                    shown,
                     marked: &marked,
                     paper: self.paper.then(|| map::Paper {
                         knight: self.run.knight.name.as_str(),
@@ -4301,6 +4657,117 @@ mod tests {
         for m in [Mode::Map, Mode::Combat, Mode::Place, Mode::Select] {
             app.mode = m;
             assert!(!app.quits_on_escape(), "{m:?}");
+        }
+    }
+
+    /// A quest's three seats, seated fresh, for the tests below. Not
+    /// `take_knight`'s full setup: these tests want a plain, named knight
+    /// and nothing more.
+    fn quest_app() -> Option<App> {
+        let mut app = App::new().ok()?;
+        app.run.knight.name = "SIR TEST".into();
+        app.run.seat_the_rivals(&app.items);
+        Some(app)
+    }
+
+    /// `knight_fight`'s `Challenged::Walkover` arm: a grave under the
+    /// player's own token wins outright and opens the trade page, with no
+    /// bout ever fought (`self.mode` stays `Map`, never `Combat`).
+    #[test]
+    fn a_grave_is_a_walkover_straight_to_the_trade_page() {
+        let Some(mut app) = quest_app() else { return };
+        app.mode = Mode::Map;
+        app.run.rivals[0].lives = 0;
+        app.knight_fight(0, 1);
+        assert_eq!(app.mode, Mode::Map, "003d5: no bout is fought");
+        assert_eq!(app.trade_page, Some((1, false)));
+    }
+
+    /// `knight_fight`'s `Challenged::Fight` arm: a live rival is a real
+    /// bout, on the map's own ground, with the duel recorded so the combat
+    /// tick's own settling code (main.rs, above) knows whose fight it is.
+    #[test]
+    fn a_live_rival_is_a_real_bout_set_up_as_a_duel() {
+        let Some(mut app) = quest_app() else { return };
+        app.mode = Mode::Map;
+        app.knight_fight(0, 1);
+        assert_eq!(app.mode, Mode::Combat);
+        assert_eq!(app.duel, Some((0, 1)));
+        assert!(app.trade_page.is_none());
+    }
+
+    /// `Knight1Won`/`BothKnightsDied` once a challenge has settled, whether
+    /// or not a bout was fought for it: every branch returns to the map,
+    /// except a person's own win, which opens the trade page instead.
+    #[test]
+    fn a_settled_challenge_opens_the_trade_page_only_for_a_players_win() {
+        let Some(mut app) = quest_app() else { return };
+        app.mode = Mode::Combat;
+        app.knight_fight_settled(None);
+        assert_eq!(app.mode, Mode::Map);
+        assert!(app.trade_page.is_none());
+
+        app.mode = Mode::Combat;
+        app.knight_fight_settled(Some(Settled::BothDied));
+        assert_eq!(app.mode, Mode::Map);
+        assert!(app.trade_page.is_none());
+
+        app.mode = Mode::Combat;
+        app.knight_fight_settled(Some(Settled::RivalWon {
+            winner: 1,
+            loot: henge_core::rival::Loot::Nothing,
+        }));
+        assert_eq!(app.mode, Mode::Map);
+        assert!(app.trade_page.is_none(), "BKAddstuff shows nothing");
+
+        app.mode = Mode::Combat;
+        app.knight_fight_settled(Some(Settled::PlayerWon { loser: 2 }));
+        assert_eq!(app.mode, Mode::Map);
+        assert_eq!(app.trade_page, Some((2, false)));
+    }
+
+    /// The trade page's own gadgets: a take moves something, and `EXIT`
+    /// closes it back to the map.
+    #[test]
+    fn the_trade_page_takes_and_the_exit_gadget_closes_it() {
+        let Some(mut app) = quest_app() else { return };
+        app.run.rivals[0].gold = 40;
+        app.trade_page = Some((1, false));
+        app.mode = Mode::Map;
+        // TKGP, off the gadget `display_knight` gives the loser's gold: the
+        // same `field` the trade page's own drawing hands `HotGadget`.
+        assert!(app.run.trade_take(1, 0x32, &app.items));
+        assert_eq!((app.run.gold, app.run.rivals[0].gold), (40, 0), "0cd1a");
+        app.close_trade_page();
+        assert!(app.trade_page.is_none());
+    }
+
+    /// `NextWHICH` (0xa434): the day turns and the between-days screen
+    /// opens the moment the fourth seat's turn wraps back to the player's.
+    #[test]
+    fn end_turn_opens_the_interlude_when_the_day_turns() {
+        let Some(mut app) = quest_app() else { return };
+        app.run.which = 3;
+        app.interlude = 0;
+        app.end_turn();
+        assert_eq!(app.run.which, 0, "the wrap lands back on the player");
+        assert_ne!(app.interlude, 0, "0x1148 ran, so the moon screen goes up");
+    }
+
+    /// `MapLOOP+19` (0xa319): a computer knight's own frame walks the map
+    /// the same as the player's, and the turn ends within a bounded number
+    /// of frames rather than running forever.
+    #[test]
+    fn rival_tick_walks_a_computer_knight_and_his_turn_ends() {
+        let Some(mut app) = quest_app() else { return };
+        app.mode = Mode::Map;
+        app.run.which = 1;
+        for frame in 0..10_000 {
+            if app.run.which != 1 {
+                return;
+            }
+            app.rival_tick();
+            assert!(frame < 9_999, "his turn never ended");
         }
     }
 }

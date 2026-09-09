@@ -280,6 +280,35 @@ pub fn lair_families(places: &Places) -> Vec<String> {
 /// standing on at once.
 pub const OVERLAP_STACK: usize = 5;
 
+/// One slot of the stack at `DS:043c`: `[x][y][kind]` for a place, and
+/// `[record][0][kind]` for another knight, where `CheckEncounterDone`
+/// (0x798) writes kind 1 over a living one and 0x21 over a grave.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// An icon out of `MapIconsTABLE`, or a lair: the pack's id for it.
+    Place(String),
+    /// Another knight's record, by index, and whether `[si+0x31]` is above
+    /// nought.
+    Knight { record: usize, alive: bool },
+}
+
+/// Another knight's token, as `CheckEncounterDone` walks the four records:
+/// `+0x5c`, `+0x5e` and `+0x31`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnightToken {
+    pub record: usize,
+    pub x: i32,
+    pub y: i32,
+    pub alive: bool,
+}
+
+/// `_MAP:knkn`, DS:`0xc3b9`: what `OrderOpt` (0xaf6f) writes before a living
+/// knight's name.
+pub const BATTLE_WITH: &str = "Battle with ";
+
+/// `_MAP:kngrave`, DS:`0xc3ec`, which is `StackMessages[0x21 - 0x15]`.
+pub const PILLAGE_GRAVE: &str = "Pillage knight's grave ";
+
 /// Everything the traveller is standing on, as the original keeps it.
 ///
 /// **Recovered, and it replaces an invention.** Walking onto a place used to
@@ -302,7 +331,7 @@ pub const OVERLAP_STACK: usize = 5;
 /// walk you back in: nothing reads the stack until fire is pressed again.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Overlaps {
-    on: Vec<String>,
+    on: Vec<Entry>,
 }
 
 impl Overlaps {
@@ -322,12 +351,54 @@ impl Overlaps {
                 break;
             }
             if def.covers_for(x, y, knight) {
-                self.on.push(id.clone());
+                self.on.push(Entry::Place(id.clone()));
             }
         }
     }
 
-    pub fn ids(&self) -> &[String] {
+    /// `MOON:CheckEncounterDone` (0x798), after the walk: the other knights'
+    /// tokens against this one, eight by ten against eight by ten through
+    /// `CheckGROOC` with icon frame 0.
+    ///
+    /// ```text
+    /// 007a3  cmp di, si; je next                   ; not himself
+    /// 007a7  xor ax, ax                            ; frame 0, the token
+    /// 007a9  bx = [di+0x5c], cx = [di+0x5e]; dx = [si+0x5c], bp = [si+0x5e]
+    /// 007b7  call CheckGROOC; cmp bp, 2; jne next
+    /// 007c1  call DisplayGlowKnight
+    /// 007c4  mov ax, 1
+    /// 007c7  cmp byte [si+0x31], 0; jg 007d0
+    /// 007cd  mov ax, 0x21                          ; a grave
+    /// 007d0  [bx] = si; [bx+2] = 0; [bx+4] = ax; [bx+6] = 0
+    /// ```
+    pub fn gather_knights(&mut self, tokens: &[KnightToken], x: i32, y: i32) {
+        let spans = |a: i32, aw: i32, b: i32, bw: i32| a < b + bw && b < a + aw;
+        for t in tokens {
+            if self.on.len() == OVERLAP_STACK {
+                break;
+            }
+            if spans(x, TOKEN_W, t.x, TOKEN_W) && spans(y, TOKEN_H, t.y, TOKEN_H) {
+                self.on.push(Entry::Knight {
+                    record: t.record,
+                    alive: t.alive,
+                });
+            }
+        }
+    }
+
+    /// The places on the stack, by id, in order.
+    pub fn ids(&self) -> Vec<&str> {
+        self.on
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Place(id) => Some(id.as_str()),
+                Entry::Knight { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Every slot, in order.
+    pub fn entries(&self) -> &[Entry] {
         &self.on
     }
 
@@ -341,9 +412,17 @@ impl Overlaps {
 
     /// The only entry, when there is exactly one: `DisplayStack`'s `cmp ax, 1`
     /// at 0xae40 goes straight to `StackDecision` without drawing anything.
-    pub fn only(&self) -> Option<&str> {
+    pub fn only_entry(&self) -> Option<&Entry> {
         match self.on.as_slice() {
-            [one] => Some(one.as_str()),
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// The same, for a place: nothing when the one entry is a knight.
+    pub fn only(&self) -> Option<&str> {
+        match self.only_entry() {
+            Some(Entry::Place(id)) => Some(id.as_str()),
             _ => None,
         }
     }
@@ -353,11 +432,19 @@ impl Overlaps {
     /// `1` to `9`, and subtracts 2 for the slot; an empty slot is refused and
     /// it waits again. So `1` is the first line and a number past the end of
     /// the list does nothing at all.
-    pub fn answer(&self, number: u32) -> Option<&str> {
+    pub fn answer_entry(&self, number: u32) -> Option<&Entry> {
         if !(1..=9).contains(&number) {
             return None;
         }
-        self.on.get(number as usize - 1).map(String::as_str)
+        self.on.get(number as usize - 1)
+    }
+
+    /// The same, for a place.
+    pub fn answer(&self, number: u32) -> Option<&str> {
+        match self.answer_entry(number) {
+            Some(Entry::Place(id)) => Some(id.as_str()),
+            _ => None,
+        }
     }
 
     /// The paper's numbered lines, as `_MAP:CreatePaper` composes them.
@@ -366,15 +453,36 @@ impl Overlaps {
     /// (`mov al, [KEYNUM]; mov [bp], al; inc bp; mov byte [bp], 0x20`, 0xaf24),
     /// calls `OrderOpt` to append the words, draws the buffer and steps
     /// `KEYNUM`, which starts at 0x31, the character `1`.
-    pub fn paper(&self, places: &Places) -> Vec<String> {
+    ///
+    /// `OrderOpt` (0xaf5e) on a knight: kind 1 copies `knkn` and then the
+    /// record's name at `[di+0x4c]`, with the line buffer stepped back one
+    /// so the two run together (`dec bp`, 0xaf75); kind 0x21 indexes
+    /// `StackMessages` for `kngrave`. `names` answers the record's name.
+    pub fn paper_with(&self, places: &Places, names: &dyn Fn(usize) -> String) -> Vec<String> {
         self.on
             .iter()
             .enumerate()
-            .map(|(i, id)| {
-                let what = places.get(id).map_or(id.as_str(), |d| d.paper_line());
+            .map(|(i, e)| {
+                let what = match e {
+                    Entry::Place(id) => places
+                        .get(id)
+                        .map_or_else(|| id.clone(), |d| d.paper_line().to_string()),
+                    Entry::Knight {
+                        record,
+                        alive: true,
+                    } => {
+                        format!("{BATTLE_WITH}{}", names(*record))
+                    }
+                    Entry::Knight { alive: false, .. } => PILLAGE_GRAVE.to_string(),
+                };
                 format!("{} {what}", i + 1)
             })
             .collect()
+    }
+
+    /// The paper with no knights on it.
+    pub fn paper(&self, places: &Places) -> Vec<String> {
+        self.paper_with(places, &|_| String::new())
     }
 }
 
@@ -762,6 +870,87 @@ mod tests {
         // And they are nowhere near each other, so a walk between them is a walk.
         assert!(!highwood.covers(297, 157));
         assert!(!waterdeep.covers(94, 47));
+    }
+
+    /// `CheckEncounterDone` (0x798): another knight's token under yours is
+    /// kind 1 while he lives and 0x21 once he does not, pushed after the
+    /// places, and `OrderOpt` writes `Battle with ` and his name, or
+    /// `Pillage knight's grave`.
+    #[test]
+    fn another_knights_token_is_a_battle_or_a_grave() {
+        let places = world();
+        let mut s = Overlaps::default();
+        let tokens = [
+            KnightToken {
+                record: 1,
+                x: 106,
+                y: 104,
+                alive: true,
+            },
+            KnightToken {
+                record: 2,
+                x: 200,
+                y: 20,
+                alive: true,
+            },
+            KnightToken {
+                record: 3,
+                x: 96,
+                y: 92,
+                alive: false,
+            },
+        ];
+        s.gather(&places, 100, 100, 0);
+        s.gather_knights(&tokens, 100, 100);
+        assert_eq!(s.ids(), ["village"], "the places, on their own");
+        assert_eq!(s.len(), 3);
+        assert_eq!(
+            s.entries()[1],
+            Entry::Knight {
+                record: 1,
+                alive: true
+            },
+            "007c4: kind 1"
+        );
+        assert_eq!(
+            s.entries()[2],
+            Entry::Knight {
+                record: 3,
+                alive: false
+            },
+            "007cd: kind 0x21"
+        );
+        let names = |n: usize| format!("SIR {n}");
+        assert_eq!(
+            s.paper_with(&places, &names),
+            [
+                "1 Village",
+                "2 Battle with SIR 1",
+                "3 Pillage knight's grave "
+            ]
+        );
+        assert_eq!(s.only(), None, "three entries: the paper");
+        assert_eq!(
+            s.answer_entry(2),
+            Some(&Entry::Knight {
+                record: 1,
+                alive: true
+            })
+        );
+        assert_eq!(s.answer(2), None, "a knight is not a place");
+        // One knight and nothing else goes straight to StackDecision.
+        s.gather(&places, 200, 20, 0);
+        s.gather_knights(&tokens, 200, 20);
+        assert_eq!(
+            s.only_entry(),
+            Some(&Entry::Knight {
+                record: 2,
+                alive: true
+            })
+        );
+        // A token one pixel clear is not on the stack.
+        s.gather_knights(&tokens, 208, 20);
+        assert_eq!(s.len(), 1, "the one from the previous gather, and no more");
     }
 
     /// Walking onto a place puts it on the stack and opens nothing. The walker
