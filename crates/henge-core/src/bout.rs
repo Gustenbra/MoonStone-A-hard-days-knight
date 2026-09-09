@@ -1199,20 +1199,167 @@ impl Bout {
             (Controller::Dragon, Some(Attack::Lunge)) => "Knight_SwShoulderHit",
             // 0244d, 02452  kinds 4 and 0x10, and the fire's 0x10
             (Controller::Dragon, Some(Attack::Swing) | Some(Attack::Chop)) => "Knight_Burn",
-            // 02457  kind 0xa
-            (Controller::Claw, Some(Attack::RThrust)) => "Knight_SwSlapped",
+            // 02457  kind 0xa, and `ClawStruck1+9` (0x43dc) `mov byte
+            // [SLAP], 1` with it: the claw always bats him rightward,
+            // whichever side of him it is. `ClawHit+9` (0x3b9f) writes the
+            // same 1 from the claw's own controller on the same blow, so one
+            // write here stands for both. `ClawStruck1+26` (0x43ed) leaves
+            // him facing *left* — that is [`crate::monster::struck_facing`] —
+            // and `KnightSLAP+19` (0x44e5) turns him back rightward on the
+            // next frame of the script. Both are built; the later one wins.
+            (Controller::Claw, Some(Attack::RThrust)) => {
+                self.shared.slap = 1;
+                "Knight_SwSlapped"
+            }
             _ => return,
         };
+        self.hit_row(target, script, t_def);
+    }
+
+    /// The one row `InitKnightvsBalok` (0x257c) writes over the knight's own
+    /// `*Hit` table (`+0x14`) for the Balok fight:
+    ///
+    /// ```text
+    /// 02585  mov di, [0x77ea]; mov di, [di+0x14]
+    /// 0258c  mov word [di+4], 0x1596     ; kind 4: Knight_SwSlapped
+    /// ```
+    ///
+    /// Kind 4 is the uppercut — `ControlBalok`'s branch at 0x3634 writes 4
+    /// into the Balok's `+0x28` — so the uppercut throws him by the very same
+    /// script a claw does, on the direction 0x3639 put in `SLAP`. The grab is
+    /// kind 0x10 and has no row of its own, so it keeps whatever
+    /// `Fighter::struck` chose.
+    fn balok_struck_knight(
+        &mut self,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Knight
+            || a_def.controller() != Controller::Balok
+            || kind != Some(Attack::Swing)
+        {
+            return;
+        }
+        self.hit_row(target, "Knight_SwSlapped", t_def);
+    }
+
+    /// `KnightSAnim` 0x44c5: `mov [0x783a], ax`, over whatever
+    /// `Fighter::struck` chose off the knight's ordinary row.
+    fn hit_row(&mut self, target: usize, script: &str, t_def: &ActorDef) {
         if !t_def.animation.contains_key(script) {
             return;
         }
-        // `KnightSAnim` 0x44c5: `mov [0x783a], ax`, over whatever
-        // `Fighter::struck` chose off the knight's ordinary row.
         let f = &mut self.fighters[target];
         if f.state == State::Hurt && f.script != script {
             f.state = State::Idle;
             f.enter_on(State::Hurt, script.to_string());
         }
+    }
+
+    /// `KnightSLAP`, image 0x44d2, and its rightward twin `KnightSLAPR`
+    /// (0x4522): the knockback that flings a knight across the arena when a
+    /// dragon's claw or a Balok's uppercut has landed on him.
+    ///
+    /// ```text
+    /// KnightSLAP:
+    /// 044d2  add word [SLAPCNT], 1
+    /// 044d7  mov [0x77e8], di             ; current actor = this knight
+    /// 044db  mov si, di
+    /// 044dd  mov word [si+0x26], 0        ; clear the direction bits
+    /// 044e2  mov al, [SLAP]
+    /// 044e5  mov byte [si+8], al          ; his facing becomes the slap's
+    /// 044e8  cmp byte [SLAP], 1
+    /// 044ed  je KnightSLAPR               ; 1 = flung right
+    /// 044ef  or byte [si+0x26], 2         ; otherwise flung left
+    /// 044f3  call CheckBorder
+    /// 044f6  test byte [si+0x26], 2
+    /// 044fa  je 04521                     ; the border refused it: nothing moves
+    /// 044fc  mov ax, [0x77e8]; call 0x986f; mov si, ax    ; his own task record
+    /// 04504  bx = SLAPY[SLAPCNT]
+    /// 04513  sub word [si+4], bx          ; and the clamp, see `slap_move`
+    /// 04521  ret
+    /// KnightSLAPR:
+    /// 04522  or word [si+0x26], 1
+    /// 04526  call CheckBorder
+    /// 04529  test word [si+0x26], 1
+    /// 0452e  je 04551                     ; refused: nothing moves
+    /// 04530  bx = SLAPY[SLAPCNT], the same six instructions
+    /// 04547  add word [si+4], bx          ; and no clamp: see `slap_move`
+    /// 04551  ret
+    /// ```
+    ///
+    /// `di` on entry is the actor whose script gosubbed it, and the script is
+    /// `Knight_SwSlapped` — the knight's own blow-taken animation — so the
+    /// caller *is* the victim. That is why this is keyed on `me` and not on a
+    /// foe the way `KnightOFF` is.
+    ///
+    /// Three things about the shape are the original's and are kept:
+    ///
+    /// * one direction bit is set and `CheckBorder` alone is asked, never
+    ///   `SBORD`, so a knight can be batted through the tree line but not off
+    ///   the board ([`crate::arena::check_border`]);
+    /// * `CheckBorder`'s own write-back of the column limit into `[si+2]`
+    ///   (0x40ed, 0x40fb) is dropped on the floor here because it is dropped
+    ///   there too: `PerformCOMMAND` (0x97fb) never copies the record's column
+    ///   into the task, and `perdone` (0x99c0) copies the task's `+4` back
+    ///   into the record's `+2` at the end of every frame, so whatever
+    ///   `CheckBorder` wrote is overwritten before anything can read it;
+    /// * the facing is taken from `SLAP` (0x44e5), which overrides the left
+    ///   that `ClawStruck1+26` gave him one frame earlier.
+    ///
+    /// The two halves disagree about operand size on the direction byte — the
+    /// leftward path is `or byte`/`test byte` at 0x44ef/0x44f6 and the
+    /// rightward one `or word`/`test word` at 0x4522/0x4529, and 0x44dd clears
+    /// the whole word — and it makes no difference: a scan of the image for
+    /// every byte- or word-sized access with a displacement of `0x27` on any
+    /// base register finds none at all, so `+0x27` is a pad and the word
+    /// stores cannot reach a field.
+    ///
+    /// The original moves the task's own column and lets `perdone` carry it
+    /// into the record; this engine keeps the position on the fighter and
+    /// mirrors it into the task at the top of each `run_task`, so the column
+    /// moved here is the fighter's.
+    fn knight_slap(&mut self, me: usize, def: &ActorDef) {
+        // 044d2  add word [SLAPCNT], 1
+        self.shared.slap_cnt += 1;
+        let slap = self.shared.slap;
+        // 044e2  mov al, [SLAP]; 044e5 mov byte [si+8], al
+        self.fighters[me].facing = if slap & 2 != 0 { -1 } else { 1 };
+        // 044dd  mov word [si+0x26], 0, and then the one bit this throw wants:
+        // 04522 `or 1` rightward, 044ef `or 2` leftward.
+        let wanted = if slap == 1 {
+            crate::arena::dir::RIGHT
+        } else {
+            crate::arena::dir::LEFT
+        };
+        let f = &self.fighters[me];
+        // `CheckBorder` reads only `+2`, `+8` and `+6`; the box fields are
+        // `SBORD`'s and this call never reaches it.
+        let (bl, _, br, bb) = f.body(def);
+        let mut probe = crate::arena::Step {
+            x: f.x,
+            y: f.y,
+            facing: f.facing,
+            dx: 0,
+            dy: 0,
+            box_left: bl,
+            box_right: br,
+            box_bottom: bb,
+        };
+        // 044f3 / 04526  call CheckBorder, and 044f6 / 04529 the bit it may
+        // have taken away. Nothing moves if it is gone.
+        if crate::arena::check_border(&mut probe, wanted) & wanted == 0 {
+            return;
+        }
+        // 04504 / 04538  bx = SLAPY[SLAPCNT].
+        let Some(entry) = crate::monster::slap_entry(self.shared.slap_cnt) else {
+            return;
+        };
+        // 04513 / 04547, with the clamp on the leftward side only.
+        let x = self.fighters[me].x;
+        self.fighters[me].x = crate::monster::slap_move(x, slap, entry);
     }
 
     /// `TrackKnight` (0x3be8) as a script calls it: `Dragon_HighBreath`
@@ -1828,6 +1975,18 @@ impl Bout {
                             f.hidden = false;
                         }
                     }
+                    // `InitSLAP` (0x44cb): `mov word [SLAPCNT], 0xffff`, the
+                    // two instructions the whole routine is. The first
+                    // `KnightSLAP` of the throw then steps the index to zero.
+                    Effect::Gosub { routine, .. } if routine == "InitSLAP" => {
+                        self.shared.slap_cnt = -1;
+                    }
+                    // `KnightSLAP` (0x44d2). Unlike `KnightOFF`, the fighter
+                    // whose effects carry this gosub is the one it throws:
+                    // `Knight_SwSlapped` is the knight's own script.
+                    Effect::Gosub { routine, .. } if routine == "KnightSLAP" => {
+                        self.knight_slap(i, def);
+                    }
                     // `SetDecapFLAG` (0x3e76): `mov word ptr [DeCapFLAG], 1`.
                     Effect::Gosub { routine, .. } if routine == "SetDecapFLAG" => {
                         self.decap = true;
@@ -2137,6 +2296,10 @@ impl Bout {
                         a_def,
                         t_def,
                     );
+                    // `InitKnightvsBalok+0x10` (0x258c): the uppercut's own row
+                    // over the knight's `*Hit` table, which is the same
+                    // `Knight_SwSlapped` and so the same throw.
+                    self.balok_struck_knight(target, blow.attack, a_def, t_def);
                     self.dragon_struck(blow.missile.is_some(), blow.attack, a_def, t_def);
                     let fatal = !self.fighters[target].alive();
                     events.push(HitEvent {
@@ -2956,6 +3119,258 @@ mod tests {
             b.shared.dragon, 0,
             "03a82: anything else is not a blow it marks"
         );
+    }
+
+    /// `InitSLAP` (0x44cb) and `KnightSLAP` (0x44d2): the knockback, entry by
+    /// entry off `BalokSLAP` (DS:0x7818), with the count starting at -1 so the
+    /// first step reads entry zero.
+    #[test]
+    fn the_slap_flings_the_knight_along_the_table() {
+        use crate::monster::BALOK_SLAP;
+        let defs = dragon_defs();
+        let knight = &defs["k"];
+        let mut b = dragon_bout(100);
+        // 044cb  mov word [SLAPCNT], 0xffff, which is what the `InitSLAP`
+        // gosub arm above does.
+        b.shared.slap_cnt = -1;
+        // 03b9f / 043dc: a claw's slap, rightward.
+        b.shared.slap = 1;
+        b.fighters[0].facing = -1;
+        let mut x = 100;
+        for (i, entry) in BALOK_SLAP.iter().enumerate() {
+            b.knight_slap(0, knight);
+            assert_eq!(b.shared.slap_cnt, i as i32, "044d2: add word [SLAPCNT], 1");
+            x += entry;
+            assert_eq!(
+                b.fighters[0].x, x,
+                "04547: entry {i} of the table is {entry}"
+            );
+            assert_eq!(b.fighters[0].facing, 1, "044e5: the facing is SLAP's");
+        }
+        // 30, 25, 20, 20, 20, then the rebound and the rest: fifty five of the
+        // hundred and four is in the first two frames, which is all the script
+        // ever asks for.
+        assert_eq!(x, 204);
+        // Past the table's eleventh word the original reads `SLAPY` itself;
+        // nothing in the image can reach it and nothing is built for it, so
+        // the step is skipped. See `monster::slap_entry`.
+        assert_eq!(crate::monster::slap_entry(11), None);
+        b.knight_slap(0, knight);
+        assert_eq!(b.fighters[0].x, x, "off the end of the table: no step");
+        assert_eq!(b.shared.slap_cnt, 11, "and the count still went up");
+    }
+
+    /// **The clamp at the end of the throw is on one side only, and that is
+    /// the shipped game.** `KnightSLAP`'s leftward tail floors the column at
+    /// ten:
+    ///
+    /// ```text
+    /// 04516  83 7c 04 0a        cmp word [si+4], 0xa
+    /// 0451a  7d 05              jge 04521            ; over five bytes
+    /// 0451c  c7 44 04 0a 00     mov word [si+4], 0xa
+    /// 04521  c3                 ret
+    /// ```
+    ///
+    /// `KnightSLAPR`'s does not. The compare is there and its body is not:
+    ///
+    /// ```text
+    /// 0454a  81 7c 04 40 01     cmp word [si+4], 0x140
+    /// 0454f  7e 00              jle 04551            ; a displacement of zero
+    /// 04551  c3                 ret
+    /// ```
+    ///
+    /// `7e 00` jumps to the very next instruction, so the taken and the
+    /// untaken branch land on the same `ret` and there is no clamp to skip
+    /// over. A knight batted rightward has no upper bound of his own. Built
+    /// that way on purpose; do not make it symmetric.
+    #[test]
+    fn the_rightward_slap_has_no_clamp_of_its_own() {
+        let defs = dragon_defs();
+        let knight = &defs["k"];
+        // Rightward from the last column `CheckBorder` still allows — 295,
+        // whose probe is exactly 320 — and thirty on top of it.
+        let mut b = dragon_bout(295);
+        b.shared.slap_cnt = -1;
+        b.shared.slap = 1;
+        b.knight_slap(0, knight);
+        assert_eq!(
+            b.fighters[0].x, 325,
+            "0454f: 7e 00, a jle with a zero displacement, so nothing clamps"
+        );
+        assert!(b.fighters[0].x > 0x140, "past the column the compare names");
+        // Leftward from the first column it still allows — 35, whose probe is
+        // exactly 10 — and the same thirty, which this side does clamp.
+        let mut b = dragon_bout(35);
+        b.shared.slap_cnt = -1;
+        b.shared.slap = 3;
+        b.knight_slap(0, knight);
+        assert_eq!(b.fighters[0].x, 0xa, "0451c: mov word [si+4], 0xa");
+    }
+
+    /// `CheckBorder` inside the throw (0x44f3 and 0x4526) and the test of the
+    /// bit it may have taken away (0x44fa, 0x452e): the step is skipped whole,
+    /// though the count and the facing are already spent.
+    #[test]
+    fn the_border_refuses_a_slap_and_nothing_moves() {
+        let defs = dragon_defs();
+        let knight = &defs["k"];
+        // Leftward at column 30: the probe is 5, under `X_LOW`, so 040e9
+        // clears bit 1 and 044fa finds it gone.
+        let mut b = dragon_bout(30);
+        b.shared.slap_cnt = -1;
+        b.shared.slap = 3;
+        b.knight_slap(0, knight);
+        assert_eq!(b.fighters[0].x, 30, "044fa: the border refused it");
+        assert_eq!(b.fighters[0].facing, -1, "044e5 ran before the border did");
+        assert_eq!(b.shared.slap_cnt, 0, "so did 044d2");
+        // Rightward at column 300: the probe is 325, over `X_HIGH`, so 040f7
+        // clears bit 0.
+        let mut b = dragon_bout(300);
+        b.shared.slap_cnt = -1;
+        b.shared.slap = 1;
+        b.knight_slap(0, knight);
+        assert_eq!(b.fighters[0].x, 300, "0452e: the border refused it");
+        assert_eq!(b.fighters[0].facing, 1);
+    }
+
+    /// Who writes `SLAP`: `ClawStruck1+9` (0x43dc) and `ClawHit+9` (0x3b9f)
+    /// always 1, and `ControlBalok`'s uppercut branch (0x3639) the Balok's own
+    /// `+8`. So a claw bats him rightward from either side of him, and the
+    /// Balok throws him the way it is itself facing.
+    #[test]
+    fn the_claw_slaps_rightward_and_the_balok_by_its_own_facing() {
+        let defs = dragon_defs();
+        let (claw, knight) = (&defs["c"], &defs["k"]);
+        // The claws stand at x 5; the knight to the right of them and then to
+        // the left, and the direction is 1 both times.
+        for knight_x in [60, 2] {
+            let mut b = dragon_bout(knight_x);
+            b.shared.slap = 0;
+            b.fighters[0].struck(knight, 10, Some(Attack::RThrust));
+            b.dragon_struck_knight(2, 0, true, Some(Attack::RThrust), claw, knight);
+            assert_eq!(b.fighters[0].script, "Knight_SwSlapped", "02457");
+            assert_eq!(b.shared.slap, 1, "043dc: mov byte [SLAP], 1");
+        }
+        // And the Balok: the uppercut branch, reached at a distance inside
+        // 0x50 and outside 0x46, with the knight on each side in turn.
+        let mut balok = def();
+        balok.controller = "balok".into();
+        let plain = def();
+        for (foe_x, want) in [(175, 1), (25, 3)] {
+            let b = Bout::new(
+                arena_field(),
+                vec![
+                    Fighter::new("b", &balok, 100, 100, 1),
+                    Fighter::new("k", &plain, foe_x, 100, -1),
+                ],
+            );
+            let mut brain = b.fighters[0].brain;
+            let mut shared = b.shared;
+            let mut facing = 1;
+            let mut seed = 1u16;
+            let sight = crate::monster::Sight {
+                me: &b.fighters[0],
+                foe: &b.fighters[1],
+                def: &balok,
+                bounds: GLOBAL,
+                gore: true,
+                body: false,
+                decapped: false,
+                progression: 0,
+                perch: None,
+                foe_blow: 0,
+                head_health: None,
+            };
+            let act = crate::monster::decide(
+                &sight,
+                &mut brain,
+                &mut seed,
+                &mut facing,
+                &mut shared,
+                &mut (0, 0),
+            );
+            assert_eq!(
+                act,
+                crate::monster::Act::Attack {
+                    kind: Attack::Swing,
+                    spawn: None
+                },
+                "0362e: the uppercut"
+            );
+            assert_eq!(shared.slap, want, "03639: mov al, [si+8]; mov [SLAP], al");
+        }
+        // `InitKnightvsBalok+0x10` (0x258c): kind 4 is the same slapped script
+        // the claw's kind 0xa is, and the grab's kind 0x10 is not.
+        let mut b = dragon_bout(60);
+        let mut balok_def = defs["d"].clone();
+        balok_def.controller = "balok".into();
+        b.fighters[0].struck(knight, 5, Some(Attack::Swing));
+        b.balok_struck_knight(0, Some(Attack::Swing), &balok_def, knight);
+        assert_eq!(b.fighters[0].script, "Knight_SwSlapped", "0258c: kind 4");
+        let mut b = dragon_bout(60);
+        b.fighters[0].struck(knight, 5, Some(Attack::Chop));
+        b.balok_struck_knight(0, Some(Attack::Chop), &balok_def, knight);
+        assert_ne!(
+            b.fighters[0].script, "Knight_SwSlapped",
+            "the grab has no row of its own"
+        );
+    }
+
+    /// The script's own gosubs, end to end. `Knight_SwSlapped` (DS:0x1596) is
+    /// two frames, each `TASKHOLD 02` with the gosub after the hold, and
+    /// `TASKHOLD`'s resume point (0x9ac5: `add word [di+2], 2`) is the
+    /// instruction after itself — so the gosub runs on both shows of each
+    /// frame, `KnightSLAP` runs four times, and the throw is 30 + 25 + 20 + 20
+    /// before `TASKGOTO Knight_GetUp`. The last seven words of `BalokSLAP` are
+    /// never read by anything.
+    #[test]
+    fn the_slap_script_runs_the_slap_four_times_and_no_more() {
+        use crate::taskvm::{End, Instr, Part, Script};
+        let (dragon, claw, mut knight) = dragon_set_piece();
+        let gosub = |r: &str| Instr::Gosub { routine: r.into() };
+        let part = Instr::Part(Part {
+            table: 1,
+            bank: 0,
+            cel: 17,
+            x: 0,
+            y: 0,
+            flags: 0,
+        });
+        // 1596..15cc, with the second frame stopping where the original goes
+        // to `Knight_GetUp`: the two sounds and the five parts are not what is
+        // under test, the two gosubs are.
+        knight.animation.insert(
+            "Knight_SwSlapped".into(),
+            Script::new(vec![
+                gosub("InitSLAP"),
+                Instr::Hold { count: 2 },
+                gosub("KnightSLAP"),
+                part.clone(),
+                Instr::EndFrame { end: End::Next },
+                Instr::Hold { count: 2 },
+                gosub("KnightSLAP"),
+                part,
+                Instr::EndFrame { end: End::Stop },
+            ]),
+        );
+        let defs: std::collections::BTreeMap<String, ActorDef> =
+            [("k", knight), ("d", dragon), ("c", claw)]
+                .into_iter()
+                .map(|(n, d)| (n.to_string(), d))
+                .collect();
+        let mut b = dragon_bout(100);
+        b.shared.slap_cnt = 0;
+        b.shared.slap = 1;
+        b.fighters[0].state = State::Idle;
+        b.fighters[0].enter_on(State::Hurt, "Knight_SwSlapped".to_string());
+        for _ in 0..40 {
+            b.step_with(|n| &defs[n], &[Intent::default(); 4]);
+            if b.fighters[0].script != "Knight_SwSlapped" {
+                break;
+            }
+        }
+        assert_eq!(b.shared.slap_cnt, 3, "four KnightSLAPs and no fifth");
+        assert_eq!(b.fighters[0].x, 195, "30 + 25 + 20 + 20");
     }
 
     /// `DragonHit2` (0x3ad5): the bite that closes takes the knight's task

@@ -397,8 +397,11 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
         6. The knight: `ControlKnight` writes 1 at 0x3f77 when right is held and 3
            at 0x3f86 when left is, before `CheckBorder` and `SBORD` get to refuse
            the step, and nothing else in his controller writes it. `KnightSLAP`
-           (0x44e5) sets it to `SLAP`, the slapper's facing, on a demon's or
-           Balok's slap. `SetKnightCombat` (0x2962, the facing store at 0x297d)
+           (0x44e5) sets it to `SLAP` on a slap, which is a dragon's claw
+           (always 1, `ClawHit+9` 0x3b9f and `ClawStruck1+9` 0x43dc) or a
+           Balok's uppercut (the Balok's own `+8`, 0x3639). `DemonSlap`
+           (0x437f) turns its victim and writes neither `SLAP` nor `SLAPY`, so
+           a demon's slap throws nobody. **Built**, as `Bout::knight_slap`. `SetKnightCombat` (0x2962, the facing store at 0x297d)
            stands him at x 250, y 0, z 100, facing 3; the creatures come from the
            spawn tables `InitNewMO` (0x27ee) walks, eight bytes `[x][y][z][facing]`:
            `TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3),

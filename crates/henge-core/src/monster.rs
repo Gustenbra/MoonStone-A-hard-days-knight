@@ -294,6 +294,23 @@ pub struct Shared {
     /// and it is kept.
     #[serde(default)]
     pub dragon_ranges: Option<(i32, i32)>,
+    /// `SLAPCNT`, DS:`0x7830`: the index [`BALOK_SLAP`] is read by.
+    /// `InitSLAP` (0x44cb) writes `0xffff` into it, so the first `KnightSLAP`
+    /// of a slap steps it to zero. See [`slap_entry`].
+    #[serde(default)]
+    pub slap_cnt: i32,
+    /// `SLAP`, DS:`0x7832`: which way the slapped knight is flung, held as a
+    /// facing byte — 1 right, 3 left, the same encoding as an actor's `+8`.
+    ///
+    /// Three sites write it and no others: `ClawHit+9` (0x3b9f) and
+    /// `ClawStruck1+9` (0x43dc) both write 1, so a dragon's claw always bats
+    /// rightward whichever side of the knight it is on; and `ControlBalok`'s
+    /// uppercut branch (0x3623) writes the Balok's own `+8`, so that one
+    /// throws him the way the Balok is facing. `DemonSlap` (0x437f) turns its
+    /// victim and writes neither this nor `SLAPY`, so a demon's slap launches
+    /// nobody.
+    #[serde(default)]
+    pub slap: i32,
 }
 
 /// `DragonFLAGS`' four bits, by the numbers the code tests.
@@ -309,6 +326,132 @@ pub mod dragon_flag {
     /// breath whatever the range (`DragonStruck+43`, 0x3a9c; `DragonAttack+93`,
     /// 0x3a35).
     pub const STRUCK: u32 = 0x80;
+}
+
+/// `BalokSLAP`, DS:`0x7818` (image 0x19bc8): how far a slapped knight is
+/// thrown on each frame of the throw.
+///
+/// Eleven words read straight out of the load image, and eleven is exactly
+/// its length — `SLAPY` begins at DS:`0x782e` with no gap after it:
+///
+/// ```text
+/// 1e 00  19 00  14 00  14 00  14 00  f9 ff  fd ff  ff ff  00 00  00 00  00 00
+/// 30     25     20     20     20     -7     -3     -1     0      0      0
+/// ```
+///
+/// So the intent legible in the data is an arc: flung hard, coasting, a small
+/// rebound the other way, and at rest.
+///
+/// **`SLAPY` (DS:`0x782e`), the pointer `KnightSLAP` reads the table
+/// through, is only ever assigned this one table.** Its three writers are
+/// `ClawHit+15` (0x3ba5), `ControlBalok`'s uppercut branch (0x3623) and
+/// nothing else; `InitSLAP` does not touch it and no other instruction in
+/// the image stores to `0x782e`. An indirection with one possible value
+/// carries no information, so it is not modelled as a field: this constant
+/// *is* `SLAPY`, and the sites that would have written it say so instead.
+///
+/// **Seven of the eleven words are dead.** `Knight_SwSlapped` (DS:`0x1596`)
+/// is the only script in the image that gosubs either routine, and it is two
+/// frames long:
+///
+/// ```text
+/// 1596  TASKSOUND 12 / TASKSOUND 08
+/// 159a  TASKGOSUB InitSLAP
+/// 159e  TASKHOLD 02 / TASKGOSUB KnightSLAP / two PARTs / ENDFRAME 00
+/// 15b2  TASKHOLD 02 / TASKGOSUB KnightSLAP / three PARTs / ENDFRAME 00
+/// 15cc  TASKGOTO Knight_GetUp
+/// ```
+///
+/// Each frame is held twice and the gosub sits *after* the `TASKHOLD`, so it
+/// runs on both shows: `TASKHOLD`'s handler (0x9aad) stores the resume point
+/// as the instruction after itself —
+///
+/// ```text
+/// 09ac1  mov byte [bx+1], 1
+/// 09ac5  add word [di+2], 2          ; past the two-byte TASKHOLD
+/// 09ac9  mov ax, [di+2]; mov [bx+2], ax
+/// ```
+///
+/// — and the end-of-frame handler (0x9947) puts that back into `task+2` for
+/// every held show. So `KnightSLAP` runs four times, `SLAPCNT` runs -1, 0, 1,
+/// 2, 3, and the shipped game only ever reads 30, 25, 20 and 20: ninety five
+/// pixels over four shows of two frames. The last of the steady run, the
+/// rebound and the rest were authored and never reached.
+#[rustfmt::skip]
+pub const BALOK_SLAP: [i32; 11] = [30, 25, 20, 20, 20, -7, -3, -1, 0, 0, 0];
+
+/// `[SLAPY + SLAPCNT*2]` as `KnightSLAP` reads it (0x4504..0x4512, and the
+/// same six instructions again at 0x4538..0x4546):
+///
+/// ```text
+/// 04504  mov di, [SLAPY]
+/// 04508  mov ax, [SLAPCNT]; shl ax, 1
+/// 0450d  push di; add di, ax; mov bx, [di]; pop di
+/// ```
+///
+/// The read is unmasked and unchecked, as `progression_at`'s is.
+//
+// TODO: what the original reads past the table's eleventh word is known —
+// DS:`0x782e` is `SLAPY` (0x7818, the table's own address), `0x7830` is
+// `SLAPCNT` and `0x7832` is `SLAP`, so indices 11, 12 and 13 would throw a
+// knight 30744 pixels, then by the count, then by the direction — but no
+// shipped script can reach it: `Knight_SwSlapped` is the only caller of
+// `KnightSLAP` and runs it four times. Nothing is built for the overrun and the
+// step is skipped instead, because modelling it would mean giving `SLAPY` a
+// word value for the sake of an unreachable branch.
+pub fn slap_entry(cnt: i32) -> Option<i32> {
+    if cnt < 0 {
+        return None;
+    }
+    BALOK_SLAP.get(cnt as usize).copied()
+}
+
+/// The tail of `KnightSLAP` (0x4513) and of `KnightSLAPR` (0x4547): the
+/// table's entry taken off or added to the task's own column `+4`, and the
+/// clamp that follows — on one side only.
+///
+/// ```text
+/// KnightSLAP, flung left:            KnightSLAPR, flung right:
+/// 04513  sub word [si+4], bx         04547  add word [si+4], bx
+/// 04516  cmp word [si+4], 0xa        0454a  cmp word [si+4], 0x140
+/// 0451a  jge 04521                   0454f  jle 04551
+/// 0451c  mov word [si+4], 0xa        ---- nothing ----
+/// 04521  ret                         04551  ret
+/// ```
+///
+/// **The rightward clamp is not there, and this is built without it on
+/// purpose.** The bytes at 0x454a are `81 7c 04 40 01` (`cmp word [si+4],
+/// 0x140`) followed by `7e 00` and then `c3`: a `jle` whose displacement is
+/// **zero**, so the taken and the untaken branch both land on the same `ret`
+/// and there is no clamp body to skip over. The leftward side is the same
+/// shape with a real body — `83 7c 04 0a` (`cmp`), `7d 05` (a `jge` over five
+/// bytes) and `c7 44 04 0a 00` (`mov word [si+4], 0xa`). The compare survives
+/// on the right and its consequence does not, so either the symmetric clamp
+/// was never written or it was deleted and the compare left behind. In the
+/// shipped game a knight batted rightward has no upper bound of his own where
+/// one batted leftward is stopped at column 10.
+///
+/// What keeps him on the board rightward is then not this routine but the
+/// global clamp every position goes through on the next displayed frame
+/// (`Fighter::walk` and `run_task`, both on `arena::GLOBAL`, which is
+/// `CheckBorder`'s own `X_LOW`..`X_HIGH`). Do not "fix" the asymmetry here:
+/// it is the original's, and
+/// `bout::tests::the_rightward_slap_has_no_clamp_of_its_own` pins it.
+pub fn slap_move(x: i32, slap: i32, entry: i32) -> i32 {
+    // 044e8  cmp byte [SLAP], 1; 044ed je KnightSLAPR. Only exactly 1 is
+    // rightward; 3, the other value anything writes, falls through to left.
+    if slap == 1 {
+        // 04547, and then the compare with no clamp under it.
+        x + entry
+    } else {
+        // 04513, 04516, 0451a, 0451c.
+        let moved = x - entry;
+        if moved < 0xa {
+            0xa
+        } else {
+            moved
+        }
+    }
 }
 
 /// `TalismanWrym`, image 0x43f4: what the dragon's blow comes down to for a
@@ -2076,6 +2219,15 @@ fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
     // `Brain::att` exactly as `ControlBlackKnight` keeps `ATT`.
     if d <= 0x50 && brain.att != Some(Attack::Swing) {
         brain.att = Some(Attack::Swing);
+        // 03639  mov al, [si+8]; 0363c mov [SLAP], al
+        // 0363f  mov word [SLAPY], BalokSLAP
+        //
+        // The uppercut is the one striker that throws its victim the way it
+        // is itself facing rather than always rightward, and `+8` is what
+        // ControlBalok+80..107 set a dozen instructions ago. `SLAPY` is only
+        // ever [`BALOK_SLAP`], so that store has nothing to keep; see the
+        // table's own note.
+        shared.slap = if *facing < 0 { 3 } else { 1 };
         return Act::Attack {
             kind: Attack::Swing,
             spawn: None,
@@ -2933,8 +3085,12 @@ fn dragon(
 ///
 /// `ClawStruck` is [`Fighter::struck`] with [`Controller::takes_damage`]
 /// false: the stance is the claw's own `*Hit` row. `ClawHit`'s `SLAP` words
-/// feed `KnightSLAP` inside `Knight_SwSlapped`, which is not built, so the
-/// branch is the stance here too.
+/// feed `KnightSLAP` inside `Knight_SwSlapped`, which is built now
+/// ([`slap_move`], `Bout::knight_slap`): `ClawHit+9` (0x3b9f) and
+/// `ClawStruck1+9` (0x43dc) write the same 1 on the same blow, the second of
+/// them on the knight's own side of it, so `Bout::dragon_struck_knight` makes
+/// that write where it hands him the script and the branch is still the
+/// stance here.
 fn claw(s: &Sight, shared: &Shared) -> Act {
     // 03b24  cmp word ptr [DEAD_CLAWS], -1; je CLAWS_DEAD
     if shared.dead_claws == -1 {

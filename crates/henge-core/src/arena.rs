@@ -297,24 +297,8 @@ impl Field {
     /// `CheckBorder` first, which may also move the anchor to the column limit
     /// it crossed, then `SBORD` over every rectangle.
     pub fn allow(&self, step: &mut Step, wanted: u8) -> u8 {
-        let mut ok = wanted;
         // ---- CheckBorder, image 0x40d0.
-        let probe = step.x + limit::REACH * step.facing;
-        if probe < limit::X_LOW {
-            ok &= !dir::LEFT;
-            step.x = limit::X_LOW;
-        }
-        if probe > limit::X_HIGH {
-            ok &= !dir::RIGHT;
-            step.x = limit::X_HIGH;
-        }
-        let depth = step.y - limit::DEPTH_LEAD;
-        if depth > limit::DEPTH_HIGH {
-            ok &= !dir::DOWN;
-        }
-        if depth < limit::DEPTH_LOW {
-            ok &= !dir::UP;
-        }
+        let mut ok = check_border(step, wanted);
 
         // ---- SBORD, image 0x4552.
         let (bl, br) = (step.box_left + step.dx, step.box_right + step.dx);
@@ -349,6 +333,47 @@ impl Field {
         }
         ok
     }
+}
+
+/// `CheckBorder`, image `0x40d0`: the global limit, the same in every arena,
+/// and the half of [`Field::allow`] that does not look at the arena's own
+/// rectangles at all.
+///
+/// ```text
+/// 040d0  mov ax, 0x19
+/// 040d3  test byte [si+8], 2; je 040db; neg ax      ; 25 ahead by the facing
+/// 040db  add ax, [si+2]
+/// 040de  mov bx, 9; add bx, [si+6]
+/// 040e4  cmp ax, 0xa;   jge 040f2; and byte [si+0x26], 0xfd; mov [si+2], 0xa
+/// 040f2  cmp ax, 0x140; jle 0x4100; and byte [si+0x26], 0xfe; mov [si+2], 0x140
+/// 04100  cmp bx, 0x9b;  jle 0410a; and byte [si+0x26], 0xfb
+/// 0410a  cmp bx, 0x1e;  jge 04113; and byte [si+0x26], 0xf7
+/// ```
+///
+/// It is its own function because it has three callers in the original and
+/// only one of them is a walk: `ControlKnight` pairs it with `SBORD`, and the
+/// two halves of `KnightSLAP` (0x44f3, 0x4526) call it alone. A knockback
+/// asks the screen's edges and nothing else, which is why a knight can be
+/// batted through the tree line but not off the board.
+pub fn check_border(step: &mut Step, wanted: u8) -> u8 {
+    let mut ok = wanted;
+    let probe = step.x + limit::REACH * step.facing;
+    if probe < limit::X_LOW {
+        ok &= !dir::LEFT;
+        step.x = limit::X_LOW;
+    }
+    if probe > limit::X_HIGH {
+        ok &= !dir::RIGHT;
+        step.x = limit::X_HIGH;
+    }
+    let depth = step.y - limit::DEPTH_LEAD;
+    if depth > limit::DEPTH_HIGH {
+        ok &= !dir::DOWN;
+    }
+    if depth < limit::DEPTH_LOW {
+        ok &= !dir::UP;
+    }
+    ok
 }
 
 /// One actor's body as `TASKWALKCOLLIDE` finds it in the task list.
