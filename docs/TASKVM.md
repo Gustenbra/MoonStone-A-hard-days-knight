@@ -25,6 +25,8 @@ python3 tools/taskvm.py MAIN.EXE --composite Knight_SwWalkOn
 | `TaskCelTable` | DS:`0x9474`, 4 word slots, the sprite bank tables |
 | `TaskTable` | DS:`0x947e`, ten task records of 0x24 bytes |
 | `TaskCommand` | DS:`0x960a`, ten VM state records of 0x1a bytes |
+| `PLAY_SFX` | image `0x5964`, what `TASKSOUND` and all 23 sound routines call |
+| `PLAYSAMPLE` | image `0x932a`, the sampled path, and `SBSampleTab` at DS:`0x865d` |
 | the scripts | DGROUP, as named data symbols: `Knight_SwSwing`, `Troll_Walk1` |
 
 The scripts are ordinary data in the executable's data segment, and the symbol
@@ -86,7 +88,7 @@ script pointer itself with `add word ptr [di+2], n`, and that `n` is the width.
 | `0x8c` | `TASKSKIP` | 4 | `u8 _, u16 target`. Branch if the DS:`0x700` mode flag is set. Ten uses, five targets, and four of the five are the bloodless `*_CollapseDead` scripts |
 | `0x8e` | `TASKTIME` | 0 | The handler is a bare `RET`. It does not advance the script pointer, so it would spin. Never emitted in any script |
 | `0x90` | `TASKMOVE` | 8 | `u8 flags, i16 x, i16 y, i16 z`. With flags bit `0x40`, sets the task position outright. Otherwise adds: x by bit 0 and the facing, y by bit 3, z by bit 5 (see below) |
-| `0x92` | `TASKSOUND` | 2 | `u8 sample`. 130 uses, 54 distinct sample numbers |
+| `0x92` | `TASKSOUND` | 2 | `u8 id`. A sound id, not a sample number: the handler at `0x9b38` loads it into `AL` and calls `PLAY_SFX` (`0x5964`), which translates it per sound device. 131 uses, 54 distinct ids, 31 distinct samples. See [Sound](#sound) |
 | `0x94` | `TASKSAVE` | 6 | `u8 mode, i16 field, u16 value`. Store into the actor record at `actor+field`; mode bit 0 stores a byte, otherwise a word |
 | `0x96` | `TASKSHADOW` | 4 | `u8 on, u16 script`. Sets `actor+0xe` to the shadow script and `actor+0xc` to on/off. Eleven uses; the four non-zero targets are `Ratman_Shadow`, `Beast_KnightShadow`, `Dragon_Shadow`, `Balok_Shadow` |
 | `0x98` | `TASKGOSUB` | 4 | `u8 _, u16 routine`. Near call into the game's own code with x, y, z, facing, the bank table and the actor in registers. 141 uses; all 41 distinct targets resolve to named routines |
@@ -148,6 +150,135 @@ its next script at once and there is never an actor standing on a dead pointer.
 `0x3fbe` behaves the same way, so **an intro figure whose script runs out simply
 leaves the picture**. That is how the druids walk out of shot at the left of the
 forest rather than piling up against the edge.
+
+## Sound
+
+`TASKSOUND` is how the game makes noise, and there is nothing else to it. The
+handler is four instructions:
+
+```
+9b38  mov  al, byte ptr [si+1]     ; the byte after the opcode
+9b3b  call 0x5964                  ; PLAY_SFX, after the link-time correction
+9b3e  add  word ptr [di+2], 2      ; and on to the next record
+9b42  ret
+```
+
+The `call` is the example the [link-time correction](#one-more-thing-about-the-link-time-correction)
+section is about: read naively it lands on `0x5797`, which is mid-instruction
+inside `MoveBACKR`; corrected it lands on `0x5964`, which is exactly where all
+23 of the named sound routines (`AddTrollSND`, `DrFireSnd`, `GuardianYellSnd`)
+also call, and they need no correction because they are in the same shift
+segment.
+
+Nothing gates it. No distance, no channel count, no priority, no volume beyond a
+constant, and no test for the same sound already playing. `PLAY_SFX` is:
+
+```
+5964  push ...
+596d  cmp  word ptr [0x8645], 3    ; SFXTYPE: 0 speaker 1 AdLib 2 Roland 3 SB
+5972  je   0x5989
+5974  mov  bx, 0x7d02              ; the FM effect table
+5977  xlatb                        ; al = [bx+al]
+5978  mov  bl, 0x0f                ; volume, a constant
+597a  mov  ah, 0x40
+597c  and  al, 0xff                ; sets flags that nothing reads
+597e  cmp  word ptr [0x8645], 3
+5983  je   0x5989
+5985  int  0x61                    ; the music driver's effect call
+5987  jmp  0x5994
+5989  mov  bx, 0x7e6e              ; the sample table
+598c  xlatb
+598d  mov  ah, 0
+598f  and  al, 0xff
+5991  call 0x932a                  ; PLAYSAMPLE
+5994  pop ...  /  ret
+```
+
+So **a script's operand is a sound id, not a sample number**. Two 364-byte
+tables translate it, one per kind of device: DS:`0x7d02` (image `0x1a0b2`,
+`Soundfxtable`) for the FM path and DS:`0x7e6e` (image `0x1a21e`) for the
+sampled path. Entries `0x00` to `0x6c` are meant; from `0x6d` to the end both
+tables are filled with `0x15`, and five of the ids the shipped scripts use
+(`0x6d`, `0x87`, `0x8f`, `0x92`, `0x93`) land in that filler and play `hit3`.
+
+`PLAYSAMPLE` at `0x932a` takes the translated number as an index into
+`SBSampleTab` (DS:`0x865d`, 49 four-byte EMS page-and-offset records), copies
+16KB out of that page and hands it to the driver with `bx = 6`. The 49 names are
+`SBFileTable` (DS:`0x8651`, image `0x1aad1`), which is `SAMPLES/` in alphabetical
+order: `baland` to `wipcrak`. **Entries 8 and 9 are both `cheap2b`**. The string
+`cheap1b` does not occur in the image at all, though `SAMPLES/CHEAP1B` is on the
+disk, so the shipped game loads `cheap2b` twice and sample 9 and the `CHEAP1B`
+file are unreachable.
+
+### Every sound in the game
+
+Exactly 26 code sites call `PLAY_SFX`, found by scanning the image for `e8`/`e9`
+displacements that resolve to `0x5964`:
+
+| | |
+|---|---|
+| `0x9b3b` | the `TASKSOUND` handler: **131** commands in the 239 named scripts (130 in the 236 with an encounter prefix, plus one in `SpeedKnife`), **54** distinct ids, **31** distinct samples |
+| 23 sites | the sound routines the scripts call through `TASKGOSUB`, listed below |
+| `0xb338` | `ShakeDiceSnd`, id `0x10`, unless `MUSICTYPE` (DS:`0x8643`) is 2, which is the Roland |
+| `0xd50a` | `AddClickSound`, id `0x0f`, unconditional, seventeen callers |
+
+That is all of it. There is no footstep routine and no swing routine: the
+knight's walk scripts carry no sound command at all, and his swing's swish is
+`TASKSOUND 0x0b` on the second frame of `Knight_SwSwing`.
+
+Across all 26 sites, 44 of the 49 samples are reachable. The five that are not
+are `camel4`, `cheap2b` (the duplicate), `grnt3b`, `mud2` and `nitland`, and two
+of those five are explained by the two dead routines below.
+
+### The 23 sound routines, and the three that are silent
+
+All of them are three to seven instructions and all are transcribed in
+`crates/henge-core/src/sound.rs` with their addresses. Five roll `_WIZARD:RND`
+(`0xbd89`), the one shift register at DS:`0xe22f` the controllers also roll, so a
+sound moves it exactly as the original does.
+
+Three are silent in the shipped image, and are translated as silent:
+
+* `KAudio0` / `KAudio1` (`0x5827`) and `HengeThunderSnd` (`0xb419`) are each a
+  bare `ret`. Four script calls between them, all silent.
+* `KnightGruntSound` / `KnightStruckSound` (`0x3d5a`) cycles a counter at
+  DS:`0x77a2` and returns `cnt + 4`, which is one of the grunt ids 4 to 8, and
+  then returns. The `jmp PLAY_SFX` at `0x3d73` that would play it is after an
+  unconditional `ret`, nothing in the image branches to `0x3d73`, and all ten of
+  the scripts' gosubs carry `0x3d66`, the link-time offset of `0x3d5a`. So the
+  knight computes a grunt and plays nothing, and `grnt3b` (id 6) is reachable
+  only through it. Whether the byte was a patch to quieten the grunts or a
+  mistake cannot be read off the image.
+
+Two more are quirks rather than silence, and are also translated as they are:
+
+* `AddRoar` (`0x3d79`), which `TroggRoarSound` (`0x3d76`) and `BalokRoarSound`
+  (`0x3e01`) jump into, advances an index at DS:`0x77a4`, tests the indexed entry
+  for the `-1` terminator, and then `pop si` **before** `mov ax, [si]`. The index
+  is thrown away with the `push`, so the id played is always entry zero. For the
+  balok that is invisible: all eight entries of its table translate to
+  `lion2c1`. For the trogg it means every one of its thirteen roars is
+  `camel3b`, and `camel4` is unreachable.
+* `AddCrushSnd` (`0x5816`) increments a counter at DS:`0x7b9e` that nothing else
+  in the image reads, and then does `and ax, 3 / jne ret` without loading `AX`
+  first. What it tests is what the `TASKGOSUB` handler left there, which is the
+  task's own x, so the mudman's crush is heard on three columns in four.
+
+And one lies about what it is: `PlayScareMusic` (`0x57cc`) plays no music. It
+rolls and plays sound id 8 or 9, which are `grnt3` and `headchop`.
+
+### Where it goes in Rust
+
+`Task::step` emits `Effect::Sound { sample }` carrying the id. `Bout::step_with`
+turns that, and the ids the `Sound`-kind gosubs return, into `bout.sounds`, a
+list of `SoundCall { who, id }` cleared every tick beside `parries`. A task put
+in the arena mid-tick (`KnifeThrow`, `AddBlood`, `AddDragonFIRE`, `TASKADDTASK`)
+shows its first frame where it is built, so `Bout::launch` collects that frame's
+sounds too: `SpeedKnife`'s swish is on its first frame and would otherwise be the
+one sound in the game nothing played. The desktop reads `bout.sounds`, turns each
+id into an asset id with `henge_audio::sfx`, and plays it. `--sounds` prints one
+line per sound with the tick, the id, the sample and the script that asked, which
+is how the wiring is checked without listening to it.
 
 ## The sprite-part record
 
@@ -287,6 +418,10 @@ Everything above is read out of the code except the following.
   `_TASK` reads it back.
 * **Part flag bits `0x04` and `0x20`.** Present in the data, read by nothing in
   the interpreter. Probably vestigial from the Amiga original.
+* **The eighteen non-sound `TASKGOSUB` kinds.** `Spawn`, `Gore` and `Control`
+  beside a name in `GOSUB_TARGETS` are still read off the name. The 23 marked
+  `Sound` are not: every one of those bodies has been disassembled, and they are
+  in [Sound](#sound) and in `crates/henge-core/src/sound.rs`.
 
 ## How it was checked
 
@@ -377,8 +512,12 @@ Three choices are worth knowing.
   `Effect::Gosub { routine, kind }`; the 41 targets are in `GOSUB_TARGETS` by
   name, with a kind read off the name (`Sound`, `Spawn`, `Gore`, `Control`),
   and a name not in the table comes out `Unknown`. `TASKSOUND` is
-  `Effect::Sound { sample }`. Nothing runs them. `TASKTIME`, whose handler
-  would spin, stops the task with `Effect::Stalled` instead.
+  `Effect::Sound { sample }`, carrying the id the handler would have handed
+  `PLAY_SFX`. The interpreter runs neither: `henge_core::sound` is where the 23
+  sound routines are transcribed, `henge_core::bout` collects the ids as
+  `bout.sounds`, and `henge_audio::sfx` is the only thing that knows what an id
+  means. `TASKTIME`, whose handler would spin, stops the task with
+  `Effect::Stalled` instead.
 * **A finished script keeps showing its last frame.** The pointer stays on the
   terminal `0xff` as in the original, so a step produces no new parts; the
   task keeps the last non-empty part list and hands it back, rather than
@@ -415,7 +554,7 @@ The baker writes three things into `packs/reference/data/`:
 
 | file | what |
 |---|---|
-| `scripts.json` | all 236 scripts, as the engine's own `Instr` values |
+| `scripts.json` | all 239 named scripts (the 236 with an encounter prefix, plus `SpeedKnife`, `Knife` and `Blood1`), as the engine's own `Instr` values, sound commands included |
 | `banks.json` | the four bank tables for each of the eleven creature loaders, with a sheet, a frame base and every cel's size |
 | `actors.json` | the knight and the ten creatures, each carrying the closure of the scripts its states reach, its bank tables, which table a task starts on, which script each state plays, its origin, hit box and girth read off its standing frame, its frame rate, and the numbers from its `Set*Tables` routine |
 

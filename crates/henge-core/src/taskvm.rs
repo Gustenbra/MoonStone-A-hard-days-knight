@@ -20,14 +20,19 @@
 //! Two instructions call out of the machine into the original's own code, and
 //! neither has a Rust equivalent:
 //!
-//! * `TASKGOSUB` is a near call into a named routine. All 37 targets that any
+//! * `TASKGOSUB` is a near call into a named routine. All 41 targets that any
 //!   shipped script uses are known by name and are listed in [`GOSUB_TARGETS`].
 //!   The interpreter does not fake them and does not skip them silently: it
 //!   emits [`Effect::Gosub`] carrying the name and what kind of thing that
 //!   routine is, and a caller that has not implemented one has a recorded
-//!   no-op rather than a hole.
-//! * `TASKSOUND` names a sample. The interpreter emits [`Effect::Sound`]; it
-//!   has no idea what sound is.
+//!   no-op rather than a hole. The 23 of them that play a sample are
+//!   transcribed in [`crate::sound`].
+//! * `TASKSOUND` names a sound id. The interpreter emits [`Effect::Sound`]; it
+//!   has no idea what sound is. The handler is at image `0x9b38`:
+//!   `mov al, [si+1]` and straight into `PLAY_SFX` (`0x5964`), then
+//!   `add word ptr [di+2], 2`. Nothing gates it, nothing remembers it, and the
+//!   id is translated per sound device inside `PLAY_SFX`, which is why an id is
+//!   not a sample number. See `henge_audio::sfx`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -277,6 +282,21 @@ pub struct Bank {
     pub base: u32,
     /// `[width, height]` per cel, in the order the bank stores them.
     pub cels: Vec<[u16; 2]>,
+    /// `COLLIDE.HIT`'s polyline for each cel, in cel-local pixels: x from the
+    /// cel's left edge, y from its top.
+    ///
+    /// **Recovered.** `TaskPlace$` (0x98c1) pushes every part flagged
+    /// `WEAPON` onto `WeoponPile` and every part flagged `BODY` onto
+    /// `BodyPile`, ten bytes each, and `TaskCol_MainLoop` (0x9f26) walks one
+    /// pile against the other. `COLCHK` (0x9fcd) then walks *this* list:
+    /// `CHECKL` (0xa0da) takes a point at a time, `NOWID1` (0xa0ed) adds the
+    /// weapon record's own x, and 0xa108 adds its y, so these are the samples
+    /// along the blade that a strike is tested at. A cel whose entry is empty
+    /// is the file's `00`, and `RIGHTON` (0xa022) answers no hit for it.
+    ///
+    /// Shorter than `cels`, or empty, for a bank the file says nothing about.
+    #[serde(default)]
+    pub hit: Vec<Vec<[i16; 2]>>,
 }
 
 impl Bank {
@@ -287,6 +307,12 @@ impl Bank {
     /// Which frame of the sheet a cel index is.
     pub fn frame(&self, cel: u8) -> Option<u32> {
         (self.cels.len() > cel as usize).then(|| self.base + cel as u32)
+    }
+
+    /// This cel's `COLLIDE.HIT` polyline, or `None` where the file names no
+    /// line for it at all. An empty slice is the file's own `00`.
+    pub fn hit_line(&self, cel: u8) -> Option<&[[i16; 2]]> {
+        self.hit.get(cel as usize).map(Vec::as_slice)
     }
 }
 
@@ -347,7 +373,9 @@ pub fn place(part: &Part, bank: &Bank, task: (i32, i32, i32), mirror: bool) -> O
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GosubKind {
-    /// Plays a sample. The name says so and nothing else about it is known.
+    /// Plays a sample. All 23 of these have been disassembled and are
+    /// transcribed in [`crate::sound`], which is where the ids they pass to
+    /// `PLAY_SFX` come from. Three of the 23 are silent in the shipped image.
     Sound,
     /// Puts something else in the arena: a thrown knife, a whirl, a dropped part.
     Spawn,
@@ -364,9 +392,10 @@ pub enum GosubKind {
 ///
 /// The addresses were resolved by `tools/taskvm.py`, and all 41 land exactly on
 /// a named routine entry point, which is one of the checks that the link-time
-/// offset correction is real. The **kind** beside each name is read off the
-/// name and nothing more: none of these bodies has been disassembled, so a
-/// caller should treat the kind as a hint and the name as the fact.
+/// offset correction is real. The **kind** beside each name started as a reading
+/// of the name; the 23 marked [`GosubKind::Sound`] have since been disassembled
+/// one by one and agree with it, and they are in [`crate::sound`] with their
+/// addresses. The other eighteen are still the name and a hint.
 ///
 /// Four of the 41 (`AddCrushSnd`, `AddMudSound`, `AddMudVoice` and
 /// `PlayScareMusic`) belong to the mudmen, whose fourteen scripts were missed
@@ -432,7 +461,9 @@ pub fn gosub_kind(routine: &str) -> GosubKind {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "effect", rename_all = "snake_case")]
 pub enum Effect {
-    /// `TASKSOUND`: a sample number, not a sound.
+    /// `TASKSOUND`: the byte the handler at `0x9b38` hands `PLAY_SFX` in `AL`.
+    /// A sound id, which is not a sample number and not a sound: the table at
+    /// DS:`0x7e6e` turns it into one of the 49 samples.
     Sound { sample: u8 },
     /// `TASKGOSUB`: a named routine in the original's code. Nothing here runs
     /// it. A caller that does not handle the name has a recorded no-op.
@@ -1348,6 +1379,65 @@ mod tests {
         );
     }
 
+    /// A sound lands on the frame its script names it on, and on no other.
+    ///
+    /// This is `Knight_SwSwing`'s own shape, command for command as the baked
+    /// script holds it: `TASKGOSUB KnightGruntSound`, `TASKHOLD 2`, the first
+    /// frame, then `TASKSOUND 0x0b` (`swish`), `TASKHOLD 1` and the second. So
+    /// the grunt is asked for on the first tick, the held frame repeats without
+    /// asking for anything a second time, and the swish arrives on the third
+    /// tick, which is the frame where the blade is out. Nothing about that is
+    /// inferred from the fighter's state: it is four bytes of script.
+    #[test]
+    fn the_knights_swing_sounds_on_the_frame_the_script_says() {
+        let s = set(&[(
+            "Knight_SwSwing",
+            vec![
+                Instr::Gosub {
+                    routine: "KnightGruntSound".into(),
+                },
+                Instr::Hold { count: 2 },
+                part(32),
+                Instr::EndFrame { end: End::Next },
+                Instr::Sound { sample: 0x0b },
+                Instr::Hold { count: 1 },
+                part(34),
+                Instr::EndFrame { end: End::Next },
+                part(35),
+                Instr::EndFrame { end: End::Stop },
+            ],
+        )]);
+        let mut t = Task::new("Knight_SwSwing", 0, 0, FACING_RIGHT);
+        let mut a = TaskActor::with_health(10);
+        let mut heard: Vec<(usize, Vec<u8>)> = Vec::new();
+        for tick in 0..4 {
+            let f = t.step(&s, &mut a, false);
+            let ids: Vec<u8> = f
+                .effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Sound { sample } => Some(*sample),
+                    _ => None,
+                })
+                .collect();
+            if !ids.is_empty() {
+                heard.push((tick, ids));
+            }
+            if tick == 0 {
+                assert!(f.effects.contains(&Effect::Gosub {
+                    routine: "KnightGruntSound".into(),
+                    kind: GosubKind::Sound,
+                }));
+            } else {
+                assert!(
+                    !f.effects.iter().any(|e| matches!(e, Effect::Gosub { .. })),
+                    "the held frame does not call the routine again"
+                );
+            }
+        }
+        assert_eq!(heard, vec![(2, vec![0x0b])], "one swish, on the third tick");
+    }
+
     /// Bloodless mode does two things, and this checks both: `TASKSKIP` is
     /// taken, and every part carrying flag 0x80 is dropped.
     #[test]
@@ -1607,6 +1697,7 @@ mod tests {
             sheet: "s".into(),
             base: 100,
             cels: vec![[20, 30], [8, 8]],
+            hit: Vec::new(),
         };
         let p = Part {
             table: 1,

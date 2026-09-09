@@ -917,13 +917,26 @@ impl Fighter {
     /// body, and only the swing marks it a weapon, so a man standing still
     /// cannot cut you by holding a blade out.
     ///
-    /// What is approximated here is the granularity. Rather than pile against
-    /// pile, each weapon cel's own rectangle is swept as a polyline against the
-    /// target's body box, which is the same shape at cel resolution.
+    /// **The weapon pile is recovered.** `COLLIDE.HIT` carries a polyline for
+    /// every cel of every weapon bank, and `COLCHK` (0x9fcd) walks exactly
+    /// that list: `CHECKL` (0xa0da) reads one point, `NOWID1` (0xa0ed) adds
+    /// the weapon record's x and 0xa108 its y, and the mirrored case is
+    /// `neg ax; add ax, [WIDTH]` at 0xa0e7 with `WIDTH` the cel's own width.
+    /// So a swing is tested along the blade, and a cel the file gives no line
+    /// for cannot hit anything (`RIGHTON`, 0xa022).
+    ///
+    /// What is still approximated is the *body* pile. The original places the
+    /// target's `BODY` parts on `BodyPile` too and tests each weapon point
+    /// against the body cel's own pixel mask (`CBITLP`, 0xa190); here the
+    /// swept line is tested against the authored body box instead, so the
+    /// resolution on that side is one rectangle rather than a mask. A bank
+    /// with no line in the file keeps the old cel rectangle, so an actor the
+    /// original never had still fights.
     fn hit_line(&self, def: &ActorDef) -> Vec<(i32, i32)> {
         let Some(task) = self.task.as_ref() else {
             return Vec::new();
         };
+        let mirror = task.mirror();
         let mut out = Vec::new();
         for p in task
             .shown
@@ -936,9 +949,25 @@ impl Fighter {
             let Some(r) = taskvm::place(p, bank, (task.x, task.y, task.z), task.mirror()) else {
                 continue;
             };
-            let (l, t) = (r.x, r.y);
-            let (rr, b) = (r.x + r.w as i32, r.y + r.h as i32);
-            out.extend([(l, t), (rr, t), (rr, b), (l, b), (l, t)]);
+            match bank.hit_line(p.cel) {
+                // 0a0da..0a10d, one sample of the blade at a time.
+                Some(points) => out.extend(points.iter().map(|[px, py]| {
+                    let x = if mirror {
+                        r.x + r.w as i32 - *px as i32
+                    } else {
+                        r.x + *px as i32
+                    };
+                    (x, r.y + *py as i32)
+                })),
+                // No block in `COLLIDE.HIT` for this bank at all, which is
+                // every actor that is not the original's. The cel's own
+                // rectangle stands in, as it did for all of them before.
+                None => {
+                    let (l, t) = (r.x, r.y);
+                    let (rr, b) = (r.x + r.w as i32, r.y + r.h as i32);
+                    out.extend([(l, t), (rr, t), (rr, b), (l, b), (l, t)]);
+                }
+            }
         }
         out
     }
@@ -1278,6 +1307,7 @@ pub(crate) mod tests {
                     sheet: "test".into(),
                     base: 0,
                     cels,
+                    hit: Vec::new(),
                 }],
             )]),
             ..ActorDef::default()
@@ -1483,6 +1513,7 @@ pub(crate) mod tests {
             sheet: "blood".into(),
             base: 0,
             cels: vec![[12, 12]; 4],
+            hit: Vec::new(),
         };
         d.banks.insert(4, vec![blood; 5]);
         assert_eq!(d.validate(), Ok(()));
@@ -2162,13 +2193,148 @@ pub(crate) mod tests {
 
     /// What stood here was `simple_ai`, a hand written opponent with a rhythm
     /// chosen for playability: two thirds speed, a step back after every
-    /// swing, and a hesitation every couple of seconds. None of that was the
-    /// original's, and item 37 replaced it with `ControlKnight`'s own shape
-    /// through the recovered tracker. The claim the old test made is the one
-    /// kept here: an opponent closes, and then it swings.
+    /// swing, and a hesitation every couple of seconds. Item 37 replaced that
+    /// with the recovered tracker, but the decision on top of it was still
+    /// ours: close, swing, and a flat cooldown of twenty.
+    ///
+    /// `ControlBlackKnight` (0x4b79) is now translated, so this tests that
+    /// instead, and it tests more than the old claim did: the opponent still
+    /// closes and then strikes, and it also picks its attack by range,
+    /// declines to play the same one twice running, and blocks or ducks what
+    /// is coming at it. The flat twenty is gone because the original has no
+    /// such number: `BKnightAttack` zeroes `+0x4a` and never sets it.
     #[test]
-    fn the_plain_opponent_closes_distance_then_swings() {
-        use crate::monster::{decide, Act, Brain, Sight};
+    fn the_computer_knight_closes_then_picks_an_attack_by_range() {
+        use crate::monster::{decide, percent, Act, Brain, Sight, PROGRESSION};
+        let d = ActorDef {
+            controller: "knight".into(),
+            approach: 100,
+            back_off: 80,
+            ..def()
+        };
+        let mut me = Fighter::new("a", &d, 0, 100, 1);
+        me.brain.flags |= crate::monster::flag::DRIVEN;
+        let look = |me: &Fighter, foe: &Fighter, brain: &mut Brain, seed: u16| {
+            let s = Sight {
+                me,
+                foe,
+                def: &d,
+                bounds: GLOBAL,
+                gore: true,
+                body: false,
+                decapped: false,
+                progression: 0,
+            };
+            let mut seed = seed;
+            let mut facing = 1;
+            decide(&s, brain, &mut seed, &mut facing)
+        };
+        // `BKBlock` spends one roll before `BKAttack` spends its own, so the
+        // seed that makes the knight strike is one whose *second* roll clears
+        // the day's figure. Day zero is `Progression[0]`, twenty.
+        let keen = (1..=u16::MAX)
+            .find(|&s| {
+                let mut x = s;
+                percent(&mut x);
+                percent(&mut x) > PROGRESSION[0]
+            })
+            .expect("some seed rolls over twenty");
+        let shy = (1..=u16::MAX)
+            .find(|&s| {
+                let mut x = s;
+                percent(&mut x);
+                percent(&mut x) <= PROGRESSION[0]
+            })
+            .expect("some seed rolls under twenty");
+
+        let mut brain = Brain::default();
+        let far = Fighter::new("b", &d, 200, 100, -1);
+        assert!(
+            matches!(look(&me, &far, &mut brain, keen), Act::Walk { dx: 1, .. }),
+            "walks toward a distant foe"
+        );
+        // Ninety across, which is `K0$`'s `cmp bx, 0x5a`.
+        let near = Fighter::new("b", &d, 90, 100, -1);
+        assert_eq!(
+            look(&me, &near, &mut brain, keen),
+            Act::Attack {
+                kind: Attack::Swing,
+                spawn: None
+            },
+            "inside ninety, and nothing ordered yet: the swing"
+        );
+        assert_eq!(brain.att, Some(Attack::Swing), "+0x28 keeps what it chose");
+        assert_eq!(
+            brain.cooldown, 0,
+            "BKnightAttack has no cooldown of its own"
+        );
+        // `cmp word [ATT], 4; je KK1$`: the same swing again is refused and
+        // the overhead chop is taken instead.
+        assert_eq!(
+            look(&me, &near, &mut brain, keen),
+            Act::Attack {
+                kind: Attack::Chop,
+                spawn: None
+            },
+            "never the same attack twice running"
+        );
+        // And again, inside ninety, with the chop now in `ATT`: the swing is
+        // free once more, so the two alternate. This is why the computer
+        // knight does not stand there repeating one blow.
+        assert_eq!(
+            look(&me, &near, &mut brain, keen),
+            Act::Attack {
+                kind: Attack::Swing,
+                spawn: None
+            },
+            "inside ninety it alternates the swing and the chop"
+        );
+        // `K2$`, ninety eight across: past ninety five, inside a hundred, and
+        // with no daggers on the belt `cmp byte [si+0x34], 0` takes the lunge
+        // whatever `ATT` holds.
+        let mid = Fighter::new("b", &d, 98, 100, -1);
+        let mut b1 = Brain::default();
+        assert_eq!(
+            look(&me, &mid, &mut b1, keen),
+            Act::Attack {
+                kind: Attack::Lunge,
+                spawn: None
+            },
+            "between ninety five and a hundred with no daggers: the lunge"
+        );
+        // `K3$`: a hundred and ten away, and a dagger to throw.
+        let out = Fighter::new("b", &d, 110, 100, -1);
+        let mut armed = me.clone();
+        armed.record.set(crate::taskvm::field::DAGGERS, 3);
+        let mut b2 = Brain::default();
+        assert_eq!(
+            look(&armed, &out, &mut b2, keen),
+            Act::Attack {
+                kind: Attack::Knife,
+                spawn: None
+            },
+            "out of reach with daggers left: it throws one"
+        );
+        // The same place with an empty belt closes instead: `K4$`.
+        let mut b3 = Brain::default();
+        assert!(
+            matches!(look(&me, &out, &mut b3, keen), Act::Walk { .. } | Act::Idle),
+            "out of reach with none: it closes"
+        );
+        // `BKAttack`'s own roll under the day's figure gives ground.
+        let mut b4 = Brain::default();
+        assert_eq!(
+            look(&me, &near, &mut b4, shy),
+            Act::Idle,
+            "a roll under the day's figure hesitates instead of striking"
+        );
+    }
+
+    /// `BKBlock` (0x4c40), which the invented AI had nothing of: the computer
+    /// knight answers what the other one is doing.
+    #[test]
+    fn the_computer_knight_blocks_a_swing_and_ducks_a_chop() {
+        use crate::monster::{decide, percent, Act, Brain, Sight, PROGRESSION};
         let d = ActorDef {
             controller: "knight".into(),
             approach: 100,
@@ -2176,32 +2342,68 @@ pub(crate) mod tests {
             ..def()
         };
         let me = Fighter::new("a", &d, 0, 100, 1);
-        let look = |foe: &Fighter, brain: &mut Brain| {
+        // `BKBlock`'s own roll has to reach the day's figure for it to look at
+        // the other knight at all: `cmp al, [bx]; jl BKAttack`.
+        let wary = (1..=u16::MAX)
+            .find(|&s| {
+                let mut x = s;
+                percent(&mut x) >= PROGRESSION[0]
+            })
+            .expect("some seed rolls at or over twenty");
+        let answer = |incoming, facing: i32| {
+            let mut foe = Fighter::new("b", &d, 90, 100, facing);
+            foe.state = State::Attack;
+            foe.attack = Some(incoming);
             let s = Sight {
                 me: &me,
-                foe,
+                foe: &foe,
                 def: &d,
                 bounds: GLOBAL,
                 gore: true,
                 body: false,
                 decapped: false,
+                progression: 0,
             };
-            let mut seed = 1u16;
-            let mut facing = 1;
-            decide(&s, brain, &mut seed, &mut facing)
+            let mut brain = Brain::default();
+            let mut seed = wary;
+            let mut f = 1;
+            decide(&s, &mut brain, &mut seed, &mut f)
         };
-        let mut brain = Brain::default();
-        let far = Fighter::new("b", &d, 200, 100, -1);
-        assert!(
-            matches!(look(&far, &mut brain), Act::Walk { dx: 1, .. }),
-            "walks toward a distant foe"
+        assert_eq!(
+            answer(Attack::Swing, -1),
+            Act::Attack {
+                kind: Attack::Block,
+                spawn: None
+            },
+            "a swing from the front is blocked"
         );
-        let near = Fighter::new("b", &d, 90, 100, -1);
-        assert!(
-            matches!(look(&near, &mut brain), Act::Attack { .. }),
-            "swings once it is in range"
+        assert_eq!(
+            answer(Attack::Chop, -1),
+            Act::Attack {
+                kind: Attack::Evade,
+                spawn: None
+            },
+            "an overhead chop is ducked"
         );
-        assert_eq!(brain.cooldown, 20, "and waits before the next one");
-        assert_eq!(look(&near, &mut brain), Act::Idle, "one swing at a time");
+        assert_eq!(
+            answer(Attack::Lunge, -1),
+            Act::Attack {
+                kind: Attack::Evade,
+                spawn: None
+            },
+            "so is a lunge"
+        );
+        // 04c60: both facing the same way is his back turned, so there is
+        // nothing to stop and it attacks instead.
+        assert!(
+            !matches!(
+                answer(Attack::Swing, 1),
+                Act::Attack {
+                    kind: Attack::Block,
+                    ..
+                }
+            ),
+            "a swing from someone facing the same way is not blocked"
+        );
     }
 }

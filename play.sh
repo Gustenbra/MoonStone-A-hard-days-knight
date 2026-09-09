@@ -82,11 +82,11 @@ echo "Building..."
 cargo build --release
 
 echo
-echo "  menus: arrows move, enter or space takes"
-echo "  fighting: arrows move, space swings, escape quits"
-echo "  tab switches map and arena, [ and ] change arena, R restarts, C the sheet"
-echo "  player two: WASD and F"
-echo "  gamepads work, and F11 calibrates one"
+echo "  the original's keys: player one enter and the arrows, player two tab W X A D"
+echo "  menus: the direction keys move, fire takes"
+echo "  fighting: arrows move, enter swings, escape on the title quits"
+echo "  F2 switches map and arena, [ and ] change arena, R restarts, C the sheet"
+echo "  gamepads work, and J on the title screen calibrates one"
 echo
 # shellcheck disable=SC2086
 [ -n "$HENGE_NO_LAUNCH" ] && exit 0

@@ -72,8 +72,25 @@ pub enum Effect {
     /// painted bets of `TAV.PIV`. The throw is shown in `room`, the dice
     /// screen, which is a hidden place whose one option leads back.
     Wager { stake: u32, room: String },
+    /// Open the bowl: the coin-at-a-time donation panel both the healer and the
+    /// mystic take their fee through.
+    ///
+    /// **Recovered.** `_WIZARD:InitDonation` at image `0xbb34` copies the purse
+    /// into `GOLDP`, clears `DONATION`, and adds four gadgets whose `[si+0x10]`
+    /// is 4, 5, 3 and 2; `DonateLoop` at `0xbbe6` reads that word itself and
+    /// `AddDonation`/`SubDonation` move exactly one coin each way, refusing at
+    /// an empty purse and an empty bowl. So there is no list of sums anywhere
+    /// and never was; the three this project offered were its own. See
+    /// [`crate::status::Donation`].
+    Bowl {
+        /// `false` is the healer and `HealDon`, `true` the mystic and
+        /// `MysticJudge`.
+        #[serde(default)]
+        consult: bool,
+    },
     /// A donation to the town healer, `HEA.PIV`: ten mends, fifteen buys a
-    /// life point, and the pot is his whatever it bought.
+    /// life point, and the pot is his whatever it bought. What the bowl commits
+    /// to when `OkDonation` is taken.
     Donate { gold: u32 },
     /// A donation to the mystic, `MYS.PIV`: a point of an ability given or
     /// taken, on a roll the size of the donation shifts.
@@ -129,6 +146,9 @@ impl Effect {
             Effect::Use { item, .. } => run.kit.count(item) > 0,
             Effect::Wager { stake, .. } => run.gold >= *stake,
             Effect::Donate { gold } | Effect::Consult { gold } => run.gold >= *gold,
+            // `InitDonation` opens with whatever is in the purse, and an empty
+            // one opens a bowl that can only be closed again.
+            Effect::Bowl { .. } => run.gold > 0,
             Effect::Sell { item } => run.kit.count(item) > 0,
             Effect::Go { .. }
             | Effect::Village { .. }
@@ -149,6 +169,7 @@ impl Effect {
             // `5 gold`, so the stake is already the label and a price column
             // beside it would print the same number twice.
             Effect::Donate { gold } | Effect::Consult { gold } => Some(*gold),
+            Effect::Bowl { .. } => None,
             // `GoldSell`: `shr ax, 1` on the price.
             Effect::Sell { item } => items.get(item).map(|d| d.price / 2),
             _ => None,
@@ -197,6 +218,27 @@ pub struct PlaceDef {
     /// name a second box and keep the picture between the two.
     #[serde(default)]
     pub text: Option<[i32; 4]>,
+    /// One rectangle per option, where the picture already carries the words.
+    ///
+    /// **Recovered, and it is what a town front door is.** `MOON:InitHighWood`
+    /// at image `0xec9` and `MOON:InitWaterDeep` at `0xf4a` clear the gadget
+    /// table and add five gadgets each, all 64 wide, all with `+8` zero so they
+    /// say nothing, and `+0xe` 1 to 5. `MOON:HWLOOP` at `0xe35` is then
+    /// `MovePointer`, `CHECKGADGET` and a `cmp word ptr es:[si + 0xe]` ladder
+    /// straight into `MERC`, `TAV`, `HEAL`, `HTEM` and `CEXIT`.
+    ///
+    /// ```text
+    /// Highwood   x 0x100   y 0x1e 0x42 0x6a 0x8c 0xb7   h 16 16 16 26 12
+    /// Waterdeep  x 0       y 0x1a 0x3f 0x65 0x86 0xb6   h 16 16 16 31 12
+    /// ```
+    ///
+    /// `HIGHWOOD.PIV` has `Visit / Merchant / Tavern / Healer / High Temple /
+    /// Exit` painted on the parchment down its right hand edge and those five
+    /// boxes sit exactly on those words, so a screen with boxes draws **no
+    /// panel, no title and no labels of its own**: the picture already says all
+    /// of it, and a panel over it is a panel over the art.
+    #[serde(default)]
+    pub boxes: Option<Vec<[i32; 4]>>,
     /// The dice table: three faces drawn where `_TAVERN:RollDice` blits them.
     ///
     /// The screen behind them is `DICE.PIV`, which is a picture of three dice
@@ -427,6 +469,15 @@ pub struct Visit {
     /// draw from `DICE.CEL`. Carried through the door into that screen.
     #[serde(default)]
     pub dice: Option<[u8; 3]>,
+    /// Whether the last choice was an offering the druids took.
+    ///
+    /// `MOON:Henge` (0x1053) does not hand a line back and leave it there: it
+    /// runs the stone circle's own set piece, `0xb35e`, and only then gives the
+    /// life point. `[0xf378]` holding something other than `0xffff` is what
+    /// decides, and that is exactly a [`crate::service::Rite`] that was not
+    /// `NothingToOffer`. See `crate::stones`.
+    #[serde(default)]
+    pub rite: bool,
 }
 
 /// What a choice did.
@@ -447,6 +498,9 @@ pub enum Answer {
         guardian: String,
         count: u32,
     },
+    /// Open the donation bowl over this screen. `DonateLoop`, which is a loop
+    /// of its own with `MovePointer` and `CHECKGADGET` in it and two ways out.
+    Bowl { consult: bool },
     /// The Valley gate stood open. The caller sets the bout up the same way
     /// and comes back through [`Run::valley_won`] or [`Run::valley_lost`].
     ///
@@ -467,6 +521,7 @@ impl Visit {
             cursor: 0,
             said: String::new(),
             dice: None,
+            rite: false,
         }
     }
 
@@ -486,6 +541,7 @@ impl Visit {
             cursor: 0,
             said: self.said.clone(),
             dice: self.dice,
+            rite: false,
         }
     }
 
@@ -516,6 +572,7 @@ impl Visit {
         let Some(choice) = def.options.get(self.cursor) else {
             return Answer::Left;
         };
+        self.rite = false;
         match &choice.effect {
             Effect::Leave => Answer::Left,
             Effect::Go { place } => Answer::Went {
@@ -578,6 +635,10 @@ impl Visit {
                     Answer::Left
                 }
             },
+            // The panel is the caller's: it is a pointer loop over four
+            // gadgets, and `DonateLoop` does not return until one of the two
+            // that close it is pressed.
+            Effect::Bowl { consult } => Answer::Bowl { consult: *consult },
             Effect::Donate { gold } => {
                 self.said = match run.donate_to_healer(*gold) {
                     Some(healing) => healing.describe().to_string(),
@@ -616,6 +677,10 @@ impl Visit {
             Effect::Offer => {
                 let rite = run.rite_at_the_stones(None, items);
                 self.said = rite.describe(items);
+                // `0x10a0` compares `[0xf378]` against `0xffff` and leaves when
+                // it is still that, so the set piece runs for an offering the
+                // druids took and for nothing else.
+                self.rite = matches!(rite, Rite::Blessed { .. });
                 if matches!(rite, Rite::Won(_)) {
                     return Answer::Left;
                 }
@@ -724,6 +789,7 @@ mod tests {
             line: String::new(),
             knight: None,
             menu: [8, 8, 100, 100],
+            boxes: None,
             text: None,
             dice: false,
             options: vec![
@@ -764,6 +830,7 @@ mod tests {
             line: String::new(),
             knight: None,
             menu: [8, 8, 100, 100],
+            boxes: None,
             text: None,
             dice: false,
             options: vec![
@@ -857,6 +924,7 @@ mod tests {
             line: String::new(),
             knight: None,
             menu: [0, 0, 0, 0],
+            boxes: None,
             text: None,
             dice: false,
             options: vec![],
@@ -1268,6 +1336,7 @@ mod tests {
             line: "Enter Valley of the Gods".into(),
             knight: None,
             menu: [8, 12, 168, 40],
+            boxes: None,
             text: None,
             dice: false,
             options: vec![

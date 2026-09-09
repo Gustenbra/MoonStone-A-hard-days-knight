@@ -256,11 +256,13 @@ pub fn pan_speed(at: u32) -> u32 {
 
 // ------------------------------------------------------------- the sequence
 
-/// **Ours.** The intro's scene loop waits two BIOS ticks a frame, so it runs
-/// at 9.1 frames a second; this engine ticks at sixty, which is 6.6 ticks to
-/// the frame. Seven is that rounded, and it is the only timing number here
-/// that is not the original's.
-pub const TICKS_PER_FRAME: u32 = 7;
+/// **Ours, but only the rounding is.** The intro's scene loop waits two BIOS
+/// ticks a frame: `INTR.EXE` at `0x021f` reads the BIOS counter at `0000:046c`,
+/// adds two and stores the target, and `0x022f` spins until the counter reaches
+/// it. Two of 18.2065 Hz is 9.1033 frames a second. This engine ticks at the
+/// game's own 70.0863 Hz retrace, which is 7.70 ticks to the intro's frame, and
+/// eight is that rounded. It was seven while the engine ticked at sixty.
+pub const TICKS_PER_FRAME: u32 = 8;
 
 /// **Ours.** How long the logo and a credit screen are held. In the original
 /// each is up for exactly as long as the next file takes to come off a floppy,
@@ -269,9 +271,11 @@ pub const LOGO_TICKS: u32 = 130;
 pub const CREDIT_TICKS: u32 = 105;
 
 /// The story card is held for 420 vertical retraces, which is the one wait in
-/// the intro measured in retraces rather than in scene frames. At 70Hz that is
-/// six seconds, which is 360 of this engine's ticks.
-pub const MESSAGE_TICKS: u32 = 360;
+/// the intro measured in retraces rather than in scene frames. This engine's
+/// tick *is* a retrace now, so the recovered number is the number: 420, which at
+/// 70.0863 Hz is the six seconds it always was. It was scaled to 360 while the
+/// engine ticked at sixty.
+pub const MESSAGE_TICKS: u32 = 420;
 
 /// The sequence, as `INTR.EXE`'s own main module runs it.
 ///

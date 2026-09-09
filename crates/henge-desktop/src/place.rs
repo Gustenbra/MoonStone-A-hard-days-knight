@@ -4,24 +4,40 @@
 //! put pixels, which is why the same [`Visit`] could be driven by a server or a
 //! test with no renderer at all.
 //!
-//! The one idea worth naming is how it picks colours. A place is drawn in the
-//! backdrop's own 32 colours, and those 32 differ wildly between a sunlit town
-//! and a stone circle at midnight, so nothing can be hardcoded. Instead the
-//! menu takes the colour the art already uses most inside its own box and
-//! writes on it in whatever contrasts hardest. Over Highwood's painted panel
-//! that lands on parchment and ink, and the live menu replaces the painted one
-//! without a seam.
+//! **Nothing here samples the art any more.** This file used to count the
+//! colours inside each box, take the commonest as the ground and the hardest
+//! contrast to it as the ink, on the argument that a sunlit town and a stone
+//! circle at midnight have nothing in common. The original does not do that
+//! anywhere. Every screen it paints a panel on paints it in a fixed index, and
+//! `GFX:TextP` has no ink at all: it hands a glyph's own pixels to the same cel
+//! blit every sprite goes through, and the screens that carry words reserve the
+//! face's entries for it. Every one of the place palettes the baker writes has
+//! index 0 black and index 1 a near white, which is that convention, so a panel
+//! is [`PANEL`] and a line is [`Font::draw_own`] and neither depends on what is
+//! behind it.
+//!
+//! **And there is no status bar.** A strip across the bottom with the day, the
+//! purse and the wounds on it was this project's, the same invention that was
+//! already taken off the map for the same reason: the original's place screens
+//! are their own pictures, and what is drawn over one is what that screen's own
+//! routine draws. `DonateLoop` writes `Your Gold` and the number at (2, 190) and
+//! (20, 175) because `_WIZARD` says so; nothing writes a purse over a town.
 
 use crate::framebuffer::Framebuffer;
 use crate::text::Font;
 use henge_assets::Registry;
 use henge_core::item::Items;
 use henge_core::place::{Effect, PlaceDef, Places, Visit};
+use henge_core::pointer::Pointer;
 use henge_core::run::Run;
 use henge_core::{SCREEN_H, SCREEN_W};
 
 /// `DICE.CEL`, whose first six cels are the six faces.
 const DICE_SHEET: &str = "bank.dice";
+
+/// `mys.cel`, which `_WIZARD:LoadGoldCels` at image `0xbd2a` loads into the
+/// bank the donation panel is blitted from: `mov dx, MysGol; call the loader`.
+const GOLD_SHEET: &str = "bank.mys";
 
 /// Loads whatever places the packs declare. A pack without them is not an
 /// error: the map simply has nowhere to go, exactly as it did before.
@@ -41,17 +57,21 @@ pub struct PlaceScene {
     pixels: Vec<u8>,
 }
 
-/// A palette read for writing on: the ground colour, the strongest contrast to
-/// it, and something halfway for saying a thing is there but shut.
-struct Ink {
-    ground: u8,
-    text: u8,
-    faint: u8,
-}
+/// The index a painted panel is filled with. `_STATUS:DisplayPillars` clears
+/// its whole screen to 0 before it draws anything, and every palette the baker
+/// writes has 0 black, so this is the game's own ground.
+const PANEL: u8 = 0;
 
-fn luma(c: u32) -> i32 {
-    (((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff)) as i32
-}
+/// What a line that cannot be taken is written in. The original has no dim
+/// state on a gadget -- a gadget with no permission bit simply does nothing --
+/// but a keyboard list needs to say which rows are live, and 4 is a mid tone in
+/// every one of the place palettes.
+const SHUT: u8 = 4;
+
+/// What a highlighted row's bar is filled with: index 1, which is the near
+/// white every one of these palettes keeps there and the entry the fonts are
+/// drawn in.
+const BAR: u8 = 1;
 
 impl PlaceScene {
     pub fn open(reg: &mut Registry, def: &PlaceDef, place: &str) -> anyhow::Result<PlaceScene> {
@@ -74,40 +94,46 @@ impl PlaceScene {
         })
     }
 
-    /// The colour the backdrop uses most inside a box, and what to write on it.
-    fn ink_for(&self, fb: &Framebuffer, x: i32, y: i32, w: i32, h: i32) -> Ink {
-        let mut counts = [0u32; 32];
-        for yy in y.max(0)..(y + h).min(SCREEN_H as i32) {
-            for xx in x.max(0)..(x + w).min(SCREEN_W as i32) {
-                counts[(self.pixels[yy as usize * SCREEN_W + xx as usize] & 0x1f) as usize] += 1;
-            }
+    /// `_WIZARD:DonationRefresh` at image `0xbc9e`, blit for blit.
+    ///
+    /// ```text
+    /// cel BAG   at (2, 0xa2) and (0x10e, 0xa2)   the two purses
+    /// cel 4     at (0x90, 0xa9)                  one coin off
+    /// cel 5     at (0xa2, 0xa9)                  one coin on
+    /// cel 3     at (0x83, 0xb9)                  take it
+    /// cel 2     at (0xad, 0xb9)                  leave
+    /// YGOL      at (2, 0xbe)     `Your Gold`
+    /// Don       at (0x106, 0xbe) `Donation`, cx 4, which is right aligned
+    /// ```
+    ///
+    /// and `DonateLoop` itself writes `GOLDP` at (0x14, 0xaf) and `DONATION` at
+    /// (0x120, 0xaf) every time round. `BAG` is a word the caller fills, so the
+    /// healer and the mystic each name their own purse cel; cels 0 and 1 are the
+    /// two and 0 is used here.
+    fn draw_bowl(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        font: &Font,
+        bowl: &henge_core::status::Donation,
+    ) {
+        use henge_core::status::{DONATE_CELS, DONATE_GADGETS};
+        const BAG: usize = 0;
+        for x in [2, 0x10e] {
+            crate::sprite::draw(reg, fb, GOLD_SHEET, BAG, x, 0xa2, false);
         }
-        let ground = counts
-            .iter()
-            .enumerate()
-            .max_by_key(|(i, n)| (**n, std::cmp::Reverse(*i)))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        Self::ink_over(fb, ground as u8)
+        for (cel, (x, y, _, _, _)) in DONATE_CELS.into_iter().zip(DONATE_GADGETS) {
+            crate::sprite::draw(reg, fb, GOLD_SHEET, cel, x, y, false);
+        }
+        font.draw_own(reg, fb, "Your Gold", 2, 0xbe);
+        let don = "Donation";
+        let w = font.width(reg, don);
+        font.draw_own(reg, fb, don, 0x106 - w, 0xbe);
+        font.draw_own(reg, fb, &bowl.purse.to_string(), 0x14, 0xaf);
+        font.draw_own(reg, fb, &bowl.given.to_string(), 0x120, 0xaf);
     }
 
-    /// The two colours that read best over a given one.
-    fn ink_over(fb: &Framebuffer, ground: u8) -> Ink {
-        let base = luma(fb.palette[ground as usize & 0x1f]);
-        let text = (0..32)
-            .max_by_key(|i| (luma(fb.palette[*i]) - base).abs())
-            .unwrap_or(0);
-        let midpoint = (base + luma(fb.palette[text])) / 2;
-        let faint = (0..32)
-            .min_by_key(|i| (luma(fb.palette[*i]) - midpoint).abs())
-            .unwrap_or(0);
-        Ink {
-            ground,
-            text: text as u8,
-            faint: faint as u8,
-        }
-    }
-
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         reg: &mut Registry,
@@ -116,6 +142,8 @@ impl PlaceScene {
         font: Option<&Font>,
         run: &Run,
         items: &Items,
+        pointer: &Pointer,
+        bowl: Option<&henge_core::status::Donation>,
     ) -> anyhow::Result<()> {
         fb.set_palette(&self.palette);
         fb.pixels.copy_from_slice(&self.pixels);
@@ -123,11 +151,31 @@ impl PlaceScene {
             self.draw_dice(reg, fb);
         }
         let Some(font) = font else { return Ok(()) };
+        // `DonateLoop` redraws the screen and then the panel, and nothing else
+        // is on it while the bowl is open.
+        if let Some(bowl) = bowl {
+            self.draw_bowl(reg, fb, font, bowl);
+            return Ok(());
+        }
         self.draw_menu(reg, fb, def, font, run, items);
         if let Some(box_) = def.text {
             self.draw_text(reg, fb, box_, font);
         }
-        self.draw_status(reg, fb, font, run);
+        // On a screen whose options are boxes, the arrow is the only cursor
+        // there is, which is what `HWLOOP` has: `MovePointer` and
+        // `CHECKGADGET`, and nothing drawn to say where the choice is. A
+        // pointer nobody has steered is parked on the highlighted box so the
+        // keyboard still shows what fire would take.
+        if def.boxes.is_some() && !pointer.woken {
+            if let Some((_, x, y, _, h)) = menu_rects(def).get(self.visit.cursor).copied() {
+                let parked = Pointer {
+                    x: x + 4,
+                    y: y + h / 2,
+                    ..*pointer
+                };
+                crate::shell::draw_pointer_at(reg, fb, &parked);
+            }
+        }
         Ok(())
     }
 
@@ -160,18 +208,18 @@ impl PlaceScene {
             return;
         }
         let [x, y, w, h] = box_;
-        let ink = self.ink_for(fb, x, y, w, h);
-        // Flooded with the colour the art already uses most inside the box, so
-        // over a painted slate or plank nothing changes and over dithered
-        // ground the words get a plate to sit on rather than a thicket.
-        fb.rect(x, y, w, h, ink.ground);
+        // No plate. A place names this box precisely because the picture
+        // already has furniture there for words: the dice table's plank, where
+        // `_TAVERN` writes `BETLOSER`, `PLAYERPOT` and `CONT`; the healer's
+        // slate; the mystic's parchment. The original writes on those and
+        // paints nothing under what it writes.
         const PAD: i32 = 5;
         let mut cy = y + PAD;
         for line in wrap(reg, font, &self.visit.said, w - PAD * 2) {
             if cy + 7 > y + h {
                 break;
             }
-            font.draw(reg, fb, &line, x + PAD, cy, ink.text);
+            font.draw_own(reg, fb, &line, x + PAD, cy);
             cy += 8;
         }
     }
@@ -185,16 +233,21 @@ impl PlaceScene {
         run: &Run,
         items: &Items,
     ) {
+        // A screen whose options are boxes over painted words draws nothing at
+        // all: `InitHighWood` adds five gadgets with no text record and
+        // `HWLOOP` writes nothing over the picture. See `PlaceDef::boxes`.
+        if def.boxes.is_some() {
+            return;
+        }
         let [x, y, w, h] = def.menu;
-        let ink = self.ink_for(fb, x, y, w, h);
-        fb.rect(x, y, w, h, ink.ground);
+        fb.rect(x, y, w, h, PANEL);
 
         const PAD: i32 = 5;
         const STEP: i32 = 9;
         let mut cy = y + PAD;
-        font.draw(reg, fb, &def.name, x + PAD, cy, ink.text);
+        font.draw_own(reg, fb, &def.name, x + PAD, cy);
         cy += STEP;
-        fb.rect(x + PAD, cy, w - PAD * 2, 1, ink.text);
+        fb.rect(x + PAD, cy, w - PAD * 2, 1, BAR);
         cy += 4;
 
         for (i, choice) in def.options.iter().enumerate() {
@@ -212,17 +265,20 @@ impl PlaceScene {
                 // arrow glyph, and inverting a line reads at this size anyway.
                 // A shut door highlights faintly, so the highlight never makes
                 // an option look live that is not.
-                let bar = if open { ink.text } else { ink.faint };
-                fb.rect(x + 2, cy - 2, w - 4, STEP, bar);
-                font.draw(reg, fb, &choice.label, x + PAD, cy, ink.ground);
+                fb.rect(x + 2, cy - 2, w - 4, STEP, if open { BAR } else { SHUT });
+                font.draw_own(reg, fb, &choice.label, x + PAD, cy);
                 if let Some(p) = &price {
-                    font.draw(reg, fb, p, x + w - PAD - pw, cy, ink.ground);
+                    font.draw_own(reg, fb, p, x + w - PAD - pw, cy);
                 }
             } else {
-                let shade = if open { ink.text } else { ink.faint };
-                font.draw(reg, fb, &choice.label, x + PAD, cy, shade);
+                // Every line goes down in the glyphs' own five indices, lit or
+                // shut: `GFX:TextP` has no ink in it and the bar behind the
+                // cursor is what says which line is which. Painting a shut line
+                // in one colour flattened it to a silhouette, which is exactly
+                // what `blit_mask` was for and why it is gone.
+                font.draw_own(reg, fb, &choice.label, x + PAD, cy);
                 if let Some(p) = &price {
-                    font.draw(reg, fb, p, x + w - PAD - pw, cy, shade);
+                    font.draw_own(reg, fb, p, x + w - PAD - pw, cy);
                 }
             }
             cy += STEP;
@@ -236,43 +292,10 @@ impl PlaceScene {
                 if cy + 7 > y + h {
                     break;
                 }
-                font.draw(reg, fb, &line, x + PAD, cy, ink.text);
+                font.draw_own(reg, fb, &line, x + PAD, cy);
                 cy += 8;
             }
         }
-    }
-
-    /// The same strip the map draws, so the day and your wounds are in the same
-    /// place whether you are walking or standing in a doorway.
-    fn draw_status(&self, reg: &mut Registry, fb: &mut Framebuffer, font: &Font, run: &Run) {
-        let (mut dark, mut light) = (0usize, 0usize);
-        for i in 1..32 {
-            if luma(fb.palette[i]) < luma(fb.palette[dark]) {
-                dark = i;
-            }
-            if luma(fb.palette[i]) > luma(fb.palette[light]) {
-                light = i;
-            }
-        }
-        fb.rect(0, 188, 320, 12, dark as u8);
-        let left = format!("Day {}", run.day);
-        font.draw(reg, fb, &left, 6, 191, light as u8);
-        let right = format!("{} of {}", run.health.max(0), run.max_health);
-        let w = font.width(reg, &right);
-        font.draw(reg, fb, &right, 314 - w, 191, light as u8);
-        // The purse goes in the middle, where a place has nothing else to put:
-        // it is the number that changes when you buy something, so it has to be
-        // on the screen you buy things on.
-        let purse = format!("{} gold", run.gold);
-        let pw = font.width(reg, &purse);
-        font.draw(
-            reg,
-            fb,
-            &purse,
-            (SCREEN_W as i32 - pw) / 2,
-            191,
-            light as u8,
-        );
     }
 }
 
@@ -283,6 +306,15 @@ impl PlaceScene {
 /// original's `ADDGADGET` does at the moment it draws each line, and the reason
 /// it can: a gadget's rectangle is the rectangle of the thing drawn in it.
 pub fn menu_rects(def: &PlaceDef) -> Vec<(usize, i32, i32, i32, i32)> {
+    // A town's five are the original's own, out of `InitHighWood` and
+    // `InitWaterDeep`, and they sit on words the picture already carries.
+    if let Some(boxes) = def.boxes.as_ref() {
+        return boxes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i, b[0], b[1], b[2], b[3]))
+            .collect();
+    }
     const PAD: i32 = 5;
     const STEP: i32 = 9;
     let [x, y, w, _] = def.menu;

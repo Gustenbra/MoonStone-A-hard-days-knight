@@ -524,18 +524,43 @@ impl Run {
 
     /// Buy one of something. The price lives with the item, so nowhere else has
     /// to know it and nowhere else can disagree about it.
+    ///
+    /// **A sword or a suit bought at a stall goes straight onto the knight.**
+    /// `_MAP:KnightInTown` at image `0xadca` is the routine that finishes a
+    /// visit to a town: it subtracts `SUPPLYPrice` from `[si+0x32]` and then
+    /// branches on `SUPPLYIndex`, which is the field the goods belong in.
+    /// `MerchantArmour` writes `SUPPLY` into `[si+0x42]`, `MerchantWeopon` into
+    /// `[si+0x40]`, `MerchantDagger` increments `[si+0x34]` and `CityHealer`
+    /// mends `[si+0x38]` and adds a life point. There is no pack anywhere on
+    /// that path, so nothing bought at a stall has to be wielded afterwards,
+    /// and the panel has no gadget that would wield it: the weapon and the
+    /// armour on the status screen carry `STRP` 2, which `HotGadget` only acts
+    /// on through `TakeGold` and only from the other arch.
     pub fn buy(&mut self, id: &str, items: &Items) -> Purchase {
         let Some(def) = items.get(id) else {
             return Purchase::Unknown;
         };
-        if self.kit.room() == 0 {
+        let onto_the_knight = matches!(
+            def.virtue,
+            crate::item::Virtue::Weapon { .. } | crate::item::Virtue::Armour { .. }
+        );
+        // The pack only has to hold what the pack holds. A suit goes on the
+        // back and puts the old one in the pack, and `wear` already drops that
+        // if there is no room for it.
+        if !onto_the_knight && self.kit.room() == 0 {
             return Purchase::NoRoom;
         }
         if self.gold < def.price {
             return Purchase::TooDear;
         }
         self.gold -= def.price;
-        self.kit.take(id, 1);
+        if onto_the_knight {
+            self.kit.take(id, 1);
+            self.wear(id, def, items);
+            self.refresh(items);
+        } else {
+            self.kit.take(id, 1);
+        }
         Purchase::Bought { paid: def.price }
     }
 
@@ -1551,17 +1576,20 @@ mod magic_tests {
         );
     }
 
-    /// A bought sword goes into the hand and the old one into the pack, and
-    /// `CalcDamage`'s bonus follows: strength plus the blade.
+    /// A bought sword goes into the hand at the counter, not into the pack, and
+    /// the old one into the pack; `CalcDamage`'s bonus follows straight away:
+    /// strength plus the blade. `_MAP:KnightInTown` and `MerchantWeopon` are
+    /// what say so, and they leave the pack out of it entirely.
     #[test]
-    fn wielding_a_sword_swaps_it_for_the_one_in_hand() {
+    fn a_bought_sword_is_in_the_hand_at_once() {
         let items = magic();
         let mut r = knight_run(&items);
         r.earn(100);
         assert_eq!(r.buy("claymore", &items), Purchase::Bought { paid: 25 });
-        assert_eq!(r.knight.damage_bonus(&items), 1, "still the long sword");
-        assert_eq!(r.cast("claymore", &items), Cast::Worn);
-        assert_eq!(r.knight.weapon, "claymore");
+        assert_eq!(
+            r.knight.weapon, "claymore",
+            "MerchantWeopon writes [si+0x40]"
+        );
         assert_eq!(
             r.knight.damage_bonus(&items),
             4,
@@ -1573,7 +1601,12 @@ mod magic_tests {
             1,
             "the old blade is carried, not lost"
         );
-        assert_eq!(r.cast("claymore", &items), Cast::HaveNone);
+        // And one already in the pack still swaps, which is what the pack is
+        // for: a blade taken off a corpse or out of a lair.
+        assert_eq!(r.cast("long_sword", &items), Cast::Worn);
+        assert_eq!(r.knight.weapon, "long_sword");
+        assert_eq!(r.kit.count("claymore"), 1, "the claymore is carried now");
+        assert_eq!(r.cast("long_sword", &items), Cast::HaveNone);
         // Armour the same way, and the ceiling moves with it.
         r.kit.take("chain_mail", 1);
         assert_eq!(r.cast("chain_mail", &items), Cast::Worn);

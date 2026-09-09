@@ -424,6 +424,12 @@ pub fn draw_pointer(reg: &mut Registry, fb: &mut Framebuffer, p: &henge_core::po
     if !p.woken {
         return;
     }
+    draw_pointer_at(reg, fb, p);
+}
+
+/// The same blit, without the "has it been steered" test: for the screens whose
+/// only cursor is the arrow, which park it on the highlighted box.
+pub fn draw_pointer_at(reg: &mut Registry, fb: &mut Framebuffer, p: &henge_core::pointer::Pointer) {
     sprite::draw(reg, fb, POINTER, 0, p.x, p.y, false);
 }
 
@@ -601,6 +607,233 @@ fn draw_pan(reg: &mut Registry, fb: &mut Framebuffer, top: i32) {
 }
 
 const PAN_SHEET: &str = "scene.intropan";
+
+/// The ending, which is `INTR.EXE`'s other half.
+///
+/// The same engine, the same scene loop and the same cast machinery as the
+/// intro above; what differs is the plates, the six sprite banks the loader at
+/// `0x3a00` fills the table with, `CO.STI` in place of `INTRO.STI`, and the two
+/// recolourings the exit byte drives. `henge_core::ending` says where every
+/// number came from.
+pub fn draw_ending(
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    fonts: &Fonts,
+    ending: &henge_core::ending::Ending,
+    cast: Option<&henge_core::content::IntroCast>,
+) {
+    use henge_core::ending::{Back, Overlay};
+    let Some(scene) = ending.showing() else {
+        return;
+    };
+    match scene.back {
+        Back::Message => show(reg, fb, MESSAGE_PLATE),
+        Back::Plate(plate) => show(reg, fb, plate),
+        Back::Rise { .. } => draw_rise(reg, fb, ending.pan as i32),
+    }
+    ink_ending(fb, scene.back, ending.code);
+
+    if let Some(cast) = cast {
+        draw_ending_cast(reg, fb, ending, cast);
+    }
+
+    // `0x129` calls `0x7f9` after the task draw when `[0x1581]` is up, so the
+    // overlay goes over the cast, not under it.
+    if scene.overlay == Overlay::Near {
+        for cel in henge_core::ending::OVERLAY {
+            if !cel.near {
+                continue;
+            }
+            sprite::draw(
+                reg,
+                fb,
+                henge_core::ending::OVERLAY_BANK,
+                cel.cel,
+                cel.x,
+                cel.y,
+                false,
+            );
+        }
+    }
+
+    let lines = ending.lines();
+    if lines.is_empty() {
+        return;
+    }
+    // `MESSAGE.PIV` carries the bold face's own five entries and so does `bg8`,
+    // so both chains are drawn in the glyphs' own indices like every other
+    // line in the game. The intro writes the five itself over the panorama,
+    // which the ending never needs because neither of its two chains goes over
+    // a picture that does not already reserve them.
+    let Some(font) = fonts.bold.or(fonts.small) else {
+        return;
+    };
+    for line in lines {
+        // The `Loading ...` record on the opening card is kept in the data and
+        // left off the screen, for the reason `henge_core::message` gives: it
+        // is the original telling you a floppy is turning, and nothing here
+        // turns one.
+        if line.text.trim_end_matches([' ', '.']) == "Loading" {
+            continue;
+        }
+        font.draw_own_centred(reg, fb, line.text, line.y);
+    }
+}
+
+/// `ColourKnight` at `0x3b9d` and `ColourMoonstone` at `0x3b23`, applied to the
+/// plate that is up.
+///
+/// Both write into a plate's stored palette at load time, so by the time a
+/// scene puts that plate on the screen the entries are already the winner's.
+/// Doing it here instead is the same thing in the same order: the picture is
+/// up, and then its palette is corrected.
+fn ink_ending(fb: &mut Framebuffer, back: henge_core::ending::Back, code: u8) {
+    use henge_core::ending::{self, Back};
+    let plate = match back {
+        Back::Plate(p) => p,
+        // `bg7` is behind the rise and `0x3ae7` hands neither it nor `bg8` to
+        // either routine, so the rise and `MESSAGE.PIV` keep their own colours.
+        _ => return,
+    };
+    if ending::KNIGHT_PLATES.contains(&plate) {
+        if let Some(words) = ending::knight_ink(code) {
+            for (i, w) in words.iter().enumerate() {
+                fb.palette[ending::KNIGHT_FIRST + i] = henge_assets::palette::from12(*w);
+            }
+        }
+    }
+    if plate == ending::MOONSTONE_PLATE {
+        if let Some((words, _)) = ending::moonstone_ink(code) {
+            for (at, w) in ending::MOONSTONE_AT.iter().zip(words) {
+                fb.palette[*at] = henge_assets::palette::from12(w);
+            }
+        }
+    }
+}
+
+/// The stone circle's set piece, `HengeLOOP`.
+///
+/// `Hen1.p` with its own palette, the winner's armour written into entries 8 to
+/// 11 by `ColourEn4Knight`, and the two tasks `0xb3a6` and `0xb3bc` start,
+/// drawn in the order they were added. `henge_core::stones` says where each
+/// number came from, including the one branch of `ColourEn4Knight` that reads
+/// the wrong register and is reproduced rather than fixed.
+pub fn draw_stones(
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    stones: &henge_core::stones::Stones,
+    banks: Option<&henge_core::taskvm::BankTables>,
+) {
+    use henge_core::stones;
+    show(reg, fb, stones::PLATE);
+    if let Some(words) = stones::knight_ink(stones.knight) {
+        for (i, w) in words.iter().enumerate() {
+            fb.palette[stones::KNIGHT_FIRST + i] = henge_assets::palette::from12(*w);
+        }
+    }
+    let Some(banks) = banks else { return };
+    for task in [&stones.torches, &stones.lift] {
+        draw_task(reg, fb, task, banks);
+    }
+}
+
+/// One task's last frame, placed the way `TASKRIGHT` places it.
+fn draw_task(
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    task: &henge_core::taskvm::Task,
+    banks: &henge_core::taskvm::BankTables,
+) {
+    if !task.active {
+        return;
+    }
+    let at = (task.x, task.y, task.z);
+    for part in &task.shown {
+        let Some(bank) = banks
+            .get(&part.table)
+            .and_then(|t| t.get(part.bank as usize))
+        else {
+            continue;
+        };
+        let Some(placed) = henge_core::taskvm::place(part, bank, at, task.mirror()) else {
+            continue;
+        };
+        let Some(cut) = sprite::cut(reg, &bank.sheet, placed.frame as usize) else {
+            continue;
+        };
+        fb.blit(&cut.pixels, cut.w, cut.h, placed.x, placed.y, placed.mirror);
+    }
+}
+
+/// `CO.STI`'s panorama, the 200 rows the camera is over.
+///
+/// The same window `draw_pan` moves down `INTRO.STI`, moving up this one
+/// instead: `0xe12` adds `[0x162]` to `[0x160]` for the intro and subtracts it
+/// for the ending, and that is the whole difference.
+fn draw_rise(reg: &mut Registry, fb: &mut Framebuffer, top: i32) {
+    use henge_core::ending::{RISE_PALETTE, RISE_SHEET};
+    if let Some(p) = reg.palette(RISE_PALETTE).map(|r| r.value.clone()) {
+        fb.set_palette(&p);
+    }
+    let Ok(img) = reg.image(RISE_SHEET) else {
+        fb.clear(0);
+        return;
+    };
+    let top = top.clamp(0, (img.height as i32 - SCREEN_H as i32).max(0)) as usize;
+    for row in 0..SCREEN_H {
+        let src = (top + row) * img.width;
+        let dst = row * SCREEN_W;
+        if src + SCREEN_W <= img.pixels.len() {
+            fb.pixels[dst..dst + SCREEN_W].copy_from_slice(&img.pixels[src..src + SCREEN_W]);
+        }
+    }
+}
+
+/// The ending's cast, placed the way the intro's is.
+///
+/// `0x1ef` and `0x207` are the same two starters, with one thing added: they
+/// add `[0x40c1]` and `[0x40c3]` to the z, and one scene sets those to 5 and
+/// 15.
+fn draw_ending_cast(
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    ending: &henge_core::ending::Ending,
+    cast: &henge_core::content::IntroCast,
+) {
+    use henge_core::intro::{SPAWN_LEFT_X, SPAWN_RIGHT_X, SPAWN_Y, SPAWN_Z};
+    let Some(scene) = ending.showing() else {
+        return;
+    };
+    let now = ending.frame();
+    for spawn in scene.cast {
+        if now < spawn.at {
+            continue;
+        }
+        let Some(frame) = cast.frame_at(spawn.script, now - spawn.at) else {
+            continue;
+        };
+        let (ox, z) = if spawn.left {
+            (SPAWN_LEFT_X, SPAWN_Z + scene.z.1)
+        } else {
+            (SPAWN_RIGHT_X, SPAWN_Z + scene.z.0)
+        };
+        for part in &frame.parts {
+            let Some(sheet) = cast.banks.get(part.bank as usize).cloned() else {
+                continue;
+            };
+            let Some(cut) = sprite::cut(reg, &sheet, part.cel as usize) else {
+                continue;
+            };
+            let x = if spawn.left {
+                ox - (part.x as i32 + cut.w as i32)
+            } else {
+                ox + part.x as i32
+            };
+            let y = SPAWN_Y + z + part.y as i32;
+            fb.blit(&cut.pixels, cut.w, cut.h, x, y, spawn.left);
+        }
+    }
+}
 
 /// Everything the step has put on the plate.
 ///

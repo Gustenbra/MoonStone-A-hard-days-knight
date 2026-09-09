@@ -44,12 +44,18 @@
 //!   moves to the next knight, and anything else is decoded out of the payload
 //!   word's low nibble.
 //!
-//! **Ours:** what a gadget's payload means here. The original's nibbles name
-//! its own trading screen's operations (5 cast, 1 take magic, 3 raise an
-//! ability, 0xa buy). Here a gadget carries a `usize` id that the screen which
-//! registered it interprets, because the screens are ours and their menus are
-//! already lists with a highlight.
+//! **The payload is recovered too.** It used to be a `usize` id that whichever
+//! screen registered the gadget interpreted, which was this project's, and the
+//! comment here said so. It is the original's now: a gadget carries
+//! [`henge_core::status::Payload`](crate::status::Payload), which is `STRP` at
+//! `+0x10` and `STPL` at `+0x12`, and `STRP`'s low nibble names the operation
+//! the way `HotGadget` reads it (5 cast, 1 take magic, 3 raise an ability, 0xa
+//! buy, and the rest to `TakeGold`) while its high nibble is the bit within a
+//! field that holds several things. `id` stays beside it because `STID` is real
+//! too: it is twice the slot, and `AddIconGadget` indexes the line a gadget
+//! says by `STID >> 1`.
 
+use crate::status::{Op, Payload};
 use serde::{Deserialize, Serialize};
 
 /// Pixels the pointer moves in one tick. `add word ptr [PointerX], 2`.
@@ -113,6 +119,24 @@ pub struct Gadget {
     /// The line this gadget says while the pointer is on it. `RESP`, the ten
     /// byte text record `AddIconGadget` hangs off every gadget it makes.
     pub label: String,
+    /// `+0x10` and `+0x12`: what fire over this one does, and to which field.
+    pub payload: Payload,
+    /// The `0x10`, `0x20` and `0x40` bits of the text record's flag word, which
+    /// is where `SetUpID` and `Paper2` put the permission: a gadget off the
+    /// `Identify` array carries none and `HotGadget` does nothing with it.
+    pub lit: bool,
+}
+
+impl Gadget {
+    /// `HotGadget`'s `and cx, 0xf`.
+    pub fn op(&self) -> Option<Op> {
+        self.payload.op()
+    }
+
+    /// Its other nibble.
+    pub fn mask(&self) -> u8 {
+        self.payload.mask()
+    }
 }
 
 impl Gadget {
@@ -174,7 +198,9 @@ impl Gadgets {
         true
     }
 
-    /// Convenience for a screen laying out a list of rows.
+    /// Convenience for a screen laying out a list of rows: a box with no
+    /// payload, which is what `HotGadget` would do nothing with and what the
+    /// screens whose own lists are still lists hand it.
     pub fn add_box(&mut self, id: usize, x: i32, y: i32, w: i32, h: i32, label: &str) -> bool {
         self.add(Gadget {
             id,
@@ -183,6 +209,8 @@ impl Gadgets {
             w,
             h,
             label: label.to_string(),
+            payload: Payload::default(),
+            lit: true,
         })
     }
 
@@ -268,7 +296,11 @@ mod tests {
             w: 30,
             h: 8,
             label: "Buy".into(),
+            payload: Payload::new(0x1a, 0x42),
+            lit: true,
         };
+        assert_eq!(g.op(), Some(Op::Buy), "0xa is BuyGoods");
+        assert_eq!(g.mask(), 1, "and the other nibble is which armour");
         assert!(g.covers(10, 20), "the top left corner is inside");
         assert!(g.covers(39, 27), "and the last pixel of it");
         assert!(!g.covers(40, 27), "the pixel past its width is not");
@@ -298,6 +330,17 @@ mod tests {
         assert!(!g.add_box(SLOTS, 0, 0, 1, 1, ""), "98 slots and no more");
         g.clear();
         assert!(g.is_empty());
+    }
+
+    /// A gadget with no payload is what `add_box` makes and what `HotGadget`
+    /// falls off the end of.
+    #[test]
+    fn a_plain_box_carries_no_operation() {
+        let mut g = Gadgets::default();
+        g.add_box(4, 0, 0, 8, 8, "row");
+        let only = g.iter().next().unwrap();
+        assert_eq!(only.op(), None);
+        assert_eq!(only.mask(), 0);
     }
 
     #[test]

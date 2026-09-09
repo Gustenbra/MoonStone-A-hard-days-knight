@@ -102,7 +102,11 @@ const SCRIPT_PREFIXES: [&str; 12] = [
 /// the dagger on `SpeedKnife` and `ControlKnife` keeps it on `Knife`;
 /// `AddBlood` starts a spray on `Blood1`, on bank table 4. All three parse
 /// like the rest and end on `ff ff`.
-const SPAWNED_SCRIPTS: [&str; 3] = ["SpeedKnife", "Knife", "Blood1"];
+/// Scripts whose names carry no actor prefix, so the rule below cannot see
+/// them. `SpeedKnife`, `Knife` and `Blood1` are spawned by other scripts;
+/// `Torches` is the stone circle's, handed to `ADDTASK` at image 0xb3a6 beside
+/// `Knight_LiftMagic`, and it is the flames on the ten stones.
+const SPAWNED_SCRIPTS: [&str; 4] = ["SpeedKnife", "Knife", "Blood1", "Torches"];
 
 fn is_script_name(name: &str) -> bool {
     if SPAWNED_SCRIPTS.contains(&name) {

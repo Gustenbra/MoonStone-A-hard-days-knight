@@ -36,12 +36,34 @@ impl Framebuffer {
         self.pixels.fill(index);
     }
 
-    /// Draws a sprite as a flat silhouette in one colour.
+    /// Draws an indexed sprite with every index sent through a table first.
     ///
-    /// Text is drawn this way rather than in its own colours: arena palettes
-    /// differ, so a glyph's own shades are legible over one backdrop and invisible
-    /// over the next. A silhouette in a chosen colour reads everywhere.
-    pub fn blit_mask(&mut self, src: &[u8], sw: usize, sh: usize, x: i32, y: i32, colour: u8) {
+    /// **This is what replaced the silhouette.** `blit_mask`, which painted a
+    /// sprite flat in one chosen colour, used to sit here and text was the only
+    /// thing that used it. There is no ink anywhere in the original's text
+    /// path: `GFX:TextP` looks a glyph up, loads its width and height into the
+    /// blitter and calls the same cel blit every other sprite in the game goes
+    /// through, so a glyph is drawn in its own five indices like everything
+    /// else. Flattened, the ring round each letter and the bright face inside
+    /// it become one colour, every counter fills in, and a line reads as a row
+    /// of blobs.
+    ///
+    /// What the original never has to do is translate: every screen it writes a
+    /// message over is `MESSAGE.PIV`, whose palette reserves those five. Here a
+    /// line can go over an arena, whose palette says something else at 5 and 9
+    /// to 12, so the sheet's own palette is named in the manifest and the
+    /// nearest entry in the loaded one is used. Where the two agree, which is
+    /// every screen the original writes on, the table is the identity and this
+    /// is the ordinary blit.
+    pub fn blit_mapped(
+        &mut self,
+        src: &[u8],
+        sw: usize,
+        sh: usize,
+        x: i32,
+        y: i32,
+        map: &[u8; 32],
+    ) {
         for sy in 0..sh {
             let dy = y + sy as i32;
             if dy < 0 || dy >= SCREEN_H as i32 {
@@ -52,8 +74,10 @@ impl Framebuffer {
                 if dx < 0 || dx >= SCREEN_W as i32 {
                     continue;
                 }
-                if src[sy * sw + sx] != 0 {
-                    self.pixels[dy as usize * SCREEN_W + dx as usize] = colour;
+                let index = src[sy * sw + sx];
+                if index != 0 {
+                    self.pixels[dy as usize * SCREEN_W + dx as usize] =
+                        map[(index & 0x1f) as usize];
                 }
             }
         }

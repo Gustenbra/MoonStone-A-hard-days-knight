@@ -149,11 +149,30 @@ fn width(op: u8) -> Option<usize> {
 
 /// The five sprite banks the intro's own cast is drawn from, in slot order.
 ///
-/// `_LOADER`'s intro loader fills the table at `DS:0x445d` in this order:
-/// `au1`, `li1`, `ha1`, `dw1`, `da1`, at four bytes a slot. The ending, which
-/// is the same executable run with an argument, fills it with a different set;
-/// only the intro's is built here.
+/// The loader fills the table at `DS:0x445d` four bytes a slot, and which slot
+/// a file lands in is the address the loader writes it to, not the order it
+/// loads them in. The intro's loader at `0x38a1` writes `au1` to `0x445d`,
+/// `li1` to `0x4461`, `da1` to `0x446d`, `ha1` to `0x4465` and `dw1` to
+/// `0x4469`, so in slot order it is `au1`, `li1`, `ha1`, `dw1`, `da1`.
 const CAST_BANKS: [&str; 5] = ["bank.au1", "bank.li1", "bank.ha1", "bank.dw1", "bank.da1"];
+
+/// The six the **ending** is drawn from, which is a different set in a
+/// different order.
+///
+/// The ending's loader at `0x3a00` writes `dg1` to `0x445d`, `li1` to
+/// `0x4461`, `ha1` to `0x4469`, `co1` to `0x4465`, `da1` to `0x446d` and
+/// `klift1` to `0x4471`, so in slot order it is `dg1`, `li1`, `co1`, `ha1`,
+/// `da1`, `klift1`. Note that `ha1` and `co1` are loaded in the opposite order
+/// from the slots they go into, and that the five druid scripts the two halves
+/// share sit in slot 4 in both, which is `da1` either way.
+const ENDING_BANKS: [&str; 6] = [
+    "bank.dg1",
+    "bank.li1",
+    "bank.co1",
+    "bank.ha1",
+    "bank.da1",
+    "bank.klift1",
+];
 
 /// Flatten one script into frames, and say where it rejoins itself.
 ///
@@ -256,10 +275,30 @@ pub const SCRIPTS: [u16; 18] = [
     0x309f, 0x30c3, 0x3221, 0x338f, 0x348f, 0x349b,
 ];
 
+/// Every script the **ending**'s four scene routines start.
+///
+/// Read the same way, out of `0x547`, `0x628`, `0x6db` and `0x778` and the two
+/// tables they step: `0x35cf` is the five of the word table at `DS:0x000c`,
+/// and the last five are the standing druids `0x4d0` puts down, which the
+/// intro's scene `0x465` puts down too.
+pub const ENDING_SCRIPTS: [u16; 15] = [
+    0x2351, 0x2e51, 0x2e75, 0x2e99, 0x309f, 0x3221, 0x3531, 0x35cf, 0x393d, 0x3a49, 0x3b07, 0x3b1f,
+    0x3c75, 0x3ceb, 0x3ddb,
+];
+
 pub fn cast(img: &[u8]) -> anyhow::Result<Cast> {
+    flatten_all(img, &SCRIPTS, &CAST_BANKS)
+}
+
+/// The ending's cast, out of the same image with the ending's own bank table.
+pub fn ending_cast(img: &[u8]) -> anyhow::Result<Cast> {
+    flatten_all(img, &ENDING_SCRIPTS, &ENDING_BANKS)
+}
+
+fn flatten_all(img: &[u8], list: &[u16], banks: &[&str]) -> anyhow::Result<Cast> {
     let mut scripts = BTreeMap::new();
     let mut loops = BTreeMap::new();
-    for off in SCRIPTS {
+    for off in list.iter().copied() {
         // A looping script is cut where it comes back on itself, and the frame
         // it comes back to is kept so it can go round for as long as the scene
         // needs. One that ends on `ff ff` gets no entry, and stops being drawn.
@@ -272,7 +311,7 @@ pub fn cast(img: &[u8]) -> anyhow::Result<Cast> {
         scripts.insert(name, frames);
     }
     Ok(Cast {
-        banks: CAST_BANKS.iter().map(|s| s.to_string()).collect(),
+        banks: banks.iter().map(|s| s.to_string()).collect(),
         scripts,
         loops,
     })

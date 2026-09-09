@@ -1,18 +1,18 @@
 //! Sound for a bout.
 //!
-//! Two halves, deliberately separate. [`cue`] decides *what* should be heard by
-//! watching the fight, and is pure logic with no platform behind it. [`sink`]
-//! decides *where it comes out*, and is the only part that knows a sound card
-//! exists.
+//! Two halves, deliberately separate. [`sfx`] says what a sound id means, which
+//! is the original's own `PLAY_SFX` translation and nothing more: *what* should
+//! be heard is decided by the scripts, in the simulation, and arrives here as a
+//! list of ids. [`sink`] decides *where it comes out*, and is the only part that
+//! knows a sound card exists.
 //!
 //! Splitting them that way means the interesting half is testable without a
 //! sound card, and a browser or server build replaces only the boring half.
 
-pub mod cue;
 pub mod music;
+pub mod sfx;
 pub mod sink;
 
-pub use cue::{Cue, Voices};
 pub use music::{Note, Score, Tunes};
 pub use sink::{Clips, Recording, Silent, Sink};
 

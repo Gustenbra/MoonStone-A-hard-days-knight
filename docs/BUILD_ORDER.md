@@ -36,7 +36,7 @@ The engine and a vertical slice. Roughly a quarter of the game.
 - [x] 16. Overworld: travel, day cycle, ambushes, terrain off `_MAP:MapType`
 - [x] 17. Runs: wounds carry, travel mends, death ends the run
 - [x] 18. Four locations with menus, and a working healer
-- [x] 19. Sound: 49 clips, four cues, silent without a device
+- [x] 19. Sound: 49 clips, played where the scripts say, silent without a device
 
 ---
 
@@ -88,7 +88,9 @@ That unblocked 22 almost for free, and most of the phase with it.
       0x993a in its own order, which turned up one thing the docs had not: `ff ff` loops
       like `ff fe` while a `TASKLOOP` count is running, and only ends the animation when
       it is not. `TASKGOSUB` is an emitted effect naming the routine, with all 37 targets
-      in a table by name and none of them faked; `TASKSOUND` is a cue. Twenty one tests,
+      in a table by name and none of them faked; `TASKSOUND` emits the sound id the
+      handler at 0x9b38 would hand `PLAY_SFX`, and the 23 routines in that table that play
+      a sample are transcribed in `henge-core/src/sound.rs`. Twenty one tests,
       including a loop, a gosub, the branch on hit points, and a state hash that survives
       a serialize and reload. `Bout::state_hash` folds the VM state in
 - [x] 26. **Exported: all 221 scripts and every actor's bank tables.** `henge-formats`
@@ -121,6 +123,17 @@ turned up on the way that the record should carry.
 of `MudmanTABLE`, so their fourteen scripts and `Rat_TreeBrush` had been filtered out
 of every count. All 236 parse and verify; the four `TASKGOSUB` targets the mudmen add
 (`AddMudVoice`, `AddMudSound`, `AddCrushSnd`, `PlayScareMusic`) are in the table.
+
+**Every sound in the game is a script command or one of 23 small routines.** A scan of
+the image for every `call`/`jmp` that resolves to `PLAY_SFX` (`0x5964`) finds 26 sites and
+no more: the `TASKSOUND` handler at `0x9b38` (131 commands in the 239 named scripts, 54
+distinct ids, 31 distinct samples), the 23 sound routines the scripts call through
+`TASKGOSUB`, the dice cup at `0xb338` and the gadget click at `0xd50a`. So the cue layer
+that inferred a swing from a state change and a footfall from a frame number is gone:
+there is no footstep routine in the original, the knight's walk scripts carry no sound
+command, and his swish is `TASKSOUND 0x0b` on the second frame of `Knight_SwSwing`. Three
+of the 23 routines are a bare `ret` or a dead `jmp` and are translated as silent, which is
+why two of the 49 samples are unreachable. `docs/TASKVM.md` has the disassembly.
 
 **The controller tables are recovered after all.** They are `BSS`, which is why the
 load image showed nothing, but `SetKnightAnims` and `SetMonsterAnims` in `MOON` fill
@@ -554,11 +567,116 @@ the decapitation beside the bloodless collapse from the same fight.
       `KnightKnightStruck1` does it for any blow from a knight), anything else
       is `Knight_SwCollapse`, the fall. The creatures' own decapitations are
       already in their `*Hit` rows and come with 46: `Ratman_HitOnHead` and the
-      beast's `UpperHit` for a blow from above, each with its own death. **Not
-      built**: `Knight_Explode`, which `TrollOHead` plays for a troll's chop on
-      a dead knight, and the spear's `TroggSpear_Toss`, because both are the
-      creature's finisher and that is item 37; `DrDropHead` and `DrDropClaws`,
-      the dragon's, which are 36's; and the screen shake `ShakeADD` asks for
+      beast's `UpperHit` for a blow from above, each with its own death.
+      **`Knight_Explode` and `TroggSpear_Toss` were on the not-built list and
+      are built now**, with item 50: `TrollStruck1` (0x438a) falls into
+      `TrollOHead` (0x4397) for the overhead chop alone and plays
+      `Knight_Explode` when that blow left nothing, and `TroggHit+12` (0x2f59)
+      has the spear, and only the spear, take a dead player knight's task away
+      and play `TroggSpear_Toss` with the gore on. **Not built**: `DrDropHead`
+      and `DrDropClaws`, the dragon's, which are 36's; and the screen shake
+      `ShakeADD` asks for
+
+- [x] 50. **The computer knight. Recovered.** What was here was an invention:
+      close the distance, swing, cool down twenty, one attack and no answer to
+      anything. The original is `ControlBlackKnight` at image 0x4b79, which
+      `InitGameStart+241` (0x1cfe) puts in `CONTROLTABLE` slot 8 while slot 6
+      holds `ControlKnight`, the joystick one, and kind 8 is what
+      `InitGameStart` writes into `+0x35` of all four knight records (0x1c69,
+      0x1c88, 0x1cab, 0x1cca). So every knight the machine plays runs this and
+      no knight a person plays ever does.
+
+      The shape, block by block. `ControlBlackKnight` picks the other knight as
+      `Opponent` (`cmp si, [KnightTable]`, 0x4b8c, then `[0x897b]` or
+      `[KnightTable]`), copies `+0x28` into `ATT` without clearing it (0x4bb7,
+      where `TroggStart` zeroes the same field at 0x2e08), and calls
+      `MonsterTrack`. Off the plane it walks (`BKnightMove`, 0x4bd3, whose
+      `and byte [si+0x48], 0x7f` at 0x4bdc gives the evade its one use back).
+      In range it reaches `BKnightAttack` (0x4c13), which for a fallen opponent
+      zeroes the cooldown, checks ninety and `DeCapFLAG`, and
+      swings for the head: no gore test and no cooldown, unlike `TroggAttack`,
+      and it does not raise the flag itself, the decapitation script's own
+      `SetDecapFLAG` does.
+
+      Against a standing opponent it reaches `BKBlock` (0x4c40) first. A
+      `GETPERCENT` roll under `Progression[day & 7]` skips straight to the
+      attack; otherwise, if the two are not facing the same way, a swing coming
+      at it inside a hundred and twenty is met with kind 8, the block, and a
+      chop or a lunge with kind 0xe, the evade (`_evadechop`, 0x4cad). That
+      pairing is exactly what `KnightBloSw` pairs them with, which is a check
+      on the reading.
+
+      `BKAttack` (0x4cc3) rolls again, against `Progression[day]` unmasked this
+      time, and gives ground on a roll at or under it, spending a second roll
+      (`RND` at 0x4cd7) whose result is dead: it builds `bx = 0x5a + (rnd & 7)`
+      and jumps to `BKnightMove`, which reads only the walk bits. Over it, the
+      kind is by range with `ATT` vetoing a repeat: the swing inside ninety
+      (`K0$`, 0x4ce5), the overhead chop inside ninety five (`KK1$`, 0x4cff),
+      the lunge inside a hundred (`K2$`, 0x4d19, taken whatever `ATT` holds
+      when the belt is empty), the thrown dagger past that if there are daggers
+      (`K3$`, 0x4d39, on `+0x34`, which `SetKnightEquipment+38` fills with ten
+      and `KnifeThrow+3` empties), and closing if there are none (`K4$`).
+
+      The two branches the task loop raises are `BKnightStruck` (0x4d50), which
+      runs `CheckBlock` and, when the blow is stopped, replays `Att[+0x28]` and
+      clears bit 7 of `+0x48` so the evade is usable again at once, and
+      `BKnightHit` (0x4da8), whose rule is not the player's: `KnightHit1`
+      (0x4123) carries a swing through only for an up thrust or an evading
+      victim, while `BKnightHit` carries it through for a chop, a lunge, or any
+      blow on a kind 6 knight, unless the victim is evading.
+
+      **`Progression` is the difficulty ramp, and the day count drives it.**
+      Twenty bytes at DS:0x7c01, `14 0a 08 07 06 05 05 ...`, indexed by the word
+      at DS:0x5b1, which `InitGameStart+60` (0x1c49) zeroes and `EncounterFini`
+      (0x1167) steps every fourth encounter alongside `MoonCount`. Nothing else
+      reads or writes it. So a computer knight hesitates one time in five on the
+      first day and one in twenty from the sixth on, and past the table's twenty
+      bytes `BKAttack`'s unmasked read falls into `demonbodge`, zero, and it
+      stops hesitating.
+
+      **A duel is two knights.** `PracticeCombat5` (0x00fe, 0x0104) writes the
+      first two records into `[0x8979]` and `[0x897b]`, `MOON:Combat+115`
+      (0x03c4) writes the challenger and the challenged into the same pair, and
+      `ControlBlackKnight`'s opponent pick has room for those two and no third.
+      The arena browser fielded three or four, the extras drawn from the second
+      knight's palette entries because there are only two knights' worth; it
+      fields two now.
+
+      **Checked by looking**: two knights in the forest arena, the computer one
+      throwing daggers at a hundred and ninety, closing when they run out,
+      alternating the swing and the chop inside ninety, and dropping into the
+      duck as the other one chops.
+
+      **Two of the creatures' own finishers came with it**, because both are
+      the `+0xc` and the `*Struck1` branches this item had to read anyway:
+      `TrollOHead` (0x4397) and the spear's half of `TroggHit` (0x2f59). See
+      item 49, where they were on the not-built list.
+
+- [x] 51. **The weapon pile, and the strike point.** `COLLIDE.HIT` was decoded
+      and then unused. It is the weapon pile's own shape: `TaskPlace$` (0x98c1)
+      pushes every part flagged `WEAPON` onto `WeoponPile` and every `BODY` part
+      onto `BodyPile`, ten bytes each, `TaskCol_MainLoop` (0x9f26) walks one
+      against the other within ten rows of depth, and `COLCHK` (0x9fcd) walks
+      the cel's polyline point by point: `CHECKL` (0xa0da) takes one, `NOWID1`
+      (0xa0ed) adds the weapon record's x and 0xa108 its y, and a mirrored part
+      is `neg ax; add ax, [WIDTH]` (0xa0e7) against the cel's own width. The
+      baker now attaches those polylines cel by cel to the bank tables (recipe
+      15) and a swing is swept along the blade rather than round the weapon
+      cel's rectangle. Fourteen banks carry lines, `kn4.ob` and every creature's
+      weapon bank among them; a bank the file says nothing about keeps the
+      rectangle, so an actor the original never had still fights.
+
+      **The strike point is `CXx` and `CY`** (0xa130, 0xa13f), which are the
+      point of the sweep that landed and not the middle of an overlap, and
+      `TaskCol_MainLoop` writes them into the struck actor's `+0x58` and `+0x5a`
+      (0x9f87, 0x9f8d) beside `+0xc` and `+0xe`. That is what the blood comes
+      out of.
+
+      **What is still not the original**: the body side. `COLCHK` ends by
+      testing the weapon point against the body cel's own pixel mask (`CBITLP`,
+      0xa190, over the plane the cel's row stride at 0xa0b5 addresses), and this
+      tests the swept line against the authored body box. Doing it properly
+      means the packed sheets carrying a per-cel mask, which they do not.
 
 ## Phase 5: the shell
 
@@ -669,10 +787,14 @@ Independent of everything. Makes it feel like a game rather than a demo.
       0x9f0d that `CheckGROOC` uses, with the pointer's rectangle **one pixel square**)
       and `HotGadget` (what fire does with the one underneath). All of it is in
       `henge_core::pointer`, hit test reproduced as written including its asymmetry.
-      **Ours:** what a gadget's payload means. The original's nibbles name its own
-      trading screen's operations; here a gadget carries an id the screen that registered
-      it interprets, because our screens are already menus with a highlight. A real mouse
-      moves it as well, because a window with a mouse in it should behave like one.
+      **The payload is recovered too, and is no longer ours.** `STRP`'s low nibble is the
+      operation (`HotGadget`: 5 cast, 1 take magic, 3 raise, 0xa buy, the rest through
+      `test ax, 0x20` to `TakeGold`) and its high nibble is the bit within a field that
+      holds several things; `STPL` is the field. `henge_core::status` carries both, along
+      with `SetUpStatus`' seven string arrays and the `StatTYPE` each side of the panel
+      reads one of. `_WIZARD:DonateLoop` numbers its own four gadgets separately (2 leave,
+      3 take, 4 less, 5 more) and is a second enum for that reason. A real mouse moves the
+      pointer as well, because a window with a mouse in it should behave like one.
       **`SHOWPOINTER` is the routine at image 0xcf31, and it is one plain cel blit**:
       `les si, [0x892f]; sub ax, ax; mov bx, [0xe492]; mov cx, [0xe494]; call 0x5d7f`,
       which is the same blit every other sprite in the game goes through. `PO.CEL` is
@@ -734,21 +856,25 @@ Independent of everything. Makes it feel like a game rather than a demo.
       first half of `INTR.EXE`, the ending the second**: given a command tail it plays
       `The End`, `co.sti` and `bg5`, `bg7`, `bg8` instead, so those three plates are
       deliberately not in the intro. **Ours:** how long the logo and each credit screen
-      holds, since in the original that is a floppy's seek time; the rounding of 9.1
-      frames a second onto sixty ticks; and the dark ring round a caption, standing in for
-      the glyph shading silhouette text throws away
-- [x] 56. **Save and load, ours by design.** The original has none: `MOON.CFG` is a
-      sound-card profile and there is no slot, no file and no routine anywhere in the
-      2,223 symbols. What made it small is that the simulation was already built for it.
-      A save is `Run` plus `Overworld` plus the title's settings plus `WaitCOUNT`, with a
-      magic string, a format number and a fingerprint over the lot; `Overworld` gained
-      `Serialize` and both gained a `state_hash` beside `Bout`'s. **Both seeds go in**, so
-      a reloaded run is robbed and mends on the same steps a continued one would have.
-      Three refusals that are told apart on purpose and none of which loads half a game:
-      not a save, a save this build cannot read, and a save whose contents do not match
-      its fingerprint. **No path of any kind is in the file**, and a test asserts it. The
-      format lives in `henge_core::save`; reading and writing the file is
-      `henge-desktop`'s, because core does no I/O and keeps its one dependency
+      holds, since in the original that is a floppy's seek time; the rounding of 9.1033
+      frames a second onto the engine's 70.0863 ticks, which is 7.70 and so eight; and the
+      dark ring round a caption, standing in for the glyph shading silhouette text throws
+      away
+- [x] 56. **Save and load: deleted from the game, kept as a test harness.** The original
+      has none: `MOON.CFG` is a sound-card profile and there is no slot, no file and no
+      routine anywhere in the 2,223 symbols, the only `*Save*` hit being `SaveTYPE`, a task
+      VM opcode. So **F5 and F9 are gone**, there is no menu item, and nothing a player can
+      reach writes or reads one. The serialisation survives, explicitly labelled, as the
+      headless harness's way of posing a run: `--save <path>`, `--load`, and `S` and `L` in
+      an `--input` script, all command line and nothing else. It is also the determinism
+      check, which is the part that was always worth having: a snapshot is `Run` plus
+      `Overworld` plus the title's settings plus `WaitCOUNT` with a magic string, a format
+      number and a fingerprint over the lot, and the test round trips it through text and
+      then runs five hundred more steps on both copies to see that they stay identical.
+      Three refusals told apart on purpose, **no path of any kind in the file**, and a test
+      asserting that. The module is `henge_core::harness`, named so nobody mistakes it for
+      a game feature; reading and writing the file is `henge-desktop`'s, because core does
+      no I/O and keeps its one dependency
 
 ## Phase 6: the world
 
@@ -914,10 +1040,16 @@ the southern woods was the last one and the original has no such place, so he is
       gadget list is `se7`..`se17`. The mystic is `MYS.PIV` and the routine at 0xb935:
       a donation, an ability picked before the roll, and `MysticUpDown` walking
       `DonationTAB` for the delta the donation buys, good at fifty or under. Its lines
-      are `MY1a`..`MY7b` verbatim. **Not built**: the temple's other counter, which buys
-      and sells a moonstone (`pu18`, `se18`, `BuyMoonstone`), because item 71 owns the
-      moonstones; and the original's coin-at-a-time donation gadget, in place of which
-      three fixed amounts are offered
+      are `MY1a`..`MY7b` verbatim. **The coin-at-a-time donation gadget is built**, which
+      is `_WIZARD:InitDonation` (0xbb34), `DonateLoop` (0xbbe6) and `DonationRefresh`
+      (0xbc9e): four gadgets whose `[si+0x10]` is 4, 5, 3 and 2, at (0x90, 0xa9),
+      (0xa2, 0xa9), (0x83, 0xb9) and (0xad, 0xb9), moving one coin at a time between
+      `GOLDP` and `DONATION`, with the two purses, the two words and the two numbers where
+      `DonationRefresh` puts them. The three fixed amounts that stood in for it are gone.
+      **Not built**: the temple's other counter, which buys and sells a moonstone
+      (`pu18`, `se18`, `BuyMoonstone`), because item 71 owns the moonstones; and the temple
+      and the merchant as `_STATUS` panels rather than as rooms with lists, which is
+      item 53
 - [x] 67. **The wizard.** `WizardIntro` on the way in, one roll plus the grudge against
       thirty, seventy and ninety for magic, an ability, gold and the toad, and the
       fourteen `WizardText` lines cycled by `WIZGOLD_CNT` and `WIZMAG_CNT`, all
@@ -968,9 +1100,14 @@ three life points, the stone circle on the stone's own night, the victory page o
       `_MAP:knvalley` `Enter Valley of the Gods`. Beating the Guardian writes
       `mov byte ptr [si+0x14], 0`, so **the keys are spent**, and a second moonstone means
       four more lairs. The keys are also on the character sheet now, which is
-      `_STATUS:StatCheckKeys`: `KI.CEL` cels 5 to 8 at x 0x4c, 0x5e, 0x70 and 0x82,
-      eighteen apart, one slot per bit, an empty slot for a key you have not found. Its
-      row, y 0x6f, is the one thing not kept: henge's panel puts the armour there
+      `_STATUS:StatCheckKeys` (0xc44e): `KI.CEL` cels 5 to 8 at x 0x4c, 0x5e, 0x70 and
+      0x82, eighteen apart, one slot per bit, an empty slot for a key you have not found.
+      **The row is kept and there is nothing in its way.** This entry used to say the row,
+      y 0x6f, was the one thing not kept because the armour sat there; it does not.
+      `DisplayKnight` puts the armour cel at (0x1d, **0x70**) and the keys start at x 0x4c,
+      so the two neither share a row nor overlap. The moonstones share the key row, at
+      x 0x67 for all four bits, which does overlap the second and third key slots and is
+      the original's own arithmetic
 - [x] 71. **The moonstone, and where it comes from.** The Valley of the Gods, which is
       the fourth thing on `MOON:StackMessages`' list and had no door until now. Behind
       the gate is the demon: `MOON:FightDemon` calls `InitKnightvsDemon`, which writes
@@ -1089,16 +1226,30 @@ Any time. None of it blocks anything.
       left with right and up with down before anything sees the word. And the reader at
       image `0x81ec` gives **the original's own keys**: player one Enter and the arrows,
       player two Tab, W, X, A and D, OR'd with `JOY1` and `JOY0` respectively.
+      Those ten keys are now what the table **ships** with; the arrows-and-space layout
+      that used to be the default was ours and is gone, and so is `--original-keys`, which
+      had nothing left to mean.
+      **The four thresholds are recovered too.** `JOY0` compares against four words at
+      `DS:0x817e` to `0x8184`, and the image has them initialised at `0x1a52e`: **16, 16,
+      80, 80**. That is the answer before anybody calibrates, so it is
+      `Calibration::default`, replacing a pair of invented corners at six tenths of
+      deflection. The four are exactly `AdjustJoy` of 6 and 90 (range 84, an eighth is 10),
+      which checks the reading and also fixes the scale a modern axis is put on: -1 maps to
+      6 and +1 to 90, so calibrating a pad that reports clean extremes gives the shipped
+      pair straight back. The one inherent piece is that a gameport count is a busy-loop
+      count and a pad reports a fraction, so something has to map one onto the other.
+      **The menu route in is recovered.** `OptionKeys` at `0x1282` tests scancode 0x24,
+      `J`, first of all and jumps to `Fix_JoyStick`, which jumps back at `0x59d7`. So `J`
+      on the title screen calibrates and F11 is gone. Escape is the same story: tested at
+      `OptionKeys+11` (`0x128d`) and again at `StartAgain+18` (`0x00ba`), both returning, so
+      it quits from the title screen and nowhere else.
       All of that is `crates/henge-desktop/src/input.rs` and unit tested.
-      **Ours.** The binding table, because the original's keys are five `mov ax,
+      **Ours.** The binding table itself, because the original's keys are ten `mov ax,
       <scancode>` instructions and there is nothing to port. It is data: actions to
-      sources, by winit's and gilrs' own names, saved to `henge-controls.json` beside the
-      save. `--bind 0:fire=Enter` rebinds from the command line, `--controls-write`
-      writes the file, `--original-keys` starts from the original's layout, and the
-      calibration is saved alongside. The default calibration's two corners are ours too:
-      `AdjustJoy`'s eighth off a modern pad's true extremes would want the stick pushed
-      seven eighths of the way, so the default pretends the corners were answered at six
-      tenths and puts *that* through `AdjustJoy` unchanged.
+      sources, by winit's and gilrs' own names, saved to `henge-controls.json`.
+      `--bind 0:fire=Space` rebinds from the command line, `--controls-write` writes the
+      file, and the calibration is saved alongside. A key the table claims is a control is
+      never also a developer key, which is why the arena flip moved off Tab onto `F2`.
       **Pads come from `gilrs`**, which was not already in `Cargo.lock`; winit has no
       gamepad support at all, so there was nothing to prefer it to. It reports no pads
       rather than failing when there is no input subsystem, which is the headless case.
@@ -1252,6 +1403,36 @@ Any time. None of it blocks anything.
       hermit**, a second healer this project invented and stood in the southern woods, and
       the Flask of healing and Draught of life he and the merchants sold. Nothing on the
       map is sited by hand any more, and the baker has a test that says so
+- [x] 83. **The clock. Recovered: the frame is one vertical retrace, so the tick is
+      70.0863 Hz and not sixty.** The wait is the unnamed public routine at image `0x5a24`,
+      sitting in the gap between `AdjustJoy` (`0x59f8`) and the start of `GFX` (`0x5a6e`):
+      `mov dx, 0x3da`, spin while bit 3 is set, then spin until it is set again, which is
+      exactly one retrace. Eight places call it and four of them are main loops, once a
+      pass: `Combat` at `0x0354`, `MapLOOP` at `0x0a306`, `ScanKEYS` at `0x0145a` and
+      `FindLandscape` at `0x0afed`; the other four are `ShakeScreen` (`0x0496b`),
+      `KnightWonGame` (`0x01117`), `FightDemon` (`0x01031`) and the fade-out loop
+      (`0x05bb0`). Nothing else paces a loop.
+      So the rate is the video mode's. **The image never reprograms the timing**: there is
+      no write to the Miscellaneous Output register at `0x3c2` anywhere in it, and the only
+      CRTC writes are index 0x0c, the start address, at `0x5a34` and in `ShakeScreen` at
+      `0x4965`. A 320x200 VGA mode therefore runs at the BIOS 400-line timing, 25.175 MHz
+      over 800 dots over 449 lines, which is **70.0863 frames a second**, the same figure
+      `henge_core::intro` already quoted for the story card's 420 retraces. The engine's
+      tick is now 14,268,123 ns.
+      **This mattered because every recovered duration in the tree is a frame count**, so
+      sixty ran all of them about fourteen percent slow: every cooldown, every script
+      frame, every sixteen-step fade. Two numbers moved with the clock rather than against
+      it: `intro::MESSAGE_TICKS` is 420 again, which is the recovered number itself now
+      that a tick is a retrace, and `intro::TICKS_PER_FRAME` is eight, because the intro's
+      own pacer (`INTR.EXE` at `0x021f` reads `0000:046c`, adds two, and `0x022f` spins to
+      it) is two BIOS ticks or 9.1033 frames a second, and 70.0863 over that is 7.70.
+      **The 54.62 Hz timer is a different clock and drives only sound.** `Install_Timer`
+      (`0x584f`) sets counter 0 to mode 3 with divisor `0x5555` and hooks int 8 to `0x5934`,
+      whose whole body is `mov ah, 1; int 60h` for the music, the same with `int 61h` for
+      the effects unless the card is 3, and a `Times3` counter that chains the original
+      int 8 every third tick so DOS keeps its 18.2 Hz time. It touches no game state, and
+      `henge_audio::music` already carried that rate inside the score, so the tunes did not
+      move
 
 ---
 
@@ -1292,6 +1473,18 @@ anyone estimates the end of this list.
 because they were recovered: because there is nothing there. Both endings are one message
 over `MESSAGE.PIV` and `WaitFIRE`, and nothing in the original counts anything. What was
 designed here has been removed rather than finished.
+
+**The status panel's menu, the town front doors' menu and the donation's three amounts
+were all here, and none of them survived a grep either.** The panel's menu was replaced by
+`SetUpStatus` (0xcf45), `SetUpID` (0xd2b9) and `AddIconGadget` (0xc9ab), which turn every
+icon on the screen into a gadget that says one of twenty seven recovered lines and runs one
+of five recovered operations. The town menus were replaced by `InitHighWood` (0xec9) and
+`InitWaterDeep` (0xf4a), five boxes each over words the artwork already carries. The
+donation was replaced by `InitDonation` (0xbb34) and `DonateLoop` (0xbbe6), which move one
+coin at a time. **Three more for the tally.** Two things this project's place screens did
+went with them: picking the ink for a menu by counting the colours in the box behind it,
+and the day-and-purse strip along the bottom of every place screen, which was the same
+invention already taken off the map.
 
 **37, 64, 69 and the whole of phase 7 were on this list and are not any more.**
 Item 37 came off it last: `ControlTrogg`, `ControlTroll`, `ControlRatmen`,

@@ -204,9 +204,14 @@ const KNIGHT_BLOCKS: &[(&str, &str)] = &[
 /// `KnightKnightStruck1`. `Knight_SwCollapse` is the second half of
 /// `Knight_SwDeath`, the fall itself; `Knight_SwDeCap` sets `DeCapFLAG`,
 /// skips to the collapse when the gore is off, and ends by killing the task.
+/// `explode` is the third, and it is not a blow on a corpse at all:
+/// `TrollStruck1` (0x438a) falls into `TrollOHead` (0x4397) for the troll's
+/// overhead chop, and if that blow left the knight with nothing it writes
+/// `Knight_Explode` instead of going on to `KnightSAnim`.
 const KNIGHT_FINISHES: &[(&str, &str)] = &[
     ("collapse", "Knight_SwCollapse"),
     ("decap", "Knight_SwDeCap"),
+    ("explode", "Knight_Explode"),
 ];
 
 /// The scripts the game's own code hands to a task it spawns off the knight:
@@ -1021,11 +1026,15 @@ fn main() -> anyhow::Result<()> {
             Sheet {
                 file,
                 frames: sheet.rects,
+                palette: None,
             },
         );
     }
 
     // Everything else that is a sprite bank, so nothing is silently dropped.
+    // `BOLD.F` and `SMALL.FON` are banks like any other, and the two of them
+    // are the only ones whose palette is not the screen they are drawn on.
+    const FONT_BANKS: [&str; 2] = ["bold", "small"];
     // The .C files (BE1, WI1, HEN1, MI) are banks too, in the same format.
     let claimed: Vec<String> = ACTORS
         .iter()
@@ -1054,6 +1063,17 @@ fn main() -> anyhow::Result<()> {
             Sheet {
                 file,
                 frames: sheet.rects,
+                // **The two font banks belong to `MESSAGE.PIV`.** `BOLD.F` and
+                // `SMALL.FON` are `CEL` files and carry no palette; `GFX:TextP`
+                // hands a glyph to the same blitter every other cel goes
+                // through, with no ink anywhere in it, and the entries its five
+                // shades name are the ones `MESSAGE.PIV` reserves: black at 5
+                // and `fed`, `dc9`, `b95`, `842` at 9 to 12. Naming that here is
+                // what lets a line be written over a screen whose palette says
+                // something else without being flattened to a silhouette.
+                palette: FONT_BANKS
+                    .contains(&stem.as_str())
+                    .then(|| "palette.scene.message".to_string()),
             },
         );
     }
@@ -1076,6 +1096,7 @@ fn main() -> anyhow::Result<()> {
                         ox: 0,
                         oy: 0,
                     }],
+                    palette: Some(format!("palette.scene.{stem}")),
                 },
             );
             m.palettes
@@ -1141,12 +1162,20 @@ fn main() -> anyhow::Result<()> {
     m.data
         .insert("data.arenas".into(), "data/arenas.json".into());
 
-    if let Ok(bytes) = lib.bytes("COLLIDE.HIT") {
-        let c = Collide::parse(&bytes)?;
-        fs::write(out.join("data/hitlines.json"), serde_json::to_string(&c)?)?;
-        m.data
-            .insert("data.hitlines".into(), "data/hitlines.json".into());
-    }
+    // `COLLIDE.HIT` is the weapon pile's own shape: the samples along each
+    // blade cel that `COLCHK` (0x9fcd) walks. It is written out whole, and it
+    // is also attached cel by cel to the bank tables below, which is where the
+    // simulation reads it.
+    let hits = match lib.bytes("COLLIDE.HIT") {
+        Ok(bytes) => {
+            let c = Collide::parse(&bytes)?;
+            fs::write(out.join("data/hitlines.json"), serde_json::to_string(&c)?)?;
+            m.data
+                .insert("data.hitlines".into(), "data/hitlines.json".into());
+            c
+        }
+        Err(_) => Collide::default(),
+    };
 
     // Which sheets each arena family draws from, and the eight arenas its
     // counter rotates through.
@@ -1178,7 +1207,7 @@ fn main() -> anyhow::Result<()> {
         .insert("data.families".into(), "data/families.json".into());
 
     // The animation task VM: every actor's bank tables, and every script.
-    let banks = bank_tables(&lib);
+    let banks = bank_tables(&lib, &hits);
     fs::write(out.join("data/banks.json"), serde_json::to_string(&banks)?)?;
     m.data.insert("data.banks".into(), "data/banks.json".into());
 
@@ -1436,7 +1465,7 @@ fn write_indexed(
 /// The knight gets the knight in both 1 and 2, because a bout between knights
 /// loads one into each, which is what makes a script that switches tables
 /// mid-animation work when both fighters are knights.
-fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
+fn bank_tables(lib: &Library, hits: &Collide) -> BTreeMap<String, BankTables> {
     let mut cache: BTreeMap<String, Bank> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for (creature, slots) in CREATURE_BANKS {
@@ -1447,7 +1476,10 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
             (3, TABLE3_BANKS),
             (4, TABLE4_BANKS),
         ] {
-            let banks: Vec<Bank> = files.iter().map(|f| bank_of(lib, f, &mut cache)).collect();
+            let banks: Vec<Bank> = files
+                .iter()
+                .map(|f| bank_of(lib, f, hits, &mut cache))
+                .collect();
             if banks.iter().any(|b| !b.cels.is_empty()) {
                 tables.insert(n, banks);
             }
@@ -1463,7 +1495,7 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
         if *creature == "dragon" {
             let banks: Vec<Bank> = DRAGON_FLIGHT_BANKS
                 .iter()
-                .map(|f| bank_of(lib, f, &mut cache))
+                .map(|f| bank_of(lib, f, hits, &mut cache))
                 .collect();
             if banks.iter().any(|b| !b.cels.is_empty()) {
                 tables.insert(5, banks);
@@ -1471,6 +1503,14 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
         }
         out.insert(creature.to_string(), tables);
     }
+    // **The stone circle's own table.** `_TAVERN`'s henge routine at image
+    // 0xb398 loads `Hen1.c` into `DiceHANDLE` (`DS:0xd113`) and hands `bp` that
+    // address to both of its `ADDTASK` calls, so the circle's two scripts index
+    // through a one-bank table and nothing else. Table 1 is the table a script
+    // uses unless it says otherwise, and neither of these says otherwise.
+    let mut henge = BankTables::new();
+    henge.insert(1, vec![bank_of(lib, "Hen1.c", hits, &mut cache)]);
+    out.insert("henge".to_string(), henge);
     out
 }
 
@@ -1479,13 +1519,26 @@ fn bank_tables(lib: &Library) -> BTreeMap<String, BankTables> {
 ///
 /// The sizes matter to the simulation, not only to the renderer: a mirrored
 /// part is placed at `task_x - (x + cel_width)`, so a width is geometry.
-fn bank_of(lib: &Library, file: &str, cache: &mut BTreeMap<String, Bank>) -> Bank {
+fn bank_of(lib: &Library, file: &str, hits: &Collide, cache: &mut BTreeMap<String, Bank>) -> Bank {
     if file.is_empty() {
         return Bank::default();
     }
     if let Some(b) = cache.get(file) {
         return b.clone();
     }
+    // `COLLIDE.HIT` names its blocks the way the bank files are named, but not
+    // always in the same case (`kn4.ob`, `Troll1.cel`), so match without it.
+    let hit: Vec<Vec<[i16; 2]>> = hits
+        .0
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(file))
+        .map(|(_, frames)| {
+            frames
+                .iter()
+                .map(|f| f.points.iter().map(|p| [p.x as i16, p.y as i16]).collect())
+                .collect()
+        })
+        .unwrap_or_default();
     let sizes = |name: &str| -> Option<Vec<[u16; 2]>> {
         Some(
             lib.cel(name)
@@ -1512,6 +1565,7 @@ fn bank_of(lib: &Library, file: &str, cache: &mut BTreeMap<String, Bank>) -> Ban
                 sheet: format!("actor.{actor}"),
                 base,
                 cels,
+                hit,
             }
         }
         None => {
@@ -1520,6 +1574,7 @@ fn bank_of(lib: &Library, file: &str, cache: &mut BTreeMap<String, Bank>) -> Ban
                 sheet: format!("bank.{stem}"),
                 base: 0,
                 cels: sizes(file).unwrap_or_default(),
+                hit,
             }
         }
     };
@@ -1757,9 +1812,10 @@ fn actor_definitions(
         .map(|(k, s)| (k.to_string(), s.to_string()))
         .collect();
     def.blockable = true;
-    // `CONTROLTABLE[6]` is `ControlKnight`, which reads a joystick. A knight
-    // in a seat the machine plays gets the plain opponent, which closes and
-    // swings and struggles out of a hold.
+    // `CONTROLTABLE[6]` is `ControlKnight`, which reads a joystick, and slot 8
+    // is `ControlBlackKnight` (`InitGameStart+241`, 0x1cfe). A knight in a
+    // seat the machine plays runs the second, which is `Controller::Knight`
+    // here; a knight a person plays never runs a controller at all.
     def.controller = "knight".into();
     // Where a knight stands at the opening of a bout. `SetKnightCombat`
     // (0x2962) writes the first record a field at a time, `mov [di+2], 0xfa;
@@ -2568,8 +2624,9 @@ fn place_definitions(
         })
     };
     let sell = |item: &str| serde_json::json!({ "do": "sell", "item": item });
-    let donate = |gold: u32| serde_json::json!({ "do": "donate", "gold": gold });
-    let consult = |gold: u32| serde_json::json!({ "do": "consult", "gold": gold });
+    // `_WIZARD:InitDonation` and `DonateLoop`: the coin-at-a-time panel both
+    // counters take their fee through.
+    let bowl = |consult: bool| serde_json::json!({ "do": "bowl", "consult": consult });
     let wager =
         |stake: u32, room: &str| serde_json::json!({ "do": "wager", "stake": stake, "room": room });
 
@@ -2653,9 +2710,15 @@ fn place_definitions(
 
     // The town healer, `HEA.PIV`. `HealDon` takes the whole donation and
     // spends it down: ten mends every wound, fifteen buys a life point, and
-    // what is left over stays in his pot. The three amounts offered are ours,
-    // because the original's gadget adds and subtracts a coin at a time; the
-    // greeting is `HT1a`..`HT1c` verbatim.
+    // what is left over stays in his pot. The greeting is `HT1a`..`HT1c`
+    // verbatim.
+    //
+    // **The amount is the original's bowl now.** Three fixed sums used to be
+    // offered here, and the comment above them admitted they were ours;
+    // `_WIZARD:InitDonation` at image 0xbb34 adds four gadgets whose payload
+    // words are 4, 5, 3 and 2, and `DonateLoop`'s `AddDonation` and
+    // `SubDonation` move exactly one coin between the purse and the bowl. So
+    // there is one option here, and taking it opens that panel.
     let town_healer = |town: &str| {
         serde_json::json!({
             "name": "Healer",
@@ -2666,9 +2729,7 @@ fn place_definitions(
             "text": [4, 148, 312, 40],
             "intro": "Good Day Sir Knight, would you care for a healing.  I have the best roots, herbs and leeches on this side of the land. I am at your service for a small donation",
             "options": [
-                { "label": "Donate",  "effect": donate(10) },
-                { "label": "Donate",  "effect": donate(25) },
-                { "label": "Donate",  "effect": donate(50) },
+                { "label": "Donate",  "effect": bowl(false) },
                 { "label": "Back",    "effect": go(town) }
             ]
         })
@@ -2726,8 +2787,8 @@ fn place_definitions(
 
     // The mystic, `MYS.PIV`. `MysticUpDown` rolls against `DonationTAB`, six
     // records of a threshold and a signed delta, so a bigger donation buys
-    // better odds; the three amounts are picked one to a band. The greeting is
-    // `MY1a`..`MY1c` verbatim.
+    // better odds, and the amount comes out of the same bowl the healer uses.
+    // The greeting is `MY1a`..`MY1c` verbatim.
     places.insert(
         "waterdeep.mystic".into(),
         serde_json::json!({
@@ -2739,9 +2800,7 @@ fn place_definitions(
             "text": [4, 148, 312, 40],
             "intro": "Welcome my child.  I am here to help you in your quest I have the powers to reach into the cosmos and give your body new skills and agility.",
             "options": [
-                { "label": "Donate", "effect": consult(5) },
-                { "label": "Donate", "effect": consult(25) },
-                { "label": "Donate", "effect": consult(50) },
+                { "label": "Donate", "effect": bowl(true) },
                 { "label": "Back",   "effect": go("waterdeep") }
             ]
         }),
@@ -2757,6 +2816,20 @@ fn place_definitions(
             "scene": "scene.highwood",
             "x": highwood.0, "y": highwood.1, "w": highwood.2, "h": highwood.3,
             "menu": [256, 0, 62, 200],
+            // `MOON:InitHighWood` at image 0xec9: five gadgets, 64 wide, at
+            // `[si+0xa]` 0x100 and `[si+0xc]` 0x1e, 0x42, 0x6a, 0x8c and 0xb7,
+            // heights 0x10, 0x10, 0x10, 0x1a and 0xc, with `+0xe` 1 to 5, which
+            // is the ladder `HWLOOP` at 0xe35 tests: `MERC`, `TAV`, `HEAL`,
+            // `HTEM`, `CEXIT`. They sit on `Merchant`, `Tavern`, `Healer`,
+            // `High Temple` and `Exit`, which `HIGHWOOD.PIV` has painted down
+            // its parchment, so nothing is drawn over them.
+            "boxes": [
+                [256, 0x1e, 64, 0x10],
+                [256, 0x42, 64, 0x10],
+                [256, 0x6a, 64, 0x10],
+                [256, 0x8c, 64, 0x1a],
+                [256, 0xb7, 64, 0x0c]
+            ],
             "options": [
                 { "label": "Merchant", "effect": go("highwood.merchant") },
                 { "label": "Tavern",   "effect": go("highwood.tavern") },
@@ -2775,6 +2848,17 @@ fn place_definitions(
             "scene": "scene.waterdee",
             "x": waterdeep.0, "y": waterdeep.1, "w": waterdeep.2, "h": waterdeep.3,
             "menu": [2, 0, 62, 200],
+            // `MOON:InitWaterDeep` at image 0xf4a, the same five on the other
+            // edge: x 0, y 0x1a, 0x3f, 0x65, 0x86 and 0xb6, heights 0x10, 0x10,
+            // 0x10, 0x1f and 0xc. The fourth is the mystic rather than the
+            // temple, which is the only difference between the two towns.
+            "boxes": [
+                [0, 0x1a, 64, 0x10],
+                [0, 0x3f, 64, 0x10],
+                [0, 0x65, 64, 0x10],
+                [0, 0x86, 64, 0x1f],
+                [0, 0xb6, 64, 0x0c]
+            ],
             "options": [
                 { "label": "Merchant", "effect": go("waterdeep.merchant") },
                 { "label": "Tavern",   "effect": go("waterdeep.tavern") },
@@ -3549,6 +3633,7 @@ fn bake_intro(lib: &Library, out: &std::path::Path, m: &mut Manifest) -> anyhow:
                     ox: 0,
                     oy: 0,
                 }],
+                palette: Some("palette.scene.mindscap".into()),
             },
         );
         m.palettes
@@ -3588,6 +3673,7 @@ fn bake_intro(lib: &Library, out: &std::path::Path, m: &mut Manifest) -> anyhow:
                     ox: 0,
                     oy: 0,
                 }],
+                palette: Some("palette.scene.intropan".into()),
             },
         );
         m.palettes
@@ -3595,12 +3681,71 @@ fn bake_intro(lib: &Library, out: &std::path::Path, m: &mut Manifest) -> anyhow:
         done.push(format!("a {}x{} panorama", pan.width, pan.height));
     }
 
-    match intro_cast() {
-        Ok(Some(cast)) => {
+    // **`CO.STI` is the ending's own panorama**, read exactly the way
+    // `INTRO.STI` is. `0xd8c` puts the three sheet segments in the tile
+    // engine's table as `[0x444b]`, `[0x4457]` and `[0x4459]`, which the
+    // ending's loader filled with `bg7`, `bg8` and `bg2a`; every tile in the
+    // file is under eighty, so only `bg7`'s are actually used. Its bottom eight
+    // rows are `bg7` whole and the thirty nine above them are one repeated sky
+    // tile with three stars in it, which is the sky the camera rises into.
+    if let Ok(sti) = lib.bytes("co.sti") {
+        let bg7 = lib.piv("bg7.piv")?;
+        let bg8 = lib.piv("bg8.piv")?;
+        let bg2a = lib.piv("bg2a.piv")?;
+        let pan = introexe::panorama(&sti, &[&bg7, &bg8, &bg2a])?;
+        anyhow::ensure!(
+            pan.width == henge_core::intro::PAN_W as usize
+                && pan.height == henge_core::intro::PAN_H as usize,
+            "the ending's panorama came out {}x{}, not 320x1200",
+            pan.width,
+            pan.height
+        );
+        let file = "sheets/scene_copan.png".to_string();
+        write_indexed(
+            &out.join(&file),
+            pan.width,
+            pan.height,
+            &pan.pixels,
+            &bg7.palette,
+        )?;
+        m.sheets.insert(
+            "scene.copan".into(),
+            Sheet {
+                file,
+                frames: vec![FrameRect {
+                    x: 0,
+                    y: 0,
+                    w: pan.width as u32,
+                    h: pan.height as u32,
+                    ox: 0,
+                    oy: 0,
+                }],
+                // `0x778` points `[0x40fb]` at `0x448f`, which `0x3ae7` filled
+                // from `bg7`, so the rise is shown in that picture's palette.
+                palette: Some("palette.scene.bg7".into()),
+            },
+        );
+        done.push(format!(
+            "the ending's {}x{} panorama",
+            pan.width, pan.height
+        ));
+    }
+
+    match intro_image() {
+        Ok(Some(img)) => {
+            let cast = introexe::cast(&img)?;
             let n = cast.scripts.len();
             fs::write(out.join("data/intro.json"), serde_json::to_string(&cast)?)?;
             m.data.insert("data.intro".into(), "data/intro.json".into());
             done.push(format!("{n} animation scripts"));
+            // The ending's cast is the same image read with the ending's own
+            // bank table, which is a different six files in a different order.
+            let end = introexe::ending_cast(&img)?;
+            let n = end.scripts.len();
+            fs::write(out.join("data/ending.json"), serde_json::to_string(&end)?)?;
+            m.data
+                .insert("data.ending".into(), "data/ending.json".into());
+            done.push(format!("{n} of the ending's"));
         }
         Ok(None) => done.push("no cast (no unpacked INTR.EXE image)".into()),
         Err(e) => done.push(format!("no cast ({e:#})")),
@@ -3610,8 +3755,8 @@ fn bake_intro(lib: &Library, out: &std::path::Path, m: &mut Manifest) -> anyhow:
     Ok(done.join(", "))
 }
 
-/// The intro's cast, if the unpacked `INTR.EXE` image is to hand.
-fn intro_cast() -> anyhow::Result<Option<henge_core::content::IntroCast>> {
+/// The expanded `INTR.EXE` image, if the unpacked one is to hand.
+fn intro_image() -> anyhow::Result<Option<Vec<u8>>> {
     use henge_formats::introexe;
     let candidates = ["research/intro.final.bin"];
     let Some(raw) = candidates.iter().find_map(|p| fs::read(p).ok()) else {
@@ -3619,7 +3764,7 @@ fn intro_cast() -> anyhow::Result<Option<henge_core::content::IntroCast>> {
     };
     let img = introexe::expand(&raw)?;
     introexe::check(&img)?;
-    Ok(Some(introexe::cast(&img)?))
+    Ok(Some(img))
 }
 
 #[cfg(test)]

@@ -1,24 +1,31 @@
-//! Saving a run, and loading one back.
+//! **A test harness feature, not a game feature.** Serialising a run so a test
+//! can pose one, and reading it back.
 //!
-//! **This one is ours.** The original has no save at all: `MOON.CFG` is a
-//! sound-card profile, there is no slot, no file and no routine, and a game of
-//! Moonstone is finished or abandoned in one sitting. So there is nothing to
-//! recover and nothing to reproduce, and the whole of what follows is designed
-//! rather than ported. It is marked as such here, in `docs/BUILD_ORDER.md` and
-//! in `docs/COMPLETE.md`, so that nobody later mistakes it for the original's.
+//! The original has no save, and neither does this game. `MOON.CFG` is a sound
+//! card profile; no symbol among the 2,223 is a save (the only `*Save*` hit is
+//! `SaveTYPE`, which is a task VM opcode); there is no slot, no file, no routine
+//! and no menu entry, and a game of Moonstone is finished or abandoned in one
+//! sitting. So nothing a player can reach writes or reads one of these. There is
+//! no save key, no load key and no menu item, and there must not be.
 //!
-//! What made it easy is that the simulation was already built to allow it.
-//! Everything the run consists of is `serde`-serializable, `henge-core` is
-//! deterministic by construction (integers only, no wall clock, no unseeded
-//! randomness, `BTreeMap` rather than `HashMap` so orderings are defined), and
-//! the two generators that matter carry their seeds inside the state. A save is
-//! therefore a serialization of the simulation and nothing else.
+//! What is left is the harness. A headless run is driven from the command line,
+//! and `--save <path>` with `--load` is how a test poses a run at day nine with a
+//! particular purse and a particular traveller's seed instead of walking the
+//! whole way there every time. That is worth keeping and it is worth keeping
+//! honestly labelled, which is why this module is called what it is.
+//!
+//! It also earns its place as a determinism check. `henge-core` is deterministic
+//! by construction (integers only, no wall clock, no unseeded randomness,
+//! `BTreeMap` rather than `HashMap` so orderings are defined) and the two
+//! generators that matter carry their seeds inside the state, so a round trip
+//! through text that comes back bit for bit and then *goes on* identically for
+//! five hundred steps is a real test of that. See the tests below.
 //!
 //! ### The shape
 //!
 //! ```text
-//! magic        "henge-save", so a file that is not one says so before anything
-//!              else is attempted
+//! magic        "henge-harness", so a file that is not one says so before
+//!              anything else is attempted
 //! format       an integer, bumped whenever the meaning of the rest changes
 //! run          the whole Run: purse, pack, knight, lairs, moon, seeds
 //! travel       where on the map, what day, and the traveller's own seed
@@ -28,80 +35,67 @@
 //! fingerprint  Run::state_hash mixed with Overworld::state_hash
 //! ```
 //!
-//! ### What happens when a save is stale
+//! ### What happens when a snapshot is stale
 //!
-//! [`Save::check`] refuses, with a named reason, and the caller is expected to
-//! say so and carry on rather than to crash or to load half of it. The three
-//! failures are distinguishable on purpose:
-//!
-//! - [`SaveError::NotASave`]: the magic is wrong. Someone pointed the loader at
-//!   the wrong file.
-//! - [`SaveError::Version`]: the magic is right and the format is not this one.
-//!   The save is real and this build cannot read it, which is a different
-//!   sentence to say to a player than "that is not a save".
-//! - [`SaveError::Corrupt`]: the magic and the format are right and the
-//!   fingerprint does not match the contents, so the file has been edited or
-//!   damaged.
-//!
-//! A save is refused, never repaired. Silently loading a save whose meaning has
-//! changed is how a run ends up in a state the simulation cannot produce, and
-//! the whole value of a deterministic core is that such a state does not exist.
+//! [`Snapshot::check`] refuses, with a named reason, and the caller is expected
+//! to say so and stop rather than to load half of it. A harness that silently
+//! loaded a snapshot whose meaning had changed would pose a state the simulation
+//! cannot produce and then test it, which is worse than no test.
 //!
 //! ### Where the bytes go
 //!
-//! Not here. This module builds the value and checks it; turning it into text
-//! and putting it on a disk is `henge-desktop`'s, because `henge-core` does no
-//! I/O and has one dependency. **No path of any kind is stored in a save**, so
-//! a save written on one machine loads on another, and a pack moved to another
-//! directory does not invalidate one.
+//! Not here. This module builds the value and checks it; turning it into text and
+//! putting it on a disk is `henge-desktop`'s, because `henge-core` does no I/O
+//! and has one dependency. **No path of any kind is stored**, so a snapshot
+//! written on one machine loads on another.
 
 use crate::overworld::Overworld;
 use crate::run::Run;
 use serde::{Deserialize, Serialize};
 
-/// What a save file has to begin with to be one.
-pub const MAGIC: &str = "henge-save";
+/// What a harness snapshot has to begin with to be one.
+pub const MAGIC: &str = "henge-harness";
 
-/// The format number. **Bump this whenever the meaning of a saved field
-/// changes**, and older saves will be refused with [`SaveError::Version`]
-/// instead of being misread.
+/// The format number. **Bump this whenever the meaning of a stored field
+/// changes**, and older snapshots will be refused with
+/// [`SnapshotError::Version`] instead of being misread.
 pub const FORMAT: u32 = 1;
 
-/// Why a save could not be loaded.
+/// Why a snapshot could not be loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SaveError {
-    /// Not a henge save at all.
-    NotASave,
-    /// A henge save this build is too old or too new to read.
+pub enum SnapshotError {
+    /// Not a henge snapshot at all.
+    NotASnapshot,
+    /// A henge snapshot this build is too old or too new to read.
     Version { found: u32, expected: u32 },
     /// The right shape, but the contents do not match the fingerprint.
     Corrupt,
 }
 
-impl SaveError {
+impl SnapshotError {
     /// A line to put in front of a player.
     pub fn message(&self) -> String {
         match self {
-            SaveError::NotASave => "that is not a saved game".to_string(),
-            SaveError::Version { found, expected } => {
-                format!("that save is version {found} and this build reads version {expected}")
+            SnapshotError::NotASnapshot => "that is not a harness snapshot".to_string(),
+            SnapshotError::Version { found, expected } => {
+                format!("that snapshot is version {found} and this build reads version {expected}")
             }
-            SaveError::Corrupt => "that save is damaged".to_string(),
+            SnapshotError::Corrupt => "that snapshot is damaged".to_string(),
         }
     }
 }
 
-impl std::fmt::Display for SaveError {
+impl std::fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message())
     }
 }
 
-impl std::error::Error for SaveError {}
+impl std::error::Error for SnapshotError {}
 
-/// A saved game.
+/// A posed run, as the harness stores it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Save {
+pub struct Snapshot {
     pub magic: String,
     pub format: u32,
     pub run: Run,
@@ -114,10 +108,10 @@ pub struct Save {
     pub fingerprint: u64,
 }
 
-impl Save {
-    /// Take a save of a run standing on the map.
+impl Snapshot {
+    /// Take a snapshot of a run standing on the map.
     ///
-    /// A save is only ever taken between one step and the next. A bout is not
+    /// A snapshot is only ever taken between one step and the next. A bout is not
     /// in it: a fight is a few seconds of a game and saving inside one would
     /// mean carrying the whole task VM, every fighter's script pointer and the
     /// missiles in the air, for something nobody wants to resume mid-swing.
@@ -128,8 +122,8 @@ impl Save {
         players: usize,
         gore: bool,
         wait_count: usize,
-    ) -> Save {
-        let mut save = Save {
+    ) -> Snapshot {
+        let mut snap = Snapshot {
             magic: MAGIC.to_string(),
             format: FORMAT,
             run: run.clone(),
@@ -139,11 +133,11 @@ impl Save {
             wait_count,
             fingerprint: 0,
         };
-        save.fingerprint = save.contents_hash();
-        save
+        snap.fingerprint = snap.contents_hash();
+        snap
     }
 
-    /// The fingerprint of what is in this save, whatever it claims.
+    /// The fingerprint of what is in this snapshot, whatever it claims.
     pub fn contents_hash(&self) -> u64 {
         let mut h = self.run.state_hash();
         for v in [
@@ -160,26 +154,26 @@ impl Save {
 
     /// Is this loadable by this build, and is it intact?
     ///
-    /// Checked in that order on purpose: a file that is not a save should not
+    /// Checked in that order on purpose: a file that is not a snapshot should not
     /// be reported as the wrong version, and the wrong version should not be
     /// reported as damage.
-    pub fn check(&self) -> Result<(), SaveError> {
+    pub fn check(&self) -> Result<(), SnapshotError> {
         if self.magic != MAGIC {
-            return Err(SaveError::NotASave);
+            return Err(SnapshotError::NotASnapshot);
         }
         if self.format != FORMAT {
-            return Err(SaveError::Version {
+            return Err(SnapshotError::Version {
                 found: self.format,
                 expected: FORMAT,
             });
         }
         if self.fingerprint != self.contents_hash() {
-            return Err(SaveError::Corrupt);
+            return Err(SnapshotError::Corrupt);
         }
         Ok(())
     }
 
-    /// A line for a slot list, or for a trace.
+    /// A line for a trace.
     pub fn summary(&self) -> String {
         let who = if self.run.knight.named() {
             self.run.knight.name.as_str()
@@ -224,18 +218,18 @@ mod tests {
         (run, travel)
     }
 
-    /// The whole point: a save reloads into a run that is the same run, field
+    /// The whole point: a snapshot reloads into a run that is the same run, field
     /// for field and seed for seed, not one that merely looks like it on a
     /// status bar.
     #[test]
-    fn a_save_round_trips_to_an_identical_simulation_state() {
+    fn a_snapshot_round_trips_to_an_identical_simulation_state() {
         let (run, travel) = posed();
-        let save = Save::of(&run, &travel, 2, false, 5);
-        let json = serde_json::to_string(&save).unwrap();
-        let back: Save = serde_json::from_str(&json).unwrap();
+        let snap = Snapshot::of(&run, &travel, 2, false, 5);
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
 
-        back.check().expect("a fresh save loads");
-        assert_eq!(back, save);
+        back.check().expect("a fresh snapshot loads");
+        assert_eq!(back, snap);
         assert_eq!(back.run, run, "every field of the run");
         assert_eq!(back.travel, travel, "and of the traveller");
         assert_eq!(
@@ -253,9 +247,9 @@ mod tests {
     #[test]
     fn a_restored_run_goes_on_exactly_as_the_original_would_have() {
         let (run, travel) = posed();
-        let save = Save::of(&run, &travel, 1, true, 0);
-        let json = serde_json::to_string(&save).unwrap();
-        let mut restored: Save = serde_json::from_str(&json).unwrap();
+        let snap = Snapshot::of(&run, &travel, 1, true, 0);
+        let json = serde_json::to_string(&snap).unwrap();
+        let mut restored: Snapshot = serde_json::from_str(&json).unwrap();
 
         let mut kept = run.clone();
         let mut kept_travel = travel.clone();
@@ -276,67 +270,67 @@ mod tests {
     }
 
     #[test]
-    fn a_save_from_an_older_format_is_refused_and_says_so() {
+    fn a_snapshot_from_an_older_format_is_refused_and_says_so() {
         let (run, travel) = posed();
-        let mut save = Save::of(&run, &travel, 1, true, 0);
-        save.format = FORMAT - 1;
+        let mut snap = Snapshot::of(&run, &travel, 1, true, 0);
+        snap.format = FORMAT - 1;
         assert_eq!(
-            save.check(),
-            Err(SaveError::Version {
+            snap.check(),
+            Err(SnapshotError::Version {
                 found: FORMAT - 1,
                 expected: FORMAT
             }),
             "refused, not read half way"
         );
-        assert!(save.check().unwrap_err().message().contains("version"));
+        assert!(snap.check().unwrap_err().message().contains("version"));
     }
 
     #[test]
-    fn a_file_that_is_not_a_save_is_told_apart_from_one_of_the_wrong_version() {
+    fn a_file_that_is_not_a_snapshot_is_told_apart_from_one_of_the_wrong_version() {
         let (run, travel) = posed();
-        let mut save = Save::of(&run, &travel, 1, true, 0);
-        save.magic = "something else".into();
-        save.format = FORMAT - 1;
+        let mut snap = Snapshot::of(&run, &travel, 1, true, 0);
+        snap.magic = "something else".into();
+        snap.format = FORMAT - 1;
         assert_eq!(
-            save.check(),
-            Err(SaveError::NotASave),
+            snap.check(),
+            Err(SnapshotError::NotASnapshot),
             "the magic is asked first"
         );
     }
 
     #[test]
-    fn an_edited_save_is_refused() {
+    fn an_edited_snapshot_is_refused() {
         let (run, travel) = posed();
-        let mut save = Save::of(&run, &travel, 1, true, 0);
-        save.run.gold += 1000;
-        assert_eq!(save.check(), Err(SaveError::Corrupt));
+        let mut snap = Snapshot::of(&run, &travel, 1, true, 0);
+        snap.run.gold += 1000;
+        assert_eq!(snap.check(), Err(SnapshotError::Corrupt));
     }
 
     /// The failure has to survive the round trip through text, because that is
     /// how it will actually arrive: as a file on a disk from an older build.
     #[test]
-    fn an_old_save_read_from_text_is_refused_cleanly() {
+    fn an_old_snapshot_read_from_text_is_refused_cleanly() {
         let (run, travel) = posed();
-        let save = Save::of(&run, &travel, 1, true, 0);
-        let mut value: serde_json::Value = serde_json::to_value(&save).unwrap();
+        let snap = Snapshot::of(&run, &travel, 1, true, 0);
+        let mut value: serde_json::Value = serde_json::to_value(&snap).unwrap();
         value["format"] = serde_json::json!(0);
         let text = serde_json::to_string(&value).unwrap();
-        let old: Save = serde_json::from_str(&text).expect("it still parses as a Save");
+        let old: Snapshot = serde_json::from_str(&text).expect("it still parses as a Snapshot");
         assert!(matches!(
             old.check(),
-            Err(SaveError::Version { found: 0, .. })
+            Err(SnapshotError::Version { found: 0, .. })
         ));
     }
 
     #[test]
-    fn no_path_is_ever_written_into_a_save() {
+    fn no_path_is_ever_written_into_a_snapshot() {
         let (run, travel) = posed();
-        let save = Save::of(&run, &travel, 1, true, 0);
-        let text = serde_json::to_string(&save).unwrap();
+        let snap = Snapshot::of(&run, &travel, 1, true, 0);
+        let text = serde_json::to_string(&snap).unwrap();
         for suspect in ["/", "\\\\", "packs", ".json", ".png"] {
             assert!(
                 !text.contains(suspect),
-                "a save must carry no paths, and this one has {suspect:?}"
+                "a snapshot must carry no paths, and this one has {suspect:?}"
             );
         }
     }
@@ -344,8 +338,8 @@ mod tests {
     #[test]
     fn a_summary_says_who_and_when() {
         let (run, travel) = posed();
-        let save = Save::of(&run, &travel, 1, true, 0);
-        let s = save.summary();
+        let snap = Snapshot::of(&run, &travel, 1, true, 0);
+        let s = snap.summary();
         assert!(s.contains("SIR JEFFREY"), "{s}");
         assert!(s.contains("day 9"), "{s}");
     }

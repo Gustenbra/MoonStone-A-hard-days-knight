@@ -101,7 +101,7 @@ OPERANDS = {
     'TASKLOOP':     'u8 count         loop back here at the next "ff fe"',
     'TASKSKIP':     'u8 _, u16 target branch if the DS:0x700 mode flag is set',
     'TASKTIME':     '(none)           handler is a bare RET; never emitted',
-    'TASKSOUND':    'u8 sample',
+    'TASKSOUND':    'u8 id            a sound id for PLAY_SFX (0x5964), not a sample number',
     'TASKMOVE':     'u8 flags, i16 x, i16 y, i16 z',
     'TASKSHADOW':   'u8 on, u16 script    shadow script for the actor, or off',
     'TASKSAVE':     'u8 mode, i16 field, u16 value   store into the actor record',

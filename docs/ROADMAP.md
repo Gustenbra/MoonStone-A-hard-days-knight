@@ -130,7 +130,7 @@ exactly the opposite requirements.
 | | Overworld | Arena |
 |---|---|---|
 | Players | hundreds | 2 to 4 |
-| Tick rate | low, ~10 Hz | high, 60 Hz |
+| Tick rate | low, ~10 Hz | high, the game's own 70 Hz |
 | Precision | none needed | frame-exact |
 | Model | authoritative server, area-of-interest, interpolation | instanced, deterministic, lockstep or rollback |
 

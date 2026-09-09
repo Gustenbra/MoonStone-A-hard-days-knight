@@ -17,17 +17,20 @@ mod world;
 
 use framebuffer::Framebuffer;
 use henge_assets::Registry;
-use henge_audio::{Clips, Sink, Voices};
+use henge_audio::{sfx, Clips, Sink};
 use henge_core::combat::{Intent, State};
+use henge_core::ending::Ending;
+use henge_core::harness::Snapshot;
 use henge_core::intro::Intro;
 use henge_core::item::{Items, Loss};
-use henge_core::knight::{Ability, Knight, Knights, MAX_ABILITY};
+use henge_core::knight::{Ability, Knight, Knights};
 use henge_core::message::{Message, Messages};
 use henge_core::place::{Answer, Overlaps, Places};
 use henge_core::pointer::{Gadgets, Pointer};
 use henge_core::run::{Cast, Challenge, Run};
-use henge_core::save::Save;
 use henge_core::shell::Start;
+use henge_core::status::{Op, Screen as SheetScreen};
+use henge_core::stones::Stones;
 use henge_core::{SCREEN_H, SCREEN_W};
 use map::MapScene;
 use std::num::NonZeroU32;
@@ -89,6 +92,13 @@ fn carrying(run: &Run) -> String {
 ///                     and the decapitation becomes a collapse
 ///   --scripts         (trace only) name the script each fighter is on, so a
 ///                     death variant can be told from another
+///   --sounds          print a line for every sound a script asks for: the
+///                     tick, the id, the sample it translates to and the script
+///                     that asked. A sound cannot be seen in a screenshot
+///   --save <path>     where the **test harness** puts a posed run. Not a game
+///                     feature: the original has no save, so no key and no menu
+///                     item reaches this. See `henge_core::harness`
+///   --load            read one at start, before anything else is posed
 ///
 /// In `--input`, a digit is the joystick held with fire, laid out like a
 /// numpad: 8 up, 2 down, 4 left, 6 right, 7 9 1 3 the diagonals, 5 fire on
@@ -123,6 +133,23 @@ fn lives_arg(a: &[String]) -> Option<i32> {
         .position(|s| s == "--lives")
         .and_then(|i| a.get(i + 1))
         .and_then(|v| v.parse().ok())
+}
+
+/// `--magic <item>`: start carrying one of the ten magic items, so the stone
+/// circle's offering, which the wizard is otherwise the only source of, can be
+/// reached in one step. The id is `service::magic_item`'s, e.g.
+/// `scroll_of_haste`.
+fn magic_arg(a: &[String]) -> Option<String> {
+    let name = a
+        .iter()
+        .position(|s| s == "--magic")
+        .and_then(|i| a.get(i + 1))?
+        .clone();
+    if henge_core::service::magic_slot(&name).is_none() {
+        eprintln!("no magic item called {name}");
+        return None;
+    }
+    Some(name)
 }
 
 /// `--stone <new|full|half|gibbous>`: start carrying that moonstone, so the
@@ -167,12 +194,13 @@ fn start_arg(a: &[String]) -> Option<Mode> {
         .and_then(|i| a.get(i + 1))?;
     match name.as_str() {
         "intro" => Some(Mode::Intro),
+        "ending" => Some(Mode::Ending),
         "title" => Some(Mode::Title),
         "select" => Some(Mode::Select),
         "map" => Some(Mode::Map),
         "arena" | "combat" => Some(Mode::Combat),
         other => {
-            eprintln!("no screen called {other}: try intro, title, select, map or arena");
+            eprintln!("no screen called {other}: try intro, ending, title, select, map or arena");
             None
         }
     }
@@ -188,19 +216,23 @@ fn point_arg(a: &[String]) -> Option<(i32, i32)> {
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
-/// `--save <path>`: where a saved game goes. One slot, because the original
-/// has none at all and a slot list is a thing to design once somebody wants
-/// more than one.
-fn save_path_arg(a: &[String]) -> String {
+/// `--save <path>`: where the **test harness** puts a posed run.
+///
+/// **Not a game feature.** The original has no save and neither does this game:
+/// there is no key, no menu item and nothing on any screen that reaches this. It
+/// exists so a headless test can pose a run once and load it instead of walking
+/// the whole way there again, and it is reachable from the command line and from
+/// nowhere else. See `henge_core::harness`.
+fn snapshot_path_arg(a: &[String]) -> String {
     a.iter()
         .position(|s| s == "--save")
         .and_then(|i| a.get(i + 1))
         .cloned()
-        .unwrap_or_else(|| "henge-save.json".to_string())
+        .unwrap_or_else(|| "henge-harness.json".to_string())
 }
 
 /// `--controls <path>`: where the binding table and the stick calibration live.
-/// Beside the save, by the same reasoning: it is a setting, not a game.
+/// A file, because the table is a setting rather than part of the game.
 fn controls_path_arg(a: &[String]) -> String {
     a.iter()
         .position(|s| s == "--controls")
@@ -323,12 +355,22 @@ fn prepare(app: &mut App, a: &[String]) {
     if let Some(stone) = stone_arg(a) {
         app.run.kit.take(stone.item(), 1);
     }
+    if let Some(item) = magic_arg(a) {
+        app.run.kit.take(&item, 1);
+    }
     // `--won`: end the run as a victory, so the winning tally can be looked at
     // without beating the Guardian first. The losing one is one lost fight
     // away, but the winning one is the end of a whole quest, and a screen
     // nobody can reach in testing is a screen nobody checks.
     if a.iter().any(|s| s == "--won") {
         app.run.won = true;
+    }
+    // `--stones`: put the stone circle's set piece up straight away. The
+    // offering that reaches it in play is the wizard's gift given back, which
+    // is a whole quest away, and a screen nobody can reach in testing is a
+    // screen nobody checks.
+    if a.iter().any(|s| s == "--stones") {
+        app.stones = Some(Stones::new(app.run.knight.seat as u8));
     }
     if let Some(n) = lives_arg(a) {
         app.run.lives = n;
@@ -340,9 +382,10 @@ fn prepare(app: &mut App, a: &[String]) {
             std::process::exit(2);
         }
     }
-    // `--load` replaces everything above it: a save is the state, and posing a
-    // run and then loading over it would be posing nothing.
-    if a.iter().any(|s| s == "--load") && !app.load_game() {
+    // `--load` replaces everything above it: a snapshot is the state, and posing
+    // a run and then loading over it would be posing nothing. Harness only; see
+    // `snapshot_path_arg`.
+    if a.iter().any(|s| s == "--load") && !app.harness_load() {
         std::process::exit(3);
     }
     // `--point x,y` puts the pointer somewhere, which is the only way to reach
@@ -413,6 +456,10 @@ fn main() -> anyhow::Result<()> {
                     // decided by looking at it, and it is checked by test in
                     // `henge_core::shell` instead.
                     Mode::Intro => format!("{t:>5}  INTRO   card {}", app.intro.card),
+                    Mode::Ending => format!(
+                        "{t:>5}  ENDING  scene {} code {:#04x}",
+                        app.ending.card, app.ending.code
+                    ),
                     Mode::Title => format!("{t:>5}  TITLE"),
                     Mode::Select => format!("{t:>5}  SELECT"),
                     Mode::Map if app.map.is_none() => break,
@@ -439,7 +486,7 @@ fn main() -> anyhow::Result<()> {
                         // if it is on the line.
                         r.moon.phase().key(),
                         k.strength, k.constitution, k.endurance, r.experience, aloft,
-                        if app.sheet { format!(" SHEET > {}", app.sheet_rows().get(app.sheet_cursor).map_or("", |r| r.0.as_str())) } else { String::new() })
+                        if app.sheet { format!(" SHEET > {}", app.sheet_said.as_deref().unwrap_or("-")) } else { String::new() })
                     }
                     Mode::Place => {
                         let Some(s) = app.visiting.as_ref() else {
@@ -614,7 +661,7 @@ fn main() -> anyhow::Result<()> {
     // A game opens on its title screen. `--start` overrides it, which is how the
     // window can still be pointed straight at a map or an arena.
     // The original runs `INTR.EXE` and then `MAIN.EXE`, so a window opens on
-    // the intro and the title follows it. Fire, space or Tab skips it, and
+    // the intro and the title follows it. Either seat's fire skips it, and
     // `--start title` goes straight there. Every headless recipe is unchanged:
     // those go through `prepare`, which still defaults to the map.
     app.mode = start_arg(&args_of()).unwrap_or(Mode::Intro);
@@ -628,8 +675,8 @@ fn main() -> anyhow::Result<()> {
     match pads.note.as_deref() {
         Some(note) => println!("{note}"),
         None => match pads.count() {
-            0 => println!("gamepads: none plugged in; F11 calibrates one when there is"),
-            n => println!("gamepads: {n} found; F11 calibrates player one's"),
+            0 => println!("gamepads: none plugged in; J on the title calibrates one"),
+            n => println!("gamepads: {n} found; J on the title calibrates player one's"),
         },
     }
 
@@ -648,15 +695,36 @@ fn main() -> anyhow::Result<()> {
     let mut surface = softbuffer::Surface::new(&context, window.clone())
         .map_err(|e| anyhow::anyhow!("no drawing surface: {e}"))?;
 
-    // The simulation runs at a fixed sixty ticks a second, whatever the
-    // machine can draw. Without this the loop ran a tick per frame and a frame
-    // as fast as the window could blit, so a fast machine played the whole
-    // game several times too quickly: an opponent crossed the arena in a
-    // blink and swung faster than a person can read, and practice was over in
-    // two seconds. Time is accumulated and spent in whole ticks so the
-    // simulation never sees a fractional step, which is what keeps two
-    // machines agreeing on it.
-    const TICK: std::time::Duration = std::time::Duration::from_micros(16_667);
+    // One tick is one of the original's frames, and the original's frame is one
+    // vertical retrace.
+    //
+    // **Recovered.** The wait is the unnamed public routine at image `0x5a24`,
+    // between `AdjustJoy` and the start of `GFX`: `mov dx, 0x3da`, spin while
+    // bit 3 is set, then spin until it is set again, which is exactly one
+    // retrace. Every main loop calls it once a pass and nothing else paces
+    // them: `Combat` at `0x0354` (the loop runs `0x0351` to `0x0374`),
+    // `MapLOOP` at `0x0a306`, `ScanKEYS` at `0x0145a`, `FindLandscape` at
+    // `0x0afed`, `ShakeScreen` at `0x0496b`, `KnightWonGame` at `0x01117`,
+    // `FightDemon` at `0x01031`, and the palette fade loop at `0x05bb0`.
+    //
+    // So the rate is the video mode's refresh rate. The game never programs the
+    // CRTC's timing or the Miscellaneous Output register: the only CRTC write in
+    // the whole image is index 0x0c, the start address, at `0x5a34` and inside
+    // `ShakeScreen` at `0x4965`. It therefore runs at the BIOS timing for a
+    // 320x200 VGA mode, which is the 400 line timing: a 25.175 MHz dot clock
+    // over 800 dots is 31468.75 lines a second, over 449 lines is **70.0863
+    // frames a second**. That is the 70 Hz `henge_core::intro` already quotes.
+    //
+    // This used to be sixty, which ran every recovered frame count about
+    // fourteen percent slow. The music is a different clock and is not this one:
+    // `Install_Timer` at `0x584f` programs the 8253 with mode 3 and a divisor of
+    // 0x5555 and its handler at `0x5934` does nothing but `int 60h` and `int
+    // 61h` with `ah = 1`, so 54.62 Hz drives the tune and the sound effects and
+    // never the game. `henge_audio::music` keeps that rate in the score itself.
+    //
+    // Time is accumulated and spent in whole ticks so the simulation never sees
+    // a fractional step, which is what keeps two machines agreeing on it.
+    const TICK: std::time::Duration = std::time::Duration::from_nanos(14_268_123);
     let mut last = std::time::Instant::now();
     let mut owed = std::time::Duration::ZERO;
 
@@ -682,36 +750,25 @@ fn main() -> anyhow::Result<()> {
                     app.point_at(x, y);
                 }
             }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::MouseInput {
-                        state,
-                        button: winit::event::MouseButton::Left,
-                        ..
-                    },
-                ..
-            } => {
-                let down = state == ElementState::Pressed;
-                // Straight onto seat two's fire, which is the button the
-                // gadgets already read.
-                if down && !app.keys[11] {
-                    app.pressed[11] = true;
-                }
-                app.keys[11] = down;
-            }
+            // There is no mouse button here. A real mouse moving the pointer is
+            // inherent in having a window, but a click standing in for fire was
+            // ours: the original drives the pointer with the stick and takes a
+            // gadget with the stick's own fire button, which is the key the
+            // seat already has.
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event, .. },
                 ..
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let down = event.state == ElementState::Pressed;
-                    if down && code == KeyCode::Escape {
+                    // `OptionKeys` at `0x128d` tests scancode 0x01, Escape, and
+                    // returns; `StartAgain` at `0x00ba` tests it again and
+                    // returns out of the program. So Escape quits, and it quits
+                    // from the options screen, which is this shell's title. A
+                    // window also has a close button, which is the other way out
+                    // and not ours to remove.
+                    if down && code == KeyCode::Escape && app.quits_on_escape() {
                         elwt.exit();
-                    }
-                    // `Fix_JoyStick`, on a key of our choosing because the
-                    // original reached it from a menu this shell does not have.
-                    if down && code == KeyCode::F11 {
-                        app.calibrate(0);
                     }
                     app.key(code, down);
                 }
@@ -826,7 +883,9 @@ struct App {
     visiting: Option<place::PlaceScene>,
     mode: Mode,
     audio: Box<dyn Sink>,
-    voices: Voices,
+    /// `--sounds`: say which sample each `TASKSOUND` fires and which script
+    /// asked, since a sound cannot be checked by looking at a screenshot.
+    trace_sounds: bool,
     fonts: std::collections::BTreeMap<String, Font>,
     /// Suppress ambushes, so map rendering can be checked anywhere.
     peaceful: bool,
@@ -858,8 +917,17 @@ struct App {
     /// like the map position it belongs with: `GemXY` in the original is
     /// beside the token, not on the knight record.
     flight: Option<Flight>,
-    /// The highlighted line of the character sheet's menu.
-    sheet_cursor: usize,
+    /// The donation bowl, when it is open over a healer's or a mystic's screen,
+    /// and which of the two is taking it. `_WIZARD:DonateLoop` is a loop of its
+    /// own with two ways out, so it is modal here too.
+    bowl: Option<(henge_core::status::Donation, bool)>,
+    /// Which of the bowl's four gadgets the keys have stepped to. The original
+    /// has only the pointer; a keyboard needs a way to reach four boxes.
+    bowl_cursor: usize,
+    /// What the gadget under the pointer says on the character sheet, which is
+    /// `GadgetHit` drawing `Response1[STID >> 1]` across the top of it. The
+    /// sheet has no cursor and no rows: see [`status`].
+    sheet_said: Option<String>,
     /// The lair this bout is being fought for, if it is one. A raid returns to
     /// the lair's own page rather than to the map, because the floor is only
     /// yours once the guardian is down and the spoils are read there.
@@ -909,10 +977,26 @@ struct App {
     /// The intro's own cast, out of the pack. Absent when the pack was baked
     /// without an unpacked `INTR.EXE`, in which case the plates simply hold.
     intro_cast: Option<std::rc::Rc<henge_core::content::IntroCast>>,
-    /// Where a save is written and read. Relative to wherever the game is run
-    /// from unless `--save` says otherwise, and never written into the save
+    /// The ending, which is the same executable run with an argument.
+    ending: Ending,
+    /// The ending's own cast. The same scripts read through a different bank
+    /// table, so it is a second entry in the pack rather than a re-use.
+    ending_cast: Option<std::rc::Rc<henge_core::content::IntroCast>>,
+    /// Whether `0x50d`'s three glows are in, which `0x3531` gosubs part way
+    /// through the ceremony and `0x547` takes out again at the end of it.
+    ending_glows: bool,
+    /// The stone circle's set piece, while `HengeLOOP` is running it. Modal,
+    /// like everything else the original puts up and sits in a loop over.
+    stones: Option<Stones>,
+    /// The circle's own one-bank table, `DiceHANDLE` with `Hen1.c` in it.
+    stones_banks: Option<henge_core::taskvm::BankTables>,
+    /// Every animation script, which the circle's two tasks run on. The bout
+    /// has its own copy; this is the shell's.
+    scripts: henge_core::taskvm::ScriptSet,
+    /// Where the harness's snapshot is written and read. Relative to wherever the
+    /// game is run from unless `--save` says otherwise, and never written into it
     /// itself.
-    save_path: String,
+    snapshot_path: String,
     status: String,
     #[cfg(feature = "research")]
     research: Option<research::Viewer>,
@@ -921,6 +1005,7 @@ struct App {
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mode {
     Intro,
+    Ending,
     Title,
     Select,
     Map,
@@ -934,14 +1019,6 @@ enum Mode {
 struct Flight {
     returns: bool,
     from: (i32, i32),
-}
-
-/// One line of the character sheet's menu: the original's `Increase`
-/// gadgets (`HGAbility`) and a cast for each thing carried (`MagicCast`).
-#[derive(Clone, Debug)]
-enum SheetAction {
-    Raise(Ability),
-    Use(String),
 }
 
 /// Load every sound the packs offer, and open a device if there is one.
@@ -1042,11 +1119,44 @@ const NUMBER_SLOT: usize = 16;
 /// the backspace key, tested before `ASCIIKEY` is ever called.
 const BACKSPACE_SLOT: usize = 15;
 
+/// `_STATUS:AddClickSound` (image `0xd508`), the click a gadget makes when it is
+/// taken.
+///
+/// The routine is two instructions, `mov al, 0x0f` and into the sample
+/// dispatcher at `0x5964`, and seventeen gadget handlers call it: `HotGadget` at
+/// `0xca11` and `0xca23` for the exit and the next knight, and then
+/// `HGCastMagic`, `MagicCast`, `HGTakeMagic`, `HGAbility`, `TKAR`, `TKWP`,
+/// `TKGP`, `BuyArmour` three times, `BuyWeapon` twice, `BuyDagger`, `TTemple`
+/// and `SellToTemple`. All seventeen are in `_STATUS`, which is the status
+/// screen, the shops and the temple: the screens that are gadget lists.
+///
+/// **Which sound it is, is recovered rather than picked.** The dispatcher at
+/// `0x5964` translates the sample number through `samptab` (`DS:0x7e6e`, image
+/// `0x1a21e`) when the card is a digital one, and entry 0x0f of that table is
+/// 0x15. The sample name table at `DS:0x8783` (image `0x1ab33`) is the
+/// forty-nine names in order, and the twenty-second of them is `hit3`. The same
+/// table read at 0x0b, which is the knight's `KnightGruntSound`, gives 0x2e and
+/// the forty-seventh name, `swish`, which is what this project already plays for
+/// a swing: the chain checks out against something chosen independently of it.
+const CLICK_SOUND: &str = "sfx.hit3";
+
+/// `J`, which is how the options screen reaches the stick calibration.
+///
+/// `OptionKeys` at image `0x1282` is the options screen's key loop, and the
+/// first thing it does every pass is `mov ax, 0x24` into `KEYPRESSED` and, if
+/// that key is down, `jmp` to `Fix_JoyStick` at `0x128a`. Scancode 0x24 is `J`.
+/// `Fix_JoyStick` ends at `0x59d7` with a `jmp` back into the options screen, so
+/// calibrating is a thing done from the menu and returned from. Slot 25, clear of
+/// the ten the seats own and of the nine number keys at [`NUMBER_SLOT`].
+const CALIBRATE_SLOT: usize = 25;
+
 fn key_index(c: KeyCode) -> usize {
     match c {
         KeyCode::BracketLeft => 4,
         KeyCode::BracketRight => 5,
         KeyCode::Backspace => BACKSPACE_SLOT,
+        // Scancode 0x24, which `OptionKeys` tests first of all.
+        KeyCode::KeyJ => CALIBRATE_SLOT,
         // The number keys the map's paper is answered with.
         KeyCode::Digit1 => NUMBER_SLOT,
         KeyCode::Digit2 => NUMBER_SLOT + 1,
@@ -1163,17 +1273,12 @@ impl App {
         // A pack without knights is not an error; the title simply cannot offer
         // a quest, exactly as it could not before.
         let knights: Knights = reg.read_data("data.knights").unwrap_or_default();
-        // Controls are ours and they are data: a file beside the save, read if
-        // it is there and the documented defaults if it is not.
+        // The rebinding table is ours and it is data: a file, read if it is
+        // there, and otherwise the original's own ten keys. There is no flag to
+        // ask for those any more, because they are what it ships with.
         let controls_path = controls_path_arg(&args_of());
         let args = args_of();
-        let mut bindings = input::Bindings::load(&controls_path).unwrap_or_else(|| {
-            if args.iter().any(|a| a == "--original-keys") {
-                input::Bindings::as_the_original_had_them()
-            } else {
-                input::Bindings::default()
-            }
-        });
+        let mut bindings = input::Bindings::load(&controls_path).unwrap_or_default();
         // `--bind 0:fire=Space`. There is no settings screen yet, so a
         // rebinding is made here or in the file, and either way it is the
         // same table and the same names.
@@ -1209,13 +1314,25 @@ impl App {
             eprintln!("no arena data: {status}");
         } else {
             println!("{status}");
-            println!("menus: arrows move, enter or space takes. p1 arrows + space,");
-            println!("p2 wasd + f, 1/2 set how many are playing,");
-            println!("tab switches map/arena, [ and ] change arena, , and . change the opponent,");
-            println!("R restarts, escape quits");
+            println!("the original's keys: p1 enter + arrows, p2 tab + w x a d.");
+            println!("menus: move with the direction keys, take with fire.");
+            println!("J on the title screen calibrates a stick, escape there quits.");
+            println!("ours: 1/2 set how many are playing, C the sheet, F2 switches");
+            println!("map/arena, [ and ] change arena, , and . change the opponent, R restarts");
         }
 
         let intro_cast = reg.read_data("data.intro").ok().map(std::rc::Rc::new);
+        let ending_cast = reg.read_data("data.ending").ok().map(std::rc::Rc::new);
+        // The stone circle runs two of the game's own animation scripts on a
+        // one-bank table, which the baker writes beside every creature's.
+        let scripts: henge_core::taskvm::ScriptSet =
+            reg.read_data("data.scripts").unwrap_or_default();
+        let stones_banks = reg
+            .read_data::<std::collections::BTreeMap<String, henge_core::taskvm::BankTables>>(
+                "data.banks",
+            )
+            .ok()
+            .and_then(|mut b| b.remove(henge_core::stones::BANKS));
         Ok(App {
             fb,
             fx: henge_assets::Effects::new(),
@@ -1244,7 +1361,7 @@ impl App {
             paper: false,
             visiting: None,
             audio,
-            voices: Voices::new(),
+            trace_sounds: args_of().iter().any(|a| a == "--sounds"),
             fonts,
             peaceful: false,
             bindings,
@@ -1258,7 +1375,9 @@ impl App {
             typed: None,
             named: Vec::new(),
             flight: None,
-            sheet_cursor: 0,
+            bowl: None,
+            bowl_cursor: 0,
+            sheet_said: None,
             raiding: None,
             questing: false,
             raid_place: String::new(),
@@ -1273,7 +1392,17 @@ impl App {
             showing_for: 0,
             intro: Intro::new(),
             intro_cast,
-            save_path: save_path_arg(&args_of()),
+            // The seat the ending opens on is the one a run's tally names; the
+            // byte is written in when the run is actually won. `--start ending`
+            // wants something to look at, and seat 0 on the full moon is the
+            // byte `Tally::code` produces there.
+            ending: Ending::new(0x24),
+            ending_cast,
+            ending_glows: false,
+            stones: None,
+            stones_banks,
+            scripts,
+            snapshot_path: snapshot_path_arg(&args_of()),
             status,
             #[cfg(feature = "research")]
             research: research::Viewer::from_args()?,
@@ -1288,20 +1417,11 @@ impl App {
     }
 
     fn key(&mut self, code: KeyCode, down: bool) {
-        // Saving and loading are ours, and so are the keys: the original has
-        // neither. They work on any screen, because refusing is how a screen
-        // that cannot be saved from says so.
-        if down {
-            match code {
-                KeyCode::F5 => {
-                    self.save_game();
-                }
-                KeyCode::F9 => {
-                    self.load_game();
-                }
-                _ => {}
-            }
-        }
+        // There is no save key and no load key. The original has no save at all,
+        // so a player cannot reach one here either; the serialisation that used
+        // to be behind F5 and F9 is now the test harness's alone and is reached
+        // only from the command line. See `henge_core::harness`.
+        //
         // The seats' ten slots come out of the binding table; everything else
         // is a developer key and stays where it is.
         let named = input::Source::key(&format!("{code:?}"));
@@ -1326,7 +1446,12 @@ impl App {
                 self.typed = Some(c);
             }
         }
-        if down {
+        // A key the binding table claims is a control, and a control is never
+        // also a developer key: the original's ten are in that table now, and
+        // player two pressing fire must not flip the screen out from under the
+        // fight. This is also what keeps a rebinding safe.
+        let is_control = !self.bindings.raised_by(&named).is_empty();
+        if down && !is_control {
             if let Some(world) = self.world.as_mut() {
                 match code {
                     KeyCode::BracketLeft => world.step_arena(-1),
@@ -1341,13 +1466,14 @@ impl App {
                     // of the four seats are filled by opponents.
                     KeyCode::Digit1 => world.set_players(1),
                     KeyCode::Digit2 => world.set_players(2),
-                    // Tab flips between the overworld and the arena, which is
-                    // how the arena browser stays reachable.
-                    KeyCode::Tab => {
+                    // F2 flips between the overworld and the arena, which is how
+                    // the arena browser stays reachable. It used to be Tab, which
+                    // the original spends on player two's fire.
+                    KeyCode::F2 => {
                         self.mode = match self.mode {
                             Mode::Map => Mode::Combat,
                             Mode::Combat => Mode::Map,
-                            // Tab is also the way out of a place, so a broken
+                            // It is also the way out of a place, so a broken
                             // menu can never trap you indoors.
                             Mode::Place => {
                                 self.visiting = None;
@@ -1360,10 +1486,16 @@ impl App {
                                 self.select = None;
                                 Mode::Title
                             }
-                            // Tab out of the intro too, so the sequence can
-                            // never hold a player who wants to play.
+                            // Out of the intro too, so the sequence can never
+                            // hold a player who wants to play.
                             Mode::Intro => {
                                 self.intro.skip();
+                                Mode::Title
+                            }
+                            // And out of the ending, which the original's own
+                            // scene loop also lets fire cut short.
+                            Mode::Ending => {
+                                self.ending.skip();
                                 Mode::Title
                             }
                             Mode::Title => Mode::Map,
@@ -1433,6 +1565,17 @@ impl App {
         }
     }
 
+    /// Whether Escape means quit, which it does on the options screen and
+    /// nowhere else.
+    ///
+    /// `OptionKeys` (`0x1282`) tests scancode 0x01 at `0x128d` and returns, and
+    /// `StartAgain` (`0x00a8`) tests it again at `0x00ba` and returns out of the
+    /// program. No other screen in the original reads it, so no other screen
+    /// here does either.
+    fn quits_on_escape(&self) -> bool {
+        self.mode == Mode::Title
+    }
+
     /// Starts `Fix_JoyStick` for one seat, and says what it wants.
     fn calibrate(&mut self, seat: usize) {
         self.bounce[seat.min(1)].clear();
@@ -1462,11 +1605,20 @@ impl App {
         if self.showing.is_some() {
             return "message".into();
         }
+        // The circle brings its own picture and its own palette, and `0xb3ea`
+        // fades up to it.
+        if self.stones.is_some() {
+            return "stones".into();
+        }
         match self.mode {
             // Each step of the intro is its own screen, because the original
             // fades between them: every scene routine calls the fade out, puts
             // its plate up and fades back in.
             Mode::Intro => format!("intro.{}", self.intro.card),
+            // And every scene of the ending, for the same reason: `0x547`,
+            // `0x628`, `0x6db` and `0x778` all open with `0xc02` and close on a
+            // fade.
+            Mode::Ending => format!("ending.{}", self.ending.card),
             Mode::Title => "title".into(),
             Mode::Select => "select".into(),
             Mode::Map => "map".into(),
@@ -1500,9 +1652,16 @@ impl App {
             // `install` emptied the glow table, and the knight's went with it,
             // which is `KnightGlowOff` at the end of every bout.
             self.knight_glows.clear();
+            // `0x547` zeroes the three handles `0x50d` left in `[0x13b1]`,
+            // `[0x13b3]` and `[0x13b5]` when its first scene ends, and a new
+            // scene is where that happens.
+            self.ending_glows = false;
             self.fx.set_fade(henge_assets::Fade::In(0));
         }
         self.knight_glow_tick();
+        // `0x50d`, which the ceremony's own script gosubs part way through
+        // itself rather than the scene routine installing it up front.
+        self.moonstone_glow_tick();
         self.fx.tick();
         // `FADEOUTDAY`, and the fade a message chain ends on. Both are screens
         // that go out when they are dismissed rather than being walked away
@@ -1597,6 +1756,47 @@ impl App {
         }
     }
 
+    /// `0x50d`, the ending's moonstone glow.
+    ///
+    /// The ceremony's own script `0x3531` gosubs it on its third frame, and it
+    /// installs three `COLOURGLOW` records through `0xa74`: entry 12 towards
+    /// `[0x4489]`, 15 towards `[0x448b]` and 23 towards `[0x448d]`, period one,
+    /// repeating for ever. Those are exactly the three entries
+    /// `ColourMoonstone` wrote, and the three targets are the other half of
+    /// what it wrote, so the stone pulses between the two shades the moon
+    /// chose. `0x547` takes all three out again when the scene ends, which is
+    /// what the scene change in `palette_tick` does.
+    fn moonstone_glow_tick(&mut self) {
+        use henge_core::ending;
+        if self.mode != Mode::Ending || self.ending_glows {
+            return;
+        }
+        let Some(scene) = self.ending.showing() else {
+            return;
+        };
+        if scene.overlay != ending::Overlay::Near
+            || self.ending.frame() < ending::MOONSTONE_GLOW_FRAME
+        {
+            return;
+        }
+        let Some((_, targets)) = ending::moonstone_ink(self.ending.code) else {
+            return;
+        };
+        let base = self.fb.palette;
+        for (at, target) in ending::MOONSTONE_AT.iter().zip(targets) {
+            self.fx.install_glow(
+                henge_assets::palette::Glow {
+                    index: *at as u8,
+                    target,
+                    period: ending::MOONSTONE_GLOW_PERIOD,
+                    repeat: 0,
+                },
+                &base,
+            );
+        }
+        self.ending_glows = true;
+    }
+
     fn mudmen_present(&self) -> bool {
         self.world
             .as_ref()
@@ -1642,6 +1842,15 @@ impl App {
             return;
         }
 
+        // `HengeLOOP` is a loop of its own too: the circle's picture goes up,
+        // its two tasks run, and nothing behind them moves until
+        // `Knight_LiftMagic` reaches its end and `HengeControl` raises
+        // `HengeFLAG`.
+        if self.stones.is_some() {
+            self.stones_tick();
+            return;
+        }
+
         // The between-days screen is modal, and it waits. `_MAP:NextWHICH` at
         // image 0xa454 is three calls in a row: the screen at 0x8e5b, then
         // `WaitFIRE` at 0x8251, which is `call 0x81ec; test bx, 0x10; je` until
@@ -1678,6 +1887,7 @@ impl App {
 
         match self.mode {
             Mode::Intro => self.intro_tick(),
+            Mode::Ending => self.ending_tick(),
             Mode::Title => self.title_tick(),
             Mode::Select => self.select_tick(),
             Mode::Map => {
@@ -1685,24 +1895,38 @@ impl App {
                 // endings are one message and then `WaitFIRE` at 0x8251, which
                 // waits for a press and then for a release, so the box is up
                 // until somebody presses fire and no longer. A loss then does
-                // `jmp StartAgain`, which is the title, and a win exits to DOS
-                // with [`henge_core::quest::Tally::code`] in `al` for `INTR.EXE`
-                // to read; there is nowhere to exit to here, so both go to the
-                // title. A six hundred tick timeout used to clear the screen on
-                // its own, and there is no such thing in either routine.
+                // `jmp StartAgain`, which is the title. A win exits to DOS with
+                // [`henge_core::quest::Tally::code`] in `al`, and the thing that
+                // reads that byte is `INTR.EXE` run with it as its command tail,
+                // which is the ending: `henge_core::ending`. So a win hands the
+                // byte to the ending here, exactly as `MOON:KnightWonGame`
+                // hands it to DOS, and a loss still goes to the title. A six
+                // hundred tick timeout used to clear the screen on its own, and
+                // there is no such thing in either routine.
                 if self.run.ending().is_some() {
                     self.run_over_for += 1;
                     if self.run_over_for > 1 && self.takes() {
                         self.run_over_for = 0;
-                        self.run.restart();
-                        // A new run is a new board: the lairs a dead knight
-                        // emptied are full and back on the map, keys and all.
-                        self.stock_lairs();
-                        if let Some(w) = self.world.as_mut() {
-                            w.set_player_health(self.run.health_for_fight());
-                            w.set_moon(self.run.moon.phase().key());
+                        let code = self.run.tally().and_then(|t| t.code());
+                        match code {
+                            Some(code) => {
+                                self.ending = Ending::new(code);
+                                self.ending_glows = false;
+                                self.mode = Mode::Ending;
+                            }
+                            None => {
+                                self.run.restart();
+                                // A new run is a new board: the lairs a dead
+                                // knight emptied are full and back on the map,
+                                // keys and all.
+                                self.stock_lairs();
+                                if let Some(w) = self.world.as_mut() {
+                                    w.set_player_health(self.run.health_for_fight());
+                                    w.set_moon(self.run.moon.phase().key());
+                                }
+                                self.mode = Mode::Title;
+                            }
                         }
-                        self.mode = Mode::Title;
                     }
                     return;
                 }
@@ -1837,11 +2061,16 @@ impl App {
                     let foe = w.foe_for(&family, pick);
                     w.set_foe(&foe);
                     w.set_family(&family, pick);
-                    self.voices.reset();
                     self.mode = Mode::Combat;
                 }
             }
             Mode::Place => {
+                // `DonateLoop` is its own loop and nothing behind it runs while
+                // it is up.
+                if self.bowl.is_some() {
+                    self.bowl_tick();
+                    return;
+                }
                 // A run that ended while you were indoors, which is what a
                 // lair's guardian or the Valley's does: back out onto the map,
                 // where the tally is. Nothing in a place is any use to a
@@ -1857,6 +2086,7 @@ impl App {
                 let mut door: Option<String> = None;
                 let mut raid: Option<(usize, String, String, String, u32)> = None;
                 let mut quest: Option<(String, String, String, u32)> = None;
+                let mut bowl: Option<bool> = None;
                 if let Some(s) = self.visiting.as_mut() {
                     if let Some(def) = self.places.get(&s.visit.place) {
                         if up {
@@ -1887,11 +2117,25 @@ impl App {
                                 } => {
                                     quest = Some((arena, family, guardian, count));
                                 }
+                                Answer::Bowl { consult } => bowl = Some(consult),
+                            }
+                            // `MOON:Henge` does not hand a line back and stop:
+                            // an offering the druids took runs the circle's own
+                            // set piece at `0xb35e` before the life point is
+                            // given. `henge_core::stones` is that loop.
+                            if s.visit.rite {
+                                s.visit.rite = false;
+                                self.stones = Some(Stones::new(self.run.knight.seat as u8));
                             }
                         }
                     } else {
                         leave = true;
                     }
+                }
+                // `InitDonation`: the purse moves into `GOLDP` and the bowl
+                // opens empty.
+                if let Some(consult) = bowl {
+                    self.bowl = Some((henge_core::status::Donation::open(self.run.gold), consult));
                 }
                 // Taking something off a lair's floor can be the thing that
                 // empties it, and an empty beaten lair is off the map.
@@ -1931,7 +2175,6 @@ impl App {
                         self.raiding = (lair != usize::MAX).then_some(lair);
                         self.raid_place = here.unwrap_or_default();
                         self.visiting = None;
-                        self.voices.reset();
                         self.mode = Mode::Combat;
                         return;
                     }
@@ -1982,8 +2225,34 @@ impl App {
                         },
                     ];
                     w.update(&seats);
-                    for (_, cue) in self.voices.observe(&w.bout.fighters, &w.events) {
-                        self.audio.play(cue.sound());
+                    // What the scripts asked for on this tick, in the order
+                    // they asked. Nothing is inferred from a state change: the
+                    // `TASKSOUND` at 0x9b38 and the 23 sound routines the
+                    // scripts call are the whole of the noise a fight makes,
+                    // and `PLAY_SFX` plays every one of them as it arrives.
+                    for call in &w.bout.sounds {
+                        let id = sfx::asset(call.id);
+                        if self.trace_sounds {
+                            let on = w.bout.fighters.get(call.who);
+                            println!(
+                                // `simulate` has already counted this tick, and
+                                // the trace loop counts from zero, so one off
+                                // lines a sound up with the COMBAT line beside
+                                // it.
+                                "{:>5}  SOUND   {} id {:#04x} sample {:>2} {:<9} {}",
+                                self.tick.saturating_sub(1),
+                                call.who,
+                                call.id,
+                                sfx::sample(call.id),
+                                sfx::name(call.id),
+                                on.map_or(String::new(), |f| format!(
+                                    "{} on {}",
+                                    f.actor,
+                                    f.task.as_ref().map_or("", |t| t.pc.script.as_str())
+                                )),
+                            );
+                        }
+                        self.audio.play(&id);
                     }
                     // A finished bout hands control back to the map, or restarts
                     // in place when there is no map to go back to.
@@ -2007,7 +2276,6 @@ impl App {
                     // the original's `StopCombat` is at the end of that script
                     // and not at the moment of death.
                     if w.settled_for() > 120 && !w.finishing() {
-                        self.voices.reset();
                         if practice {
                             // Nothing to carry back. Practice is over when the
                             // bout is, and the title is where it came from.
@@ -2106,12 +2374,54 @@ impl App {
         }
     }
 
+    /// The ending, scene by scene. Fire skips it, and when it runs out the
+    /// program is over, which here means the title.
+    fn ending_tick(&mut self) {
+        if self.takes() || self.pressed[11] {
+            self.ending.skip();
+        }
+        self.ending.tick();
+        if self.ending.done {
+            self.mode = Mode::Title;
+            // A new quest from the beginning, which is what running `MAIN.EXE`
+            // again after the ending amounts to: `play.bat` runs the game, the
+            // game exits with its byte, the ending runs, and the batch file goes
+            // round to the game again.
+            self.run.restart();
+            self.stock_lairs();
+            if let Some(w) = self.world.as_mut() {
+                w.set_player_health(self.run.health_for_fight());
+                w.set_moon(self.run.moon.phase().key());
+            }
+        }
+    }
+
+    /// `HengeLOOP`. One frame every three vertical retraces until the lift's
+    /// animation ends, and there is no way to cut it short: the loop tests
+    /// nothing but `HengeFLAG`.
+    fn stones_tick(&mut self) {
+        let Some(stones) = self.stones.as_mut() else {
+            return;
+        };
+        stones.tick(&self.scripts);
+        if stones.done() {
+            self.stones = None;
+        }
+    }
+
     /// The title's option list, and the attract loop behind it.
     ///
     /// A press while it is showing off only wakes it. Letting the same press
     /// through would mean walking away from the keyboard and coming back to find
     /// the game had started itself.
     fn title_tick(&mut self) {
+        // `OptionKeys` tests scancode 0x24 first of all and jumps to
+        // `Fix_JoyStick` when it is down, so `J` on this screen and on no other
+        // starts the calibration, and the calibration comes back here.
+        if self.pressed[CALIBRATE_SLOT] {
+            self.calibrate(0);
+            return;
+        }
         let (up, down) = (self.pressed[0], self.pressed[1]);
         let (left, right, take) = (self.pressed[2], self.pressed[3], self.takes());
         let touched = up || down || left || right || take;
@@ -2291,7 +2601,6 @@ impl App {
         let daggers = self.run.knight.daggers;
         let sheet = self.sheet_of();
         self.flight = None;
-        self.sheet_cursor = 0;
         let phase = self.run.moon.phase().key();
         if let Some(w) = self.world.as_mut() {
             // A quest opens on the full moon, which `InitGameStart` writes
@@ -2341,82 +2650,83 @@ impl App {
         }
     }
 
-    /// Write a save.
+    /// **Test harness only.** Write a snapshot of the posed run.
     ///
-    /// **Ours entirely**: the original has no save. It is taken on the map and
-    /// nowhere else, because a save is a serialization of the simulation
-    /// between one step and the next; saving inside a bout would mean carrying
-    /// every fighter's script pointer and the knives in the air for something
-    /// nobody wants to resume mid-swing. `henge_core::save` says the rest.
-    fn save_game(&mut self) -> bool {
+    /// The original has no save and nothing a player can reach calls this: the
+    /// only two routes in are `--input`'s `S` and the `--save` path, both of which
+    /// are command line. It is taken on the map and nowhere else, because a
+    /// snapshot is a serialisation of the simulation between one step and the
+    /// next; inside a bout it would mean carrying every fighter's script pointer
+    /// and the knives in the air. `henge_core::harness` says the rest.
+    fn harness_save(&mut self) -> bool {
         if self.mode != Mode::Map || !self.run.knight.named() {
             self.notice("only on the road");
             return false;
         }
         let Some(m) = self.map.as_ref() else {
-            self.notice("no map to save");
+            self.notice("no map to snapshot");
             return false;
         };
-        let save = Save::of(
+        let snap = Snapshot::of(
             &self.run,
             &m.state,
             self.title.state.players,
             self.title.state.gore,
             self.hint,
         );
-        let text = match serde_json::to_string_pretty(&save) {
+        let text = match serde_json::to_string_pretty(&snap) {
             Ok(t) => t,
             Err(e) => {
-                self.notice(format!("save failed: {e}"));
+                self.notice(format!("snapshot failed: {e}"));
                 return false;
             }
         };
-        match std::fs::write(&self.save_path, text) {
+        match std::fs::write(&self.snapshot_path, text) {
             Ok(()) => {
-                println!("saved to {}: {}", self.save_path, save.summary());
-                self.notice("saved");
+                println!("wrote {}: {}", self.snapshot_path, snap.summary());
+                self.notice("snapshot written");
                 true
             }
             Err(e) => {
-                self.notice(format!("save failed: {e}"));
+                self.notice(format!("snapshot failed: {e}"));
                 false
             }
         }
     }
 
-    /// Read a save back, or say clearly why not.
+    /// **Test harness only.** Read a snapshot back, or say clearly why not.
     ///
-    /// Three distinguishable refusals, none of which loads half a game: not a
-    /// save, a save this build cannot read, and a save that does not match its
-    /// own fingerprint.
-    fn load_game(&mut self) -> bool {
-        let text = match std::fs::read_to_string(&self.save_path) {
+    /// Three distinguishable refusals, none of which loads half a run: not a
+    /// snapshot, a snapshot this build cannot read, and one that does not match
+    /// its own fingerprint.
+    fn harness_load(&mut self) -> bool {
+        let text = match std::fs::read_to_string(&self.snapshot_path) {
             Ok(t) => t,
             Err(e) => {
-                self.notice(format!("no save: {e}"));
+                self.notice(format!("no snapshot: {e}"));
                 return false;
             }
         };
-        let save: Save = match serde_json::from_str(&text) {
+        let snap: Snapshot = match serde_json::from_str(&text) {
             Ok(s) => s,
             Err(_) => {
-                self.notice(henge_core::save::SaveError::NotASave.message());
-                eprintln!("{}: not a saved game", self.save_path);
+                self.notice(henge_core::harness::SnapshotError::NotASnapshot.message());
+                eprintln!("{}: not a harness snapshot", self.snapshot_path);
                 return false;
             }
         };
-        if let Err(e) = save.check() {
+        if let Err(e) = snap.check() {
             self.notice(e.message());
-            eprintln!("{}: {e}", self.save_path);
+            eprintln!("{}: {e}", self.snapshot_path);
             return false;
         }
-        println!("loaded {}: {}", self.save_path, save.summary());
-        self.apply(save);
+        println!("loaded {}: {}", self.snapshot_path, snap.summary());
+        self.apply(snap);
         true
     }
 
-    /// Put a checked save into the running game.
-    fn apply(&mut self, save: Save) {
+    /// Put a checked snapshot into the running game. Harness only.
+    fn apply(&mut self, save: Snapshot) {
         self.run = save.run;
         self.title.state.players = save.players.clamp(1, henge_core::shell::SEATS);
         self.title.state.gore = save.gore;
@@ -2498,29 +2808,73 @@ impl App {
     /// menus that were already there.
     fn gadgets_tick(&mut self, dx: i32, dy: i32) {
         self.gadgets.clear();
-        let rows: Vec<(usize, i32, i32, i32, i32)> = if self.sheet && self.mode == Mode::Map {
-            let n = self.sheet_rows().len();
-            status::sheet_menu_rects(n, Some(self.sheet_cursor))
-        } else {
-            match self.mode {
-                // The title and the select have no gadgets and no pointer:
-                // `DoOptions` and `ChooseLoop` poll the stick themselves and
-                // the six routines that blit `PO.CEL` are the town menus, the
-                // tavern, the wizard's donation and the status screen. See
-                // `shell::draw_pointer`.
-                Mode::Place => self
-                    .visiting
-                    .as_ref()
-                    .and_then(|s| self.places.get(&s.visit.place))
-                    .map_or_else(Vec::new, place::menu_rects),
-                _ => Vec::new(),
+        self.sheet_said = None;
+        // The status screen is the pointer's own screen and has nothing else on
+        // it. Every icon `PlaceIcons` blits is a gadget of the same size, every
+        // pillar is the way out, and `MovePointer` reads the knight's own
+        // control rather than the other seat's, so seat one steers it here.
+        // Modal on the map, which is where `ReDisplay` and `StatLOOP` sit; over
+        // an arena or a doorway the sheet is a card held up, and whatever is
+        // behind it keeps its own gadgets.
+        if self.sheet && self.mode == Mode::Map {
+            let panel = status::lay_out(&self.run, SheetScreen::Sheet, None);
+            for g in panel.gadgets(&mut self.reg) {
+                self.gadgets.add(g);
             }
+            let dx = self.keys[3] as i32 - self.keys[2] as i32;
+            let dy = self.keys[1] as i32 - self.keys[0] as i32;
+            self.pointer.steer(dx, dy, self.keys[6]);
+            if self.pointer.woken {
+                self.sheet_said = self
+                    .gadgets
+                    .hit(self.pointer.x, self.pointer.y)
+                    .map(|g| g.label.clone())
+                    .filter(|l| !l.is_empty());
+            }
+            return;
+        }
+        // `InitDonation`'s four, which `DonateLoop` reads by their payload word
+        // rather than by an id.
+        if let Some((_, _)) = self.bowl.as_ref() {
+            for (n, (x, y, w, h, op)) in henge_core::status::DONATE_GADGETS.into_iter().enumerate()
+            {
+                self.gadgets.add(henge_core::pointer::Gadget {
+                    id: n,
+                    x,
+                    y,
+                    w,
+                    h,
+                    label: String::new(),
+                    payload: henge_core::status::Payload::new(op as u16, 0x32),
+                    lit: true,
+                });
+            }
+            self.pointer.steer(dx, dy, self.keys[11]);
+            return;
+        }
+        let rows: Vec<(usize, i32, i32, i32, i32)> = match self.mode {
+            // The title and the select have no gadgets and no pointer:
+            // `DoOptions` and `ChooseLoop` poll the stick themselves and
+            // the six routines that blit `PO.CEL` are the town menus, the
+            // tavern, the wizard's donation and the status screen. See
+            // `shell::draw_pointer`.
+            Mode::Place => self
+                .visiting
+                .as_ref()
+                .and_then(|s| self.places.get(&s.visit.place))
+                .map_or_else(Vec::new, place::menu_rects),
+            _ => Vec::new(),
         };
         if rows.is_empty() {
             return;
         }
         for (id, x, y, w, h) in rows {
             self.gadgets.add_box(id, x, y, w, h, "");
+        }
+        // `AddClickSound`, which every one of the original's gadget handlers
+        // calls the moment a gadget's action is taken. See [`CLICK_SOUND`].
+        if self.pressed[6] || self.pressed[11] || self.pressed[12] {
+            self.audio.play(CLICK_SOUND);
         }
         // The stick moves it two pixels a tick, which is `MovePointer`. Seat
         // two's keys, so seat one's still move the highlight and nothing that
@@ -2538,14 +2892,10 @@ impl App {
         };
         // Being over a row is being on it, the way `GadgetHit` says the line
         // for whatever the pointer has reached.
-        match self.mode {
-            _ if self.sheet => self.sheet_cursor = over,
-            Mode::Place => {
-                if let Some(s) = self.visiting.as_mut() {
-                    s.visit.cursor = over;
-                }
+        if self.mode == Mode::Place {
+            if let Some(s) = self.visiting.as_mut() {
+                s.visit.cursor = over;
             }
-            _ => {}
         }
         // And fire over it takes it, through the same edge every menu reads.
         if self.pressed[11] {
@@ -2569,73 +2919,144 @@ impl App {
         });
     }
 
-    /// The character sheet's menu: the three `Increase` gadgets in the
-    /// original's own order (`ab1`..`ab3`), lit only while the experience
-    /// covers the cost and the ability is under five, as the status screen
-    /// at `0xd3a7` lights them; then a line for everything carried.
-    fn sheet_rows(&self) -> Vec<(String, bool, SheetAction)> {
-        let mut rows = Vec::new();
-        if !self.run.knight.named() {
-            return rows;
+    /// One tick of `_WIZARD:DonateLoop` at image `0xbbe6`.
+    ///
+    /// The loop draws `GOLDP` and `DONATION`, moves the pointer, checks the
+    /// gadgets and, when fire goes down on one, switches on its `[si+0x10]`:
+    /// 2 `ExitDonation` throws the bowl away, 3 `OkDonation` writes `GOLDP`
+    /// back into `[si+0x32]`, 4 `SubDonation` and 5 `AddDonation` move one coin.
+    /// Only the first two return.
+    ///
+    /// Direction keys move the highlight from box to box as well, because the
+    /// original's pointer is a stick and a keyboard has to reach four gadgets
+    /// somehow; the pointer itself is `MovePointer` unchanged.
+    fn bowl_tick(&mut self) {
+        use henge_core::status::{DonateOp, DONATE_GADGETS};
+        let Some((mut bowl, consult)) = self.bowl else {
+            return;
+        };
+        // Which of the four is chosen: whatever the pointer is over, or the
+        // one the keys have stepped to.
+        if self.pressed[2] || self.pressed[0] {
+            self.bowl_cursor = self.bowl_cursor.saturating_sub(1);
         }
-        let cost = self.run.level_cost();
-        for a in [Ability::Strength, Ability::Endurance, Ability::Constitution] {
-            let lit = self.run.can_level() && self.run.knight.ability(a) < MAX_ABILITY;
-            rows.push((
-                format!("{} ({cost} xp)", a.increase_line()),
-                lit,
-                SheetAction::Raise(a),
-            ));
+        if self.pressed[3] || self.pressed[1] {
+            self.bowl_cursor = (self.bowl_cursor + 1).min(DONATE_GADGETS.len() - 1);
         }
-        for (id, n) in self.run.kit.iter() {
-            // A key and a moonstone are carried, not cast: `MagicCast` has no
-            // branch for either, and the panel's own line for one is `Take Key
-            // to the Valley`, which is a trade and not a use. They are listed
-            // so the pack is honest about what is in it, and unlit so nothing
-            // offers to spend the quest.
-            let token = henge_core::moon::is_token(id);
-            let line = match self.items.get(id) {
-                Some(d) if token => d.name.clone(),
-                Some(d) => d.action_line(),
-                None => format!("Use {id}"),
-            };
-            let line = if n > 1 { format!("{line} x{n}") } else { line };
-            rows.push((line, !token, SheetAction::Use(id.to_string())));
+        let over = self
+            .gadgets
+            .hit(self.pointer.x, self.pointer.y)
+            .filter(|_| self.pointer.woken)
+            .map(|g| g.id);
+        if let Some(n) = over {
+            self.bowl_cursor = n;
         }
-        rows
-    }
-
-    /// One tick of the sheet as a menu.
-    fn sheet_tick(&mut self) {
-        let rows = self.sheet_rows();
-        if rows.is_empty() {
+        if !self.takes() && !self.pressed[11] {
+            self.bowl = Some((bowl, consult));
             return;
         }
-        if self.pressed[0] {
-            self.sheet_cursor = self.sheet_cursor.saturating_sub(1);
+        let op = DONATE_GADGETS[self.bowl_cursor].4;
+        self.audio.play(CLICK_SOUND);
+        if !bowl.act(op) {
+            self.bowl = Some((bowl, consult));
+            return;
         }
-        if self.pressed[1] {
-            self.sheet_cursor += 1;
+        // Both ways out leave the purse where it was: `ExitDonation` because it
+        // writes nothing, and `OkDonation` because what it writes is exactly
+        // what `HealDon` and `MysticJudge` are then handed and spend. Those two
+        // are `Run::donate_to_healer` and `Run::consult_the_mystic`, which take
+        // the coin themselves, so nothing is deducted twice here.
+        let given = if op == DonateOp::Ok { bowl.given } else { 0 };
+        self.bowl = None;
+        self.bowl_cursor = 0;
+        if given == 0 {
+            return;
         }
-        self.sheet_cursor = self.sheet_cursor.min(rows.len() - 1);
+        let said = if consult {
+            self.run
+                .consult_the_mystic(given, &self.items)
+                .describe()
+                .to_string()
+        } else {
+            self.run
+                .donate_to_healer(given)
+                .map_or_else(String::new, |h| h.describe().to_string())
+        };
+        if let Some(s) = self.visiting.as_mut() {
+            s.visit.said = said;
+        }
+    }
+
+    /// One tick of the status screen, which is `StatLOOP` at `0xbe13`:
+    /// `MovePointer`, `CHECKGADGET`, and `HotGadget` on the one under the
+    /// pointer when fire goes down.
+    ///
+    /// **`HotGadget` at `0xca0a`, transcribed.** Id 7 is the way out and the
+    /// three pillars all carry it; otherwise the payload's low nibble decides,
+    /// and what each arm does here is what the arm does there:
+    ///
+    /// * 3 `HGAbility`: spend experience, and only while the `0x40` bit is on,
+    ///   which `SetUpID` sets when `[ARR+18]` is no more than the knight's
+    ///   experience and the value is under five.
+    /// * 5 `HGCastMagic` into `MagicCast`, which is `dec byte [bx+si]` and then
+    ///   the field's own routine. `Run::cast` is that family.
+    /// * 1 `HGTakeMagic` and 2 `TakeGold`: both move a thing from one record to
+    ///   another, and `HotGadget` only reaches the second at all through
+    ///   `test ax, 0x20`, the right arch's permission bit. One traveller on this
+    ///   map means there is no other record, so both do nothing, which is also
+    ///   what they do in the original with one knight in the game.
+    /// * 0xa `BuyGoods`: the merchant's, and no merchant panel is reachable yet.
+    fn sheet_tick(&mut self) {
         if !self.takes() {
             return;
         }
-        let (_, lit, action) = rows[self.sheet_cursor].clone();
-        match action {
-            SheetAction::Raise(a) => {
-                if lit && self.run.spend_experience(a, &self.items) {
+        let Some(hit) = self
+            .gadgets
+            .hit(self.pointer.x, self.pointer.y)
+            .filter(|_| self.pointer.woken)
+            .cloned()
+        else {
+            return;
+        };
+        // `cmp word ptr es:[si + 0xe], 7`, the first thing the routine tests:
+        // `AddClickSound` and `ExitFLAG = 1`, which ends `StatLOOP`.
+        if hit.id == henge_core::status::EXIT_ID {
+            self.audio.play(CLICK_SOUND);
+            self.sheet = false;
+            return;
+        }
+        let Some(op) = hit.op() else { return };
+        let Some(slot) = henge_core::status::slot_of(hit.id) else {
+            return;
+        };
+        match op {
+            Op::Raise => {
+                if !hit.lit {
+                    return;
+                }
+                // The three slots are strength, constitution and endurance, in
+                // that order: `SetUpStatus` writes `ab1`, `ab3`, `ab2`.
+                let a = match slot {
+                    0 => Ability::Strength,
+                    1 => Ability::Constitution,
+                    _ => Ability::Endurance,
+                };
+                if self.run.spend_experience(a, &self.items) {
+                    self.audio.play(CLICK_SOUND);
                     self.notice(format!("{} {}", a.name(), self.run.knight.ability(a)));
                     self.sync_sheet();
                 }
             }
-            SheetAction::Use(id) => {
-                if !lit {
+            Op::Cast => {
+                let Some(id) = henge_core::status::SLOT_TABLE[slot].item else {
                     return;
-                }
-                let cast = self.run.cast(&id, &self.items);
+                };
+                self.audio.play(CLICK_SOUND);
+                let cast = self.run.cast(id, &self.items);
                 self.acted(cast);
             }
+            // Nothing on one knight's own sheet: see above.
+            Op::TakeMagic | Op::Take | Op::Buy => {}
         }
     }
 
@@ -2947,13 +3368,14 @@ impl App {
                 self.keys[11] = true;
                 self.pressed[11] = true;
             }
-            // Save and load, so both can be driven with no keyboard: the same
-            // two calls F5 and F9 make.
+            // The test harness's snapshot, written and read. **Not a game
+            // feature**: there is no key for either and no menu item, and these
+            // two letters are only reachable from `--input` on the command line.
             Some('S') => {
-                self.save_game();
+                self.harness_save();
             }
             Some('L') => {
-                self.load_game();
+                self.harness_load();
             }
             // Held and pressed both: walking reads the key, a menu reads the
             // edge, and the same letter has to drive either.
@@ -3007,25 +3429,28 @@ impl App {
     }
 
     /// Draw a line of text over the current frame, for checking the font.
+    ///
+    /// In the glyphs' own five indices like every other line in the game, so
+    /// what this shows is what a screen would show. Over a palette that is not
+    /// the font bank's, `text::Font` translates them; the darkest entry behind
+    /// the line is this harness's, so a light face over a light picture can
+    /// still be read.
     fn say(&mut self, line: &str) {
         let Some(font) = self.fonts.remove("bold") else {
             eprintln!("no font in the packs");
             return;
         };
         let luma = |c: u32| ((c >> 16) & 0xff) * 2 + ((c >> 8) & 0xff) * 3 + (c & 0xff);
-        let (mut dark, mut light) = (0usize, 0usize);
+        let mut dark = 0usize;
         for i in 1..32 {
             if luma(self.fb.palette[i]) < luma(self.fb.palette[dark]) {
                 dark = i;
-            }
-            if luma(self.fb.palette[i]) > luma(self.fb.palette[light]) {
-                light = i;
             }
         }
         let mut y = 30;
         for part in line.split('|') {
             self.fb.rect(0, y - 4, 320, 26, dark as u8);
-            font.draw_centred(&mut self.reg, &mut self.fb, part, y, light as u8);
+            font.draw_own_centred(&mut self.reg, &mut self.fb, part, y);
             y += 30;
         }
         self.fonts.insert("bold".into(), font);
@@ -3060,17 +3485,22 @@ impl App {
         self.fx.reseed(&self.fb.palette);
         if self.sheet {
             // The sheet brings its own palette (`_STATUS:STAPAL`), so the ink
-            // does not come off whatever was on screen behind it.
-            let font = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
-            // The menu is live on the map, where the sheet is modal; in an
-            // arena the sheet is a card held up over the fight.
-            let rows: Vec<(String, bool)> = self
-                .sheet_rows()
-                .into_iter()
-                .map(|(l, lit, _)| (l, lit))
-                .collect();
-            let cursor = (self.mode == Mode::Map && !rows.is_empty()).then_some(self.sheet_cursor);
-            status::draw_sheet(&mut self.reg, &mut self.fb, font, &self.run, &rows, cursor);
+            // does not come off whatever was on screen behind it. `ReDisplay`
+            // lays the panel out and draws it in one pass; this does the same,
+            // off the same routine `gadgets_tick` registered from.
+            let small = self.fonts.get("small").or_else(|| self.fonts.get("bold"));
+            let bold = self.fonts.get("bold");
+            let panel = status::lay_out(&self.run, SheetScreen::Sheet, None);
+            let said = self.sheet_said.clone();
+            status::draw_sheet(
+                &mut self.reg,
+                &mut self.fb,
+                small,
+                bold,
+                &self.run,
+                &panel,
+                said.as_deref(),
+            );
         }
         // The pointer goes on last, over whatever it is pointing at, and only
         // on a screen that has boxes for it to be over.
@@ -3096,6 +3526,13 @@ impl App {
             shell::draw_interlude(&mut self.reg, &mut self.fb, &fonts, self.run.moon.phase());
             return;
         }
+        // The stone circle's set piece sits over everything, because
+        // `HengeLOOP` is a loop of its own with the whole screen to itself.
+        if let Some(stones) = self.stones.clone() {
+            let banks = self.stones_banks.clone();
+            shell::draw_stones(&mut self.reg, &mut self.fb, &stones, banks.as_ref());
+            return;
+        }
         // A message box sits over everything else for the same reason: it is
         // what `WAITMESSAGE`, `OCCURMESSAGE` and `INSTRUCTMESSAGE` do.
         if let Some(msg) = self.showing.as_ref() {
@@ -3115,6 +3552,22 @@ impl App {
             let intro = self.intro;
             let cast = self.intro_cast.clone();
             shell::draw_intro(&mut self.reg, &mut self.fb, &fonts, &intro, cast.as_deref());
+            return;
+        }
+        if self.mode == Mode::Ending {
+            let fonts = shell::Fonts {
+                bold: self.fonts.get("bold"),
+                small: self.fonts.get("small"),
+            };
+            let ending = self.ending;
+            let cast = self.ending_cast.clone();
+            shell::draw_ending(
+                &mut self.reg,
+                &mut self.fb,
+                &fonts,
+                &ending,
+                cast.as_deref(),
+            );
             return;
         }
         if self.mode == Mode::Title {
@@ -3154,6 +3607,8 @@ impl App {
                             font,
                             &self.run,
                             &self.items,
+                            &self.pointer,
+                            self.bowl.as_ref().map(|(d, _)| d),
                         )
                         .is_ok()
                     {
@@ -3228,32 +3683,16 @@ mod tests {
     }
 
     #[test]
-    fn the_default_bindings_reach_the_slots_the_game_reads() {
-        let b = input::Bindings::default();
-        for (code, slot) in [
-            (KeyCode::ArrowUp, 0),
-            (KeyCode::ArrowDown, 1),
-            (KeyCode::ArrowLeft, 2),
-            (KeyCode::ArrowRight, 3),
-            (KeyCode::Space, 6),
-            (KeyCode::KeyW, 7),
-            (KeyCode::KeyS, 8),
-            (KeyCode::KeyA, 9),
-            (KeyCode::KeyD, 10),
-            (KeyCode::KeyF, 11),
-        ] {
-            assert_eq!(slots_for(&b, code), vec![slot], "{code:?} lost its slot");
-        }
-    }
-
-    #[test]
     fn the_developer_keys_are_not_in_the_binding_table() {
         let b = input::Bindings::default();
+        // Tab and Enter are gone from this list: they are two of the original's own
+        // ten keys now, and `F2` took Tab's developer job for exactly that reason.
         for code in [
             KeyCode::BracketLeft,
             KeyCode::Comma,
-            KeyCode::Enter,
-            KeyCode::Tab,
+            KeyCode::F2,
+            KeyCode::KeyC,
+            KeyCode::KeyR,
         ] {
             assert!(
                 slots_for(&b, code).is_empty(),
@@ -3315,19 +3754,85 @@ mod tests {
     fn rebinding_moves_the_slot_a_key_feeds() {
         let mut b = input::Bindings::default();
         let (seat, action, src) =
-            input::Bindings::parse_bind("0:fire=Enter").expect("a readable spec");
+            input::Bindings::parse_bind("0:fire=Space").expect("a readable spec");
         b.bind(seat, action, src);
-        assert_eq!(slots_for(&b, KeyCode::Enter), vec![6]);
-        // And the key it replaced still works, because a list is a list.
         assert_eq!(slots_for(&b, KeyCode::Space), vec![6]);
+        // And the key it joined still works, because a list is a list.
+        assert_eq!(slots_for(&b, KeyCode::Enter), vec![6]);
     }
 
+    /// The whole of the reader at `0x81ec`, as slots, straight out of the
+    /// defaults: ten keys where this test used to check four.
     #[test]
-    fn the_originals_own_keys_reach_the_same_slots() {
-        let b = input::Bindings::as_the_original_had_them();
-        assert_eq!(slots_for(&b, KeyCode::Enter), vec![6]);
-        assert_eq!(slots_for(&b, KeyCode::Tab), vec![11]);
-        assert_eq!(slots_for(&b, KeyCode::KeyX), vec![8]);
-        assert_eq!(slots_for(&b, KeyCode::ArrowUp), vec![0]);
+    fn the_originals_own_keys_are_what_ships_and_reach_the_right_slots() {
+        let b = input::Bindings::default();
+        for (key, slot) in [
+            (KeyCode::ArrowUp, 0),
+            (KeyCode::ArrowDown, 1),
+            (KeyCode::ArrowLeft, 2),
+            (KeyCode::ArrowRight, 3),
+            (KeyCode::Enter, 6),
+            (KeyCode::KeyW, 7),
+            (KeyCode::KeyX, 8),
+            (KeyCode::KeyA, 9),
+            (KeyCode::KeyD, 10),
+            (KeyCode::Tab, 11),
+        ] {
+            assert_eq!(slots_for(&b, key), vec![slot], "{key:?}");
+        }
+        // And the keys that were ours reach nothing.
+        for key in [KeyCode::Space, KeyCode::KeyF, KeyCode::KeyS] {
+            assert_eq!(slots_for(&b, key), Vec::<usize>::new(), "{key:?}");
+        }
+    }
+
+    /// `J` is the options screen's route into `Fix_JoyStick` (`OptionKeys` at
+    /// `0x1282`, scancode 0x24), so it has to be a key that arrives somewhere.
+    #[test]
+    fn j_is_the_calibration_key_and_nothing_else() {
+        assert_eq!(key_index(KeyCode::KeyJ), CALIBRATE_SLOT);
+        const { assert!(CALIBRATE_SLOT < 256) };
+        // Clear of the seats' ten and of the nine numbers.
+        const { assert!(CALIBRATE_SLOT > NUMBER_SLOT + 8) };
+        let b = input::Bindings::default();
+        assert_eq!(slots_for(&b, KeyCode::KeyJ), Vec::<usize>::new());
+    }
+
+    /// `J` starts `Fix_JoyStick` from the options screen and from no other, which
+    /// is `OptionKeys` at `0x1282` testing scancode 0x24 before anything else.
+    #[test]
+    fn j_starts_the_calibration_on_the_title_and_nowhere_else() {
+        let mut app = match App::new() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        app.mode = Mode::Title;
+        app.pressed[CALIBRATE_SLOT] = true;
+        app.title_tick();
+        assert!(app.calibrating.is_some(), "J on the title calibrates");
+        // And it does not also take whatever the title's cursor was sitting on.
+        app.calibrating = None;
+        for m in [Mode::Map, Mode::Combat, Mode::Place] {
+            app.mode = m;
+            app.pressed[CALIBRATE_SLOT] = true;
+            app.simulate();
+            assert!(app.calibrating.is_none(), "{m:?} has no calibration key");
+        }
+    }
+
+    /// Escape is the options screen's own quit (`OptionKeys` at `0x128d`,
+    /// `StartAgain` at `0x00ba`) and is not a key anywhere else.
+    #[test]
+    fn escape_quits_from_the_title_and_from_nowhere_else() {
+        let mut app = match App::new() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        app.mode = Mode::Title;
+        assert!(app.quits_on_escape());
+        for m in [Mode::Map, Mode::Combat, Mode::Place, Mode::Select] {
+            app.mode = m;
+            assert!(!app.quits_on_escape(), "{m:?}");
+        }
     }
 }

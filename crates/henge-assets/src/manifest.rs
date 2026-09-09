@@ -28,16 +28,32 @@ pub struct FrameRect {
     pub oy: i32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Sheet {
     /// Path relative to the pack root.
     pub file: String,
     pub frames: Vec<FrameRect>,
+    /// Which palette this sheet's indices were authored against.
+    ///
+    /// A sheet's pixels are palette **indices**, and until this field existed
+    /// nothing said what they meant. Draw a sheet over a screen that loaded a
+    /// different palette and every index names a different colour, which is
+    /// not a visible error so much as a plausible-looking one. With the
+    /// palette named, indices can be translated into whatever is loaded by
+    /// nearest colour, which is what `henge-desktop`'s text does: the two font
+    /// banks are `CEL` files with no palette of their own, and the entries
+    /// their glyphs are drawn in belong to `MESSAGE.PIV`, the plate the
+    /// original writes every message over.
+    ///
+    /// `None` where the baker cannot say, which is a sheet whose indices are
+    /// already right for the screen it is drawn on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<String>,
 }
 
 /// Bumped whenever the baker starts writing something a pack could not have
 /// had before. The launcher rebakes when what is on disk does not match.
-pub const RECIPE: u32 = 13;
+pub const RECIPE: u32 = 20;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {

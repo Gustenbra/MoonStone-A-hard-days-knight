@@ -13,6 +13,7 @@ use crate::arena::{Arrivals, Border, Field, GLOBAL};
 use crate::combat::{line_hits_body, Attack, Fighter, Intent, Order, State};
 use crate::content::ActorDef;
 use crate::monster::Controller;
+use crate::sound::{self, SoundCall};
 use crate::taskvm::{self, field, Effect, Task, TaskActor, FACING_LEFT, FACING_RIGHT};
 use crate::wave::Wave;
 use serde::{Deserialize, Serialize};
@@ -140,6 +141,16 @@ pub struct Bout {
     /// part of the fingerprint.
     #[serde(default)]
     pub parries: Vec<Parry>,
+    /// What asked to be heard on the last tick, in the order the scripts asked.
+    /// Output, like the parries: the simulation never reads it back, and nothing
+    /// here knows what a sound id means.
+    ///
+    /// `TASKSOUND` (0x92, handler `0x9b38`) and the sound routines the scripts
+    /// call through `TASKGOSUB` are the only things in the original that fill
+    /// this, because they are the only things in the original that make a noise
+    /// during a fight. See [`crate::sound`].
+    #[serde(default)]
+    pub sounds: Vec<SoundCall>,
     /// `_WIZARD:RND`'s shift register, which the creatures' controllers roll
     /// against. The original keeps one word for the whole game at DS:`0xe22f`;
     /// here it belongs to the bout, so a fight replays and two machines agree.
@@ -168,6 +179,15 @@ pub struct Bout {
     /// rotation, which is the reason it has to live on the bout as well.
     #[serde(default)]
     pub arrivals: Arrivals,
+    /// `DS:0x5b1`, the day count the computer knight's nerve is read off.
+    ///
+    /// `InitGameStart+60` (0x1c49) writes zero and `EncounterFini+35` (0x1167)
+    /// adds one every fourth encounter, in step with `MoonCount`; `BKBlock`
+    /// (0x4c45) and `BKAttack` (0x4cc8) are its only readers, and they index
+    /// [`crate::monster::PROGRESSION`] with it. Zero is the practice duel,
+    /// which `PracticeCombat5` reaches straight out of `InitGameStart`.
+    #[serde(default)]
+    pub progression: i32,
 }
 
 /// Any non-zero start; the original seeds its register off the BIOS tick,
@@ -186,10 +206,12 @@ impl Bout {
             bloodless: false,
             missiles: Vec::new(),
             parries: Vec::new(),
+            sounds: Vec::new(),
             rng: default_rng(),
             decap: false,
             wave: Wave::default(),
             arrivals: Arrivals::default(),
+            progression: 0,
         }
     }
 
@@ -343,6 +365,26 @@ impl Bout {
         (base * num / den + bonus).max(1)
     }
 
+    /// Put a task in the arena and show its first frame at once, so it is on
+    /// screen the tick it appears.
+    ///
+    /// That frame is a frame like any other, so a script whose first command is
+    /// a `TASKSOUND` is heard now: `SpeedKnife` is, and the swish of a thrown
+    /// dagger would otherwise be the one sound in the game nothing played.
+    fn launch(&mut self, mut m: Missile, scripts: &taskvm::ScriptSet) {
+        let frame = m.task.step(scripts, &mut m.record, self.bloodless);
+        let owner = m.owner;
+        for e in &frame.effects {
+            if let Effect::Sound { sample } = e {
+                self.sounds.push(SoundCall {
+                    who: owner,
+                    id: *sample,
+                });
+            }
+        }
+        self.missiles.push(m);
+    }
+
     /// `KnifeThrow`: one dagger off the thrower, and a task of its own on
     /// `SpeedKnife` at the thrower's position and facing, on his banks.
     fn throw_knife(&mut self, owner: usize, def: &ActorDef) {
@@ -356,7 +398,7 @@ impl Bout {
         let mut knife = Task::new("SpeedKnife", task.x, task.y, task.facing);
         knife.table = def.bank_table;
         knife.z = task.z;
-        let mut m = Missile {
+        let m = Missile {
             owner,
             actor: f.actor.clone(),
             task: knife,
@@ -368,9 +410,9 @@ impl Bout {
             spent: false,
             follow: false,
         };
-        // Its first frame now, so it is on screen the tick it leaves the hand.
-        m.task.step(&def.animation, &mut m.record, self.bloodless);
-        self.missiles.push(m);
+        // Its first frame now, so it is on screen the tick it leaves the hand,
+        // and `SpeedKnife` opens with the `TASKSOUND` for the throw.
+        self.launch(m, &def.animation);
     }
 
     /// A task that rides on a fighter: the demon's whirl. It is a missile like
@@ -389,7 +431,7 @@ impl Bout {
         let mut task = Task::new(script, t.x, t.y, t.facing);
         task.table = def.bank_table;
         task.z = t.z;
-        let mut m = Missile {
+        let m = Missile {
             owner,
             actor: f.actor.clone(),
             task,
@@ -401,8 +443,7 @@ impl Bout {
             spent: false,
             follow: true,
         };
-        m.task.step(&def.animation, &mut m.record, self.bloodless);
-        self.missiles.push(m);
+        self.launch(m, &def.animation);
     }
 
     /// `AddDragonFIRE`: a task on `Dragon_Fire` at the dragon's own position
@@ -418,7 +459,7 @@ impl Bout {
         let mut task = Task::new(script, t.x + 0x37 * dir, t.y, facing);
         task.table = def.bank_table;
         task.z = t.z;
-        let mut m = Missile {
+        let m = Missile {
             owner,
             actor: f.actor.clone(),
             task,
@@ -430,8 +471,7 @@ impl Bout {
             spent: false,
             follow: false,
         };
-        m.task.step(&def.animation, &mut m.record, self.bloodless);
-        self.missiles.push(m);
+        self.launch(m, &def.animation);
     }
 
     /// `AddBlood`: a spray at the strike point, facing the way the knight
@@ -449,7 +489,7 @@ impl Bout {
         };
         let mut blood = Task::new("Blood1", at.0, at.1, facing);
         blood.table = 4;
-        let mut m = Missile {
+        let m = Missile {
             owner,
             actor: actor.to_string(),
             task: blood,
@@ -461,8 +501,7 @@ impl Bout {
             spent: false,
             follow: false,
         };
-        m.task.step(&def.animation, &mut m.record, self.bloodless);
-        self.missiles.push(m);
+        self.launch(m, &def.animation);
     }
 
     /// `SETDEMONBORD`: a fight is fought on the border of any actor that
@@ -562,6 +601,117 @@ impl Bout {
         }
     }
 
+    /// `TrollStruck1` (0x438a) and `TrollOHead` (0x4397): the troll's own
+    /// finisher, which is not a blow on a corpse but the blow that makes one.
+    ///
+    /// ```text
+    /// TrollStruck1:
+    /// 0438a  sub word [di+0x38], 7
+    /// 0438e  cmp word [si+0x28], 0x10   ; the overhead chop
+    /// 04392  je  TrollOHead
+    /// 04394  jmp KnightSAnim            ; anything else is an ordinary blow
+    /// TrollOHead:
+    /// 04397  mov di, [0x77e8]
+    /// 0439b  cmp word [di+0x38], 0
+    /// 0439f  jle 043a4
+    /// 043a1  jmp KnightSAnim            ; still standing: an ordinary blow
+    /// 043a4  mov word [0x783a], Knight_Explode
+    /// ```
+    ///
+    /// So a troll's chop that takes the last of a knight's hit points does not
+    /// lay him down, it bursts him. Called after [`Fighter::struck`] has taken
+    /// the damage off, which is where `[di+0x38]` stands when `TrollOHead`
+    /// reads it.
+    fn troll_explodes(
+        &mut self,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        // 0438e  cmp word [si+0x28], 0x10; 04392 je TrollOHead
+        if a_def.controller() != Controller::Troll || kind != Some(Attack::Chop) {
+            return;
+        }
+        // 0439b  cmp word [di+0x38], 0; 0439f jle 043a4
+        if self.fighters[target].health > 0 {
+            return;
+        }
+        let Some(script) = t_def.finishes.get("explode").cloned() else {
+            return;
+        };
+        // 043a4  mov word [0x783a], Knight_Explode
+        let f = &mut self.fighters[target];
+        if let Some(t) = f.task.as_mut() {
+            t.replace(script.clone());
+        }
+        f.script = script;
+    }
+
+    /// The rest of `TroggHit` (0x2f59), which is the spear's alone: it picks a
+    /// dead knight up on the point and throws him.
+    ///
+    /// ```text
+    /// 02f59  mov si, [di+0xc]          ; what I hit
+    /// 02f5c  cmp byte [si+0x35], 6     ; a knight a person is playing
+    /// 02f60  jne TroggStart
+    /// 02f65  cmp word [si+0xc], 0      ; and he has not hit anything himself
+    /// 02f69  jne TroggDone
+    /// 02f6b  cmp word [si+0x38], 0
+    /// 02f6f  jg  TroggDone             ; still standing: nothing
+    /// 02f71  mov word [0x783a], 0xffff ; carry on rather than recover
+    /// 02f77  cmp byte [di+0x35], 0x10  ; and only the spear
+    /// 02f7b  jne TroggDone
+    /// 02f7d  cmp word [0x700], 0
+    /// 02f82  jne TroggDone             ; gore off: nothing
+    /// 02f86  call (the knight's task is taken away)
+    /// 02f89  mov word [0x783a], TroggSpear_Toss
+    /// TroggDone:
+    /// 02f92  cmp byte [di+0x35], 0x10
+    /// 02f98  mov ax, [di+0x10]         ; the spear stands rather than
+    /// 02f9b  mov [0x783a], ax          ; playing the recovery
+    /// ```
+    ///
+    /// The corpse is drawn inside `TroggSpear_Toss` from here on, which is
+    /// what the removed task means, so it is hidden the way the mudman's
+    /// entangled knight is. `[si+0xc]`, "he has not hit anything himself on
+    /// this frame", has no equivalent in this engine and is not tested.
+    fn trogg_spear_toss(
+        &mut self,
+        attacker: usize,
+        target: usize,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        // 02f77  cmp byte [di+0x35], 0x10; 02f5c cmp byte [si+0x35], 6
+        if a_def.controller() != Controller::TroggSpear
+            || t_def.controller() != Controller::Knight
+            || self.fighters[target].brain.flags & crate::monster::flag::DRIVEN != 0
+        {
+            return;
+        }
+        // 02f6b  cmp word [si+0x38], 0; 02f6f jg TroggDone
+        // 02f7d  cmp word [0x700], 0; 02f82 jne TroggDone
+        if self.fighters[target].health > 0 || self.bloodless {
+            return;
+        }
+        let Some(script) = a_def
+            .animation
+            .contains_key("TroggSpear_Toss")
+            .then(|| "TroggSpear_Toss".to_string())
+        else {
+            return;
+        };
+        // 02f86: the knight's own task goes, and he is drawn inside the toss.
+        self.fighters[target].hidden = true;
+        // 02f89  mov word [0x783a], TroggSpear_Toss
+        self.fighters[attacker].ordered = Some(Order {
+            state: State::Attack,
+            script,
+            attack: None,
+        });
+    }
+
     /// Whether anyone is being finished off: the original's `DeCapFLAG`, which
     /// `TroggAttack` tests so that only one creature comes in for the head.
     ///
@@ -648,6 +798,7 @@ impl Bout {
                 gore,
                 body: foe.finishable(t_def),
                 decapped,
+                progression: self.progression,
             };
             let mut brain = self.fighters[me].brain;
             let mut seed = self.rng;
@@ -769,6 +920,7 @@ impl Bout {
         F: Fn(&str) -> &'a ActorDef,
     {
         self.parries.clear();
+        self.sounds.clear();
         let bloodless = self.bloodless;
 
         // A blow in the air this tick: who or what is swinging it, the shape,
@@ -877,7 +1029,7 @@ impl Bout {
                             let mut task = Task::new(script, t.x, t.y, t.facing);
                             task.table = t.table;
                             task.z = t.z;
-                            let mut m = Missile {
+                            let m = Missile {
                                 owner: i,
                                 actor: f.actor.clone(),
                                 task,
@@ -889,8 +1041,27 @@ impl Bout {
                                 spent: false,
                                 follow: false,
                             };
-                            m.task.step(&def.animation, &mut m.record, bloodless);
-                            self.missiles.push(m);
+                            self.launch(m, &def.animation);
+                        }
+                    }
+                    // `TASKSOUND`: the script named a sample at this exact
+                    // frame. Nothing decides anything about it here; the id
+                    // goes out as the handler at 0x9b38 hands it to `PLAY_SFX`.
+                    Effect::Sound { sample } => {
+                        self.sounds.push(SoundCall { who: i, id: sample });
+                    }
+                    // And the 23 routines the scripts call that play one: each
+                    // is transcribed in `crate::sound`, and the three that are
+                    // silent in the shipped image are silent here.
+                    Effect::Gosub {
+                        routine,
+                        kind: taskvm::GosubKind::Sound,
+                    } => {
+                        let x = self.fighters[i].task.as_ref().map_or(0, |t| t.x);
+                        let mut ids = Vec::new();
+                        sound::gosub(&routine, x, &mut self.rng, &mut ids);
+                        for id in ids {
+                            self.sounds.push(SoundCall { who: i, id });
                         }
                     }
                     _ => {}
@@ -932,7 +1103,18 @@ impl Bout {
                 if !m.task.running && !m.flight.is_empty() {
                     m.task.replace(m.flight.clone());
                 }
-                m.task.step(&def.animation, &mut m.record, bloodless);
+                let frame = m.task.step(&def.animation, &mut m.record, bloodless);
+                // A thrown dagger has a script of its own, and `SpeedKnife`
+                // asks for the swish on its first frame.
+                let owner = m.owner;
+                for e in &frame.effects {
+                    if let Effect::Sound { sample } = e {
+                        self.sounds.push(SoundCall {
+                            who: owner,
+                            id: *sample,
+                        });
+                    }
+                }
             }
             if !m.task.active {
                 m.spent = true;
@@ -1013,6 +1195,16 @@ impl Bout {
                                 target,
                                 with,
                             });
+                            // `BKnightStruck` (0x4d78): a computer knight
+                            // that stops a blow has its evade's one use given
+                            // back on the spot. See
+                            // [`crate::monster::black_knight_blocked`].
+                            if crate::monster::black_knight_blocked(t_def.controller())
+                                && self.fighters[target].brain.flags & crate::monster::flag::DRIVEN
+                                    != 0
+                            {
+                                self.fighters[target].evaded = false;
+                            }
                             self.fighters[attacker].recover(a_def);
                             self.hit_something(attacker, a_def);
                             break;
@@ -1021,6 +1213,10 @@ impl Bout {
                     let evading = self.fighters[target].guarding() == Some(Attack::Evade);
                     self.fighters[target].struck(t_def, damage, blow.attack);
                     self.got_struck(target, t_def);
+                    if blow.missile.is_none() {
+                        self.troll_explodes(target, blow.attack, a_def, t_def);
+                        self.trogg_spear_toss(attacker, target, a_def, t_def);
+                    }
                     // `KnightGotStruck` (0x4267) dispatches on the striker's
                     // own kind, so it is the blow of a body and not of a
                     // thrown thing: a knife has a task of its own and never
@@ -1068,8 +1264,27 @@ impl Bout {
                         });
                     }
                     // The swing is over the moment it lands, save for the
-                    // exceptions `KnightHitNormal` and `KnightHitKnight` make.
-                    if blow.missile.is_none() && blow.attack != Some(Attack::UThrust) && !evading {
+                    // exceptions the striker's own `+0xc` branch makes.
+                    // `KnightHit1` (0x4123) keeps it going for an up thrust
+                    // and for a blow on a knight who is evading;
+                    // `BKnightHit` (0x4da8) is the computer knight's own
+                    // branch and keeps it going for its chop and its lunge as
+                    // well. `flag::DRIVEN` is the original's `+0x35`: kind 8
+                    // runs `ControlBlackKnight`, kind 6 reads a joystick.
+                    let driven = |f: &Fighter| f.brain.flags & crate::monster::flag::DRIVEN != 0;
+                    let carries_on = if a_def.controller() == Controller::Knight
+                        && driven(&self.fighters[attacker])
+                    {
+                        crate::monster::black_knight_carries_on(
+                            blow.attack,
+                            t_def.controller() == Controller::Knight
+                                && !driven(&self.fighters[target]),
+                            evading,
+                        )
+                    } else {
+                        blow.attack == Some(Attack::UThrust) || evading
+                    };
+                    if blow.missile.is_none() && !carries_on {
                         self.fighters[attacker].recover(a_def);
                     }
                     if blow.missile.is_none() {
@@ -1237,26 +1452,44 @@ impl Bout {
     }
 }
 
-/// Where a blow landed, for the blood: the middle of the overlap between the
-/// blow's extent and the body it found. The original has the pixel where the
-/// weapon pile and the body pile first met (`CXx`, `CY`); this is the same
-/// place at rectangle resolution.
+/// Where a blow landed, for the blood: `CXx` and `CY`.
+///
+/// **Recovered.** `COLCHK` walks the weapon's polyline point by point, and the
+/// point that lands is the answer, not the middle of anything:
+///
+/// ```text
+/// 0a128  sub cx, cx
+/// 0a12a  mov cl, [bx-2]            ; the point's own x, as CHECKL left it
+/// 0a12d  add cx, [di+6]            ; plus the weapon record's x
+/// 0a130  mov [CXx], cx
+/// 0a137  sub dx, dx
+/// 0a139  mov dl, [bx-1]            ; and its y
+/// 0a13c  add dx, [di+8]
+/// 0a13f  mov [CY], dx
+/// ```
+///
+/// and `TaskCol_MainLoop` then writes the pair into the struck actor's `+0x58`
+/// and `+0x5a` (0x9f87, 0x9f8d). The walk stops at the first point inside the
+/// body cel whose mask bit is set, so this takes the first point of the sweep
+/// that is inside the body.
+///
+/// Where no point of the sweep is inside, which this engine can reach because
+/// a bank with no line in `COLLIDE.HIT` still sweeps its cel corners, the
+/// first segment that meets the body is clamped into it instead. The original
+/// has no such case: every point it tests is a sample of the blade.
 fn strike_point(line: &[(i32, i32)], body: (i32, i32, i32, i32)) -> (i32, i32) {
     let (l, t, r, b) = body;
-    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for (x, y) in line {
-        x0 = x0.min(*x);
-        y0 = y0.min(*y);
-        x1 = x1.max(*x);
-        y1 = y1.max(*y);
+    let inside = |(x, y): &(i32, i32)| *x >= l && *x <= r && *y >= t && *y <= b;
+    // 0a12a..0a13f: the point that landed.
+    if let Some(p) = line.iter().find(|p| inside(p)) {
+        return *p;
     }
-    let (ox0, oy0) = (x0.max(l), y0.max(t));
-    let (ox1, oy1) = (x1.min(r), y1.min(b));
-    if ox0 <= ox1 && oy0 <= oy1 {
-        ((ox0 + ox1) / 2, (oy0 + oy1) / 2)
-    } else {
-        ((l + r) / 2, (t + b) / 2)
+    for w in line.windows(2) {
+        if crate::combat::line_hits_body(w, body) {
+            return (w[0].0.clamp(l, r), w[0].1.clamp(t, b));
+        }
     }
+    ((l + r) / 2, (t + b) / 2)
 }
 
 #[cfg(test)]
@@ -1334,6 +1567,88 @@ mod tests {
                 .map(|i| Fighter::new("k", &d, 40 + i * 70, 100, 1))
                 .collect(),
         )
+    }
+
+    /// `TrollStruck1` into `TrollOHead` (0x438a, 0x4397): the troll's overhead
+    /// chop, and only that, bursts a knight it kills. Nothing built this
+    /// before; `Knight_Explode` was named in the scripts and never played.
+    #[test]
+    fn a_trolls_chop_that_kills_bursts_the_knight() {
+        let mut troll = def();
+        troll.controller = "troll".into();
+        let mut knight = def();
+        knight
+            .finishes
+            .insert("explode".into(), "Knight_Explode".into());
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("t", &troll, 100, 100, 1),
+                Fighter::new("k", &knight, 140, 100, -1),
+            ],
+        );
+        // 0439b: still standing, so `KnightSAnim` and no burst.
+        b.fighters[1].health = 5;
+        b.troll_explodes(1, Some(Attack::Chop), &troll, &knight);
+        assert_ne!(b.fighters[1].script, "Knight_Explode");
+        // 0438e: the swing is not the chop, so no burst either.
+        b.fighters[1].health = 0;
+        b.troll_explodes(1, Some(Attack::Swing), &troll, &knight);
+        assert_ne!(b.fighters[1].script, "Knight_Explode");
+        // 043a4: the chop, and nothing left.
+        b.troll_explodes(1, Some(Attack::Chop), &troll, &knight);
+        assert_eq!(b.fighters[1].script, "Knight_Explode");
+        // And no other creature does it: the table entry is the troll's.
+        let mut other = def();
+        other.controller = "trogg".into();
+        b.fighters[1].script.clear();
+        b.troll_explodes(1, Some(Attack::Chop), &other, &knight);
+        assert_eq!(b.fighters[1].script, "");
+    }
+
+    /// `TroggHit+12` (0x2f59): the spear trogg picks a dead knight up on the
+    /// point. The axe and the hammer do not, and neither does anyone with the
+    /// gore switched off.
+    #[test]
+    fn the_spear_trogg_tosses_a_corpse_and_only_with_the_gore_on() {
+        let mut spear = def();
+        spear.controller = "trogg_spear".into();
+        spear
+            .animation
+            .insert("TroggSpear_Toss".into(), Default::default());
+        let knight = def();
+        let mut b = Bout::new(
+            arena_field(),
+            vec![
+                Fighter::new("s", &spear, 100, 100, 1),
+                Fighter::new("k", &knight, 140, 100, -1),
+            ],
+        );
+        // 02f6b: still standing.
+        b.fighters[1].health = 5;
+        b.trogg_spear_toss(0, 1, &spear, &knight);
+        assert_eq!(b.fighters[0].ordered, None);
+        // 02f7d: gore off.
+        b.fighters[1].health = 0;
+        b.bloodless = true;
+        b.trogg_spear_toss(0, 1, &spear, &knight);
+        assert_eq!(b.fighters[0].ordered, None);
+        // 02f89, with the gore on.
+        b.bloodless = false;
+        b.trogg_spear_toss(0, 1, &spear, &knight);
+        assert_eq!(
+            b.fighters[0].ordered.as_ref().map(|o| o.script.as_str()),
+            Some("TroggSpear_Toss")
+        );
+        assert!(b.fighters[1].hidden, "the corpse is drawn inside the toss");
+        // 02f77: the axe trogg runs the same routine and takes `TroggDone`.
+        let mut axe = def();
+        axe.controller = "trogg".into();
+        axe.animation
+            .insert("TroggSpear_Toss".into(), Default::default());
+        b.fighters[0].ordered = None;
+        b.trogg_spear_toss(0, 1, &axe, &knight);
+        assert_eq!(b.fighters[0].ordered, None);
     }
 
     /// A lair fight is not over while it still owes creatures, and each death

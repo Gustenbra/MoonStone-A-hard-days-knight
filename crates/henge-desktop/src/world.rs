@@ -57,7 +57,9 @@ pub struct World {
     index: usize,
     pub bout: Bout,
     pub control: Vec<Control>,
-    /// Hits from the last tick, for whoever wants to play a sound.
+    /// Hits from the last tick, as `step_with` reported them. Nothing plays a
+    /// sound off them: a blow's noise is a `TASKSOUND` on the frame that lands
+    /// it, and comes out of `bout.sounds`.
     pub events: Vec<HitEvent>,
     /// `BattlePal`'s tables: what a bout writes over the backdrop's palette
     /// for the knight, a second knight, each creature and the ground. See
@@ -591,11 +593,29 @@ impl World {
             henge_core::wave::Wave::default()
         };
         let humans = self.humans().max(1);
+        // **Two knights, and never three.** A bout between knights is exactly
+        // two records in the original and there is no room for a third:
+        // `PracticeCombat5` (0x00fe, 0x0104) writes the first two knight
+        // records into `[0x8979]` and `[0x897b]`, `MOON:Combat+115` (0x03c4)
+        // writes the challenger and the challenged into the same pair, and
+        // `InitKnightvsKnight+9` (0x2063) reads the second one. The recovered
+        // `ControlBlackKnight` settles it: its opponent is `[0x897b]` if it is
+        // `[KnightTable]` and `[KnightTable]` otherwise (0x4b8c..0x4ba3), so a
+        // third knight has no opponent the routine can name. The browser's
+        // brawl used to field three or four, the extras wearing the second
+        // knight's colours because there are only two knights' worth of
+        // palette entries; it fields two now. A creature fight is still
+        // whatever its wave asks for.
         let n = if wave.max > 0 {
             humans + wave.max as usize
+        } else if self.foe == "knight" {
+            2
         } else {
             self.control.len().max(2)
         };
+        if self.foe == "knight" && self.control.len() > n {
+            self.control.truncate(n);
+        }
         if wave.max > 0 {
             self.control = (0..n)
                 .map(|i| {

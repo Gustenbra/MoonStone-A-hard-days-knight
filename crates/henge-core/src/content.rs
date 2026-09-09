@@ -196,8 +196,9 @@ pub struct ActorDef {
     pub origin: [i16; 2],
     /// How many ticks one script frame lasts.
     ///
-    /// The original ran its task loop once per game frame, and this engine
-    /// ticks sixty times a second, so the two have to be related by something.
+    /// The original ran its task loop once per game frame, and this engine's tick
+    /// is that frame: one vertical retrace, 70.0863 a second. So the relation is
+    /// a count of frames and not a conversion of clocks.
     /// For the knight it is derived rather than felt: `Knight_SwWalkOn` bakes
     /// its own travel into its part offsets, and it covers about 47 pixels in
     /// the four frames of one stride. At a walking speed of two pixels a tick
@@ -216,10 +217,19 @@ pub struct ActorDef {
     /// fought before this table existed.
     #[serde(default)]
     pub attacks: BTreeMap<String, AttackDef>,
-    /// Which of `attacks` the one button, and the plain opponent, gets: the
-    /// swing for the knight, the one attack each creature was fielded with.
-    /// Also what `damage` is the figure for, so another attack's blow is its
-    /// table damage against this one's.
+    /// What `damage` is the figure for, so another attack's blow is its own
+    /// `*Dam` entry against this one's. That is `blow_ratio`, and it is the
+    /// only thing this field is still needed for.
+    ///
+    /// It used to be "which of a creature's own attacks the one button gets",
+    /// which was ours. It is not needed for that any more: every controller
+    /// writes its own kind into `+0x28` and the pack gives each actor exactly
+    /// the kinds its routine writes. `ControlBlackKnight` names six (swing 4,
+    /// chop 0x10, lunge 2, knife 6, block 8, evade 0xe, at 0x4c87, 0x4cb5,
+    /// 0x4cf1, 0x4d0b, 0x4d2b, 0x4d3f), `ControlRatCollide` two (0x3188,
+    /// 0x319b), `TroggAttacks` three, and so on down the bestiary. The
+    /// fallback `attack_for` still makes is for an actor a pack invents that
+    /// asks for a kind it has no script for; none of the original's does.
     #[serde(default)]
     pub attack: String,
     /// The blow-taken script by the attacker's attack kind: the `*Hit` table,

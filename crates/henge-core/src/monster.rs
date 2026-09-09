@@ -56,7 +56,9 @@ pub enum Controller {
     Dragon,
     /// `ControlClaw`: one of the dragon's two forelimbs.
     Claw,
-    /// A knight, or anything with no controller of its own: close, and swing.
+    /// `ControlBlackKnight`, `BKnightMove`, `BKBlock`, `BKAttack`: the
+    /// knight the machine plays, which is `CONTROLTABLE` slot 8. Slot 6 is
+    /// `ControlKnight` and reads a joystick, so it never runs here.
     Knight,
 }
 
@@ -131,11 +133,29 @@ pub struct Brain {
     pub flags: u32,
     pub walk: u32,
     pub phase: u8,
-    /// Ticks until this controller may run again. The original's task loop
-    /// calls a controller once per game frame at most, and this engine ticks
-    /// six times for each of those, so without it every count a controller
-    /// keeps would run six times too fast.
+    /// Ticks until this controller may run again.
+    ///
+    /// **Judged and kept.** The original's task loop calls a controller once
+    /// per game frame at most, when the task's `+1` is clear, and
+    /// [`Fighter::ready`] is that test. What it is not is a *tick*: this
+    /// engine ticks six times for each of the original's frames, so a
+    /// controller gated only on `ready` would run six times per frame and
+    /// every count one keeps, `TroggSwing`'s ten and `TroggSpear_Lunge`'s
+    /// twenty among them, would run out six times too fast. This holds one
+    /// controller call to one game frame, which is what the original does;
+    /// removing it would not be more faithful, it would be six times faster.
     pub rest: i32,
+    /// `+0x28` as `ControlBlackKnight` finds it, which is the kind of the
+    /// last attack it ordered.
+    ///
+    /// `TroggStart` (0x2e08) zeroes `+0x28` at the top of every pass and
+    /// `ControlBlackKnight` does not: it copies the field into `ATT`
+    /// (0x4bb7) and then reads `ATT` back in `BKAttack` to keep from playing
+    /// the same attack twice running. [`Fighter::attack`] is the same field,
+    /// but this engine clears it when the fighter leaves the attack state, so
+    /// the controller's own copy is kept here instead.
+    #[serde(default)]
+    pub att: Option<crate::combat::Attack>,
 }
 
 /// `DemonFLAGS`, `DragonFLAGS`, `BalokFLAGS`, `MudmenFLAGS` and `+0x48`, as
@@ -530,6 +550,13 @@ pub struct Sight<'a> {
     pub body: bool,
     /// Whether anyone has taken the finisher yet: `DeCapFLAG`.
     pub decapped: bool,
+    /// `DS:0x5b1`, the day count, which is what `BKBlock` and `BKAttack`
+    /// index [`PROGRESSION`] with. `InitGameStart+60` (0x1c49) writes zero and
+    /// `EncounterFini+35` (0x1167) adds one every fourth encounter, in step
+    /// with `MoonCount` two bytes along; nothing else touches it. So the
+    /// computer knight's nerve is the calendar: the longer the game has run,
+    /// the less often it hesitates.
+    pub progression: i32,
 }
 
 /// One tick of one creature's own controller.
@@ -556,7 +583,7 @@ pub fn decide(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) ->
         Controller::Demon => demon(s, brain, facing),
         Controller::Dragon => dragon(s, brain, facing),
         Controller::Claw => claw(s, brain),
-        Controller::Knight => knight(s, brain, facing),
+        Controller::Knight => black_knight(s, brain, seed, facing),
     }
 }
 
@@ -1536,40 +1563,448 @@ fn claw(s: &Sight, _brain: &mut Brain) -> Act {
     }
 }
 
-/// A knight, or anything with no controller of its own. Deliberately plain:
-/// it closes and swings, and it struggles out of a hold the way a person
-/// would, which is fire and down together (`MudmenEntangle` reads exactly
-/// those two bits).
-fn knight(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
+/// `Progression`, DS:0x7c01, twenty bytes of data segment.
+///
+/// ```text
+/// 14 0a 08 07 06 05 05 05 05 05 05 05 05 05 05 05 05 05 05 05
+/// ```
+///
+/// `BKBlock` and `BKAttack` are the only readers, and the index is the day
+/// count at DS:0x5b1 ([`Sight::progression`]). The byte is a percentage:
+/// below it `BKBlock` does not even look at what the opponent is doing, and
+/// at or below it `BKAttack` backs away instead of striking. Twenty on the
+/// first day, ten on the second, and five from the sixth on.
+///
+/// The table is exactly twenty bytes: the next data symbol, `demonbodge`, is
+/// at 0x7c15. `BKAttack` does not mask its index, so from the twenty-first
+/// day the read falls into `demonbodge`, which the image initialises to zero,
+/// and the knight stops hesitating altogether. `BKBlock` does mask, with
+/// `and cx, 7`, so its own index wraps round to the first eight bytes.
+#[rustfmt::skip]
+pub const PROGRESSION: [i32; 20] = [
+    0x14, 0x0a, 0x08, 0x07, 0x06, 0x05, 0x05, 0x05, 0x05, 0x05,
+    0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05, 0x05,
+];
+
+/// `[Progression + cx]` as `BKAttack` reads it, unmasked: past the table's
+/// twenty bytes the read is `demonbodge`'s low byte, zero in the image.
+fn progression_at(day: i32) -> i32 {
+    if day < 0 {
+        return PROGRESSION[0];
+    }
+    match PROGRESSION.get(day as usize) {
+        Some(v) => *v,
+        // 04cd2  cmp al, [bx]: off the end of the table, and zero.
+        None => 0,
+    }
+}
+
+/// `ControlBlackKnight`, image 0x4b79, and the whole controller under it:
+/// `BKnightMove` (0x4bd3), `BKnightAttack` (0x4c13), `BKBlock` (0x4c40),
+/// `_evadechop` (0x4cad), `BKAttack` (0x4cc3). Translated block for block.
+///
+/// This is the routine `InitGameStart+241` (0x1cfe) puts in `CONTROLTABLE`
+/// slot 8, and kind 8 is what `InitGameStart` writes into `+0x35` of all four
+/// knight records (0x1c69, 0x1c88, 0x1cab, 0x1cca). Slot 6 holds
+/// `ControlKnight`, which reads the joystick, so every knight the machine
+/// plays runs this and no knight a person plays ever does.
+///
+/// The opponent is picked at the top and is always the other knight:
+///
+/// ```text
+/// 04b79  mov [0x77e8], si          ; me
+/// 04b7d  mov di, si
+/// 04b80  mov ax, [di+0x10]         ; the stance is the answer unless
+/// 04b83  mov [0x783a], ax          ; something else is
+/// 04b87  mov word [si+0x26], 0     ; no walk bits, and +0x28 is NOT cleared
+/// 04b8c  cmp si, [KnightTable]
+/// 04b90  jne 04b9c
+/// 04b92  mov ax, [0x897b]          ; I am knight one: knight two
+/// 04b96  mov [Opponent], ax
+/// 04b9a  jmp 04ba4
+/// 04b9c  mov ax, [KnightTable]     ; otherwise knight one
+/// 04b9f  mov [Opponent], ax
+/// 04ba4  cmp word [si+0xe], 0
+/// 04ba8  je  04bad
+/// 04baa  jmp BKnightStruck
+/// 04bad  cmp word [si+0xc], 0
+/// 04bb1  je  04bb6
+/// 04bb3  jmp BKnightHit
+/// 04bb7  mov ax, [si+0x28]
+/// 04bba  mov [ATT], ax             ; the kind it last ordered
+/// 04bbe  call MonsterTrack
+/// 04bc1  or  ax, ax
+/// 04bc3  je  BKnightAttack         ; in range on the plane: bx is the distance
+/// 04bc5  cmp word [ZPLANE], 0
+/// 04bca  je  BKnightMove           ; off the plane: walk
+/// 04bcc  call FindDistance
+/// 04bcf  mov bx, ax
+/// 04bd1  jmp BKnightAttack
+/// ```
+///
+/// `[0x8979]` and `[0x897b]` are the two knights of a knight-versus-knight
+/// fight: `PracticeCombat5` (0x00fe, 0x0104) writes the first two records into
+/// them and `InitKnightvsKnight+9` (0x2063) reads the second. There is no
+/// third. Which of the two is `me` only decides which is `Opponent`, and the
+/// bout hands the target in, so that branch is nothing here.
+///
+/// The `+0xe` and `+0xc` branches are raised where the blow lands, the way
+/// the trogg's are: see [`black_knight_struck`] and [`black_knight_hit`].
+fn black_knight(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act {
+    // Held by a mudman. The original cannot reach this: the only fight that
+    // fields a kind 8 knight is knight versus knight, and a knight has no
+    // hold. It is kept for the arena browser, which can field anything
+    // against anything, and it is the same press `MudmenEntangle` reads.
     if s.me.held() {
         return Act::Struggle;
     }
-    // ControlBlackKnight+69 (0x4bbe): `call MonsterTrack`.
+    // 04bb7  mov ax, [si+0x28]; 04bba mov [ATT], ax
+    let att = brain.att;
+    // 04bbe  call MonsterTrack
     let t = track(s.me, s.foe, s.def, facing);
-    if !s.foe.alive() {
-        if !s.gore || !s.body || s.decapped || t.distance > 100 {
-            return Act::Idle;
+    // 04bc1  or ax, ax; 04bc3 je BKnightAttack
+    let bx = if !t.walking {
+        t.distance
+    } else if !t.plane {
+        // 04bc5  cmp word [ZPLANE], 0; 04bca je BKnightMove
+        return bk_move(t);
+    } else {
+        // 04bcc  call FindDistance; 04bcf mov bx, ax
+        find_distance(s.me, s.foe)
+    };
+    // BKnightAttack:
+    // 04c13  mov di, [si+0x16]     (the *Att table: Act::Attack indexes it)
+    // 04c17  mov bx, [Opponent]; 04c1b cmp word [bx+0x38], 0; 04c20 jg BKBlock
+    if s.foe.health > 0 {
+        return bk_block(s, brain, seed, att, bx, t, *facing);
+    }
+    // 04c22  mov byte [si+0x4a], 0
+    brain.cooldown = 0;
+    // 04c26  cmp bx, 0x5a; 04c29 jg BKnightMove
+    if bx > 0x5a {
+        return bk_move(t);
+    }
+    // 04c2b  cmp word [DeCapFLAG], 0; 04c30 jne A0$ (the stance)
+    //
+    // No gore test and no cooldown on this path, unlike `TroggAttack`, and it
+    // does not raise `DeCapFLAG` itself: the decapitation script's own
+    // `SetDecapFLAG` does that, which the bout sees as a corpse on a
+    // finishing script.
+    if s.decapped {
+        return Act::Idle;
+    }
+    // 04c32  mov word [si+0x28], 4; 04c37 mov ax, [di+4]
+    brain.att = Some(Attack::Swing);
+    Act::Attack {
+        kind: Attack::Swing,
+        spawn: None,
+    }
+}
+
+/// `BKnightMove`, image 0x4bd3.
+///
+/// ```text
+/// 04bd3  cmp byte [si+0x26], 0
+/// 04bd7  jne M0$
+/// 04bd9  jmp 02d52                 ; no walk bit: the stance
+/// M0$:
+/// 04bdc  and byte [si+0x48], 0x7f  ; walking gives the evade its use back
+/// 04be0  test byte [si+0x26], 8; 04be6 mov di, BKnightWALKU; call MoveU
+/// 04bec  test byte [si+0x26], 4; 04bf2 mov di, BKnightWALKD; call MoveD
+/// 04bf8  test byte [si+0x26], 1; 04bfe mov di, BKnightWALKR; call MoveR
+/// 04c04  test byte [si+0x26], 2; 04c0a mov di, BKnightWALKR; call MoveL
+/// 04c10  jmp MonsterWalk
+/// ```
+///
+/// The four walk tables are the knight's own walk cycle, which is what an
+/// [`Act::Walk`] with no script of its own plays; `MoveL` takes the same
+/// `BKnightWALKR` as `MoveR` and mirrors it, which this engine does by the
+/// facing. The `and byte [si+0x48], 0x7f` is [`Fighter::evaded`], and
+/// `Fighter::apply` already clears it for any `State::Walk` order.
+fn bk_move(t: Track) -> Act {
+    walk(t)
+}
+
+/// `BKBlock`, image 0x4c40: whether to answer what the opponent is doing
+/// rather than start something.
+///
+/// ```text
+/// 04c41  call GETPERCENT
+/// 04c45  mov cx, [0x5b1]           ; the day count
+/// 04c49  and cx, 7
+/// 04c4d  mov bx, Progression
+/// 04c50  add bx, cx
+/// 04c52  cmp al, [bx]
+/// 04c55  jl  BKAttack              ; under the day's figure: do not look
+/// 04c58  mov bx, [Opponent]
+/// 04c5c  mov al, [bx+8]            ; his facing
+/// 04c60  cmp al, [si+8]            ; against mine, as FaceKnight left it
+/// 04c63  je  BKAttack              ; both facing the same way: his back is
+///                                  ; to me, so there is nothing to stop
+/// 04c66  cmp word [bx+0x28], 4     ; he is swinging
+/// 04c6f  jne _notswing
+/// 04c76  mov al, [bx+8]            ; the same comparison again, which
+/// 04c7a  cmp al, [si+8]            ; cannot fail here
+/// 04c7d  je  _notswing
+/// 04c7f  call FindDistance
+/// 04c82  cmp ax, 0x78
+/// 04c85  jg  BKAttack              ; a hundred and twenty away: not yet
+/// 04c87  mov word [si+0x28], 8     ; the block
+/// 04c8c  mov ax, [di+8]
+/// 04c92  jmp 02d52
+/// _notswing:
+/// 04c9a  cmp word [bx+0x28], 0x10  ; the overhead chop
+/// 04c9f  je  _evadechop
+/// 04ca6  cmp word [bx+0x28], 2     ; or the lunge
+/// 04cab  jne BKAttack
+/// _evadechop:
+/// 04cad  call FindDistance
+/// 04cb0  cmp ax, 0x78
+/// 04cb3  jg  BKAttack
+/// 04cb5  mov word [si+0x28], 0xe   ; the evade
+/// 04cba  mov ax, [di+0xe]
+/// 04cc0  jmp 02d52
+/// ```
+///
+/// So a swing is blocked and a chop or a lunge is ducked, which is exactly
+/// what `KnightBloSw` pairs them with, and neither is attempted from further
+/// than a hundred and twenty.
+fn bk_block(
+    s: &Sight,
+    brain: &mut Brain,
+    seed: &mut u16,
+    att: Option<Attack>,
+    bx: i32,
+    t: Track,
+    facing: i32,
+) -> Act {
+    // 04c41  call GETPERCENT
+    let al = percent(seed);
+    // 04c45  mov cx, [0x5b1]; 04c49 and cx, 7
+    let cx = (s.progression & 7) as usize;
+    // 04c52  cmp al, [bx]; 04c55 jl BKAttack
+    if al < PROGRESSION[cx] {
+        return bk_attack(s, brain, seed, att, bx, t);
+    }
+    // 04c5c  mov al, [bx+8]; 04c60 cmp al, [si+8]; 04c63 je BKAttack
+    if s.foe.facing == facing {
+        return bk_attack(s, brain, seed, att, bx, t);
+    }
+    // 04c6a  cmp word [bx+0x28], 4; 04c6f jne _notswing
+    if s.foe.attack == Some(Attack::Swing) {
+        // 04c7f  call FindDistance; 04c82 cmp ax, 0x78; 04c85 jg BKAttack
+        if find_distance(s.me, s.foe) > 0x78 {
+            return bk_attack(s, brain, seed, att, bx, t);
         }
-        if cooling(brain) {
-            return Act::Idle;
+        // 04c87  mov word [si+0x28], 8
+        brain.att = Some(Attack::Block);
+        return Act::Attack {
+            kind: Attack::Block,
+            spawn: None,
+        };
+    }
+    // _notswing: 04c9a chop, 04ca6 lunge, anything else BKAttack
+    if s.foe.attack == Some(Attack::Chop) || s.foe.attack == Some(Attack::Lunge) {
+        // _evadechop:
+        // 04cad  call FindDistance; 04cb0 cmp ax, 0x78; 04cb3 jg BKAttack
+        if find_distance(s.me, s.foe) > 0x78 {
+            return bk_attack(s, brain, seed, att, bx, t);
         }
-        brain.cooldown = 20;
+        // 04cb5  mov word [si+0x28], 0xe
+        brain.att = Some(Attack::Evade);
+        return Act::Attack {
+            kind: Attack::Evade,
+            spawn: None,
+        };
+    }
+    bk_attack(s, brain, seed, att, bx, t)
+}
+
+/// `BKAttack`, image 0x4cc3: which attack, by range, and never the same one
+/// twice running.
+///
+/// ```text
+/// 04cc4  call GETPERCENT
+/// 04cc8  mov cx, [0x5b1]           ; the day count, NOT masked here
+/// 04ccd  mov bx, Progression
+/// 04cd0  add bx, cx
+/// 04cd2  cmp al, [bx]
+/// 04cd5  jg  K0$                   ; over the day's figure: strike
+/// 04cd7  call RND                  ; under it: give ground
+/// 04cda  and ax, 7
+/// 04cdd  mov bx, 0x5a
+/// 04ce0  add bx, ax                ; ninety plus nought to seven, and dead:
+/// 04ce2  jmp BKnightMove           ; BKnightMove reads only the walk bits
+/// K0$:
+/// 04ce5  cmp bx, 0x5a
+/// 04ce8  jg  KK1$
+/// 04cea  cmp word [ATT], 4
+/// 04cef  je  KK1$                  ; not a swing twice running
+/// 04cf1  mov word [si+0x28], 4     ; inside ninety: the swing
+/// 04cf6  mov ax, [di+4]
+/// KK1$:
+/// 04cff  cmp bx, 0x5f
+/// 04d02  jg  K2$
+/// 04d04  cmp word [ATT], 0x10
+/// 04d09  je  K2$
+/// 04d0b  mov word [si+0x28], 0x10  ; inside ninety five: the overhead chop
+/// 04d10  mov ax, [di+0x10]
+/// K2$:
+/// 04d19  cmp bx, 0x64
+/// 04d1c  jg  K3$
+/// 04d1e  cmp byte [si+0x34], 0     ; daggers left
+/// 04d22  je  K5$                   ; none: lunge whatever it last did
+/// 04d24  cmp word [ATT], 2
+/// 04d29  je  K3$                   ; some, and it just lunged: throw one
+/// K5$:
+/// 04d2b  mov word [si+0x28], 2     ; inside a hundred: the lunge
+/// 04d30  mov ax, [di+2]
+/// K3$:
+/// 04d39  cmp byte [si+0x34], 0
+/// 04d3d  je  K4$
+/// 04d3f  mov word [si+0x28], 6     ; further, with daggers: throw one
+/// 04d44  mov ax, [di+6]
+/// K4$:
+/// 04d4d  jmp BKnightMove           ; further, with none: close
+/// ```
+///
+/// `+0x34` is the dagger count: `SetKnightEquipment+38` (0x1fc8) writes ten,
+/// `KnifeThrow+3` (0x3e2b) takes one off, `BuyDagger` and `MerchantDagger`
+/// put them back, and `ControlBalok+199` reads the same byte.
+///
+/// The roll at 0x4cd7 is `RND` and not `GETPERCENT`, and what it builds in
+/// `bx` is never read, because `BKnightMove` looks only at the walk bits
+/// `MonsterTrack` already set. The roll is still spent, so it is spent here.
+fn bk_attack(
+    s: &Sight,
+    brain: &mut Brain,
+    seed: &mut u16,
+    att: Option<Attack>,
+    bx: i32,
+    t: Track,
+) -> Act {
+    // 04cc4  call GETPERCENT
+    let al = percent(seed);
+    // 04cc8  mov cx, [0x5b1]: no `and cx, 7` on this one
+    // 04cd2  cmp al, [bx]; 04cd5 jg K0$
+    if al <= progression_at(s.progression) {
+        // 04cd7  call RND; 04cda and ax, 7; 04cdd mov bx, 0x5a; 04ce0 add bx, ax
+        *seed = rnd(*seed);
+        return bk_move(t);
+    }
+    // K0$: 04ce5 cmp bx, 0x5a; 04ce8 jg KK1$; 04cea cmp [ATT], 4; 04cef je KK1$
+    if bx <= 0x5a && att != Some(Attack::Swing) {
+        brain.att = Some(Attack::Swing);
         return Act::Attack {
             kind: Attack::Swing,
             spawn: None,
         };
     }
-    if t.walking {
-        return walk(t);
+    // KK1$: 04cff cmp bx, 0x5f; 04d02 jg K2$; 04d04 cmp [ATT], 0x10; 04d09 je K2$
+    if bx <= 0x5f && att != Some(Attack::Chop) {
+        brain.att = Some(Attack::Chop);
+        return Act::Attack {
+            kind: Attack::Chop,
+            spawn: None,
+        };
     }
-    if cooling(brain) {
-        return Act::Idle;
+    // K2$: 04d19 cmp bx, 0x64; 04d1c jg K3$
+    // 04d1e  cmp byte [si+0x34], 0; 04d22 je K5$; 04d24 cmp [ATT], 2; 04d29 je K3$
+    if bx <= 0x64 && (s.me.daggers() == 0 || att != Some(Attack::Lunge)) {
+        brain.att = Some(Attack::Lunge);
+        return Act::Attack {
+            kind: Attack::Lunge,
+            spawn: None,
+        };
     }
-    brain.cooldown = 20;
-    Act::Attack {
-        kind: Attack::Swing,
-        spawn: None,
+    // K3$: 04d39 cmp byte [si+0x34], 0; 04d3d je K4$
+    if s.me.daggers() != 0 {
+        // 04d3f  mov word [si+0x28], 6
+        brain.att = Some(Attack::Knife);
+        return Act::Attack {
+            kind: Attack::Knife,
+            spawn: None,
+        };
     }
+    // K4$: 04d4d jmp BKnightMove
+    bk_move(t)
+}
+
+/// `BKnightStruck`, image 0x4d50, and `BlackKnightStruck` (0x4d7f) under it:
+/// the `+0xe` branch, which is the one thing the player's knight has no
+/// equivalent of.
+///
+/// ```text
+/// 04d50  mov di, [0x77e8]          ; me
+/// 04d54  cmp word [di+0x38], 0
+/// 04d58  je  BlackKnightStruck     ; no hit points: take it
+/// 04d5a  mov si, [di+0xe]          ; whoever struck me
+/// 04d5d  call CheckBlock
+/// 04d60  cmp word [blockflag], 0
+/// 04d65  je  BlackKnightStruck     ; not stopped: take it
+/// 04d67  mov di, [0x77e8]
+/// 04d6b  mov ax, [di+0x28]         ; the guard I am holding
+/// 04d6e  mov si, [di+0x16]
+/// 04d71  add si, ax
+/// 04d73  mov ax, [si]              ; Att[that guard], played again
+/// 04d78  and byte [di+0x48], 0x7f  ; and the evade's one use given back
+/// 04d7c  jmp 02d52
+/// ```
+///
+/// `CheckBlock` (0x420d) is already [`Fighter::blocks`], and the replay of
+/// `Att[+0x28]` is `REPLACEANIM` on the script the fighter is already on,
+/// which this engine does for any order that repeats. The line that is not
+/// anywhere else is `and byte [di+0x48], 0x7f`: a stopped blow gives the
+/// computer knight its evade back at once, where a person's knight only gets
+/// it back by walking (`M0$`, and `ControlKnight`). Answers whether the
+/// evade's one use is returned.
+pub fn black_knight_blocked(controller: Controller) -> bool {
+    // 04d78, on the blocked path and nowhere else.
+    controller == Controller::Knight
+}
+
+/// `BKnightHit`, image 0x4da8, with `BKnightHitNormal` (0x4dbd) and
+/// `BKnightHitKnight` (0x4dc6): the `+0xc` branch.
+///
+/// ```text
+/// 04da8  mov di, [si+0xc]          ; what I hit
+/// 04dab  cmp byte [di+0x35], 6
+/// 04daf  je  BKnightHitKnight      ; a knight a person is playing
+/// 04db1  cmp word [si+0x28], 0x10
+/// 04db5  je  BKnightHitKnight      ; or my own overhead chop
+/// 04db7  cmp word [si+0x28], 2
+/// 04dbb  je  BKnightHitKnight      ; or my own lunge
+/// BKnightHitNormal:
+/// 04dbd  mov ax, [si+0x12]         ; the recovery: the blow is over
+/// 04dc0  mov [0x783a], ax
+/// 04dc3  jmp 02d52
+/// BKnightHitKnight:
+/// 04dc6  cmp word [di+0x28], 0xe
+/// 04dca  je  BKnightHitNormal      ; he ducked it: recover after all
+/// 04dcc  mov word [0x783a], 0xffff ; otherwise carry on: the blow follows
+/// 04dd2  jmp 02d52                 ; through
+/// ```
+///
+/// The player's knight has the same branch in `KnightHit1` (0x4123) and its
+/// rule is not the same one: there the chop and the lunge recover like
+/// anything else and only the up thrust carries on. Note also that
+/// `BKnightHit` tests the victim's kind against 6 alone where `KnightHit1`
+/// tests 6 and 8, so a computer knight that lands a swing on another computer
+/// knight recovers from it.
+///
+/// `kind` is the striker's `+0x28`, `victim_player_knight` the `+0x35` test,
+/// and `victim_evading` the victim's own `+0x28` being 0xe. Answers whether
+/// the swing carries on (`0xffff`) rather than recovering.
+pub fn black_knight_carries_on(
+    kind: Option<Attack>,
+    victim_player_knight: bool,
+    victim_evading: bool,
+) -> bool {
+    // 04dab / 04db1 / 04db7
+    let hit_knight =
+        victim_player_knight || kind == Some(Attack::Chop) || kind == Some(Attack::Lunge);
+    // 04dc6  cmp word [di+0x28], 0xe; 04dca je BKnightHitNormal
+    hit_knight && !victim_evading
 }
 
 /// The state a fighter needs to answer a controller's questions, so this
@@ -1753,6 +2188,7 @@ mod tests {
             gore: true,
             body: false,
             decapped: false,
+            progression: 0,
         };
         let mut seed = 0x2f1du16;
         decide(&s, brain, &mut seed, facing)
@@ -1915,6 +2351,7 @@ mod tests {
             gore: true,
             body,
             decapped: false,
+            progression: 0,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
@@ -2058,6 +2495,7 @@ mod tests {
                 gore: true,
                 body: false,
                 decapped: false,
+                progression: 0,
             }
         }
         // Walk the register until it hands out a roll at thirty or under,
@@ -2235,6 +2673,7 @@ mod tests {
             gore: true,
             body: false,
             decapped: false,
+            progression: 0,
         };
         let mut seed = 1u16;
         let mut brain = Brain::default();

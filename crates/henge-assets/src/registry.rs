@@ -210,6 +210,7 @@ mod tests {
                         ox: 0,
                         oy: 0,
                     }],
+                    palette: None,
                 },
             );
         }

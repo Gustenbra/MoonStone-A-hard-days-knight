@@ -25,7 +25,12 @@
 //!   *the bottom right*. `GetJoyTL` and `GetJoyBR` store the raw counts, and
 //!   `AdjustJoy` then pulls each threshold **one eighth of the measured range**
 //!   inwards. So three quarters of the travel is dead and a direction only
-//!   registers in the outer eighth at each end. See [`Calibration`].
+//!   registers in the outer eighth at each end. Before anybody calibrates,
+//!   the four thresholds are the constants the image ships in `DGROUP` at
+//!   `DS:0x817e`: 16, 16, 80, 80. See [`Calibration`].
+//! * **Where the menu reaches it.** `OptionKeys` at `0x1282` tests scancode 0x24,
+//!   `J`, before anything else and jumps straight to `Fix_JoyStick`, which ends
+//!   with a `jmp` back to the options screen at `0x59d7`.
 //! * **Debounce.** `BOUNCEBUTTON` waits for fire to go down and then waits for
 //!   it to come back up. A press is worth exactly one thing, however long it is
 //!   held. See [`Debounce`].
@@ -38,15 +43,16 @@
 //!
 //! # What is ours
 //!
-//! **Rebindable controls.** The original has no such thing: its keys are five
+//! **Rebindable controls.** The original has no such thing: its keys are ten
 //! `mov ax, <scancode>` instructions. So [`Bindings`] is designed, not
 //! translated, and it is deliberately *data*: a table of actions to sources
 //! that serialises to JSON and can be saved, shipped in a pack, or edited by
 //! hand. Nothing in the game asks which key was pressed; it asks which action
 //! is held.
 //!
-//! Henge's own default keys are kept rather than the original's, because they
-//! are what the README, the play scripts and every recipe in the docs say.
+//! The table's *contents* are not ours, though. It ships with the original's own
+//! ten keys, read out of the reader at image `0x81ec`, because where the original
+//! has something this project translates it, and the layout is something it has.
 
 use serde::{Deserialize, Serialize};
 
@@ -151,9 +157,20 @@ pub struct Bindings {
 }
 
 impl Default for Bindings {
-    /// Henge's own keys, plus the obvious pad. Player one has the arrows and
-    /// space, player two has `WASD` and `F`, exactly as the README says, and
-    /// each seat also answers to a gamepad's d-pad, left stick and south button.
+    /// **The original's own ten keys**, plus a pad for each seat.
+    ///
+    /// The reader at image `0x81ec` is two runs of five `KEYPRESSED` calls, each
+    /// followed by an `rcl` into the seat's word, so the order the scancodes are
+    /// asked for is the bit order and the last one shifted in is bit 0. Player
+    /// one, into `bx`: `0x1c` Enter, `0x48` up, `0x50` down, `0x4b` left, `0x4d`
+    /// right. Player two, into `dx` from `0x821d`: `0x0f` Tab, `0x11` W, `0x2d`
+    /// X, `0x1e` A, `0x20` D. Against the word's own bits (`0x10` fire, `0x08`
+    /// up, `0x04` down, `0x02` left, `0x01` right) that is Enter and the arrows
+    /// for one, and Tab, W, X, A, D for two.
+    ///
+    /// The pad sources beside them are ours: the original reads a gameport, and a
+    /// d-pad and a south button are the same five bits arriving on hardware it
+    /// never saw.
     fn default() -> Bindings {
         let pad_dirs = |pad: usize, keys: [&str; 5]| {
             Seat::of(
@@ -204,11 +221,13 @@ impl Default for Bindings {
         };
         Bindings {
             seats: vec![
+                // 0x48, 0x50, 0x4b, 0x4d, 0x1c.
                 pad_dirs(
                     0,
-                    ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"],
+                    ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"],
                 ),
-                pad_dirs(1, ["KeyW", "KeyS", "KeyA", "KeyD", "KeyF"]),
+                // 0x11, 0x2d, 0x1e, 0x20, 0x0f.
+                pad_dirs(1, ["KeyW", "KeyX", "KeyA", "KeyD", "Tab"]),
             ],
             calibration: vec![Calibration::default(), Calibration::default()],
         }
@@ -216,29 +235,6 @@ impl Default for Bindings {
 }
 
 impl Bindings {
-    /// The original's own keys, for anyone who wants them: Enter, the arrows
-    /// and Tab, W, X, A, D, read straight out of the reader at image `0x81ec`.
-    pub fn as_the_original_had_them() -> Bindings {
-        let mut b = Bindings::default();
-        let set = |seat: &mut Seat, keys: [&str; 5]| {
-            for (a, k) in Action::ALL
-                .iter()
-                .zip([keys[0], keys[1], keys[2], keys[3], keys[4]])
-            {
-                let list = seat.actions.entry(*a).or_default();
-                list.retain(|s| !matches!(s, Source::Key { .. }));
-                list.insert(0, Source::key(k));
-            }
-        };
-        // Action::ALL is up, down, left, right, fire.
-        set(
-            &mut b.seats[0],
-            ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"],
-        );
-        set(&mut b.seats[1], ["KeyW", "KeyX", "KeyA", "KeyD", "Tab"]);
-        b
-    }
-
     /// Every action a source raises, across every seat.
     pub fn raised_by(&self, src: &Source) -> Vec<(usize, Action)> {
         let mut out = Vec::new();
@@ -338,31 +334,64 @@ pub struct Calibration {
 }
 
 impl Default for Calibration {
-    /// **The formula is the original's; these two corners are ours.**
+    /// **The original's own shipped thresholds**, and they are four constants,
+    /// not a derivation.
     ///
-    /// `AdjustJoy` takes an eighth off each end of whatever the player's own
-    /// two answers measured. On a 1991 stick those answers were sloppy and
-    /// nowhere near the electrical extremes, so an eighth in from them fell
-    /// somewhere reachable. A modern pad reports a clean -1 to 1, and running
-    /// the same eighth off the true extremes would want the stick pushed
-    /// seven eighths of the way before it did anything.
+    /// `JOY0` compares against four words in `DGROUP` at `DS:0x817e`, `0x8180`,
+    /// `0x8182` and `0x8184`. `Fix_JoyStick` overwrites them, but the image has
+    /// them initialised, at image `0x1a52e` onwards, and they read **16, 16, 80,
+    /// 80**: `xmin`, `ymin`, `xmax`, `ymax`. That is what the game answers with
+    /// before anybody calibrates anything, so it is what this answers with.
     ///
-    /// So the default pretends the corners were answered at six tenths of full
-    /// deflection, which is about what a hand does, and puts *that* through
-    /// `AdjustJoy` unchanged. A direction then registers at around half. Anyone
-    /// who wants the letter of it can run the calibration and push all the way.
+    /// The earlier default here invented two corners at six tenths of deflection
+    /// and put them through `AdjustJoy`. There was never any need: the numbers
+    /// were in the image. They are also self consistent with `AdjustJoy`, which
+    /// is a check on having read the right four words: corners of 6 and 90 have
+    /// a range of 84, an eighth of 84 is 10, and 6 + 10 with 90 - 10 is exactly
+    /// 16 and 80.
     fn default() -> Calibration {
-        Calibration::from_corners(
-            (Calibration::from_axis(-0.6), Calibration::from_axis(-0.6)),
-            (Calibration::from_axis(0.6), Calibration::from_axis(0.6)),
-        )
+        Calibration {
+            xmin: Calibration::SHIPPED_MIN,
+            ymin: Calibration::SHIPPED_MIN,
+            xmax: Calibration::SHIPPED_MAX,
+            ymax: Calibration::SHIPPED_MAX,
+        }
     }
 }
 
 impl Calibration {
     /// `cmp bx, 0x400`. A count that gets this far is a stick that is not
-    /// plugged in, and the original ignores that axis entirely.
+    /// plugged in, and the original ignores that axis entirely. It is the
+    /// runaway cap of the read loop and not a deflection, so nothing a present
+    /// stick reports may ever reach it.
     pub const TIMEOUT: i32 = 0x400;
+
+    /// The thresholds the image ships with, at `DS:0x817e` and `DS:0x8182`
+    /// (image `0x1a52e` and `0x1a532`): 16 and 80.
+    pub const SHIPPED_MIN: i32 = 16;
+    pub const SHIPPED_MAX: i32 = 80;
+
+    /// The corner pair [`Calibration::SHIPPED_MIN`] and
+    /// [`Calibration::SHIPPED_MAX`] are `AdjustJoy` of, which is 6 and 90, and
+    /// therefore the count scale the original's own numbers live on.
+    ///
+    /// **This pair is the inherent part.** A gameport count is how many times
+    /// round a busy loop, so the same stick on a faster machine counts higher and
+    /// there is no fixed number of counts that means "hard left": that is exactly
+    /// why `Fix_JoyStick` exists. A pad that reports a fraction has to be put on
+    /// *some* count scale before the original's comparisons can be used on it,
+    /// and the only scale the image names is this one. Mapping -1 onto 6 and +1
+    /// onto 90 also makes the two agree: calibrating a pad that reports clean
+    /// extremes records corners of 6 and 90 and `AdjustJoy` gives back the
+    /// shipped 16 and 80, so the default and a fresh calibration are the same
+    /// answer.
+    ///
+    /// Unused, along with [`Calibration::from_axis`], in a build with the gamepad
+    /// feature off: that is a machine with no stick to put on any scale.
+    #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
+    pub const AXIS_LOW: i32 = 6;
+    #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
+    pub const AXIS_HIGH: i32 = 90;
 
     /// `GetJoyTL`, `GetJoyBR` and `AdjustJoy`, in that order.
     ///
@@ -395,9 +424,14 @@ impl Calibration {
     /// Deliberately not a shortcut past the original's thresholds: a stick that
     /// reports a fraction is turned into the count the same deflection would
     /// have produced on a gameport, and then read exactly as `JOY0` reads one.
+    /// The scale is [`Calibration::AXIS_LOW`] to [`Calibration::AXIS_HIGH`],
+    /// which is the scale the shipped thresholds are measured on.
+    #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
     pub fn from_axis(v: f32) -> i32 {
         let n = ((v + 1.0) * 0.5).clamp(0.0, 1.0);
-        ((n * (Calibration::TIMEOUT - 1) as f32) as i32).clamp(0, Calibration::TIMEOUT - 1)
+        let span = (Calibration::AXIS_HIGH - Calibration::AXIS_LOW) as f32;
+        let c = Calibration::AXIS_LOW + (n * span + 0.5) as i32;
+        c.clamp(Calibration::AXIS_LOW, Calibration::AXIS_HIGH)
     }
 
     /// `JOY0`'s four comparisons, and its treatment of a timed out axis.
@@ -730,25 +764,52 @@ mod tests {
         assert_eq!(settle(c.mask(500, 500)), 0);
     }
 
+    /// The four words the image ships at `DS:0x817e`, verbatim.
+    #[test]
+    fn the_default_thresholds_are_the_four_words_the_image_ships() {
+        let c = Calibration::default();
+        assert_eq!(
+            (c.xmin, c.ymin, c.xmax, c.ymax),
+            (16, 16, 80, 80),
+            "image 0x1a52e onwards"
+        );
+    }
+
+    /// And they are `AdjustJoy` of the scale's own two ends, which is both the
+    /// check that the right four words were read and the reason the scale is
+    /// what it is.
+    #[test]
+    fn the_shipped_thresholds_are_adjust_joy_of_the_scale_ends() {
+        let from_extremes = Calibration::from_corners(
+            (Calibration::AXIS_LOW, Calibration::AXIS_LOW),
+            (Calibration::AXIS_HIGH, Calibration::AXIS_HIGH),
+        );
+        assert_eq!(from_extremes, Calibration::default());
+    }
+
     #[test]
     fn a_normalised_axis_lands_on_the_counts_scale() {
-        assert_eq!(Calibration::from_axis(-1.0), 0);
-        assert_eq!(Calibration::from_axis(1.0), Calibration::TIMEOUT - 1);
+        assert_eq!(Calibration::from_axis(-1.0), Calibration::AXIS_LOW);
+        assert_eq!(Calibration::from_axis(1.0), Calibration::AXIS_HIGH);
         let mid = Calibration::from_axis(0.0);
-        assert!((510..=513).contains(&mid), "centre was {mid}");
-        // The default calibration leaves a centred stick alone and answers a
-        // stick pushed the whole way.
+        assert_eq!(mid, 48, "the midpoint of 6 and 90");
+        // Nothing a present stick reports may be mistaken for an absent one.
+        assert!(Calibration::from_axis(1.0) < Calibration::TIMEOUT);
+        // The shipped thresholds leave a centred stick alone and answer a stick
+        // pushed the whole way.
         let c = Calibration::default();
         assert_eq!(c.mask(mid, mid), 0);
         assert_eq!(c.mask(Calibration::from_axis(-1.0), mid), LEFT);
         assert_eq!(c.mask(Calibration::from_axis(1.0), mid), RIGHT);
         assert_eq!(c.mask(mid, Calibration::from_axis(-1.0)), UP);
         assert_eq!(c.mask(mid, Calibration::from_axis(1.0)), DOWN);
-        // A light nudge is inside the dead zone, which is the point of it, and
-        // half deflection is outside it, which is the point of the default
-        // corners being six tenths rather than the extremes.
+        // A light nudge is inside the dead zone, which is the point of it. The
+        // live band is the outer quarter of each half, which is what an eighth of
+        // the range at each end comes to.
         assert_eq!(c.mask(Calibration::from_axis(-0.4), mid), 0);
-        assert_eq!(c.mask(Calibration::from_axis(-0.55), mid), LEFT);
+        assert_eq!(c.mask(Calibration::from_axis(-0.7), mid), 0);
+        assert_eq!(c.mask(Calibration::from_axis(-0.8), mid), LEFT);
+        assert_eq!(c.mask(Calibration::from_axis(0.8), mid), RIGHT);
     }
 
     #[test]
@@ -783,25 +844,49 @@ mod tests {
         assert!(d.edge(FIRE | UP));
     }
 
+    /// The reader at image `0x81ec`, key for key and bit for bit. Ten assertions
+    /// where there used to be four, because the layout is now recovered and a
+    /// recovered layout is checkable in full.
     #[test]
-    fn the_default_bindings_are_the_keys_the_readme_promises() {
+    fn the_default_bindings_are_the_keys_the_original_reads() {
         let b = Bindings::default();
         assert_eq!(b.seats.len(), 2);
-        assert!(b.seats[0].actions[&Action::Up].contains(&Source::key("ArrowUp")));
-        assert!(b.seats[0].actions[&Action::Fire].contains(&Source::key("Space")));
-        assert!(b.seats[1].actions[&Action::Left].contains(&Source::key("KeyA")));
-        assert!(b.seats[1].actions[&Action::Fire].contains(&Source::key("KeyF")));
-        // And each seat has a pad of its own.
+        // Player one, `bx`: 0x1c, 0x48, 0x50, 0x4b, 0x4d.
+        for (a, k) in [
+            (Action::Fire, "Enter"),
+            (Action::Up, "ArrowUp"),
+            (Action::Down, "ArrowDown"),
+            (Action::Left, "ArrowLeft"),
+            (Action::Right, "ArrowRight"),
+        ] {
+            assert!(
+                b.seats[0].actions[&a].contains(&Source::key(k)),
+                "seat one {a:?} is {k}"
+            );
+        }
+        // Player two, `dx`: 0x0f, 0x11, 0x2d, 0x1e, 0x20.
+        for (a, k) in [
+            (Action::Fire, "Tab"),
+            (Action::Up, "KeyW"),
+            (Action::Down, "KeyX"),
+            (Action::Left, "KeyA"),
+            (Action::Right, "KeyD"),
+        ] {
+            assert!(
+                b.seats[1].actions[&a].contains(&Source::key(k)),
+                "seat two {a:?} is {k}"
+            );
+        }
+        // And nothing of ours is left in: space and F were henge's own fire keys
+        // and the original has neither.
+        for k in ["Space", "KeyF", "KeyS"] {
+            assert!(
+                b.raised_by(&Source::key(k)).is_empty(),
+                "{k} is not one of the original's ten"
+            );
+        }
+        // Each seat still has a pad of its own, which is ours and stays.
         assert_eq!((b.seats[0].pad, b.seats[1].pad), (0, 1));
-    }
-
-    #[test]
-    fn the_originals_own_keys_are_available() {
-        let b = Bindings::as_the_original_had_them();
-        assert!(b.seats[0].actions[&Action::Fire].contains(&Source::key("Enter")));
-        assert!(b.seats[1].actions[&Action::Fire].contains(&Source::key("Tab")));
-        assert!(b.seats[1].actions[&Action::Down].contains(&Source::key("KeyX")));
-        // The pad bindings survive a change of keys.
         assert!(b.seats[0].actions[&Action::Up].contains(&Source::button("DPadUp")));
     }
 

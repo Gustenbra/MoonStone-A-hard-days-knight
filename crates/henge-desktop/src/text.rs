@@ -7,12 +7,22 @@
 //! change, and the space is glyph 69 drawn like any other character, which is
 //! why `space_width` is that glyph's own advance rather than a number.
 //!
-//! **The original never draws text in a colour.** `GFX:TextP` looks a glyph up,
-//! puts its width and height in the blitter's registers and calls the same cel
-//! blit every other sprite in the game goes through; there is no ink anywhere in
-//! it. So [`Font::draw_own`] is the original's way and [`Font::draw`] is this
-//! project's, for the screens whose palette is an arena's rather than one of the
-//! three plates that reserve the face's five entries.
+//! **The original never draws text in a colour, and neither does this any
+//! more.** `GFX:TextP` looks a glyph up, puts its width and height in the
+//! blitter's registers and calls the same cel blit every other sprite in the
+//! game goes through; there is no ink anywhere in it. `BOLD.F`'s glyphs are
+//! drawn in five indices, 5 the ring round the letter and 9 to 12 the bright
+//! face inside it, and flattening all five to one colour closes every counter
+//! and turns a line into a row of blobs.
+//!
+//! `Font::draw`, which took an ink and painted the glyph as a silhouette, is
+//! gone and so is the `blit_mask` under it. What stood in its way was that the
+//! five entries mean something else over an arena, and the fix is the one
+//! `docs/ROADMAP.md` already named: **the manifest says which palette a sheet's
+//! indices were authored against**, so the glyph's own shades can be translated
+//! into whatever the screen loaded, by nearest colour. Over `MESSAGE.PIV`,
+//! `CH.PIV` and the intro's panorama, which are the screens the original writes
+//! on, the two palettes agree and the translation is the identity.
 
 use crate::framebuffer::Framebuffer;
 use henge_assets::Registry;
@@ -81,27 +91,12 @@ impl Font {
         s.chars().map(|c| self.advance(reg, c)).sum()
     }
 
-    pub fn draw(
-        &self,
-        reg: &mut Registry,
-        fb: &mut Framebuffer,
-        s: &str,
-        x: i32,
-        y: i32,
-        colour: u8,
-    ) -> i32 {
-        self.render(reg, fb, s, x, y, Some(colour))
-    }
-
-    /// Draw a line in the glyphs' own colours rather than as a silhouette.
+    /// Draw a line in the glyphs' own colours, which is the only way there is.
     ///
-    /// `BOLD.F`'s glyphs carry five indices: 5 rings the letter and fills its
-    /// counters, and 9 to 12 are the bright face inside that ring. A
-    /// silhouette paints both in one colour, which closes every counter and
-    /// turns the line into a row of blobs. Blitting the indices keeps the
-    /// letter shapes, and it is legible wherever the screen's palette carries
-    /// the font's own five entries: `MESSAGE.PIV` has them already, and
-    /// `henge_core::intro::CAPTION_INK` is the intro writing them itself.
+    /// Where the screen's palette is not the one the font bank was authored
+    /// against, each of the glyph's indices is sent to the nearest colour in
+    /// the palette that *is* loaded. That keeps the letter shapes, which a
+    /// silhouette destroys.
     pub fn draw_own(
         &self,
         reg: &mut Registry,
@@ -110,18 +105,61 @@ impl Font {
         x: i32,
         y: i32,
     ) -> i32 {
-        self.render(reg, fb, s, x, y, None)
+        self.render(reg, fb, s, x, y)
     }
 
-    fn render(
-        &self,
-        reg: &mut Registry,
-        fb: &mut Framebuffer,
-        s: &str,
-        x: i32,
-        y: i32,
-        colour: Option<u8>,
-    ) -> i32 {
+    /// The table that carries this sheet's indices into the loaded palette.
+    ///
+    /// The identity where the manifest names no palette for the sheet, and the
+    /// identity again where the two palettes are the same, which is every
+    /// screen the original itself writes on.
+    fn translation(&self, reg: &Registry, fb: &Framebuffer) -> [u8; 32] {
+        let mut map = [0u8; 32];
+        for (i, m) in map.iter_mut().enumerate() {
+            *m = i as u8;
+        }
+        let Some(id) = reg.sheet(&self.sheet).and_then(|r| r.value.palette.clone()) else {
+            return map;
+        };
+        let Some(own) = reg.palette(&id).map(|r| r.value.clone()) else {
+            return map;
+        };
+        let same = own
+            .iter()
+            .take(32)
+            .enumerate()
+            .all(|(i, c)| fb.palette[i] == *c);
+        if same {
+            return map;
+        }
+        let split = |c: u32| -> [i32; 3] {
+            [
+                ((c >> 16) & 0xff) as i32,
+                ((c >> 8) & 0xff) as i32,
+                (c & 0xff) as i32,
+            ]
+        };
+        // Nearest by squared distance, weighted the way luminance is: a glyph
+        // that has to move ends up on the entry a viewer would call the same
+        // colour rather than the one with the smallest arithmetic difference.
+        for (i, want) in own.iter().take(32).enumerate() {
+            let [wr, wg, wb] = split(*want);
+            let mut best = (i32::MAX, i as u8);
+            for (j, have) in fb.palette.iter().enumerate() {
+                let [hr, hg, hb] = split(*have);
+                let d =
+                    2 * (wr - hr) * (wr - hr) + 4 * (wg - hg) * (wg - hg) + (wb - hb) * (wb - hb);
+                if d < best.0 {
+                    best = (d, j as u8);
+                }
+            }
+            map[i] = best.1;
+        }
+        map
+    }
+
+    fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, s: &str, x: i32, y: i32) -> i32 {
+        let map = self.translation(reg, fb);
         let mut cx = x;
         for c in s.chars() {
             if c == ' ' {
@@ -149,25 +187,10 @@ impl Font {
                     px[row * w..(row + 1) * w].copy_from_slice(&img.pixels[src..src + w]);
                 }
             }
-            match colour {
-                Some(ink) => fb.blit_mask(&px, w, h, cx, y, ink),
-                None => fb.blit(&px, w, h, cx, y, false),
-            }
+            fb.blit_mapped(&px, w, h, cx, y, &map);
             cx += w as i32 + self.tracking;
         }
         cx - x
-    }
-
-    pub fn draw_centred(
-        &self,
-        reg: &mut Registry,
-        fb: &mut Framebuffer,
-        s: &str,
-        y: i32,
-        colour: u8,
-    ) {
-        let w = self.width(reg, s);
-        self.draw(reg, fb, s, (henge_core::SCREEN_W as i32 - w) / 2, y, colour);
     }
 
     /// [`Font::draw_own`], centred the way `TextPTop` centres a line whose
