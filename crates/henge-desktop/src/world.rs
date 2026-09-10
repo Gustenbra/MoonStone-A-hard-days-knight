@@ -156,6 +156,21 @@ pub struct World {
     /// it. The same figure painted in indices 9 to 11 instead of 6 to 8, so a
     /// second knight is a different colour without a single pixel changing.
     second_banks: Option<Vec<Bank>>,
+    /// Every encounter's `TASKCELBUF` table set, keyed by the creature whose
+    /// loader builds it.
+    ///
+    /// **The four tables belong to the fight, not to the fighter.** One
+    /// loader runs per encounter and fills all four; the actor record's
+    /// `+0x18` only says which of them a task *starts* on, and `TASKCELBUF`
+    /// moves it between them from there. So table 1 is the knight's banks and
+    /// table 2 is whichever creature was loaded, for everybody in the arena.
+    ///
+    /// That is what `Beast_BackToss` needs: `InitKnightvsBeast` (0x2283,
+    /// 0x2288) puts it on two of the knight's own `*Hit` rows, and the script
+    /// opens `TASKCELBUF 2` so the knight's task draws the tossed knight out
+    /// of the beast's cels. With a table set per actor it could not be drawn
+    /// at all, which is why it was left unbuilt.
+    encounter_banks: BTreeMap<String, BankTables>,
     /// `BattlePal` as last composed, for whoever names a fighter by one of
     /// its colours after the frame is drawn.
     palette: [u32; battle_palette::ENTRIES],
@@ -219,11 +234,13 @@ impl World {
             eprintln!("no battle palette in the pack, fighters keep the backdrop's colours: {e}");
             BattleColours::default()
         });
-        let second_banks = reg
+        let all_banks = reg
             .read_data::<BTreeMap<String, BankTables>>("data.banks")
-            .ok()
-            .and_then(|mut b| b.remove("hero"))
-            .and_then(|mut tables| tables.remove(&2));
+            .unwrap_or_default();
+        let second_banks = all_banks
+            .get("hero")
+            .and_then(|tables| tables.get(&2))
+            .cloned();
         let mut order: Vec<String> = arenas.keys().cloned().collect();
         order.sort();
         anyhow::ensure!(!order.is_empty(), "no arenas in the pack");
@@ -248,6 +265,7 @@ impl World {
             events: Vec::new(),
             colours,
             second_banks,
+            encounter_banks: all_banks,
             palette: [0; battle_palette::ENTRIES],
             player_health: None,
             sheet: None,
@@ -1164,7 +1182,8 @@ impl World {
                         None
                     };
                     let def = self.def_of(&m.actor);
-                    Self::draw_parts(reg, fb, def, &m.task, banks)?;
+                    let enc = self.encounter_banks.get(&self.foe);
+                    Self::draw_parts(reg, fb, def, &m.task, banks, enc)?;
                 }
             }
         }
@@ -1291,7 +1310,14 @@ impl World {
         } else {
             None
         };
-        Self::draw_parts(reg, fb, def, task, banks)
+        Self::draw_parts(
+            reg,
+            fb,
+            def,
+            task,
+            banks,
+            self.encounter_banks.get(&self.foe),
+        )
     }
 
     /// The parts of one task, whoever's it is. A task that has killed itself
@@ -1306,6 +1332,7 @@ impl World {
         def: &ActorDef,
         task: &Task,
         banks: Option<&[Bank]>,
+        encounter: Option<&BankTables>,
     ) -> anyhow::Result<()> {
         if !task.active {
             return Ok(());
@@ -1316,7 +1343,19 @@ impl World {
                 .filter(|_| part.table == def.bank_table)
                 .and_then(|b| b.get(part.bank as usize))
                 .filter(|b| !b.cels.is_empty());
-            let Some(bank) = swapped.or_else(|| def.bank(part.table, part.bank)) else {
+            // The fight's own four tables come first, since in the original
+            // there is one set and every actor indexes it. The actor's own
+            // are the fall-back, for a task drawn outside a fight -- the
+            // stone circle's two scripts, the map -- where no encounter set
+            // was loaded.
+            let shared = encounter
+                .and_then(|t| t.get(&part.table))
+                .and_then(|b| b.get(part.bank as usize))
+                .filter(|b| !b.cels.is_empty());
+            let Some(bank) = swapped
+                .or(shared)
+                .or_else(|| def.bank(part.table, part.bank))
+            else {
                 continue;
             };
             let Some(placed) = henge_core::taskvm::place(part, bank, at, task.mirror()) else {

@@ -679,6 +679,14 @@ impl Fighter {
                 self.enter_on(order.state, order.script);
             }
             self.attack = order.attack;
+            // 02fb2: `ControlBeast` writes `+0x28` on every tick, before any
+            // branch, so a kind its controller set outside an attack order
+            // survives the order rather than being cleared by it. Only the
+            // beast has one, because only the beast deals its blow from a
+            // walk; see `Brain::kind`.
+            if let Some(k) = self.brain.kind {
+                self.attack = Some(k);
+            }
         } else if self.brain.flags & crate::monster::flag::DRIVEN != 0 {
             // A creature with a controller of its own has no joystick to read.
             // Between one order and the next it carries on with what it was
@@ -1310,20 +1318,56 @@ impl Fighter {
     }
 
     /// A blow on a body that is already down: the corpse is given the
-    /// finish. `MudmenStruck1`, the path every creature's and a thrown
-    /// dagger's blow on a fallen knight takes, decapitates for a swing and
-    /// collapses him for anything else; `KnightKnightStruck1` decapitates
-    /// for any blow, so a knight's is any blow from the same kind of
-    /// fighter. Whether the head actually comes off is the script's own
-    /// `TASKSKIP`, which the gore switch decides.
-    pub fn finish(&mut self, def: &ActorDef, by: Option<Attack>, by_own_kind: bool) -> bool {
+    /// finish, and **which finish is the striker's business, not the blow's**.
+    ///
+    /// `KnightGotStruck` (0x4267) does `mov si, [di+0xe]` -- the striker --
+    /// before it jumps through `StruckTable` (DS:0x7843) by *his* `+0x35`,
+    /// so each entry decides for itself what a blow on a body with no hit
+    /// points left does:
+    ///
+    /// ```text
+    /// 0x02 mudman, 0x1a dagger  MudmenStruck1 0x4498  swing -> decap, else collapse
+    /// 0x06 / 0x08 knight        KnightKnightStruck1   any blow -> the head
+    /// 0x0c / 0x0e trogg         TroggStruck1 -> TroggFinishKnight 0x42fc
+    /// 0x20 troll                TrollStruck1 -> TrollOHead
+    /// ```
+    ///
+    /// and `TroggFinishKnight` is the one that had been read as the mudman's
+    /// rule:
+    ///
+    /// ```text
+    /// 042fc  cmp byte ptr [si + 0x35], 0xc   ; the axe, and the axe only
+    /// 04300  je  TroggChopHead               ; Knight_SwDeCap, whatever the blow
+    /// 04302  mov word ptr [0x783a], 0x1328   ; Knight_SwCollapse
+    /// ```
+    ///
+    /// So an **axe trogg always takes the head and a hammer trogg always
+    /// collapses him**, whichever of their two blows landed. This used to be
+    /// a `// TODO`, because both share `Controller::Trogg` and the pack
+    /// carried no `+0x35` to tell them apart; it carries one now, as
+    /// [`ActorDef::record_kind`].
+    ///
+    /// Whether the head actually comes off is the script's own `TASKSKIP`,
+    /// which the gore switch decides.
+    pub fn finish(
+        &mut self,
+        def: &ActorDef,
+        by: Option<Attack>,
+        by_own_kind: bool,
+        striker: u8,
+    ) -> bool {
         if !self.finishable(def) {
             return false;
         }
-        let which = if by == Some(Attack::Swing) || by_own_kind {
-            "decap"
-        } else {
-            "collapse"
+        let which = match striker {
+            // 0x42fc: the axe trogg's own kind.
+            0x0c => "decap",
+            // 0x0e, the hammer, is `TroggFinishKnight`'s fall-through.
+            0x0e => "collapse",
+            // Everything else keeps the rule it had, which is `MudmenStruck1`'s
+            // for a creature and `KnightKnightStruck1`'s between knights.
+            _ if by == Some(Attack::Swing) || by_own_kind => "decap",
+            _ => "collapse",
         };
         let Some(script) = def.finishes.get(which).cloned() else {
             return false;
@@ -2472,6 +2516,35 @@ pub(crate) mod tests {
              idx, the same tick"
         );
     }
+    /// The axe trogg takes the head and the hammer trogg collapses him,
+    /// whichever blow landed. `TroggFinishKnight` (0x42fc) tests `+0x35`
+    /// against 0xc and nothing else, so this is not the mudman's
+    /// swing-or-not rule and never was.
+    #[test]
+    fn the_axe_trogg_takes_the_head_and_the_hammer_trogg_does_not() {
+        let mut d = scripted_def();
+        d.finishes = [("decap", "decap"), ("collapse", "collapse")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let down = |striker: u8, by: Option<Attack>| -> String {
+            let mut f = Fighter::new("k", &d, 100, 100, 1);
+            f.health = 0;
+            f.enter(State::Dead);
+            f.finish(&d, by, false, striker);
+            f.script.clone()
+        };
+        // 0x0c, the axe: the head, on the chop as readily as on the swing.
+        assert_eq!(down(0x0c, Some(Attack::Chop)), "decap");
+        assert_eq!(down(0x0c, Some(Attack::Swing)), "decap");
+        // 0x0e, the hammer: never the head, not even on a swing.
+        assert_eq!(down(0x0e, Some(Attack::Swing)), "collapse");
+        assert_eq!(down(0x0e, Some(Attack::Chop)), "collapse");
+        // 0x02, the mudman, keeps its own rule, which is the blow's.
+        assert_eq!(down(0x02, Some(Attack::Swing)), "decap");
+        assert_eq!(down(0x02, Some(Attack::Chop)), "collapse");
+    }
+
     /// The spear trogg's attack window is ten pixels wide, and a flat speed
     /// stepped straight over it.
     ///

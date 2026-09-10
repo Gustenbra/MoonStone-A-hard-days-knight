@@ -179,6 +179,26 @@ pub struct Bout {
     /// `BKnightAttack` (0x4c2b) read it.
     #[serde(default)]
     pub decap: bool,
+    /// `ShakeCOUNT` (DS:0x78b8): the screen shake is due when this counts
+    /// down to nought.
+    ///
+    /// `ShakeADD` (0x493f) is two instructions of substance -- if the count
+    /// is already set, leave it; otherwise `mov word [0x78b8], 1` -- and it
+    /// has exactly two callers in the game: `BalokJumping+12` (0x374b), when
+    /// the Balok lands, and the script `Troll_Chop`, which gosubs it. Nothing
+    /// else in the image shakes the screen.
+    ///
+    /// `COLCON` (0x4988) is what spends it, once per combat loop pass:
+    /// `cmp word [0x78b8], 0; je; dec word [0x78b8]; jne; call ShakeScreen`.
+    /// So the count is set to one and the shake runs on the very next pass.
+    /// `InitCombat` (0x33e) clears it at the start of a fight.
+    ///
+    /// It lives here, in the simulation, because it is a small deterministic
+    /// integer and both peers of a lockstep fight must agree on it. What the
+    /// shake *looks* like does not: `ShakeScreen`'s fifteen random offsets
+    /// are the renderer's, and are not rolled from this crate's seed.
+    #[serde(default)]
+    pub shake_count: u32,
     /// How many creatures this fight still owes, how many it holds at once, and
     /// what one of them is fielded with: `TotalMonsters`, `MaxMonsters`,
     /// `NumberInCombat` and `SIDE`. See [`crate::wave`].
@@ -239,6 +259,8 @@ impl Bout {
             sounds: Vec::new(),
             rng: default_rng(),
             decap: false,
+            // `InitCombat+13` (0x33e): every fight opens with it clear.
+            shake_count: 0,
             wave: Wave::default(),
             arrivals: Arrivals::default(),
             progression: 0,
@@ -1487,6 +1509,31 @@ impl Bout {
 
     /// `KnightSAnim` 0x44c5: `mov [0x783a], ax`, over whatever
     /// `Fighter::struck` chose off the knight's ordinary row.
+    /// `ShakeADD`, image 0x493f: ask for a shake, unless one is already due.
+    pub fn shake(&mut self) {
+        if self.shake_count == 0 {
+            self.shake_count = 1;
+        }
+    }
+
+    /// `COLCON`'s own three lines (0x4988), once per combat loop pass: spend
+    /// a pending shake and say whether this is the pass it runs on.
+    ///
+    /// ```text
+    /// 04988  cmp word ptr [0x78b8], 0
+    /// 0498d  je  04998
+    /// 0498f  dec word ptr [0x78b8]
+    /// 04993  jne 04998
+    /// 04995  call ShakeScreen
+    /// ```
+    pub fn take_shake(&mut self) -> bool {
+        if self.shake_count == 0 {
+            return false;
+        }
+        self.shake_count -= 1;
+        self.shake_count == 0
+    }
+
     fn hit_row(&mut self, target: usize, script: &str, t_def: &ActorDef) {
         if !t_def.animation.contains_key(script) {
             return;
@@ -1941,6 +1988,14 @@ impl Bout {
             self.fighters[me].y = ny;
             self.rng = seed;
             self.shared = shared;
+            // `BalokJumping+12` (0x374b) calls `ShakeADD` where it stands, so
+            // the controller's answer is taken here rather than waiting for a
+            // script effect. Cleared as it is spent, since the call happens
+            // once.
+            if self.shared.shake {
+                self.shared.shake = false;
+                self.shake();
+            }
             (act, Intent::default())
         };
         let order = |state, script: String, attack| {
@@ -2077,6 +2132,7 @@ impl Bout {
                 script,
                 damage,
                 fatal,
+                victim,
             } => {
                 let t_def = def_of(&self.fighters[target].actor);
                 self.fighters[target].holder = None;
@@ -2086,6 +2142,19 @@ impl Bout {
                     self.fighters[target].struck(t_def, left, None);
                 } else if damage > 0 {
                     self.fighters[target].struck(t_def, damage, None);
+                }
+                // `mov si, 0x1596; call REPLACEANIM` on the victim's own
+                // record, which is what the demon's two whip follows do
+                // (0x50de, 0x5119): the script is named outright and his
+                // `*Hit` row is not consulted. Taken after the blow, because
+                // the blow is what puts him in `State::Hurt` for `hit_row`
+                // to replace -- and a blow that killed him is left alone,
+                // since a corpse that plays a thrown script is a corpse
+                // that gets up.
+                if let Some(v) = victim {
+                    if self.fighters[target].alive() {
+                        self.hit_row(target, &v, t_def);
+                    }
                 }
                 order(State::Attack, script, None)
             }
@@ -2230,6 +2299,17 @@ impl Bout {
                         self.knight_slap(i, def);
                     }
                     // `SetDecapFLAG` (0x3e76): `mov word ptr [DeCapFLAG], 1`.
+                    // `ShakeADD` (0x493f), which `Troll_Chop` gosubs and
+                    // `BalokJumping+12` (0x374b) calls when the Balok lands:
+                    //
+                    //   04946  cmp word [ShakeCOUNT], 0
+                    //   0494b  jne  <out>          ; one shake at a time
+                    //   0494d  mov word [ShakeCOUNT], 1
+                    //
+                    // so a second chop while one is pending does nothing.
+                    Effect::Gosub { routine, .. } if routine == "ShakeADD" => {
+                        self.shake();
+                    }
                     Effect::Gosub { routine, .. } if routine == "SetDecapFLAG" => {
                         self.decap = true;
                     }
@@ -2636,7 +2716,10 @@ impl Bout {
                     continue;
                 }
                 let own_kind = self.fighters[attacker].actor == self.fighters[target].actor;
-                if self.fighters[target].finish(t_def, blow.attack, own_kind) {
+                // `KnightGotStruck` (0x4267) picks the handler by the
+                // striker's `+0x35`, so the striker's record kind goes in.
+                let striker = a_def.record_kind;
+                if self.fighters[target].finish(t_def, blow.attack, own_kind, striker) {
                     connected = true;
                     let decapitating = blow.attack == Some(Attack::Swing) && !bloodless;
                     if blow.missile.is_none() && !decapitating {
@@ -4936,6 +5019,132 @@ mod tests {
             restored.step(&d, &intents);
             assert_eq!(restored.state_hash(), b.state_hash(), "tick {t}");
         }
+    }
+
+    /// The demon's whip drags the knight in, end to end.
+    ///
+    /// `DemonOWhipFollow` (0x50de) hands him `Knight_SwSlapped` outright --
+    /// `mov si, 0x1596; call REPLACEANIM` on the knight's own record -- and
+    /// that script is the only one in the image that gosubs `InitSLAP` and
+    /// `KnightSLAP`. Without the hand-off the knight took the blow, stood
+    /// where he was, and `SLAPY`'s `DemonWHIP` was written every whip and
+    /// read by nobody.
+    #[test]
+    fn the_whip_puts_the_knight_on_the_thrown_script_and_drags_him_in() {
+        let (_, _, knight) = dragon_set_piece();
+        let mut demon = crate::combat::tests::depth_def();
+        demon.controller = "demon".into();
+        demon.damage = 4;
+        let any = demon
+            .animation
+            .values()
+            .next()
+            .cloned()
+            .expect("the fixture has scripts");
+        for name in ["Demon_OWhipHit", "Demon_OWhipKnight"] {
+            demon.animation.insert(name.into(), any.clone());
+        }
+        demon.damage = 4;
+        let mut d = Fighter::new("d", &demon, 100, 100, 1);
+        d.brain.flags |= crate::monster::flag::CAUGHT | crate::monster::flag::DRIVEN;
+        // Mid-chain: phase 2 is `DemonOWhipFollow`.
+        d.brain.phase = 2;
+        d.brain.flags &= !crate::monster::flag::UNBORN;
+        let k = Fighter::new("k", &knight, 230, 100, -1);
+        let mut b = Bout::new(arena_field(), vec![d, k]);
+        b.shared.slap_y = crate::monster::slap_y::DEMON_WHIP;
+        let pick = |n: &str| -> &ActorDef {
+            if n == "d" {
+                &demon
+            } else {
+                &knight
+            }
+        };
+        for _ in 0..40 {
+            // The controller runs on the frame a script ended, which is what
+            // the original's task loop does; `step_with` is the tick.
+            let i = b.monster_intent(0, 1, pick, true);
+            b.step_with(pick, &[i, Intent::default()]);
+            if b.fighters[1].script == "Knight_SwSlapped" {
+                break;
+            }
+        }
+        assert_eq!(
+            b.fighters[1].script, "Knight_SwSlapped",
+            "050de: the knight is handed the thrown script, not his own hurt row",
+        );
+        assert_eq!(
+            b.fighters[0].brain.flags & crate::monster::flag::CAUGHT,
+            0,
+            "050e5: and the whip lets him go",
+        );
+    }
+
+    /// The screen shake: `ShakeADD` (0x493f) sets `ShakeCOUNT` to one unless
+    /// one is already pending, and `COLCON` (0x4988) spends it on the next
+    /// pass. Two callers in the whole game, `Troll_Chop`'s gosub and
+    /// `BalokJumping+12` (0x374b).
+    #[test]
+    fn a_shake_is_asked_for_once_and_spent_on_the_next_pass() {
+        let d = def();
+        let mut b = Bout::new(arena_field(), vec![Fighter::new("k", &d, 100, 100, 1)]);
+        // 0x33e: `InitCombat` clears it.
+        assert_eq!(b.shake_count, 0);
+        assert!(!b.take_shake(), "nothing pending, nothing shakes");
+        b.shake();
+        assert_eq!(b.shake_count, 1, "0494d");
+        // 04946: a second ask while one is pending changes nothing.
+        b.shake();
+        assert_eq!(b.shake_count, 1);
+        // 0498f and 04993: the decrement reaches nought, so this is the pass.
+        assert!(b.take_shake());
+        assert_eq!(b.shake_count, 0);
+        assert!(!b.take_shake(), "and only that pass");
+    }
+
+    /// The beast's toss, the two things that kept it off the screen.
+    ///
+    /// `InitKnightvsBeast` (0x2283, 0x2288) puts `Beast_BackToss` on the
+    /// knight's own `*Hit` rows for kinds 0x10 and 0xe. Reaching it needs
+    /// both of these, and each was missing on its own:
+    ///
+    /// * the beast's kind. `ControlBeast+17` (0x2fb2) writes 0x10 into
+    ///   `+0x28` on **every tick, before any branch**, because the charge is
+    ///   its walk and it never enters an attack state at all. A kind written
+    ///   only on an attack order is a kind the beast never has.
+    /// * the banks. The script opens `TASKCELBUF 2`, and table 2 is the
+    ///   encounter's loaded creature for everybody in the arena, the knight
+    ///   included, which is `World::encounter_banks`.
+    #[test]
+    fn the_beast_keeps_its_kind_through_a_walk_so_its_toss_row_is_reachable() {
+        let mut beast = def();
+        beast.controller = "beast".into();
+        let mut knight = def();
+        knight
+            .animation
+            .insert("Beast_BackToss".into(), Default::default());
+        let mut f = Fighter::new("b", &beast, 100, 100, 1);
+        // What the controller wrote, before any order.
+        f.brain.kind = Some(Attack::Chop);
+        f.ordered = Some(Order {
+            state: State::Walk,
+            script: String::new(),
+            attack: None,
+        });
+        f.step(
+            &beast,
+            Intent {
+                dx: 1,
+                dy: 0,
+                attack: false,
+            },
+            &arena_field(),
+        );
+        assert_eq!(
+            f.attack,
+            Some(Attack::Chop),
+            "02fb2: the walk order does not clear it",
+        );
     }
 }
 

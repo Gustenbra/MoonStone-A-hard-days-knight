@@ -390,6 +390,27 @@ pub struct ActorDef {
     /// asks for a kind it has no script for; none of the original's does.
     #[serde(default)]
     pub attack: String,
+    /// The actor record's `+0x35`, which every `Set*Tables` routine writes
+    /// and which the original uses to tell one actor from another wherever a
+    /// branch needs to.
+    ///
+    /// It is what `StruckTable` (DS:0x7843) is indexed by: `KnightGotStruck`
+    /// (0x4267) does `mov si, [di+0xe]` -- the striker -- and jumps through
+    /// the table by *his* kind, so what a blow on a fallen knight does is
+    /// the striker's business and not the blow's. It is also what
+    /// `TroggFinishKnight` (0x42fc) tests to tell the axe trogg from the
+    /// hammer, and what `TroggStruck`'s gate (0x2f31) and `KnifeThrow`
+    /// (0x3e3e, the one write outside the eleven `Set*Tables`) read.
+    ///
+    /// **Zero is a real kind**, the beast's: `SetBeastTables` (0x22f1) writes
+    /// it. The knight's 6 does not come from his record at all -- his
+    /// `Set*Tables` routine writes no `+0x35` -- but from wherever a fight is
+    /// stood up, `InitKnightBattle` (0x408, 0x418) and its two siblings; a
+    /// computer knight's seat of the same record gets 8 from `InitGameStart`
+    /// (0x1c69 and three more, one per seat), and the two share every
+    /// `StruckTable` entry.
+    #[serde(default)]
+    pub record_kind: u8,
     /// The blow-taken script by the attacker's attack kind: the `*Hit` table,
     /// which `KnightSAnim` and `TroggStruck` index with the attacker's
     /// `+0x28`. Each of these scripts carries its own `TASKDEAD`, so which
@@ -539,6 +560,7 @@ impl Default for ActorDef {
             speed_x: 0,
             speed_y: 0,
             walk_speed: WalkSpeed::default(),
+            record_kind: 0,
             reach: 0,
             depth_tolerance: 0,
             attack_cooldown: 0,

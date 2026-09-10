@@ -423,6 +423,9 @@ fn prepare(app: &mut App, a: &[String]) {
     }
 }
 
+/// `ShakeScreen`'s own `mov cx, 0xf` (0x4962).
+const SHAKE_FRAMES: u32 = 15;
+
 fn main() -> anyhow::Result<()> {
     let mut app = App::new()?;
 
@@ -838,11 +841,13 @@ fn main() -> anyhow::Result<()> {
                 if let Ok(mut buffer) = surface.buffer_mut() {
                     app.render();
                     let palette = app.palette_now();
+                    let shake = app.shake_rows;
                     app.fb.present_into(
                         &mut buffer,
                         size.width as usize,
                         size.height as usize,
                         &palette,
+                        shake,
                     );
                     let _ = buffer.present();
                 }
@@ -1018,6 +1023,15 @@ struct App {
     /// Place id to tune id, recovered from `LOADMUSIC`'s callers.
     music_places: std::collections::BTreeMap<String, String>,
     tick: u64,
+    /// `ShakeScreen` (0x495b) has `mov cx, 0xf`: fifteen passes of the
+    /// retrace, and the game loop is stopped for all of them.
+    shake: u32,
+    /// How many rows the picture is displaced this tick, nought to three.
+    /// The renderer's, not the simulation's -- `ShakeScreen` rolls its own
+    /// numbers off the game's RNG but nothing reads the result back, so a
+    /// lockstep peer that shook differently would still agree on the fight.
+    shake_rows: i32,
+    shake_rng: u32,
     keys: [bool; 256],
     /// Keys that went down this tick. A menu wants presses, not held keys, or
     /// one tap of Down would run the highlight off the bottom of the list.
@@ -1571,6 +1585,10 @@ impl App {
             scene: String::new(),
             music_places,
             tick: 0,
+            shake: 0,
+            shake_rows: 0,
+            // Any seed: nothing reads the result back into the fight.
+            shake_rng: 0x2f1d,
             keys: [false; 256],
             pressed: [false; 256],
             reg,
@@ -1860,6 +1878,18 @@ impl App {
     /// One tick. A key press is an edge: it lasts exactly this tick and is
     /// spent whether or not anything wanted it.
     fn update(&mut self) {
+        // `ShakeScreen` (0x495b) is called from inside `COLCON`, which is
+        // `Combat`'s second call (0x357), and it does not return for fifteen
+        // retraces: the task step, the blit, the page flip and the collision
+        // pass at 0x35a to 0x366 all wait for it. So the fight really does
+        // stop dead while the screen shudders. The count is fixed, so every
+        // peer of a lockstep fight stops for the same fifteen ticks.
+        if self.shake > 0 {
+            self.palette_tick();
+            self.pressed = [false; 256];
+            self.typed = None;
+            return;
+        }
         self.simulate();
         self.palette_tick();
         self.music_tick();
@@ -1955,6 +1985,43 @@ impl App {
         {
             self.knight_glow_tick();
             self.fx.tick_effects();
+            // `COLCON`'s own first three lines, before any of the colour work:
+            //
+            //   04988  cmp word ptr [ShakeCOUNT], 0
+            //   0498d  je  04998
+            //   0498f  dec word ptr [ShakeCOUNT]
+            //   04993  jne 04998
+            //   04995  call ShakeScreen
+            //
+            // The count lives in the bout, because it is simulation state two
+            // peers of a lockstep fight have to agree on. What it looks like
+            // does not, and does not come from the simulation's seed.
+            if self.world.as_mut().is_some_and(|w| w.bout.take_shake()) {
+                self.shake = SHAKE_FRAMES;
+            }
+        }
+        // `ShakeScreen` (0x495b) itself: fifteen passes of the retrace, each
+        // one jerking the display's own start address by a random nought to
+        // three rows.
+        //
+        //   04962  mov cx, 0xf
+        //   04965  mov dx, 0x3d4; mov al, 0xd; out dx, al   ; CRTC start low
+        //   0496b  call <wait one retrace>
+        //   0496e  call <rnd>; and al, 3; mov bl, 0x50; mul bl
+        //   04977  mov dx, 0x3d5; out dx, al
+        //   0497b  loop 0496b
+        //
+        // 0x50 is eighty bytes, which is one row of a four-plane 320 wide
+        // screen, so the offset is nought to three rows and no more. The
+        // original blocks the whole game loop for those fifteen retraces;
+        // here the count is the same and fixed, so every peer pauses for the
+        // same number of ticks, and only the offsets differ.
+        if self.shake > 0 {
+            self.shake -= 1;
+            self.shake_rng = self.shake_rng.wrapping_mul(1103515245).wrapping_add(12345);
+            self.shake_rows = ((self.shake_rng >> 16) & 3) as i32;
+        } else {
+            self.shake_rows = 0;
         }
         // `0x50d`, which the ceremony's own script gosubs part way through
         // itself rather than the scene routine installing it up front.

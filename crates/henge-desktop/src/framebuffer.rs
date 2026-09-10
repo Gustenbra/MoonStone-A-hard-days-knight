@@ -112,7 +112,23 @@ impl Framebuffer {
         ))
     }
 
-    pub fn present_into(&self, dst: &mut [u32], dw: usize, dh: usize, palette: &[u32; 32]) {
+    /// `shake` is `ShakeScreen`'s CRTC displacement, in rows: the routine
+    /// (0x495b) writes `rnd & 3` times eighty into the start-address low byte
+    /// at 0x3d5, and eighty bytes is one row of a four-plane 320 wide screen,
+    /// so the picture slides up by nought to three rows.
+    ///
+    /// What the original reveals under it is whatever sits below the visible
+    /// page in video memory, which a double-buffered engine has no equivalent
+    /// of; the bottom row is held instead, which is ours and is the least
+    /// distracting of the choices.
+    pub fn present_into(
+        &self,
+        dst: &mut [u32],
+        dw: usize,
+        dh: usize,
+        palette: &[u32; 32],
+        shake: i32,
+    ) {
         if dw == 0 || dh == 0 {
             return;
         }
@@ -127,7 +143,7 @@ impl Framebuffer {
         let (ox, oy) = ((dw - vw) / 2, (dh - vh) / 2);
         dst.fill(0);
         for y in 0..vh {
-            let sy = y * SCREEN_H / vh;
+            let sy = ((y * SCREEN_H / vh) as i32 + shake).clamp(0, SCREEN_H as i32 - 1) as usize;
             let srow = sy * SCREEN_W;
             let drow = (oy + y) * dw + ox;
             for x in 0..vw {

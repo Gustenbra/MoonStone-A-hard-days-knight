@@ -168,18 +168,17 @@ const KNIGHT_FINISHES: &[(&str, &str)] = &[
 /// own tables and both have to be named here. Both draw from banks 0, 1 and 3
 /// of table 1, which is the knight's own.
 //
-// TODO: `InitKnightvsBeast` (0x2283, 0x2288) puts `Beast_BackToss` on two of
-// his `*Hit` rows, and that script is not named here because it cannot be
-// drawn as this bake lays banks out. It opens `TASKCELBUF 2`, and table 2 is
-// "whichever creature the encounter loaded" — the beast's two banks in the
-// beast's own definition, but the knight's five in his, because `bank_tables`
-// gives every actor its own pair and the knight gets the knight in both. For
-// the knight's task to draw the tossed knight the beast's table 2 would have
-// to reach his definition, which means either a per-encounter knight or a bank
-// table that is not per-actor. `Bout::beast_struck_knight` builds the row and
-// `hit_row` leaves it alone for a definition that has not got the script, so
-// the mechanism is there and waiting for the banks. Unresolved: which of the
-// two the pack should become.
+// `Beast_BackToss` is here for the same reason and one more. `InitKnightvsBeast`
+// (0x2283, 0x2288) puts it on two of the knight's own `*Hit` rows, and it opens
+// `TASKCELBUF 2` so the knight's task draws the tossed knight out of the
+// **beast's** cels. That could not be drawn while each actor carried its own
+// four tables, and the answer turned out to be the second of the two the note
+// here used to weigh: **the tables are the encounter's, not the actor's**. One
+// loader runs per fight and fills all four of them; `+0x18` only says which one
+// a task starts on. `henge_desktop::world` now resolves every part against the
+// fight's own set (`World::encounter_banks`) and falls back to the actor's only
+// outside a fight, so table 2 is the loaded creature's for everybody in the
+// arena, knight included, exactly as it is in the original.
 const KNIGHT_SPAWNED: &[&str] = &[
     "SpeedKnife",
     "Knife",
@@ -187,6 +186,7 @@ const KNIGHT_SPAWNED: &[&str] = &[
     "Knight_SwSlapped",
     "Knight_SwOThrust",
     "Knight_SwDThrust",
+    "Beast_BackToss",
 ];
 
 /// The spray `AddBlood` starts, on bank table 4. Every part of it is gated.
@@ -1892,6 +1892,15 @@ fn actor_definitions(
             }
         },
         reach: 38,
+        // **Not from the record.** `SetKnightSwTables` writes no `+0x35` at
+        // all; the knight's is written where a fight is set up, by
+        // `InitKnightBattle` (0x408, 0x418), `PracticeCombat5` (0x10d, 0x11d)
+        // and `DistanceDONE` (0xa4e1), all six of them `mov byte [reg+0x35], 6`.
+        // A computer knight's seat of the same record gets 8 instead, from
+        // `InitGameStart`'s four writes (0x1c69, 0x1c88, 0x1ca7, 0x1cc6) --
+        // one per seat -- and the two share every `StruckTable` entry
+        // (`KnightKnightStruck1`, 0x4407), so one number serves here.
+        record_kind: 6,
         depth_tolerance: kt.plane.unwrap_or(0),
         attack_cooldown: 45,
         approach: kt.approach.unwrap_or(0),
@@ -2125,6 +2134,9 @@ fn creature_definition(
             }
         },
         reach: c.reach,
+        // `+0x35`, which this creature's own `Set*Tables` routine writes and
+        // `StruckTable` is indexed by.
+        record_kind: t.kind.unwrap_or(0),
         depth_tolerance: t.plane.unwrap_or(0),
         attack_cooldown: 45,
         approach: t.approach.unwrap_or(0),

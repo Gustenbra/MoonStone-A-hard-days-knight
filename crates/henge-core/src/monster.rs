@@ -131,6 +131,15 @@ impl Controller {
 pub struct Brain {
     pub cooldown: i32,
     pub timer: i32,
+    /// `+0x28`, the kind of blow this actor is dealing, where its controller
+    /// writes it outside an attack order.
+    ///
+    /// Only the beast needs it: `ControlBeast+17` (0x2fb2) writes 0x10 on
+    /// every tick, before any branch, because the charge is its walk and it
+    /// never enters an attack at all. Everything else writes `+0x28` on the
+    /// frame it orders the blow, which is [`Act::Attack`]'s own kind.
+    #[serde(default)]
+    pub kind: Option<crate::combat::Attack>,
     pub flags: u32,
     pub walk: u32,
     pub phase: u8,
@@ -256,12 +265,26 @@ pub struct Shared {
     /// DS:`0x779a`, how many frames of the current hop are left, which
     /// `BalokJumping` counts down beside the jump's own count.
     pub balok_hop: i32,
+    /// `ShakeADD` (0x493f) was called this pass, which the bout turns into
+    /// `ShakeCOUNT`. `BalokJumping+12` (0x374b) is the one controller that
+    /// calls it, on a landing from a rise of eight or more; the only other
+    /// caller in the game is the script `Troll_Chop`, whose gosub the bout
+    /// sees for itself.
+    #[serde(default)]
+    pub shake: bool,
     /// DS:`0x7796`, the frame count the last `CalcJUMP` worked out.
     ///
     /// It is scratch in the original and every `CalcJUMP` overwrites it, but
     /// `BalokJumping` (0x36f5) reads it a frame after `BalokJump` wrote it, so
     /// it has to outlive the call.
     pub jump_steps: i32,
+    /// `JumpHIEGHT` (DS:0x7798), which `CalcJUMP` (0x2b2e, 0x2b42, 0x2b55)
+    /// writes and the Balok's landing reads back at 0x3741 to decide whether
+    /// the thud is heavy enough to shake the screen. A global in the
+    /// original, so it is whatever the last jump aimed at, and it is one
+    /// here for the same reason.
+    #[serde(default)]
+    pub jump_height: i32,
     /// `DragonFLAGS`, DS:`0x7786`, the word the whole of `ControlDragon` keys
     /// off. `InitKnightvsDragon+84` (0x248c) zeroes it. See [`dragon_flag`].
     #[serde(default)]
@@ -607,6 +630,16 @@ pub enum Act {
         script: String,
         damage: i32,
         fatal: bool,
+        /// A script handed to the victim outright, rather than letting his
+        /// own `*Hit` row decide what he plays.
+        ///
+        /// `DemonOWhipFollow` (0x50de) and `DemonUWhipFollow` (0x5119) both
+        /// do exactly that: `mov si, 0x1596` -- `Knight_SwSlapped` -- then
+        /// `call REPLACEANIM` (0x97ee) on the knight's own record, which
+        /// `mov ax, [0x978]` / `call 0x9886` fetched two instructions
+        /// earlier. Nothing about the blow is consulted; the whip has him,
+        /// so he plays the thrown script and reads `SLAPY` through it.
+        victim: Option<String>,
     },
     /// Held, and trying to get out of it. `MudmenEntangle` reads fire and
     /// down together off the joystick and nothing else, so this is that press
@@ -2160,6 +2193,7 @@ fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
                 script: "Mudmen_ChokeKnight".into(),
                 damage: 0,
                 fatal: true,
+                victim: None,
             };
         }
         if !s.foe.held() {
@@ -2169,6 +2203,7 @@ fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
                 script: "Mudmen_Hit".into(),
                 damage: 0,
                 fatal: false,
+                victim: None,
             };
         }
         return Act::Play("Mudmen_EntangleKnight".into());
@@ -2372,6 +2407,8 @@ fn balok_jump(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
     plan.steps = aim.steps.min(0x14);
     plan.rise = aim.rise;
     shared.jump_steps = aim.steps;
+    // 036b1 reads it back off DS:0x7798 at the landing.
+    shared.jump_height = aim.rise;
     shared.balok_hop = plan.steps;
     brain.jump = Some(plan.start());
     shared.balok = balok_flag::JUMPING;
@@ -2453,10 +2490,29 @@ fn balok_jumping(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
         };
     }
     // 0372a: the ordinary landing.
+    //
+    //   0372a  mov byte [si+0x49], 5          ; the wait before the next hop
+    //   0372e  mov word [0x783a], Balok_Jump
+    //   03734  mov word [si+4], 0             ; back on the ground
+    //   03739  mov byte [BalokFLAGS], 0
+    //   0373e  mov ax, 2
+    //   03741  cmp word [JumpHIEGHT], 8
+    //   03746  jl  03758                      ; a low hop lands quietly
+    //   03748  call 03751                     ; sound 0x2d, the thud
+    //   0374b  call ShakeADD
+    //
+    // **The shake is the landing's, and only from height.** A hop the
+    // tracker sized under eight rows makes no sound and no shudder, which is
+    // why the Balok's little shuffling jumps do not rattle the screen and the
+    // one it comes down at you from does.
+    let heavy = shared.jump_height >= 8;
     brain.jump = None;
     brain.height = 0;
     brain.timer = 5;
     shared.balok &= !balok_flag::JUMPING;
+    if heavy {
+        shared.shake = true;
+    }
     Act::Fly {
         x: step.x,
         y: step.z,
@@ -2533,6 +2589,16 @@ fn beast(
     facing: &mut i32,
     at: &mut (i32, i32),
 ) -> Act {
+    // 02fb2  mov word ptr [di + 0x28], 0x10
+    //
+    // **Unconditional, on every tick of the controller**, before any branch:
+    // a beast's kind is the charge whether it is running, turning or waiting
+    // off the edge. It never enters an attack state at all -- the charge is
+    // its walk -- so a kind written only on an attack is a kind it never has,
+    // and `InitKnightvsBeast`'s rows (0x2283, 0x2288), which are keyed on it,
+    // could never be reached. That is the second reason `Beast_BackToss` was
+    // never seen; the first was the banks.
+    brain.kind = Some(Attack::Chop);
     // `BeastCharge`, 0x2fe6: the facing is the record's own `+8`, read to
     // choose which edge to test and written when the edge is reached.
     //
@@ -2642,6 +2708,12 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
             return Act::Idle;
         }
         let caught = brain.flags & flag::CAUGHT != 0;
+        // The phase this pass *is*, kept before the advance below. Testing
+        // the advanced value was a bug of its own: the two follows are
+        // phases 2 and 4, and after `brain.phase = next` those read 3 and 0,
+        // so only the under whip's follow ever fired and
+        // `DemonOWhipFollow` (0x50de) was unreachable.
+        let now = brain.phase;
         let (script, next, low, high, hold) = match brain.phase {
             // `DemonOFollowT`
             1 => ("Demon_OWhipMiss", 2u8, 120, 140, 4),
@@ -2654,12 +2726,31 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
         };
         brain.phase = next;
         brain.cooldown = hold;
-        if brain.phase.is_multiple_of(2) && caught {
+        if matches!(now, 2 | 4) && caught {
             // The follow-through with the knight already caught: the original
             // hands him `Knight_SwSlapped` outright rather than waiting for a
             // weapon part to touch him.
+            // `DemonOWhipFollow` (0x50de) and `DemonUWhipFollow` (0x5119),
+            // which are the same six instructions with a different cooldown:
+            //
+            //   050c0  test word [DemonFLAGS], 0x40   ; has it caught him?
+            //   050c9  mov si, [0xa64]                ; the demon's record
+            //   050cd  mov al, [si+8]
+            //   050d0  mov [SLAP], al                 ; the way IT faces
+            //   050d4  mov ax, [0x978]; call 0x9886   ; the knight's record
+            //   050de  mov si, 0x1596                 ; Knight_SwSlapped
+            //   050e1  call REPLACEANIM
+            //   050e5  and word [DemonFLAGS], 0xffbf  ; let him go
+            //   050ea  mov byte [si+0x4a], 3          ; 5 for the under whip
+            //
+            // The direction is written again here, off the demon's `+8` as
+            // it stands now rather than as it stood when the whip went out,
+            // and `SLAPY` still points at `DemonWHIP`, whose four words are
+            // -7, -3, -1, 0. So the knight is dragged in, not thrown.
             brain.flags &= !flag::CAUGHT;
-            let hit = if brain.phase == 0 {
+            shared.slap = if *facing < 0 { 3 } else { 1 };
+            shared.slap_y = slap_y::DEMON_WHIP;
+            let hit = if now == 4 {
                 "Demon_UWhipHit"
             } else {
                 "Demon_OWhipHit"
@@ -2668,11 +2759,15 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
                 script: hit.into(),
                 damage: s.me.damage,
                 fatal: false,
+                victim: Some("Knight_SwSlapped".into()),
             };
         }
         if d >= low && d <= high {
             brain.flags |= flag::CAUGHT;
-            let caught_script = if brain.phase == 2 {
+            // The catch happens on the two tracking phases, 1 and 3.
+            // Written against `now` rather than the advanced value, which
+            // happened to agree here and did not above.
+            let caught_script = if now == 1 {
                 "Demon_OWhipKnight"
             } else {
                 "Demon_UWhipKnight"
@@ -2730,10 +2825,9 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
         // The whip's own table, which is [`BALOK_SLAP`] five words in and so
         // all negative: a caught knight is dragged towards the demon rather
         // than thrown from it. `DemonOWhipFollow` (0x50de) and
-        // `DemonUWhipFollow` (0x5119) are what hand him `Knight_SwSlapped` to
-        // read it with, and that hand-off is not built: `Act::Strike` below
-        // leaves him on his own hurt row. The pointer is still written here
-        // because it is what the branch writes.
+        // `DemonUWhipFollow` (0x5119) hand him `Knight_SwSlapped` to read it
+        // with, and both write the direction again themselves off the
+        // demon's facing as it stands then; see the whip chain above.
         shared.slap = if *facing < 0 { 3 } else { 1 };
         shared.slap_y = slap_y::DEMON_WHIP;
         return Act::Attack {
@@ -4872,6 +4966,56 @@ mod tests {
             Act::Play("Demon_OWhipKnight".into())
         );
         assert!(b.flags & flag::CAUGHT != 0);
+    }
+
+    /// `DemonOWhipFollow` (0x50de) and `DemonUWhipFollow` (0x5119): once the
+    /// whip has him, the follow-through hands him `Knight_SwSlapped`
+    /// outright, writes the direction again off the demon's own `+8`, and
+    /// lets him go.
+    ///
+    /// It is that script, and only that script, that gosubs `InitSLAP` and
+    /// `KnightSLAP`, so without the hand-off the knight took the damage and
+    /// stood where he was: `SLAPY` pointed at `DemonWHIP` and nothing ever
+    /// read it. Its four words are -7, -3, -1, 0, which is a drag towards
+    /// the demon rather than a throw away from it.
+    #[test]
+    fn the_whips_follow_through_hands_the_knight_the_thrown_script() {
+        let def = creature("demon", 95, 90);
+        let mut b = Brain::default();
+        let mut shared = Shared::default();
+        let mut facing = 1;
+        let me = at(0, 50);
+        let far = at(138, 50);
+        let near = at(130, 50);
+        // Out at the whip's range, which starts the chain.
+        assert_eq!(
+            kind(&ask_shared(&def, &mut b, &mut shared, &me, &far, None)),
+            Some(Attack::Lunge)
+        );
+        assert_eq!(shared.slap_y, slap_y::DEMON_WHIP, "050a4");
+        // The first follow catches him.
+        b.cooldown = 0;
+        assert_eq!(
+            ask_shared(&def, &mut b, &mut shared, &me, &near, None),
+            Act::Play("Demon_OWhipKnight".into())
+        );
+        assert!(b.flags & flag::CAUGHT != 0);
+        // And the next one is the hand-off.
+        b.cooldown = 0;
+        let act = ask_facing(&def, &mut b, 0, 130, 0, &mut facing);
+        match act {
+            Act::Strike { victim, .. } => assert_eq!(
+                victim.as_deref(),
+                Some("Knight_SwSlapped"),
+                "050de: mov si, 0x1596; call REPLACEANIM",
+            ),
+            other => panic!("the follow-through should strike, not {other:?}"),
+        }
+        assert_eq!(
+            b.flags & flag::CAUGHT,
+            0,
+            "050e5: and word [DemonFLAGS], 0xffbf"
+        );
     }
 
     /// The dragon's definition as the pack carries it: the two `DragonWal`

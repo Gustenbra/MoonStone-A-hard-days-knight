@@ -418,7 +418,13 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
            knight towards the demon. **Built**, as `Bout::knight_slap`,
            `monster::Shared::slap_y` and `monster::slap_y`; the whip's own
            hand-off of `Knight_SwSlapped` (`DemonOWhipFollow` 0x50de,
-           `DemonUWhipFollow` 0x5119) is **not built**. `SetKnightCombat` (0x2962, the facing store at 0x297d)
+           `DemonUWhipFollow` 0x5119) is **built**: both hand the caught knight
+           `Knight_SwSlapped` outright (`mov si, 0x1596; call REPLACEANIM`),
+           write the direction again off the demon's own `+8`, and clear the
+           caught bit, which is `Act::Strike`'s `victim` and
+           `Bout::hit_row`. Finding it turned up a bug of ours beside it: the
+           phase gate was testing the advanced phase, so `DemonOWhipFollow`
+           was unreachable and only the under whip ever followed through. `SetKnightCombat` (0x2962, the facing store at 0x297d)
            stands him at x 250, y 0, z 100, facing 3; the creatures come from the
            spawn tables `InitNewMO` (0x27ee) walks, eight bytes `[x][y][z][facing]`:
            `TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3),
@@ -648,10 +654,12 @@ the decapitation beside the bloodless collapse from the same fight.
       standing still and lands only on one mid-swing or turned away. One
       simplification is ours: the original never clears `+0x28` on a blow taken,
       so a reeling knight keeps the kind of whatever he was doing; here a
-      reeling or recovering knight never blocks. **Not built**: what the
-      original does with a block against the spear (`TroggSpearStruck1` plays
-      `Knight_SwEvade` for it), and the Black Knight's own guard (`BKBlock`,
-      `_evadechop`), which is his behaviour
+      reeling or recovering knight never blocks. A block against the spear needs
+      nothing built: `TroggSpearStruck1` (0x4325) shows `Knight_SwEvade`, and
+      `InitKnightvsTroggSpear` (0x21d8, 0x21dd) has already put that script in
+      both of the knight's guard slots, so the blow costs him nothing either
+      way. The Black Knight's own guard (`BKBlock` 0x4c40, `_evadechop` 0x4cad)
+      **is built**, as `monster::bk_block`; this line used to say it was not.
 - [x] 48. **Weapon state: the thrown dagger, and honestly not the rest.** The
       dagger is the one weapon state the scripts hold, and it is built end to
       end: `Knight_SwKnife` opens with a `TASKTESTEQ` on the dagger count at
@@ -703,12 +711,19 @@ the decapitation beside the bloodless collapse from the same fight.
       `Knight_Explode` when that blow left nothing, and `TroggHit+12` (0x2f59)
       has the spear, and only the spear, take a dead player knight's task away
       and play `TroggSpear_Toss` with the gore on. `DrDropHead` and
-      `DrDropClaws`, the dragon's, are built with 36. **Not built**: the screen
-      shake `ShakeADD` asks for. Where it goes is now known: `COLCON` (0x4988)
-      opens by counting `ShakeCOUNT` (DS:`0x78b8`) down and calling
-      `ShakeScreen` (0x495b) on the pass it reaches nought, and `ShakeScreen`
-      is fifteen retraces of CRTC index 0x0d against `rnd & 3` rows. So it
-      belongs beside the effects in `palette_tick`, on the same per-pass gate
+      `DrDropClaws`, the dragon's, are built with 36. **The screen shake is
+      built too.** `COLCON` (0x4988) opens by counting `ShakeCOUNT`
+      (DS:`0x78b8`) down and calling `ShakeScreen` (0x495b) on the pass it
+      reaches nought, and `ShakeScreen` is fifteen retraces of CRTC index 0x0d
+      against `rnd & 3` rows, eighty bytes to the row. It sits beside the
+      effects in `palette_tick`, on the same per-pass gate. `ShakeADD`
+      (0x493f) has exactly two callers: the script `Troll_Chop`, whose gosub
+      the bout sees, and `BalokJumping+12` (0x374b) — and that one only when
+      `JumpHIEGHT` was eight or more (0x3741), so a low hop lands quietly. The
+      count is [`Bout::shake_count`], because two peers of a lockstep fight
+      must agree on it and on the fifteen ticks the original spends inside
+      `ShakeScreen` without returning; the offsets are the renderer's and are
+      not rolled from the fight's own seed
 
 - [x] 50. **The computer knight. Recovered.** What was here was an invention:
       close the distance, swing, cool down twenty, one attack and no answer to
