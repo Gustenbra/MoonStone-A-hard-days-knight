@@ -704,7 +704,11 @@ the decapitation beside the bloodless collapse from the same fight.
       has the spear, and only the spear, take a dead player knight's task away
       and play `TroggSpear_Toss` with the gore on. `DrDropHead` and
       `DrDropClaws`, the dragon's, are built with 36. **Not built**: the screen
-      shake `ShakeADD` asks for
+      shake `ShakeADD` asks for. Where it goes is now known: `COLCON` (0x4988)
+      opens by counting `ShakeCOUNT` (DS:`0x78b8`) down and calling
+      `ShakeScreen` (0x495b) on the pass it reaches nought, and `ShakeScreen`
+      is fifteen retraces of CRTC index 0x0d against `rnd & 3` rows. So it
+      belongs beside the effects in `palette_tick`, on the same per-pass gate
 
 - [x] 50. **The computer knight. Recovered.** What was here was an invention:
       close the distance, swing, cool down twenty, one attack and no answer to

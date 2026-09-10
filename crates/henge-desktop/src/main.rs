@@ -940,6 +940,23 @@ fn tick_len_for(mode: Mode) -> std::time::Duration {
     }
 }
 
+/// How many ticks one pass of this mode's own loop takes.
+///
+/// A loop's per-pass work (`COLCON`, `KnightGlowOn`) happens once a pass and
+/// not once a tick, and the two are only the same thing where a pass is a
+/// single wait. In a fight a pass is `DELAY`'s six timer ticks, the 109.849 ms
+/// `Combat` (0x351) spends between its deadline at 0x96e1 and paying it at
+/// 0x96f1. Every other loop that does per-pass work waits one retrace, which
+/// is one tick here.
+const COMBAT_PASS_TICKS: u32 = 6;
+
+fn ticks_per_pass(mode: Mode) -> u32 {
+    match mode {
+        Mode::Combat => COMBAT_PASS_TICKS,
+        Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Map | Mode::Place => 1,
+    }
+}
+
 /// `MudmenGlowOn`: `COLOURGLOW(0x0e, 0x100, 2, 0)`. Palette entry fourteen
 /// breathes towards a dark red every other frame for as long as the bout runs.
 /// Recovered, and installed by `InitCombat` when mudmen are in the arena.
@@ -1875,11 +1892,26 @@ impl App {
             self.ending_glows = false;
             self.fx.set_fade(henge_assets::Fade::In(0));
         }
-        self.knight_glow_tick();
+        // `COLCON` (0x4988) and `KnightGlowOn` (0x8f8) are the calling loop's
+        // own per-pass work, not per-tick work, and in a fight a pass is six
+        // ticks rather than one. `Combat` (0x351) calls both, at 0x357 and
+        // 0x369; `MapLOOP+3` (0xa309) and `ChooseLoop+3` (0x15a3) call
+        // `COLCON` on a pass that is one retrace, which is one tick here, and
+        // a scan of the image finds no other caller of either. Ungated, a
+        // fight ran every colour cycle and the dying knight's own breathing
+        // six times too fast.
+        if self
+            .tick
+            .is_multiple_of(u64::from(ticks_per_pass(self.mode)))
+        {
+            self.knight_glow_tick();
+            self.fx.tick_effects();
+        }
         // `0x50d`, which the ceremony's own script gosubs part way through
         // itself rather than the scene routine installing it up front.
         self.moonstone_glow_tick();
-        self.fx.tick();
+        // Not `VBLQUE`'s, and so not gated with it: see `Effects::tick_fade`.
+        self.fx.tick_fade();
         // `FADEOUTDAY`, and the fade a message chain ends on. Both are screens
         // that go out when they are dismissed rather than being walked away
         // from, which is the only kind of fade out a shell with no loading time
@@ -5278,6 +5310,43 @@ mod tests {
         // 9.1034 frames a second.
         let fps = 1.0 / frame.as_secs_f64();
         assert!((fps - 9.1034).abs() < 0.001, "the fight ran at {fps} fps");
+    }
+
+    /// `COLCON` (0x4988) and `KnightGlowOn` (0x8f8) run once a loop pass. A
+    /// pass is one tick everywhere the loop waits one retrace, and six in a
+    /// fight, so the per-pass work must be gated on the same six `script_ticks`
+    /// and `DELAY` name and not on the tick.
+    #[test]
+    fn per_pass_work_is_gated_to_the_loops_own_pass() {
+        assert_eq!(ticks_per_pass(Mode::Combat), 6, "0x357 and 0x369, per pass");
+        // `MapLOOP+3` (0xa309) and `ChooseLoop+3` (0x15a3) call `COLCON` on a
+        // pass that is a single retrace, which is this engine's tick there.
+        for mode in [Mode::Map, Mode::Select] {
+            assert_eq!(ticks_per_pass(mode), 1, "{mode:?} passes once a retrace");
+        }
+        // A pass is the whole of a frame either way round.
+        assert_eq!(
+            tick_len_for(Mode::Combat) * ticks_per_pass(Mode::Combat),
+            TIMER_TICK * 6
+        );
+        assert_eq!(
+            tick_len_for(Mode::Map) * ticks_per_pass(Mode::Map),
+            RETRACE_TICK
+        );
+    }
+
+    /// The fade is not a `VBLQUE` entry, so splitting the effects off must
+    /// leave it stepping on its own: `tick_effects` alone never advances it,
+    /// and `tick` still does both for anything that wants the pair.
+    #[test]
+    fn the_fade_steps_apart_from_the_effects() {
+        let mut fx = henge_assets::Effects::new();
+        fx.set_fade(henge_assets::Fade::In(0));
+        let before = fx.fade();
+        fx.tick_effects();
+        assert_eq!(fx.fade(), before, "0x4988 does not step a fade");
+        fx.tick_fade();
+        assert_ne!(fx.fade(), before, "and this is the half that does");
     }
 
     /// One stride of `Knight_SwWalkOn` is four script frames and
