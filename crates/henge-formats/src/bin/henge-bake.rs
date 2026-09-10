@@ -575,9 +575,25 @@ const CREATURES: &[Creature] = &[
         // `ControlMudmen`: it reaches for you between seventy five and a
         // hundred and goes under the ground inside that.
         controller: "mudman",
-        rows: &[("bury", &["Mudmen_IBury"]), ("appear", &["Mudmen_Appear"])],
+        // `Mudmen_IBury` (DS:0x54e6) is the rear-up, and it is literally the
+        // last frame of `Mudmen_Appear` (DS:0x5490): both scripts end at
+        // 0x5530. `Mudmen_ToStance` (DS:0x5532) is the two frames that put the
+        // arms back down, and it runs straight on into `Mudmen_Stance`.
+        rows: &[
+            ("bury", &["Mudmen_IBury"]),
+            ("appear", &["Mudmen_Appear"]),
+            ("stance", &["Mudmen_ToStance"]),
+        ],
         border: None,
-        spawns: &["Mudmen_EntangleKnight", "Mudmen_ChokeKnight", "Mudmen_KnightSd"],
+        // `Mudmen_KillKnight` (DS:0x594c) is the grab `MudmenBury` lands: six
+        // frames of the knight being dragged under, with `KillKnight` gosubbed
+        // at 0x59ac and `StopCombat` at 0x59de.
+        spawns: &[
+            "Mudmen_EntangleKnight",
+            "Mudmen_ChokeKnight",
+            "Mudmen_KnightSd",
+            "Mudmen_KillKnight",
+        ],
         blockable: false,
         bleeds: false,
         damage: 2,

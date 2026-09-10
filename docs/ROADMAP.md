@@ -53,7 +53,22 @@ pinned by a test that fails if it drifts.
 - [x] **Every creature's controller**, block for block: the three troggs, the troll, the
       ratman, the mudmen, the beast, the Balok, the demon, the dragon and its two claws,
       and the computer knight (`ControlBlackKnight` 0x4b79, including `BKBlock` and
-      `_evadechop`).
+      `_evadechop`). Read end to end from the entry point down every branch, not sampled:
+      four of the nine were wrong in ways only a full read finds.
+      * `ControlBeast` (0x2f5f): `BeastMove` writes the column and nothing else, the depth
+        is `SetBEASTZ`'s at the turn alone, `BeastChargeOffsets` is its walk-speed table
+        under another name, and `SetBeastTimer`'s count is written and never read.
+      * `ControlTroll` (0x55c4): at a hundred and fifty exactly it stands, and `TrollChop`
+        (0x56a3) reads the persistent `+0x28` so it never chops twice running.
+      * `ControlMudmen` (0x52ee): **the burrow is the kill, not a retreat.**
+        `Mudmen_IBury` is the rear-up -- the same frame `Mudmen_Appear` ends on -- and
+        `MudmenBury` (0x54bb) drags the knight under where he stands when it finishes, on
+        his plane and twenty to eighty pixels of him. `MudmenAppear` is the eruption at
+        the start of the fight and runs once. The entangle is forty frames, fire and down
+        together tear him out of it, and the shove costs the mudman a point.
+      * `ControlBalok` (0x3599): `BalokHit`'s `+0x28 == 4` branch is `Balok_SlapRecover`,
+        the crush snaps the Balok onto the knight before `KillKnight`, and
+        `ControlBalokRelease` puts a live knight down seventy five pixels in front of it.
 - [x] **The blow.** `TASKWALKCOLLIDE` (0x9e06) and the weapon and body piles, `CalcDamage`,
       the `*Att`, `*Hit`, `*Dam` and `*Blo` tables, and the per-encounter rows each
       `InitKnightvs*` writes over them.

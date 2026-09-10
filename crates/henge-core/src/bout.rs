@@ -831,9 +831,23 @@ impl Bout {
         if def.controller() != Controller::Balok {
             return false;
         }
+        // 03783  cmp word ptr [si + 0x28], 4; 03787 jne; 03789 the slap's own
+        // recovery. It is the uppercut that has landed, so the Balok comes out
+        // of it differently from the way it comes out of a swing that missed;
+        // everything else takes `+0x12`, which [`Fighter::recover`] gives.
+        if self.fighters[attacker].attack == Some(Attack::Swing) {
+            if !def.animation.contains_key("Balok_SlapRecover") {
+                return false;
+            }
+            // The recovery a landed uppercut takes, rather than `+0x12`. It is
+            // a label inside `Balok_UpperCut`'s own bytes (DS:0x4a58, where the
+            // script runs 0x4a0a to 0x4a74), so what it plays is the tail of
+            // the swing again: the Balok pulls its arm back down instead of
+            // finishing the sweep it would have finished on a miss.
+            self.fighters[attacker].enter_on(State::Recover, "Balok_SlapRecover".into());
+            return true;
+        }
         // 0377d  cmp word ptr [si + 0x28], 0x10: the grab and nothing else.
-        // The uppercut's own branch is `Balok_SlapRecover` and everything
-        // else's is `+0x12`, which is what [`Fighter::recover`] already gives.
         if self.fighters[attacker].attack != Some(Attack::Chop) {
             return false;
         }
@@ -1927,12 +1941,19 @@ impl Bout {
     /// on the tick a script frame ended, which is when the original's task
     /// loop calls a controller at all, so a cooldown of ten is ten frames
     /// rather than ten sixtieths of a second.
+    ///
+    /// `struggle` is fire and down held together on the target's keys, the one
+    /// thing any of the original's controllers reads the keyboard for:
+    /// `MudmenEntangle+12` (0x54fe) calls the reader at 0x81ec and tests `bx &
+    /// 0x10` and `bx & 4`. It is read on the creature's pass and not on the
+    /// knight's, because the creature is what lets go.
     pub fn monster_intent<'a, F>(
         &mut self,
         me: usize,
         target: usize,
         def_of: F,
         gore: bool,
+        struggle: bool,
     ) -> Intent
     where
         F: Fn(&str) -> &'a ActorDef,
@@ -1995,6 +2016,7 @@ impl Bout {
                 // takes off, which `RatHangKnight` is the one caller of.
                 foe_blow,
                 head_health,
+                struggle,
             };
             let mut brain = self.fighters[me].brain;
             let mut seed = self.rng;
@@ -2095,10 +2117,15 @@ impl Bout {
                 None
             }
             Act::Play(script) => order(State::Attack, script, None),
-            Act::Appear { x, facing, script } => {
+            Act::Appear {
+                x,
+                y,
+                facing,
+                script,
+            } => {
                 let b = GLOBAL;
                 let f = &mut self.fighters[me];
-                let (nx, ny) = b.clamp(x, f.y);
+                let (nx, ny) = b.clamp(x, y);
                 f.x = nx;
                 f.y = ny;
                 f.facing = facing;
@@ -2140,6 +2167,7 @@ impl Bout {
                 fatal,
                 hold,
                 victim,
+                put,
             } => {
                 let t_def = def_of(&self.fighters[target].actor);
                 if hold {
@@ -2148,6 +2176,16 @@ impl Bout {
                 } else {
                     self.fighters[target].holder = None;
                     self.fighters[target].hidden = false;
+                }
+                // `ControlBalokRelease+62` (0x382e): `mov [di+4], ax` on the
+                // knight's *task*, with `ax` the Balok's own column stepped
+                // seventy five the way it faces. He is put down in front of it
+                // rather than inside it.
+                if let Some(x) = put {
+                    let y = self.fighters[target].y;
+                    let (nx, ny) = GLOBAL.clamp(x, y);
+                    self.fighters[target].x = nx;
+                    self.fighters[target].y = ny;
                 }
                 // `sub word [di+0x38], n` on the one held: hit points off,
                 // with no blow-taken script of his own, because he is drawn
@@ -3693,6 +3731,7 @@ mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: None,
+                struggle: false,
             };
             let act = crate::monster::decide(
                 &sight,
@@ -4084,6 +4123,7 @@ mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: None,
+                struggle: false,
             };
             let act = crate::monster::decide(
                 &sight,
@@ -4265,7 +4305,7 @@ mod tests {
         // however close he stands.
         b.fighters[0].x = 60;
         for claw in [2, 3] {
-            b.monster_intent(claw, 0, |n| &defs[n], true);
+            b.monster_intent(claw, 0, |n| &defs[n], true, false);
             assert_eq!(
                 b.fighters[claw].ordered.as_ref().map(|o| o.script.as_str()),
                 Some("Dragon_ClawDead"),
@@ -4294,7 +4334,7 @@ mod tests {
         // among the standing.
         for claw in [2, 3] {
             b.fighters[claw].brain.rest = 0;
-            b.monster_intent(claw, 0, |n| &defs[n], true);
+            b.monster_intent(claw, 0, |n| &defs[n], true, false);
             assert!(!b.fighters[claw].alive(), "03b61: CLAWS_DEAD");
             assert!(b.fighters[claw].task.as_ref().is_some_and(|t| !t.active));
         }
@@ -4402,6 +4442,7 @@ mod tests {
             perch: None,
             foe_blow: 0,
             head_health: None,
+            struggle: false,
         };
         let grip = |a: &crate::monster::Act| match a {
             crate::monster::Act::Grip { script, hold, .. } => Some((script.clone(), *hold)),
@@ -4676,7 +4717,7 @@ mod tests {
         );
         // A hundred and ten away is `TroggChop`'s range, and it is the chop
         // the controller hands over, not the swing the one button would give.
-        let intent = b.monster_intent(1, 0, pick, true);
+        let intent = b.monster_intent(1, 0, pick, true, false);
         assert!(
             !intent.attack,
             "the order carries the attack, not the intent"
@@ -4906,7 +4947,7 @@ mod tests {
         b.fighters[0].health = 0;
         b.fighters[0].state = State::Dead;
         assert!(!b.decap, "InitCombat (0x307) zeroes it");
-        b.monster_intent(1, 0, pick, true);
+        b.monster_intent(1, 0, pick, true, false);
         let first = b.fighters[1].ordered.clone().expect("an order");
         assert_eq!(
             first.attack,
@@ -4917,7 +4958,7 @@ mod tests {
         // The second trogg, inside a hundred with its count at zero, is
         // refused by the flag alone.
         b.fighters[2].brain.cooldown = 0;
-        b.monster_intent(2, 0, pick, true);
+        b.monster_intent(2, 0, pick, true, false);
         let second = b.fighters[2].ordered.clone().expect("an order");
         assert_eq!(second.state, State::Idle, "TroggAttack+0x2c: jne 02e9c");
         assert_eq!(second.attack, None);
@@ -5138,7 +5179,7 @@ mod tests {
         for _ in 0..40 {
             // The controller runs on the frame a script ended, which is what
             // the original's task loop does; `step_with` is the tick.
-            let i = b.monster_intent(0, 1, pick, true);
+            let i = b.monster_intent(0, 1, pick, true, false);
             b.step_with(pick, &[i, Intent::default()]);
             if b.fighters[1].script == "Knight_SwSlapped" {
                 break;

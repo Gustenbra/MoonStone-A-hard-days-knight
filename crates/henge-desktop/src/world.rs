@@ -1062,6 +1062,18 @@ impl World {
     /// which is which.
     pub fn update(&mut self, local: &[Intent]) {
         let mut intents = vec![Intent::default(); self.bout.fighters.len()];
+        // Fire and down together, per seat, before the loop borrows the
+        // intents: `MudmenEntangle+12` (0x54fe) reads the keyboard on the
+        // *mudman's* pass, so the creature's controller needs the keys of the
+        // seat it has hold of. Only a seat somebody is playing has any.
+        let struggles: Vec<bool> = (0..self.bout.fighters.len())
+            .map(|i| match self.control.get(i).copied() {
+                Some(Control::Local(slot)) => local
+                    .get(slot)
+                    .is_some_and(|k: &Intent| k.attack && k.dy > 0),
+                _ => false,
+            })
+            .collect();
 
         for (i, intent) in intents.iter_mut().enumerate() {
             // A creature the wave walked in mid-fight has no seat in the control
@@ -1094,10 +1106,15 @@ impl World {
                         // this struct. Lending the definitions out and taking
                         // them back is the cheap way to say that; the map is
                         // moved, not cloned.
+                        let struggle = struggles.get(target).copied().unwrap_or(false);
                         let actors = std::mem::take(&mut self.actors);
-                        *intent = self
-                            .bout
-                            .monster_intent(i, target, |name| &actors[name], gore);
+                        *intent = self.bout.monster_intent(
+                            i,
+                            target,
+                            |name| &actors[name],
+                            gore,
+                            struggle,
+                        );
                         self.actors = actors;
                     }
                 }
@@ -1246,6 +1263,14 @@ impl World {
         index: usize,
     ) -> anyhow::Result<()> {
         let f = &self.bout.fighters[index];
+        // `TASKSTANDBY` (0x96b9) toggles `[di+0x22]` on the fighter's own task,
+        // and the draw loop walks the task table: a fighter somebody is drawing
+        // inside its own animation is not drawn again here. `MudmenHit2` and
+        // `MudmenBury` do it to the knight, `TroggSpear_Toss` to a corpse, and
+        // `KnightOFF` to the knight the demon's zap takes off the board.
+        if f.hidden {
+            return Ok(());
+        }
         let def = self.def_at(index);
         if def.scripted() {
             return self.draw_task(reg, fb, index);

@@ -609,22 +609,20 @@ impl Fighter {
             return Vec::new();
         }
 
-        // Held: `MudmenEntangle` takes the knight's control away entirely and
-        // reads only fire and down, which is the struggle. Everything else he
-        // presses does nothing until he is free or dead.
+        // Held: `TASKSTANDBY` has taken this fighter's task off the draw list
+        // and whoever has hold of him is drawing him inside its own animation,
+        // so his own keys do nothing at all. The struggle out of a mudman's
+        // arms is read on the *mudman's* pass (`MudmenEntangle+12`, 0x54fe) and
+        // `MudmenSd` (0x5560) is what puts his task back; Balok's grab and a
+        // ratman's are let go by their own controllers the same way. Nothing
+        // here may release him, or he would be drawn twice for the frame that
+        // shows him breaking loose.
         if self.holder.is_some() {
             self.ordered = None;
-            // `MudmenEntangle`: `test bx, 0x10` and `test bx, 4`, fire and
-            // down, and only both together tear him loose.
-            if intent.attack && intent.dy > 0 {
-                self.holder = None;
-                self.hidden = false;
-            } else {
-                if def.scripted() {
-                    return self.run_task(def, bloodless, false);
-                }
-                return Vec::new();
+            if def.scripted() {
+                return self.run_task(def, bloodless, false);
             }
+            return Vec::new();
         }
 
         // A committed action runs to completion before input is looked at
@@ -3281,6 +3279,7 @@ pub(crate) mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: None,
+                struggle: false,
             };
             let mut seed = seed;
             let mut facing = 1;
@@ -3429,6 +3428,7 @@ pub(crate) mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: None,
+                struggle: false,
             };
             let mut brain = Brain::default();
             let mut seed = wary;

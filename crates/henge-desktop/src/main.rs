@@ -590,9 +590,14 @@ fn main() -> anyhow::Result<()> {
                                 // decided by its controller and nothing else, so a
                                 // trace is the place to see it turn.
                                 let face = if f.facing < 0 { '<' } else { '>' };
+                                // `TASKSTANDBY` has taken this one's task off
+                                // the draw list and somebody else is drawing
+                                // him: a held knight, a tossed corpse, or the
+                                // knight the demon's zap has off the board.
+                                let standby = if f.hidden { "~" } else { "" };
                                 format!(
-                                    "{:<6} {:<12}{:>4} @{:>3},{:>3}{}{}",
-                                    f.actor, state, f.health, f.x, f.y, face, script
+                                    "{}{:<6} {:<12}{:>4} @{:>3},{:>3}{}{}",
+                                    standby, f.actor, state, f.health, f.x, f.y, face, script
                                 )
                             })
                             .collect();

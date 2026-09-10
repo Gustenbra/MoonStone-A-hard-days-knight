@@ -44,7 +44,8 @@ pub enum Controller {
     Troll,
     /// `ControlRatmen`, `ControlRatCollide`.
     Ratman,
-    /// `ControlMudmen`, with `MudmenReach`, `MudmenIBury` and `MudmenAppear`.
+    /// `ControlMudmen`: `MudmenAppear` erupts, `MudmenReach` reaches, and
+    /// `MudmenIBury` rears up for the grab `MudmenBury` lands.
     Mudman,
     /// `ControlBalok`.
     Balok,
@@ -236,6 +237,20 @@ pub mod flag {
     /// pass; `BalokFLAGS & 1`, which `BalokGrabbed` raises beside it, is what
     /// carries the frame after that.
     pub const GRABBED: u32 = 0x0004_0000;
+    /// `MudmenFLAGS & 0x40` and `+0x48 & 0x40`: the knight has torn out of the
+    /// entangle, `Mudmen_KnightSd` is the frame that shows it and `MudmenSd`
+    /// (0x5560) is what runs the frame after (`MudmenEntangle+31`, 0x551c).
+    pub const SHOVED: u32 = 0x0008_0000;
+    /// `+0x48 & 8` on a mudman: it is out of the ground. `SetUpMudmenTables`
+    /// (0x26a4) writes `+0x48` nought, so the first pass of `ControlMudmen`
+    /// finds this clear and runs `MudmenAppear` (0x534b). Nothing clears it
+    /// afterwards -- `MudmenIBury` zeroes the byte and sets it straight back --
+    /// so the eruption happens exactly once a fight.
+    pub const SURFACED: u32 = 0x0020_0000;
+    /// `MudmenFLAGS & 4`: it has dragged the knight under, and nothing it does
+    /// after that matters (`MudmenBury+34`, 0x54dd, read at
+    /// `ControlMudmen+43`, 0x5319, which returns without looking further).
+    pub const DRAGGED_UNDER: u32 = 0x0010_0000;
 }
 
 /// The words a fight keeps for a whole species rather than for one creature.
@@ -618,8 +633,15 @@ pub enum Act {
     Vanish,
     /// Play this script outright, committed, with no blow of its own.
     Play(String),
-    /// `MudmenAppear`: surface at this x, facing this way, on this script.
-    Appear { x: i32, facing: i32, script: String },
+    /// `MudmenAppear` (0x546b): the eruption at the start of the fight, which
+    /// puts the creature on the knight's own column and depth and then steps
+    /// seventy five pixels to whichever side keeps it on the screen.
+    Appear {
+        x: i32,
+        y: i32,
+        facing: i32,
+        script: String,
+    },
     /// Take hold of the target for this many script frames.
     /// `MudmenHit2` does it when the arm lands.
     Seize { script: String, ticks: i32 },
@@ -676,6 +698,12 @@ pub enum Act {
         /// under Balok's landing, `Knight_GetUp` when a hanging ratman is
         /// killed. Empty leaves him on whatever his own state names.
         victim: String,
+        /// Where the one let go is put down: `ControlBalokRelease+62`
+        /// (0x382e) writes `balok.x` plus or minus seventy five, on the side
+        /// the Balok is facing, into the knight's *task* rather than his
+        /// record. Nothing else in the game moves a fighter it releases, so
+        /// this is `None` everywhere else.
+        put: Option<i32>,
     },
 }
 
@@ -1050,6 +1078,14 @@ pub struct Sight<'a> {
     /// (0x3b4e) reads off the fixed record whichever claw is running. None
     /// when there is no dragon in the fight.
     pub head_health: Option<i32>,
+    /// Fire and down held together on the opponent's keys, which is the only
+    /// thing any controller reads the keyboard for: `MudmenEntangle+12`
+    /// (0x54fe) calls the key reader and tests `bx & 0x10` and `bx & 4`.
+    ///
+    /// The reader at 0x81ec shifts five scancodes into `bx` in order -- Enter
+    /// 0x1c, up 0x48, down 0x50, left 0x4b, right 0x4d -- so fire is bit 4 and
+    /// down is bit 2.
+    pub struggle: bool,
 }
 
 /// The tree at DS:`0x69ae`, as far as anything in a fight cares about it.
@@ -1093,7 +1129,7 @@ pub fn decide(
         Controller::Troll => troll(s, brain, facing, shared),
         Controller::Ratman => ratman(s, brain, facing, shared),
         Controller::Mudman => mudman(s, brain, facing),
-        Controller::Balok => balok(s, brain, facing, shared),
+        Controller::Balok => balok(s, brain, facing, shared, at),
         Controller::Beast => beast(s, brain, seed, facing, at),
         Controller::Demon => demon(s, brain, facing, shared),
         Controller::Dragon => dragon(s, brain, facing, shared, at),
@@ -1619,15 +1655,42 @@ fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
     if t.walking {
         return walk(t);
     }
-    let d = t.distance;
-    if (100..150).contains(&d) && brain.phase != 1 {
-        brain.phase = 1;
+    // `TrollAttack`, 0x5678, and it is `FindDistance`'s answer rather than
+    // the tracker's:
+    //
+    //   05678  call FindDistance
+    //   0567f  cmp ax, 0x64
+    //   05682  jl  TrollBunt      ; inside a hundred: the club
+    //   05684  cmp ax, 0x96
+    //   05687  jl  TrollChop      ; a hundred to a hundred and forty nine
+    //                             ; and at a hundred and fifty exactly it
+    //                             ; falls out of the routine and stands
+    let d = find_distance(s.me, s.foe);
+    // 05684: `jl 0x96`, so a hundred and fifty itself is neither. The troll's
+    // `+0x52` is a hundred and fifty too, so `MonsterTrack` hands the
+    // controller that exact distance and the original stands on it; this used
+    // to bunt.
+    if d >= 0x96 {
+        return Act::Idle;
+    }
+    // `TrollChop`, 0x56a3:
+    //
+    //   056a3  cmp word ptr [si+0x28], 0x10
+    //   056a7  je  TrollBunt        ; it chopped last frame: club him instead
+    //   056a9  mov word ptr [si+0x28], 0x10
+    //
+    // `ControlTroll` clears `+0x26` at the top and leaves `+0x28` alone, so
+    // the kind is last frame's and the two blows alternate. That is
+    // [`Brain::kind`], which the beast needs for its own reason.
+    if d >= 0x64 && brain.kind != Some(Attack::Chop) {
+        brain.kind = Some(Attack::Chop);
         return Act::Attack {
             kind: Attack::Chop,
             spawn: None,
         };
     }
-    brain.phase = 0;
+    // 05689: the bunt is kind 4.
+    brain.kind = Some(Attack::Swing);
     // 05694  mov al, [si+8]; 05697 mov [SLAP], al; 0569a mov [SLAPY], BalokSLAP.
     // `+8` is what `MonsterTrack` left a few instructions ago, which is
     // `*facing` here.
@@ -1727,6 +1790,7 @@ fn ratman(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) -
         brain.flags &= !flag::RELEASING;
         shared.rat &= !rat_flag::ON_HEAD;
         return Act::Grip {
+            put: None,
             script: String::new(),
             damage: 0,
             cost: 0,
@@ -2023,6 +2087,7 @@ fn ratman_hang_knight(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act 
             brain.flags &= !flag::HANGING;
             shared.rat &= !rat_flag::HANGING;
             return Act::Grip {
+                put: None,
                 script: row(s.def, "fall"),
                 damage: 0,
                 cost: s.foe_blow,
@@ -2033,6 +2098,7 @@ fn ratman_hang_knight(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act 
             };
         }
         return Act::Grip {
+            put: None,
             script: row(s.def, "shake"),
             damage: 0,
             cost: s.foe_blow,
@@ -2044,6 +2110,7 @@ fn ratman_hang_knight(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act 
     // 0333a: one point a frame, and the last one is the death.
     let last = s.foe.health <= 1;
     Act::Grip {
+        put: None,
         script: row(s.def, if last { "hung" } else { "hang" }),
         damage: 1,
         cost: 0,
@@ -2076,6 +2143,7 @@ fn ratman_on_head(s: &Sight, brain: &mut Brain) -> Act {
         brain.flags &= !flag::ON_HEAD;
         brain.flags |= flag::RELEASING;
         return Act::Grip {
+            put: None,
             script: row(s.def, "whack"),
             damage: 0,
             cost: 0,
@@ -2090,6 +2158,7 @@ fn ratman_on_head(s: &Sight, brain: &mut Brain) -> Act {
         brain.flags &= !flag::ON_HEAD;
         brain.flags |= flag::GOUGING;
         return Act::Grip {
+            put: None,
             script: row(s.def, "gouge"),
             damage: 0,
             cost: 0,
@@ -2099,6 +2168,7 @@ fn ratman_on_head(s: &Sight, brain: &mut Brain) -> Act {
         };
     }
     Act::Grip {
+        put: None,
         script: row(s.def, "sit"),
         damage: 0,
         cost: 0,
@@ -2169,6 +2239,7 @@ fn ratman_gouged(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
     // 033f6  mov word ptr [di + 4], 0xffba
     brain.height = -0x46;
     Act::Grip {
+        put: None,
         script: row(s.def, "leaps"),
         damage: 5,
         cost: 0,
@@ -2178,66 +2249,180 @@ fn ratman_gouged(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
     }
 }
 
-/// `ControlMudmen`: it reaches for you between seventy five and a hundred,
-/// and inside that it goes under the ground and comes up beside you.
+/// `ControlMudmen` (0x52ee) and the eight branches under it.
+///
+/// Read end to end, because the shape of it is not what the animation names
+/// suggest. **Going under the ground is not a retreat, it is the kill**: the
+/// band between fifty one and seventy four plays `Mudmen_IBury`, and when that
+/// script ends `MudmenBury` drags the knight under where he stands. Nothing
+/// resurfaces; `Mudmen_Appear` is the emergence at the start of the fight and
+/// runs once, off the actor record's `+0x48` starting at nought.
+///
+/// ```text
+/// 052fe  mov  word [si+0x26], 0
+/// 05303  cmp  word [si+0xe], 0;        jne MudmenStruck
+/// 0530c  cmp  word [si+0xc], 0;        jne MudmenHit2
+/// 05319  test word [MudmenFLAGS], 4;   jne exit          ; the knight is under
+/// 05324  test word [MudmenFLAGS], 1;   jne MudmenEntangle
+/// 0532f  test word [MudmenFLAGS], 2;   jne MudmenChoked
+/// 0533a  test word [MudmenFLAGS], 0x40;jne MudmenSd
+/// 05345  test byte [si+0x48], 8;       je  MudmenAppear
+/// 0534e  test byte [si+0x48], 0x10;    jne MudmenBury
+/// 05357  call MonsterTrack; or ax, ax; je  MudmenAttack  ; bx is [si+0x52]
+/// 0535e  cmp  word [ZPLANE], 0;        je  MudmenMove
+/// 05365  call FindDistance; mov bx, ax
+/// MudmenAttack:
+/// 0536a  cmp  bx, 0x32; jle MudmenMove
+/// 0536f  cmp  bx, 0x4b; jl  MudmenIBury
+/// 05377  cmp  bx, 0x64; jge MudmenMove
+/// 0537c  jmp  MudmenReach
+/// ```
+///
+/// `SetUpMudmenTables` (0x2695) writes `+0x52` = 0x50, `+0x54` = 0x4b and
+/// `+0x56` = 5, so the `ax == 0` path reaches `MudmenAttack` with `bx` = 80 and
+/// the real gap somewhere in 76..=80. Both land on `MudmenReach`, which is why
+/// handing the real distance in here rather than the record's constant changes
+/// nothing: the band the constant sits in is the band the gap sits in.
 fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
-    // Holding the knight: `MudmenEntangle` counts down, and the choke at the
-    // end of it is `KillKnight`.
+    // 05319: once the knight is under the ground this controller answers
+    // nothing ever again. `StopCombat` inside `Mudmen_KillKnight` ends the
+    // fight, so this only covers the frames between.
+    if brain.flags & flag::DRAGGED_UNDER != 0 {
+        return Act::Idle;
+    }
+    // `MudmenSd` (0x5560): the frame after `Mudmen_KnightSd`. The knight's task
+    // comes back on, he is put back on his stance, and the shove costs the
+    // mudman a hit point -- `sub word ptr [si+0x38], 1` at 0x5583, then
+    // `Mudmen_Hit` at 0x5587.
+    if brain.flags & flag::SHOVED != 0 {
+        brain.flags &= !flag::SHOVED;
+        return Act::Grip {
+            put: None,
+            script: "Mudmen_Hit".into(),
+            damage: 0,
+            cost: 1,
+            fatal: false,
+            hold: false,
+            victim: String::new(),
+        };
+    }
+    // `MudmenEntangle` (0x54f2): forty frames, counted down a frame at a time,
+    // and `MudmenChoke` at the end of them.
     if brain.flags & flag::ENTANGLING != 0 {
+        // 054f8  sub byte ptr [si+0xb], 1;  054fc je MudmenChoke
         brain.timer -= 1;
         if brain.timer <= 0 {
+            // `MudmenChoke` (0x5531) calls `KillKnight`, and `MudmenChoked`
+            // (0x5542) plays `Mudmen_ChokeKnight` and kills his task outright
+            // (`ax = Opponent; call 0x96c9` at 0x5551). So he stays off the
+            // draw list: the script's own bank 1 parts are what show him.
             brain.flags &= !flag::ENTANGLING;
-            return Act::Strike {
+            return Act::Grip {
+                put: None,
                 script: "Mudmen_ChokeKnight".into(),
                 damage: 0,
+                cost: 0,
                 fatal: true,
-                victim: None,
+                hold: true,
+                victim: String::new(),
             };
         }
-        if !s.foe.held() {
-            // He tore free: `Mudmen_KnightSd`, and it costs the mudman a point.
+        // 054fe  call GetKeys; 05501 test bx, 0x10; 05507 test bx, 4 -- fire
+        // and down together, and nothing else, tear him loose. The scancodes
+        // 0x81ec reads into `bx` are Enter 0x10, up 8, down 4, left 2, right 1.
+        if s.struggle {
+            // 0550d: `Mudmen_KnightSd` is still a composite, so he stays off
+            // the draw list for it; `MudmenSd` is what lets him go.
             brain.flags &= !flag::ENTANGLING;
-            return Act::Strike {
-                script: "Mudmen_Hit".into(),
+            brain.flags |= flag::SHOVED;
+            return Act::Grip {
+                put: None,
+                script: "Mudmen_KnightSd".into(),
                 damage: 0,
+                cost: 0,
                 fatal: false,
-                victim: None,
+                hold: true,
+                victim: String::new(),
             };
         }
         return Act::Play("Mudmen_EntangleKnight".into());
     }
-    if brain.flags & flag::BURIED != 0 {
-        brain.timer -= 1;
-        if brain.timer > 0 {
-            return Act::Idle;
-        }
-        brain.flags &= !flag::BURIED;
-        // `MudmenAppear`: seventy five pixels to one side of him, and on the
-        // side that keeps it on the screen.
-        let side = if s.foe.x >= 160 { -1 } else { 1 };
+    // `MudmenAppear` (0x546b), which 0x5345 reaches on the first pass and never
+    // again. It does not walk on: it is put on the knight's own column and
+    // depth and then stepped seventy five pixels to the side that keeps it on
+    // the screen, and the last frame of `Mudmen_Appear` is the same frame
+    // `Mudmen_IBury` is -- the rear-up. So the eruption arms the grab (0x549b
+    // and 0x549f set both bits) and `MudmenBury` answers it below.
+    if brain.flags & flag::SURFACED == 0 {
+        brain.flags |= flag::SURFACED | flag::BURIED;
+        // 0547d  mov ax, 0x4b; mov byte [si+8], 3      ; 3 is leftward, -1 here
+        // 05484  cmp word [si+2], 0xa0; jl 0x5492
+        // 0548b  mov byte [si+8], 1; mov ax, 0xffb5    ; 1 is rightward
+        let (step, face) = if s.foe.x >= 0xa0 {
+            (-0x4b, 1)
+        } else {
+            (0x4b, -1)
+        };
         return Act::Appear {
-            x: s.foe.x + 75 * side,
-            facing: -side,
+            x: s.foe.x + step,
+            // 05477  mov ax, [di+6]; mov [si+6], ax
+            y: s.foe.y,
+            facing: face,
             script: "Mudmen_Appear".into(),
         };
     }
-    // ControlMudmen+105 (0x5357): `call MonsterTrack`, after the entangle,
-    // choke, surface and bury branches.
+    // `MudmenBury` (0x54bb), reached on the frame `Mudmen_IBury` ends. It is
+    // the kill: on the knight's own plane and between twenty and eighty pixels
+    // of him, it takes him under. Outside that he has stepped out of it and the
+    // mudman stands up again.
+    if brain.flags & flag::BURIED != 0 {
+        brain.flags &= !flag::BURIED;
+        // 054bb  call CheckZAxis; 054c0 je MudmenToStance
+        // 054c2  call FindDistance
+        // 054c5  cmp ax, 0x14; jl MudmenToStance
+        // 054ca  cmp ax, 0x50; jg MudmenToStance
+        let d = find_distance(s.me, s.foe);
+        if check_z_from(s.me.y, s.foe, s.def) && (0x14..=0x50).contains(&d) {
+            // 054cf  mov ax, di; call TASKSTANDBY     ; his task comes off
+            // 054d4  call KillKnight
+            // 054d7  mov word [0x783a], Mudmen_KillKnight
+            // 054dd  or  word [MudmenFLAGS], 4
+            brain.flags |= flag::DRAGGED_UNDER;
+            return Act::Grip {
+                put: None,
+                script: "Mudmen_KillKnight".into(),
+                damage: 0,
+                cost: 0,
+                fatal: true,
+                hold: true,
+                victim: String::new(),
+            };
+        }
+        // `MudmenToStance` (0x54e5), which runs straight on into
+        // `Mudmen_Stance`.
+        return Act::Play(row(s.def, "stance"));
+    }
+    // ControlMudmen+105 (0x5357): `call MonsterTrack`, after all of the above.
     let t = track(s.me, s.foe, s.def, facing);
+    // 0535e: tracking asked for a step and the planes do not line up, so the
+    // step is the whole of this frame.
     if t.walking && !t.plane {
         return walk(t);
     }
     let d = t.distance;
-    if d <= 50 || d >= 100 {
+    // 0536a and 05377: fifty or less and it backs away, a hundred or more and
+    // it closes in. Either way `MudmenMove`.
+    if d <= 0x32 || d >= 0x64 {
         return walk(t);
     }
-    if d < 75 {
-        // `MudmenIBury`. The original checks the plane and the distance again
-        // when it surfaces; here the timer is the whole of it.
+    if d < 0x4b {
+        // `MudmenIBury` (0x54a6): `[si+0x48] = 0`, then `|= 8` and `|= 0x10`.
+        // The 8 is already set, so all this does is arm the bury.
         brain.flags |= flag::BURIED;
-        brain.timer = 8;
-        return Act::Play("Mudmen_IBury".into());
+        return Act::Play(row(s.def, "bury"));
     }
+    // `MudmenReach` (0x5458): it checks the plane once more and walks instead
+    // if the knight has left it.
     if !t.plane {
         return walk(t);
     }
@@ -2274,16 +2459,23 @@ fn mudman(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
 /// 0365b  cmp  byte [knight+0x34], 0; jne BalokJump      ; he has daggers
 /// 03667  cmp  ax, 0xb4; jg BalokJump; else exit
 /// ```
-fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) -> Act {
+fn balok(
+    s: &Sight,
+    brain: &mut Brain,
+    facing: &mut i32,
+    shared: &mut Shared,
+    at: &mut (i32, i32),
+) -> Act {
     // 035ad  test word ptr [0x7794], 2
     if shared.balok & balok_flag::JUMPING != 0 {
-        return balok_jumping(s, brain, shared);
+        return balok_jumping(s, brain, shared, at);
     }
     // `BalokGrabbed` (0x379b), which is `BalokHit`'s own branch: the grab
     // connected on the frame just gone, so this one is `Balok_GrabKnight`.
     if brain.flags & flag::GRABBED != 0 {
         brain.flags &= !flag::GRABBED;
         return Act::Grip {
+            put: None,
             script: "Balok_GrabKnight".into(),
             damage: 0,
             cost: 0,
@@ -2298,6 +2490,7 @@ fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
         shared.balok &= !balok_flag::HELD;
         shared.balok |= balok_flag::RELEASING;
         return Act::Grip {
+            put: None,
             script: "Balok_ShakeKnight".into(),
             damage: 0,
             cost: 0,
@@ -2308,7 +2501,7 @@ fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
     }
     // 035d5  test word ptr [0x7794], 0x20
     if shared.balok & balok_flag::RELEASING != 0 {
-        return balok_release(s, shared);
+        return balok_release(s, shared, facing);
     }
     // 035e0  cmp word ptr [di + 0x38], 0; 035e4 jg; else the exit
     if !s.foe.alive() {
@@ -2444,7 +2637,7 @@ fn balok_jump(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
 /// The landing is tested against the *hop's* own counter at DS:`0x779a` and
 /// not against the jump slot's, and the two run together, so the second half
 /// of the hop is where it can land on somebody.
-fn balok_jumping(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
+fn balok_jumping(s: &Sight, brain: &mut Brain, shared: &mut Shared, at: &mut (i32, i32)) -> Act {
     // 036d1  mov byte ptr [si + 0x49], 0
     brain.timer = 0;
     let Some(mut jump) = brain.jump else {
@@ -2472,12 +2665,25 @@ fn balok_jumping(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
                 script: "Balok_Jumping".into(),
             };
         }
-        // 03711: it comes down on him, and that is the whole of him.
+        // 03711  mov ax, [di+2]; mov [si+2], ax
+        // 03717  mov ax, [di+6]; mov [si+6], ax
+        //
+        // It comes down *on* him: the record is snapped onto his column and
+        // his row before the kill, so the explosion is under its feet and not
+        // ten pixels off them.
+        *at = (s.foe.x, s.foe.y);
         brain.jump = None;
         brain.height = 0;
         brain.timer = 5;
         shared.balok &= !balok_flag::JUMPING;
+        // 03723  call KillKnight, and then the fall through into 0372a, which
+        // is the ordinary landing entire: the wait, `Balok_Jump`, the flags,
+        // and the thud with the shudder behind it when the hop was a high one.
+        if shared.jump_height >= 8 {
+            shared.shake = true;
+        }
         return Act::Grip {
+            put: None,
             script: "Balok_Jump".into(),
             damage: 0,
             cost: 0,
@@ -2547,13 +2753,14 @@ fn balok_jumping(s: &Sight, brain: &mut Brain, shared: &mut Shared) -> Act {
 /// call `KillKnight` through `TASKGOSUB` partway through, which is what
 /// finishes him, and `0x40` is a bit nothing in `ControlBalok` reads, so the
 /// frame after one of them the creature is back on the ordinary path.
-fn balok_release(s: &Sight, shared: &mut Shared) -> Act {
+fn balok_release(s: &Sight, shared: &mut Shared, facing: &mut i32) -> Act {
     if !s.foe.alive() {
         // 037c1  xor word ptr [0x77a0], 1
         shared.balok_bite ^= 1;
         let crush = shared.balok_bite == 0;
         shared.balok = balok_flag::CHEWING;
         return Act::Grip {
+            put: None,
             script: if crush {
                 "Balok_SqueezeKnight".into()
             } else {
@@ -2566,8 +2773,17 @@ fn balok_release(s: &Sight, shared: &mut Shared) -> Act {
             victim: String::new(),
         };
     }
+    // 037fa..0380e: the knight's pending blow and blow-taken are cleared, his
+    // task comes back on and he is put on his own stance.
+    // 03814  mov ax, [KnightTable]; call FINDTASK
+    // 0381c  mov si, [0x77e8]; mov ax, [si+2]; mov bx, 0x4b
+    // 03826  test byte [si+8], 2; je; neg bx      ; 3 is leftward
+    // 0382e  add ax, bx; mov [di+4], ax
+    // 03834  mov word [BalokFLAGS], 0
+    // 0383a  mov ax, [si+0x12]                    ; `Balok_Recover`
     shared.balok = 0;
     Act::Grip {
+        put: Some(s.me.x + if *facing < 0 { -0x4b } else { 0x4b }),
         script: "Balok_Recover".into(),
         damage: 0,
         cost: 0,
@@ -3958,12 +4174,17 @@ mod tests {
             let def = creature(name, 100, 90);
             // A fresh mind each side: a ratman that has already thrown itself
             // into the air on the first ask is in `RatmanLeaping` on the
-            // second, and that branch turns nobody, which is the original.
+            // second, and that branch turns nobody, which is the original. A
+            // mudman out of the ground, because `MudmenAppear` is a branch that
+            // writes its own facing and never reaches the tracker.
+            let risen = |flags: &mut Brain| flags.flags |= flag::SURFACED;
             let mut b = Brain::default();
+            risen(&mut b);
             let mut facing = 1;
             ask_facing(&def, &mut b, 200, 100, 0, &mut facing);
             assert_eq!(facing, -1, "{name} to the knight's right faces left");
             let mut b = Brain::default();
+            risen(&mut b);
             let mut facing = -1;
             ask_facing(&def, &mut b, 0, 100, 0, &mut facing);
             assert_eq!(facing, 1, "{name} to the knight's left faces right");
@@ -4025,6 +4246,15 @@ mod tests {
                 );
             }
         }
+        if controller == "mudman" {
+            for (row, name) in [
+                ("bury", "Mudmen_IBury"),
+                ("appear", "Mudmen_Appear"),
+                ("stance", "Mudmen_ToStance"),
+            ] {
+                def.scripts.insert(row.to_string(), vec![name.to_string()]);
+            }
+        }
         def
     }
 
@@ -4052,6 +4282,7 @@ mod tests {
             perch: None,
             foe_blow: 0,
             head_health: None,
+            struggle: false,
         };
         let mut seed = 0x2f1du16;
         let mut at = (me.x, me.y);
@@ -4089,6 +4320,7 @@ mod tests {
             perch: None,
             foe_blow: 0,
             head_health: None,
+            struggle: false,
         };
         let mut seed = 0x2f1du16;
         let mut here = (me.x, me.y);
@@ -4124,6 +4356,7 @@ mod tests {
             perch,
             foe_blow: 3,
             head_health: None,
+            struggle: false,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
@@ -4286,6 +4519,7 @@ mod tests {
             perch: None,
             foe_blow: 0,
             head_health: None,
+            struggle: false,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
@@ -4448,6 +4682,7 @@ mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: None,
+                struggle: false,
             }
         }
         // Walk the register until it hands out a roll at thirty or under,
@@ -4714,6 +4949,7 @@ mod tests {
 
     fn grip(script: &str, damage: i32, hold: bool) -> Act {
         Act::Grip {
+            put: None,
             script: script.into(),
             damage,
             cost: 0,
@@ -4723,38 +4959,192 @@ mod tests {
         }
     }
 
-    /// `MudmenReach` between seventy five and a hundred, `MudmenIBury` inside
-    /// that, and `MudmenAppear` seventy five pixels to one side of him.
+    /// `MudmenAppear` (0x546b) erupts beside the knight once and once only, and
+    /// the last frame of that script is `Mudmen_IBury` -- the rear-up -- so the
+    /// eruption is itself a grab that `MudmenBury` (0x54bb) lands.
     #[test]
-    fn the_mudman_reaches_then_goes_under_the_ground() {
+    fn the_mudman_erupts_beside_the_knight_and_the_eruption_is_a_grab() {
         let def = creature("mudman", 80, 75);
         let mut b = Brain::default();
+        // 05484: the knight left of the middle, so it comes up on his right.
+        match ask(&def, &mut b, 0, 60, 0) {
+            Act::Appear {
+                x,
+                y,
+                facing,
+                script,
+            } => {
+                assert_eq!(x, 60 + 0x4b, "seventy five to the side of him");
+                assert_eq!(y, 50, "and on his own depth");
+                assert_eq!(facing, -1, "turned back towards him");
+                assert_eq!(script, "Mudmen_Appear");
+            }
+            other => panic!("the mudman did not erupt: {other:?}"),
+        }
+        assert!(b.flags & flag::SURFACED != 0 && b.flags & flag::BURIED != 0);
+        // 0548b: the knight right of the middle, so it comes up on his left.
+        let mut b = Brain::default();
+        match ask(&def, &mut b, 0, 200, 0) {
+            Act::Appear { x, facing, .. } => {
+                assert_eq!(x, 200 - 0x4b);
+                assert_eq!(facing, 1);
+            }
+            other => panic!("the mudman did not erupt: {other:?}"),
+        }
+        // `MudmenBury`: seventy five away and on his plane, so he goes under.
+        // The eruption put it there, so this is what an eruption next to a
+        // knight who stands still comes to.
+        let act = ask(&def, &mut b, 200 - 0x4b, 200, 0);
+        assert_eq!(
+            act,
+            Act::Grip {
+                put: None,
+                script: "Mudmen_KillKnight".into(),
+                damage: 0,
+                cost: 0,
+                fatal: true,
+                hold: true,
+                victim: String::new(),
+            }
+        );
+        assert!(b.flags & flag::DRAGGED_UNDER != 0);
+        assert_eq!(ask(&def, &mut b, 0, 0, 0), Act::Idle, "and nothing after");
+    }
+
+    /// `MudmenReach` between seventy five and a hundred, `MudmenIBury` inside
+    /// that, and the grab or the stance at the end of the rear-up.
+    #[test]
+    fn the_mudman_reaches_then_rears_up_for_the_grab() {
+        let def = creature("mudman", 80, 75);
+        let risen = || {
+            let mut b = Brain::default();
+            b.flags |= flag::SURFACED;
+            b
+        };
+        let mut b = risen();
         assert_eq!(
             kind(&ask(&def, &mut b, 0, 80, 0)),
             Some(Attack::Swing),
             "the arm at eighty"
         );
-        let mut b = Brain::default();
+        // 0536f: fifty one to seventy four is the rear-up.
+        let mut b = risen();
         assert_eq!(
             ask(&def, &mut b, 0, 60, 0),
             Act::Play("Mudmen_IBury".into())
         );
         assert!(b.flags & flag::BURIED != 0);
-        // It stays under until the timer runs out, then comes up beside him.
-        let mut act = ask(&def, &mut b, 0, 60, 0);
-        for _ in 0..12 {
-            if matches!(act, Act::Appear { .. }) {
-                break;
-            }
-            act = ask(&def, &mut b, 0, 60, 0);
+        // He stood still: twenty to eighty of him, on his plane, so he is
+        // dragged under.
+        let act = ask(&def, &mut b, 0, 60, 0);
+        assert!(
+            matches!(&act, Act::Grip { script, fatal: true, .. } if script == "Mudmen_KillKnight"),
+            "{act:?}"
+        );
+        // And the same rear-up with the knight off the plane: `CheckZAxis`
+        // fails at 0x54c0 and the arms come back down.
+        let mut b = risen();
+        assert_eq!(
+            ask(&def, &mut b, 0, 60, 0),
+            Act::Play("Mudmen_IBury".into())
+        );
+        assert_eq!(
+            ask(&def, &mut b, 0, 60, 40),
+            Act::Play("Mudmen_ToStance".into()),
+            "he stepped off the plane"
+        );
+        assert_eq!(b.flags & flag::BURIED, 0);
+        // And with him inside twenty: 0x54c8 sends it to the stance too.
+        let mut b = risen();
+        ask(&def, &mut b, 0, 60, 0);
+        assert_eq!(
+            ask(&def, &mut b, 50, 60, 0),
+            Act::Play("Mudmen_ToStance".into()),
+            "ten pixels is too close to take hold of"
+        );
+    }
+
+    /// `MudmenEntangle` (0x54f2): forty frames, the choke at the end of them,
+    /// and fire and down together to tear loose -- which costs the mudman a hit
+    /// point in `MudmenSd` (0x5583).
+    #[test]
+    fn the_mudmans_arms_choke_unless_you_press_fire_and_down() {
+        let def = creature("mudman", 80, 75);
+        let mut b = Brain::default();
+        b.flags |= flag::SURFACED | flag::ENTANGLING;
+        b.timer = 40;
+        for _ in 0..39 {
+            assert_eq!(
+                ask(&def, &mut b, 0, 20, 0),
+                Act::Play("Mudmen_EntangleKnight".into())
+            );
         }
-        match act {
-            Act::Appear { x, facing, .. } => {
-                assert_eq!(x, 135, "seventy five to the far side of him");
-                assert_eq!(facing, -1);
+        assert_eq!(
+            ask(&def, &mut b, 0, 20, 0),
+            Act::Grip {
+                put: None,
+                script: "Mudmen_ChokeKnight".into(),
+                damage: 0,
+                cost: 0,
+                fatal: true,
+                hold: true,
+                victim: String::new(),
+            },
+            "the fortieth frame is the choke"
+        );
+        // The same hold, struggled out of on the third frame.
+        let mut b = Brain::default();
+        b.flags |= flag::SURFACED | flag::ENTANGLING;
+        b.timer = 40;
+        ask(&def, &mut b, 0, 20, 0);
+        ask(&def, &mut b, 0, 20, 0);
+        let mut facing = 1;
+        let me = at(0, 50);
+        let foe = at(20, 50);
+        let s = Sight {
+            me: &me,
+            foe: &foe,
+            def: &def,
+            gore: true,
+            body: false,
+            decapped: false,
+            progression: 0,
+            perch: None,
+            foe_blow: 0,
+            head_health: None,
+            struggle: true,
+        };
+        let mut seed = 1;
+        let mut spot = (0, 50);
+        let act = decide(
+            &s,
+            &mut b,
+            &mut seed,
+            &mut facing,
+            &mut Shared::default(),
+            &mut spot,
+        );
+        assert!(
+            matches!(&act, Act::Grip { script, hold: true, .. } if script == "Mudmen_KnightSd"),
+            "{act:?}"
+        );
+        assert_eq!(b.flags & flag::ENTANGLING, 0);
+        assert!(b.flags & flag::SHOVED != 0);
+        // `MudmenSd` the frame after: his task comes back and the shove costs
+        // the mudman one point.
+        assert_eq!(
+            ask(&def, &mut b, 0, 20, 0),
+            Act::Grip {
+                put: None,
+                script: "Mudmen_Hit".into(),
+                damage: 0,
+                cost: 1,
+                fatal: false,
+                hold: false,
+                victim: String::new(),
             }
-            other => panic!("the mudman never surfaced: {other:?}"),
-        }
+        );
+        assert_eq!(b.flags & flag::SHOVED, 0);
     }
 
     /// `ControlBalok` hangs back between a hundred and twenty and a hundred
@@ -4784,6 +5174,7 @@ mod tests {
             perch: None,
             foe_blow: 0,
             head_health: None,
+            struggle: false,
         };
         let mut seed = 1u16;
         let mut brain = Brain::default();
@@ -4831,6 +5222,7 @@ mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: None,
+                struggle: false,
             };
             match decide(
                 &s,
@@ -4861,6 +5253,84 @@ mod tests {
         assert_eq!(kind(&ask(&def, &mut b, 0, 75, 0)), Some(Attack::Swing));
         let mut b = Brain::default();
         assert_eq!(kind(&ask(&def, &mut b, 0, 100, 0)), Some(Attack::Chop));
+    }
+
+    /// `ControlBalokRelease` (0x37f0): a knight who is still alive when the
+    /// shake ends is put down seventy five pixels in front of the Balok rather
+    /// than left inside it, and a dead one is chewed.
+    #[test]
+    fn balok_puts_the_knight_down_in_front_of_itself() {
+        let def = creature("balok", 80, 60);
+        let me = at(100, 50);
+        let foe = at(100, 50);
+        fn sight_of<'a>(me: &'a Fighter, foe: &'a Fighter, def: &'a ActorDef) -> Sight<'a> {
+            Sight {
+                me,
+                foe,
+                def,
+                gore: true,
+                body: false,
+                decapped: false,
+                progression: 0,
+                perch: None,
+                foe_blow: 0,
+                head_health: None,
+                struggle: false,
+            }
+        }
+        let go = |s: &Sight, shared: &mut Shared, facing: &mut i32| {
+            let mut b = Brain::default();
+            let mut seed = 1u16;
+            decide(s, &mut b, &mut seed, facing, shared, &mut (0, 0))
+        };
+        // Facing right: 0x3826 finds `+8` bit 1 clear, so `bx` stays positive.
+        let mut shared = Shared {
+            balok: balok_flag::RELEASING,
+            ..Default::default()
+        };
+        let mut facing = 1;
+        let act = go(&sight_of(&me, &foe, &def), &mut shared, &mut facing);
+        assert_eq!(
+            act,
+            Act::Grip {
+                put: Some(100 + 0x4b),
+                script: "Balok_Recover".into(),
+                damage: 0,
+                cost: 0,
+                fatal: false,
+                hold: false,
+                victim: String::new(),
+            }
+        );
+        assert_eq!(shared.balok, 0, "0x3834: mov word ptr [BalokFLAGS], 0");
+        // Facing left: 0x382c negates it.
+        let mut shared = Shared {
+            balok: balok_flag::RELEASING,
+            ..Default::default()
+        };
+        let mut facing = -1;
+        match go(&sight_of(&me, &foe, &def), &mut shared, &mut facing) {
+            Act::Grip { put, .. } => assert_eq!(put, Some(100 - 0x4b)),
+            other => panic!("{other:?}"),
+        }
+        // A dead one goes to `ControlBalokBite` instead, and `BalokFLAG`
+        // (DS:0x77a0, not `BalokFLAGS`) alternates the bite with the squeeze.
+        let mut dead = at(100, 50);
+        dead.health = 0;
+        let mut shared = Shared {
+            balok: balok_flag::RELEASING,
+            ..Default::default()
+        };
+        let mut facing = 1;
+        let first = go(&sight_of(&me, &dead, &def), &mut shared, &mut facing);
+        shared.balok = balok_flag::RELEASING;
+        let second = go(&sight_of(&me, &dead, &def), &mut shared, &mut facing);
+        let named = |a: &Act| match a {
+            Act::Grip { script, .. } => script.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(named(&first), "Balok_BiteKnight");
+        assert_eq!(named(&second), "Balok_SqueezeKnight");
     }
 
     /// `BeastCharge` and `SetBeastTimer`: the beast never tracks. It runs to
@@ -5068,6 +5538,7 @@ mod tests {
             perch: None,
             foe_blow: 0,
             head_health: Some(200),
+            struggle: false,
         };
         let mut seed = 0x2f1du16;
         let mut facing = 1;
@@ -5378,6 +5849,7 @@ mod tests {
                 perch: None,
                 foe_blow: 0,
                 head_health: head,
+                struggle: false,
             };
             let mut seed = 0x2f1du16;
             let mut facing = 1;
