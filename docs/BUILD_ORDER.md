@@ -648,9 +648,16 @@ the decapitation beside the bloodless collapse from the same fight.
       standing still and lands only on one mid-swing or turned away. One
       simplification is ours: the original never clears `+0x28` on a blow taken,
       so a reeling knight keeps the kind of whatever he was doing; here a
-      reeling or recovering knight never blocks. **Not built**: what the
-      original does with a block against the spear (`TroggSpearStruck1` plays
-      `Knight_SwEvade` for it), and the Black Knight's own guard (`BKBlock`,
+      reeling or recovering knight never blocks. **Read and closed**: what the
+      original does with a block against the spear is `TroggSpearStruck1`'s own
+      first three lines, `call CheckBlock` / `cmp word [blockflag], 0` /
+      `mov word [0x783a], 0x11ce` (0x431b, 0x4325), and 0x11ce is
+      `Knight_SwEvade` — which is the script `InitKnightvsTroggSpear` has
+      already written into both guard slots of the knight's own `+0x16` table
+      (0x21d8 for kind 0xe, 0x21dd for kind 8), so the knight is shown exactly
+      what he is already holding and the blow costs him nothing. That is what
+      this engine's parry leaves him on, so there is nothing left to build.
+      Still **not built**: the Black Knight's own guard (`BKBlock`,
       `_evadechop`), which is his behaviour
 - [x] 48. **Weapon state: the thrown dagger, and honestly not the rest.** The
       dagger is the one weapon state the scripts hold, and it is built end to
@@ -692,9 +699,22 @@ the decapitation beside the bloodless collapse from the same fight.
       part of which is gated. **Dismemberment:** the knight kneels for twenty
       frames of `Knight_SwDeath` with two `BODY` parts still on him, and a blow
       that finds them in that window is the finisher: a swing takes the head
-      (`MudmenStruck1`, the path every creature's and the dagger's blow takes;
-      `KnightKnightStruck1` does it for any blow from a knight), anything else
-      is `Knight_SwCollapse`, the fall. The creatures' own decapitations are
+      (`MudmenStruck1`/`KnightStruck1` at 0x4498, the entry `StruckTable` holds
+      for a mudman and for the dagger; `KnightKnightStruck1` at 0x4407 does it
+      for any blow from a knight), anything else is `Knight_SwCollapse`, the
+      fall. **Which striker finishes at all is the table's own business**, read
+      again and corrected: `KnightGotStruck` (0x4267) dispatches on the
+      striker's `+0x35` and `TroggSpearStruck1` (0x431b) is the one entry with
+      no `cmp word [di+0x38], 0` in it, so a spear trogg's lunge on the
+      kneeling body is **not** a finisher — it takes its flat three off a body
+      with none to give (0x432e) and goes to `KnightSAnim` (0x44b9). The
+      spear's only finisher is the toss. That gate is now built, as
+      `monster::finishes_a_corpse`. Still **not built** inside it:
+      `TroggFinishKnight` (0x42fc) splits the axe trogg from the hammer trogg
+      on `+0x35` (0xc against 0xe), so in the original the axe always takes the
+      head and the hammer always collapses him whichever of their two blows
+      landed; the pack carries no `+0x35` and both share `Controller::Trogg`,
+      so the pair keep the 0x4498 rule. The creatures' own decapitations are
       already in their `*Hit` rows and come with 46: `Ratman_HitOnHead` and the
       beast's `UpperHit` for a blow from above, each with its own death.
       **`Knight_Explode` and `TroggSpear_Toss` were on the not-built list and
