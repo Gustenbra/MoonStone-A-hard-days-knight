@@ -10,6 +10,7 @@
 //! authority over the *game* (there is none: see [`crate::lockstep`]) but an
 //! authority over who is sitting where, which somebody has to have.
 
+use crate::later::Later;
 use crate::list::Directory;
 use crate::proto::{cut, Lobby, Msg, Player, SeatInput, PLAYER_NAME_MAX, PROTOCOL, SEATS};
 use crate::wire::{Link, Listener, WireError};
@@ -91,6 +92,16 @@ pub struct Host {
     pub started: bool,
     /// The list server, while this game is announced on one.
     pub directory: Option<Directory>,
+    /// The announcement, while it is still being made. Connecting to a list
+    /// server is a socket to the far side of a country and the frame it is asked
+    /// on cannot wait for it, so it is asked on a thread and collected in
+    /// [`Host::poll`].
+    announcing: Option<Later<Result<Directory, WireError>>>,
+    /// Where this game is listed, kept so the listing can be put back after the
+    /// connection to the list server breaks.
+    listed_on: Option<(String, String)>,
+    /// When to try again, once one has broken.
+    relist_at: Option<std::time::Instant>,
     /// What each seat's round trip measured, in milliseconds, and when it was
     /// last asked. The input delay is chosen from the worst of them.
     trips: std::collections::BTreeMap<u8, u32>,
@@ -115,6 +126,7 @@ impl Host {
             seat: 0,
             name: cut(player, PLAYER_NAME_MAX),
             ready: false,
+            ms: None,
         });
         Ok(Host {
             door,
@@ -122,6 +134,9 @@ impl Host {
             guests: Vec::new(),
             started: false,
             directory: None,
+            announcing: None,
+            listed_on: None,
+            relist_at: None,
             trips: std::collections::BTreeMap::new(),
             began: std::time::Instant::now(),
             asked: std::time::Instant::now(),
@@ -174,17 +189,34 @@ impl Host {
     /// whether it could get back in, which is the only honest test of whether
     /// friends can reach this machine. A host it could not reach is carried by
     /// the server instead.
-    pub fn list_on(&mut self, server: &str, version: &str) -> Result<(), WireError> {
-        let d = Directory::announce(
-            server,
-            &self.lobby.name,
-            self.door.port(),
-            SEATS as u8,
-            self.locked(),
-            version,
-        )?;
-        self.directory = Some(d);
-        Ok(())
+    ///
+    /// **This returns at once and does not mean the game is listed.** The
+    /// connection is made on a thread of its own, the way the router is asked,
+    /// and the answer arrives through [`Host::poll`] as an [`Event::Note`]: a
+    /// list server that is down takes the whole of `PATIENCE` to say so, and a
+    /// lobby that froze for that long while it found out would look broken. Ask
+    /// [`Host::listing`] whether the answer is still coming.
+    pub fn list_on(&mut self, server: &str, version: &str) {
+        self.listed_on = Some((server.to_string(), version.to_string()));
+        self.relist_at = None;
+        self.announce_now();
+    }
+
+    /// Start one announcement on a thread, from what [`Host::list_on`] was told.
+    fn announce_now(&mut self) {
+        let Some((server, version)) = self.listed_on.clone() else {
+            return;
+        };
+        let (name, port, locked) = (self.lobby.name.clone(), self.door.port(), self.locked());
+        self.announcing = Some(Later::start(move || {
+            Directory::announce(&server, &name, port, SEATS as u8, locked, &version)
+        }));
+    }
+
+    /// Whether an announcement is still being made, so the screen can say it is
+    /// asking rather than say nothing.
+    pub fn listing(&self) -> bool {
+        self.announcing.as_ref().is_some_and(|a| a.waiting())
     }
 
     /// The address to read out to a friend, once the list server has said what
@@ -299,6 +331,7 @@ impl Host {
                             seat: free,
                             name: name.clone(),
                             ready: false,
+                            ms: None,
                         });
                         self.lobby.players.sort_by_key(|p| p.seat);
                         let _ = link.send(&Msg::Welcome {
@@ -360,6 +393,15 @@ impl Host {
             // Kept as the latest rather than smoothed: a lobby is measured over
             // seconds and the number is only read once, when the host starts.
             self.trips.insert(seat, ms);
+            // And onto the roster, so it reaches every screen. Only the host has
+            // a line to everybody, so a guest can measure nothing itself and
+            // would otherwise show one number where the host showed all of them.
+            if let Some(p) = self.lobby.players.iter_mut().find(|p| p.seat == seat) {
+                if p.ms != Some(ms) {
+                    p.ms = Some(ms);
+                    roster_changed = true;
+                }
+            }
         }
         // Drop what was lost, highest index first so the rest keep their places.
         lost.sort_by_key(|l| std::cmp::Reverse(l.0));
@@ -405,6 +447,46 @@ impl Host {
     /// it happens once per person joining a lobby, so a frame is dropped when
     /// somebody arrives and never otherwise.
     fn poll_directory(&mut self, out: &mut Vec<Event>) {
+        // The announcement, if one is still being made. It is collected before
+        // the directory is read, so the first tick a list server answers on is
+        // also the first tick its answer is acted on.
+        if let Some(answer) = self.announcing.as_mut().and_then(|a| a.take()) {
+            match answer {
+                Ok(d) => {
+                    self.directory = Some(d);
+                    self.relist_at = None;
+                }
+                Err(e) => {
+                    out.push(Event::Note {
+                        text: format!("not on the list: {e}"),
+                    });
+                    // Try again later rather than never. A list server that is
+                    // being restarted, or a network that blinked, should not
+                    // cost the game its listing for the rest of the evening.
+                    self.relist_at = Some(std::time::Instant::now() + RELIST);
+                }
+            }
+            self.announcing = None;
+        }
+        // A listing whose connection broke is thrown away and made again. The
+        // game itself is untouched by this: the lobby is still open on its own
+        // port and anybody who has the address can still knock.
+        if self.directory.as_ref().is_some_and(|d| d.lost()) {
+            if let Some(mut d) = self.directory.take() {
+                for text in d.notes() {
+                    out.push(Event::Note { text });
+                }
+            }
+            self.relist_at = Some(std::time::Instant::now() + RELIST);
+        }
+        if self.announcing.is_none() && self.directory.is_none() {
+            if let Some(at) = self.relist_at {
+                if std::time::Instant::now() >= at {
+                    self.relist_at = None;
+                    self.announce_now();
+                }
+            }
+        }
         let players = self.lobby.players() as u8;
         let Some(d) = self.directory.as_mut() else {
             return;
@@ -522,6 +604,13 @@ impl Host {
 
 /// The seat of a socket that has connected and not yet said hello.
 const SEAT_UNSEATED: u8 = u8::MAX;
+
+/// How long to wait before putting a lost listing back.
+///
+/// **Ours**, and picked rather than recovered, like everything in this crate.
+/// Long enough that a list server being restarted is not hammered while it comes
+/// up, short enough that a friend browsing a minute later still finds the game.
+const RELIST: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Joining.
 pub struct Guest {

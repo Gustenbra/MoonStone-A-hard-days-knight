@@ -70,6 +70,7 @@
 //! A host that comes back unreachable is carried by the server instead, byte for
 //! byte, without the server ever parsing what it carries.
 
+pub mod later;
 pub mod list;
 pub mod lobby;
 pub mod lockstep;
@@ -78,6 +79,7 @@ pub mod proto;
 pub mod session;
 pub mod wire;
 
+pub use later::Later;
 pub use list::{browse, Directory, ListMsg, Listing, DEFAULT_LIST_PORT};
 pub use lobby::{Event, Guest, Host, JoinError};
 pub use lockstep::{Desync, Lockstep, Turn};

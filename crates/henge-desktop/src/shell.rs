@@ -1059,7 +1059,7 @@ pub fn draw_online(
             }
             // A lobby is where somebody should find out the line is bad, not a
             // minute into a fight.
-            if let Some(ms) = screen.trips.get(&p.seat) {
+            if let Some(ms) = p.ms {
                 about.push(format!("{ms}MS"));
             }
             if !about.is_empty() {

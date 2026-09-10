@@ -114,6 +114,10 @@ fn main() {
         );
         println!("  --no-relay    hold the list only, and carry nobody's game");
         println!("  --quiet       do not print a line per event");
+        println!(
+            "  --stale <s>   drop a game whose host has not refreshed for this long (default {})",
+            STALE.as_secs()
+        );
         println!();
         println!("Forward that one TCP port and nothing else. No files, no database.");
         return;
@@ -123,6 +127,14 @@ fn main() {
         .unwrap_or(henge_net::DEFAULT_LIST_PORT);
     let relaying = !args.iter().any(|a| a == "--no-relay");
     let loud = !args.iter().any(|a| a == "--quiet");
+    // How long a listing outlives its host's last refresh. A knob rather than a
+    // constant because a test cannot wait three quarters of a minute to prove
+    // that a refreshed game is not dropped, and because a server on a bad line
+    // may want to be more forgiving than the default.
+    let stale = after(&args, "--stale")
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(STALE);
 
     let door = match Listener::open(port) {
         Ok(d) => d,
@@ -146,6 +158,7 @@ fn main() {
         next: 1,
         relaying,
         loud,
+        stale,
         budget: Budget::new(),
     };
 
@@ -254,6 +267,8 @@ struct Server {
     next: u64,
     relaying: bool,
     loud: bool,
+    /// How long a listing outlives its host's last refresh: `--stale`.
+    stale: Duration,
     budget: Budget,
 }
 
@@ -463,7 +478,21 @@ impl Server {
         ));
     }
 
-    /// The hosts' control connections: a request to be carried, or a goodbye.
+    /// The hosts' control connections: a refresh, a request to be carried, or a
+    /// goodbye.
+    ///
+    /// **The refresh is the important one.** A host keeps its listing alive by
+    /// sending [`ListMsg::Announce`] every fifteen seconds down the connection it
+    /// already has, and [`Serving::expire`] drops any game whose entry has not
+    /// been touched for [`STALE`]. This arm is what touches it. Without it every
+    /// game fell off the list forty five seconds after it was opened, and the
+    /// host saw its connection closed a moment later, which is what
+    /// `Directory::poll` reports as having lost the list server.
+    ///
+    /// The reply matters too, and not only for tidiness: it is the only thing
+    /// this server ever sends down an idle host connection, and a host behind a
+    /// carrier's NAT needs traffic coming back or the mapping is dropped from
+    /// under it.
     fn read_hosts(&mut self) {
         let ids: Vec<String> = self.hosts.keys().cloned().collect();
         for id in ids {
@@ -473,11 +502,18 @@ impl Server {
             let (msgs, err) = h.link.poll();
             let mut want_relay = false;
             let mut withdraw = false;
+            let mut refresh = None;
             for m in msgs {
                 h.seen = Instant::now();
                 match m {
                     ListMsg::WantRelay => want_relay = true,
                     ListMsg::Withdraw { .. } => withdraw = true,
+                    ListMsg::Announce {
+                        name,
+                        players,
+                        locked,
+                        ..
+                    } => refresh = Some((name, players, locked)),
                     _ => {}
                 }
             }
@@ -486,6 +522,29 @@ impl Server {
                 self.games.remove(&id);
                 self.say(format!("gone {id}"));
                 continue;
+            }
+            if let Some((name, players, locked)) = refresh {
+                let told = self.games.get_mut(&id).map(|g| {
+                    g.listing.name = name;
+                    g.listing.players = players;
+                    g.listing.locked = locked;
+                    g.seen = Instant::now();
+                    (
+                        Announced {
+                            id: id.clone(),
+                            seen_as: g.listing.at.clone(),
+                            reachable: g.reachable,
+                        },
+                        g.code.clone(),
+                    )
+                });
+                if let (Some((told, code)), Some(h)) = (told, self.hosts.get_mut(&id)) {
+                    let _ = h.link.send(&ListMsg::Announced(told));
+                    if !code.is_empty() {
+                        let _ = h.link.send(&ListMsg::Relayed { code });
+                    }
+                    let _ = h.link.flush();
+                }
             }
             if want_relay {
                 self.give_relay(&id);
@@ -621,7 +680,7 @@ impl Server {
         let stale: Vec<String> = self
             .games
             .iter()
-            .filter(|(_, g)| g.seen.elapsed() > STALE)
+            .filter(|(_, g)| g.seen.elapsed() > self.stale)
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {

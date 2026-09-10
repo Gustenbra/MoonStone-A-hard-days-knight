@@ -165,10 +165,6 @@ pub struct Online {
     pub note: String,
     /// The address to read out to a friend, once the router has been asked.
     pub reachable: String,
-    /// What each seat's round trip measured, in milliseconds, once the host has
-    /// measured it. Drawn beside the name, because a lobby is where somebody
-    /// finds out the line is bad rather than a minute into a fight.
-    pub trips: std::collections::BTreeMap<u8, u32>,
 }
 
 impl Default for Online {
@@ -191,7 +187,6 @@ impl Default for Online {
             hosting: false,
             note: String::new(),
             reachable: String::new(),
-            trips: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -458,7 +453,6 @@ impl Online {
         self.note = note.to_string();
         self.games.clear();
         self.looked = false;
-        self.trips.clear();
     }
 
     fn seat_ask(&self) -> Ask {
@@ -735,11 +729,13 @@ mod tests {
                 seat: 0,
                 name: "host".into(),
                 ready: true,
+                ms: None,
             },
             Player {
                 seat: 1,
                 name: "me".into(),
                 ready: false,
+                ms: None,
             },
         ];
         assert_eq!(o.selected(), Row::Ready);

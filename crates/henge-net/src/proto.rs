@@ -100,6 +100,17 @@ pub struct Player {
     /// Sitting down and happy to start.
     #[serde(default)]
     pub ready: bool,
+    /// What this seat's round trip to the host last measured, in milliseconds,
+    /// or nothing for a seat nobody has measured yet. The host's own seat is
+    /// never measured: there is no line between it and itself.
+    ///
+    /// **It rides on the roster so that every screen shows the same number.**
+    /// The host is the only machine that can measure anything, since it is the
+    /// only one every other machine has a line to, so a guest with nothing but
+    /// its own link would otherwise show one number or none while the host
+    /// showed all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u32>,
 }
 
 /// A lobby, as the host keeps it and as every guest is told it.
@@ -307,6 +318,7 @@ mod tests {
                 seat,
                 name: format!("p{seat}"),
                 ready: true,
+                ms: None,
             });
         }
         assert_eq!(l.free_seat(), None);
@@ -323,6 +335,7 @@ mod tests {
             seat: 0,
             name: "carl".into(),
             ready: true,
+            ms: None,
         })
         .unwrap();
         assert!(!json.to_lowercase().contains("knight"));
@@ -336,6 +349,7 @@ mod tests {
             seat: 0,
             name: "a".into(),
             ready: false,
+            ms: None,
         });
         assert!(!l.can_start());
         l.players[0].ready = true;
@@ -367,6 +381,7 @@ mod tests {
             seat: 0,
             name: "carl".into(),
             ready: true,
+            ms: None,
         });
         let roster = serde_json::to_string(&lobby).unwrap();
         assert!(!roster.to_lowercase().contains("portcullis"));

@@ -8,7 +8,11 @@ It does two things and holds nothing:
 
 - **The list.** Hosts announce their lobby and refresh every fifteen seconds;
   the game's *Open games* page asks for the list. An entry is a name, an address,
-  a head count, whether a password is wanted, and which build opened it.
+  a head count, whether a password is wanted, and which build opened it. An entry
+  whose host has not refreshed for forty five seconds is dropped (`--stale`
+  changes that), and the server answers every refresh, which is also what keeps
+  the connection warm through a carrier's NAT. A host that loses the connection
+  puts its listing back a few seconds later on its own.
 - **The relay.** A host whose router will not open a port keeps one outbound
   connection to the server. When somebody joins, the server asks that host for a
   second connection, glues the two sockets together and copies bytes between them
@@ -273,6 +277,23 @@ machine before trusting it:
 ```sh
 nc -vz THE.ADDRESS 19911
 ```
+
+### Updating one that is already running
+
+The server and the game are versioned together (`henge_net::list::LIST_PROTOCOL`),
+so a change to either usually wants the other. On the machine:
+
+```sh
+cd henge && git pull
+cargo build --release -p henge-net --bin henge-list
+sudo install -m755 target/release/henge-list /usr/local/bin/
+sudo systemctl restart henge-list
+journalctl -u henge-list -f
+```
+
+Restarting drops the open lobbies' control connections. Nothing is lost that
+matters: a game already being played is unaffected, and every host puts its
+listing back within a few seconds of noticing.
 
 ### Watching what it costs
 

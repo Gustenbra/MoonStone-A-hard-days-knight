@@ -87,7 +87,7 @@ fn a_game_is_announced_found_and_withdrawn() {
     let server = Serving::start(&[]);
     let mut host = Host::open("CARLS GAME", "carl", 0, true).unwrap();
     host.lock("portcullis");
-    host.list_on(&server.at(), "test").expect("to announce");
+    host.list_on(&server.at(), "test");
 
     let mut found = None;
     until("the game to appear on the list", || {
@@ -104,6 +104,13 @@ fn a_game_is_announced_found_and_withdrawn() {
     // The probe got back in: the host really is listening on that port, and the
     // server measured it rather than believing anybody.
     assert!(!g.relayed(), "a reachable host is not carried");
+    // The address the server saw comes back on the announcement's own reply,
+    // which is a poll of its own: the game is on the list from the moment the
+    // announcement lands, and the host learns where it was seen from just after.
+    until("the host to learn its own public address", || {
+        host.poll();
+        host.address().is_some()
+    });
     assert_eq!(host.address().as_deref(), Some(g.at.as_str()));
 
     host.close("done");
@@ -120,7 +127,7 @@ fn a_game_is_announced_found_and_withdrawn() {
 fn a_game_from_another_build_is_not_offered() {
     let server = Serving::start(&[]);
     let mut host = Host::open("OLD GAME", "carl", 0, false).unwrap();
-    host.list_on(&server.at(), "an-older-build").unwrap();
+    host.list_on(&server.at(), "an-older-build");
     until("the game to be listed at all", || {
         host.poll();
         !list::browse(&server.at(), "")
@@ -141,7 +148,7 @@ fn the_host_checks_the_password_and_the_list_never_sees_it() {
     let server = Serving::start(&[]);
     let mut host = Host::open("LOCKED", "carl", 0, false).unwrap();
     host.lock("portcullis");
-    host.list_on(&server.at(), "test").unwrap();
+    host.list_on(&server.at(), "test");
     let port = host.port();
 
     // Wrong word: turned away with a reason.
@@ -368,4 +375,93 @@ fn a_mismatched_protocol_is_refused_by_name() {
     });
     let why = refused.unwrap();
     assert!(why.contains(&format!("{}", LIST_PROTOCOL + 77)), "{why}");
+}
+
+/// The announcement is made on a thread of its own, so the frame it was asked on
+/// costs nothing even when the server will never answer.
+///
+/// This is the whole reason `Host::list_on` returns nothing: a list server that
+/// is down takes the full patience to say so, and a lobby that stopped dead for
+/// that long while it found out reads as a game that has hung.
+#[test]
+fn announcing_to_a_server_that_never_answers_does_not_stop_the_game() {
+    let mut host = Host::open("PATIENT", "carl", 0, false).unwrap();
+    // 203.0.113.0/24 is TEST-NET-3, reserved for documentation and routed
+    // nowhere, so this connection can only fail: either at once, or when the
+    // patience runs out. Which of the two it is, is not this test's business.
+    let began = Instant::now();
+    host.list_on("203.0.113.1:19911", "test");
+    assert!(
+        began.elapsed() < Duration::from_millis(100),
+        "list_on held the caller for {:?}",
+        began.elapsed()
+    );
+    assert!(host.listing(), "and it says the answer is still coming");
+    assert!(host.directory.is_none());
+
+    // And when the answer does come it is a note, said once.
+    let mut said = Vec::new();
+    until("the host to be told it is not on the list", || {
+        for e in host.poll() {
+            if let henge_net::Event::Note { text } = e {
+                said.push(text);
+            }
+        }
+        !host.listing()
+    });
+    assert!(
+        said.iter().any(|n| n.contains("not on the list")),
+        "{said:?}"
+    );
+    assert!(host.directory.is_none());
+}
+
+/// A game whose host keeps refreshing stays on the list, and the host's
+/// connection is not closed under it.
+///
+/// This is the regression test for the bug that took every game off the list
+/// three quarters of a minute after it was opened. A host refreshes by sending
+/// `Announce` down the control connection it already has, and the server was
+/// only ever reading `WantRelay` and `Withdraw` off that connection, so the
+/// entry's own clock never moved and `expire` dropped it. What the person saw
+/// was their game vanishing from the browser and their lobby saying it had lost
+/// the list server.
+///
+/// The server is started with `--stale 1` so the test is over in seconds rather
+/// than in the default forty five.
+#[test]
+fn a_refreshed_game_is_not_dropped_off_the_list() {
+    let server = Serving::start(&["--stale", "1"]);
+    let mut host = Host::open("STAYING", "carl", 0, false).unwrap();
+    host.list_on(&server.at(), "test");
+    until("the game to be listed", || {
+        host.poll();
+        list::browse(&server.at(), "test")
+            .unwrap_or_default()
+            .iter()
+            .any(|g| g.name == "STAYING")
+    });
+
+    // Well past the point where an unrefreshed game would have been dropped.
+    // The refresh is sent by hand rather than waited for: `Directory::poll`
+    // sends one every fifteen seconds and a test should not take that long.
+    let until_then = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until_then {
+        host.poll();
+        if let Some(d) = host.directory.as_mut() {
+            d.refresh(1);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        list::browse(&server.at(), "test")
+            .unwrap_or_default()
+            .iter()
+            .any(|g| g.name == "STAYING"),
+        "a game whose host is still there should still be on the list"
+    );
+    assert!(
+        host.directory.is_some(),
+        "and its connection to the list server should still be open"
+    );
 }

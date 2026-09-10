@@ -190,6 +190,9 @@ pub struct Directory {
     last: std::time::Instant,
     /// Anything worth showing the person.
     notes: Vec<String>,
+    /// The connection broke, so this directory holds nothing but a dead socket.
+    /// The owner is expected to throw it away and announce again.
+    lost: bool,
 }
 
 impl Directory {
@@ -229,6 +232,7 @@ impl Directory {
             version: version.to_string(),
             last: std::time::Instant::now(),
             notes: Vec::new(),
+            lost: false,
         })
     }
 
@@ -264,28 +268,51 @@ impl Directory {
             }
         }
         if let Some(e) = err {
-            self.notes.push(format!("the list server went away: {e}"));
+            // The connection to the list server broke. It is only the listing
+            // that is lost: a game already under way keeps running, and anybody
+            // who already has the address can still join. The host puts the
+            // game back on the list by announcing again; see `Host::poll`.
+            self.lost = true;
+            self.notes
+                .push(format!("lost the list server ({e}), announcing again"));
         }
         if self.last.elapsed() >= REFRESH {
-            self.last = std::time::Instant::now();
-            let _ = self.link.send(&ListMsg::Announce {
-                protocol: LIST_PROTOCOL,
-                id: self.id.clone(),
-                name: self.name.clone(),
-                port: self.port,
-                players,
-                seats: self.seats,
-                locked: self.locked,
-                version: self.version.clone(),
-            });
-            let _ = self.link.flush();
+            self.refresh(players);
         }
         tickets
+    }
+
+    /// Say again that this game is here.
+    ///
+    /// **This is what keeps a game on the list.** The server drops an entry
+    /// whose host has not been heard from for `STALE`, and this is the only
+    /// thing that is ever heard from it. [`Directory::poll`] does it every
+    /// [`REFRESH`]; it is public so a test can do it on its own clock rather
+    /// than waiting out the interval.
+    pub fn refresh(&mut self, players: u8) {
+        self.last = std::time::Instant::now();
+        let _ = self.link.send(&ListMsg::Announce {
+            protocol: LIST_PROTOCOL,
+            id: self.id.clone(),
+            name: self.name.clone(),
+            port: self.port,
+            players,
+            seats: self.seats,
+            locked: self.locked,
+            version: self.version.clone(),
+        });
+        let _ = self.link.flush();
     }
 
     /// Anything worth telling the person, taken as it is read.
     pub fn notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    /// Whether the connection to the server has broken. A lost listing is not a
+    /// lost game: the lobby, and a game already running on it, carry on.
+    pub fn lost(&self) -> bool {
+        self.lost
     }
 
     /// Whether the server got back in. Nothing until it has said.

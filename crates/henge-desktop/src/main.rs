@@ -1261,6 +1261,10 @@ struct App {
     opener: Option<henge_net::Opener>,
     /// **Ours**: the mapping the router gave, so it can be taken down again.
     mapping: Option<henge_net::Mapping>,
+    /// **Ours**: the list of open games, while it is being fetched. On a thread
+    /// of its own for the same reason the router is: a list server that is down
+    /// takes seconds to say so and a frozen screen reads as a hung game.
+    browsing: Option<henge_net::Later<Result<Vec<henge_net::Listing>, henge_net::WireError>>>,
     /// **Ours**: last tick's word for every seat, which is what turns a held
     /// word into a press. The original does the same with `BOUNCEBUTTON`.
     seat_was: [henge_net::SeatInput; henge_core::shell::SEATS],
@@ -2013,6 +2017,7 @@ impl App {
             mapping: None,
             seat_was: [henge_net::SeatInput::default(); henge_core::shell::SEATS],
             seat_pressed: [SeatPress::default(); henge_core::shell::SEATS],
+            browsing: None,
             raw: [false; 256],
             raw_pressed: [false; 256],
             raw_typed: None,
@@ -3706,10 +3711,10 @@ impl App {
                         let listed = if server.is_empty() {
                             Some("no list server: friends will need your address".to_string())
                         } else {
-                            match host.list_on(&server, &build_name()) {
-                                Ok(()) => None,
-                                Err(e) => Some(format!("not on the list ({server}): {e}")),
-                            }
+                            // Asked, not waited for: the answer arrives as a
+                            // note out of the lobby's own poll.
+                            host.list_on(&server, &build_name());
+                            None
                         };
                         self.lobby = Some(Waiting::Host(host));
                         // The router, on its own thread: the lobby is drawable
@@ -3739,25 +3744,18 @@ impl App {
                     }
                     return;
                 }
-                // This one stops the game for as long as the answer takes, which
-                // is a second at worst. It happens because somebody pressed a
-                // key and is waiting for a list.
-                match henge_net::browse(&server, &build_name()) {
-                    Ok(games) => {
-                        let note = if games.is_empty() {
-                            format!("no games open on {server}")
-                        } else {
-                            format!("{} open on {server}", games.len())
-                        };
-                        if let Some(o) = self.online.as_mut() {
-                            o.listed(games, &note);
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(o) = self.online.as_mut() {
-                            o.listed(Vec::new(), &format!("could not reach {server}: {e}"));
-                        }
-                    }
+                // Asked on a thread of its own, like the announcement and like
+                // the router: a list server that is down takes the whole of the
+                // patience to say so, and a screen that stopped dead for that
+                // long would read as the game having hung. The answer is
+                // collected in [`App::online_poll`].
+                let build = build_name();
+                let at = server.clone();
+                self.browsing = Some(henge_net::Later::start(move || {
+                    henge_net::browse(&at, &build)
+                }));
+                if let Some(o) = self.online.as_mut() {
+                    o.listed(Vec::new(), &format!("looking on {server}"));
                 }
             }
             online::Ask::Take {
@@ -3854,6 +3852,28 @@ impl App {
 
     /// Whatever the lobby's socket has to say.
     fn online_poll(&mut self) {
+        // The list of open games, if one was asked for and has come back.
+        if let Some(answer) = self.browsing.as_mut().and_then(|b| b.take()) {
+            let server = list_server(&args_of());
+            match answer {
+                Ok(games) => {
+                    let note = if games.is_empty() {
+                        format!("no games open on {server}")
+                    } else {
+                        format!("{} open on {server}", games.len())
+                    };
+                    if let Some(o) = self.online.as_mut() {
+                        o.listed(games, &note);
+                    }
+                }
+                Err(e) => {
+                    if let Some(o) = self.online.as_mut() {
+                        o.listed(Vec::new(), &format!("could not reach {server}: {e}"));
+                    }
+                }
+            }
+            self.browsing = None;
+        }
         let Some(side) = self.lobby.as_mut() else {
             return;
         };
@@ -3867,15 +3887,10 @@ impl App {
             Some(Waiting::Guest(g)) => Some(g.lobby.clone()),
             None => None,
         };
-        let trips: std::collections::BTreeMap<u8, u32> = match self.lobby.as_ref() {
-            Some(Waiting::Host(h)) => (0..henge_core::shell::SEATS as u8)
-                .filter_map(|s| h.trip(s).map(|ms| (s, ms)))
-                .collect(),
-            _ => std::collections::BTreeMap::new(),
-        };
         if let (Some(o), Some(r)) = (self.online.as_mut(), roster) {
+            // The round trips come with the roster now, so a guest sees the same
+            // numbers the host does rather than none.
             o.roster = r;
-            o.trips = trips;
         }
         let mut start = None;
         let mut delay = 0;
@@ -4174,6 +4189,7 @@ impl App {
             net.close(why);
         }
         self.opener = None;
+        self.browsing = None;
         if let Some(m) = self.mapping.take() {
             m.close();
         }
