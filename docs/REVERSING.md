@@ -562,16 +562,47 @@ original fights over the whole of it and has no status panel along the bottom at
 `KnightSLAP`. `MonsterWalk` (`0x4e8b`) calls neither, and DS:`0x88ff` is read at combat
 time by `SBORD` and by nothing else. In the DOS game a troll walks through the tree line.
 
-Henge runs every fighter through the same gate, which is ours and is said so in
-`Fighter::walk`. It has one consequence worth naming, because it is visible: a creature
-whose seat record puts it off the right edge (`TroggTABLE`'s second record is x 360) wants
-to stand its `+0x54` away from the knight, and when the knight is far enough right there is
-no such column inside the arena. In the original it walks past the border and stands; here
-it walks into the border and stops. While the step gate and the write-back disagreed about
-where the edge was, it did worse than stop: `CheckBorder`'s limits are `X_LOW`..`X_HIGH`
-(10..320) and four of the shipped arena headers name a rectangle that reaches past 320, so
-the step landed outside and `run_task`'s own clamp pulled it back on the next script frame,
-two pixels out and ten back for the rest of the fight. Both gates now use the same pair.
+Henge used to run every fighter through the same gate. That was ours, and it was a bug, and
+it is gone. It is worth recording what it cost, because the symptom looked nothing like its
+cause.
+
+The spear trogg appeared to freeze. Inside his `back_off` (`SetTroggSpTables` at `0x2220`
+gives him approach `0x82`, back off `0x78`) `MonsterTrack`'s `TrackBack` (`0x5763`) hands
+him a step *away* from the knight, so a person who walked up to him pushed him backwards.
+Once that carried him out of the borders' idea of the arena, our gate refused him every
+direction at once, `moved` came back false, and the translation of `0x4eaa` -- reset the
+walk cycle, play the stance -- put him in his stance, where he stayed for the rest of the
+fight. He was not stuck in any state machine. He was walking into a wall we had built.
+
+`MonsterWalk` (`0x4e8b`) is the whole of a creature's gate and it is four instructions long
+in substance: `NextWalk`, `TASKWALKCOLLIDE` at `0x4e9e`, `and [si+0x26], ax`, then
+`add [si+2], ax` and `add [si+6], ax` at `0x4eeb` and `0x4ef1`, and out to `0x2d52`. No
+border test, and **no clamp on the result**. `ControlBlackKnight` jumps into the same
+routine at `0x4c10`, so a computer knight is not bordered either.
+
+Nor is anything clamped after the add, for anybody. `ControlKnight` adds its own step at
+`0x3fdc`, `0x3feb`, `0x3ffa` and `0x4009` and falls straight out. `CheckBorder`'s write-back
+(`0x40ed`, `0x40fb`) is the whole of the knight's bound and it is taken *before* the add, off
+the probe, which is why a knight pushed into the limit comes to rest at exactly `X_LOW` or
+`X_HIGH` rather than 25 short of it. Scanning every instruction in the image that writes an
+actor's column settles the rest: `mov [si+2], imm`, `add`, `sub` and `mov [si+2], r` between
+them give exactly two routines that bound one, `CheckBorder` and `KnightON` (`0x5289`, on
+arrival, and it bounds `[si+4]`), against four movement sites that add without a bound --
+`MonsterWalk` `0x4eeb`, `DemonMove` `0x5004`, `MudmenMove` `0x53fb`, `MudmenAppear` `0x5492`.
+The task VM writes no actor column at all: a scripted lunge moves the *task*, and the
+controller owns the anchor. So `run_task`'s clamp was ours too, and it was the visible half
+of the freeze -- it pulled a fighter who had walked past the edge back two pixels on every
+script frame, which is the twitching the person saw before the stance took over.
+
+The seat tables corroborate all of it beyond argument. `TroggTABLE` puts one creature at
+column -50 and another at 360, both outside `X_LOW`..`X_HIGH`, and a creature the borders
+held could never walk in from either. Note also that `CheckBorder` writes back only the
+column: its two depth tests at `0x4100` and `0x410a` clear direction bits and nothing more,
+so even the knight's depth is never snapped.
+
+A creature that walks off-screen is not lost. Once the knight is further away than
+`approach`, `MonsterTrack` hands the creature a step toward him again, so he walks back in.
+That is the original's only restoring force and it is enough.
 
 `bord` (`0x5828`) is not part of any of this: it writes attribute controller register
 `0x11`, the overscan colour.

@@ -286,7 +286,9 @@ All 386 files decode. See `FORMATS.md`.
       touches the display. The other two are movement: `CheckBorder` (0x40d0) holds an
       actor inside columns 10 to 320 and depths 30 to 155, and `SBORD` (0x4552) walks the
       arena's own list of impassable rectangles. Both work by clearing bits in a per-actor
-      byte of allowed directions rather than by clamping. Item 60
+      byte of allowed directions rather than by clamping, and both are the person's knight's
+      alone: `MonsterWalk` (0x4e8b) calls neither, and nothing in the image clamps a column
+      after a step is added. Item 60
 
 ## 2.3 Text `done`
 

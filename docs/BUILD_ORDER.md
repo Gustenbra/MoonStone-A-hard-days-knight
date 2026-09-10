@@ -1213,8 +1213,17 @@ the southern woods was the last one and the original has no such place, so he is
       (`0x29f7`), which is where the fighters start, and the row it measures from is
       DS:`0x80b5`, which the layout loader at `0x8d93` fills with the deepest `bottom` in
       the header, floored at 30.
-      And **only the knight is bordered in the original**: `SBORD` has one caller and
-      `MonsterWalk` is not it. Running the creatures through the same gate is ours.
+      And **only the person's knight is bordered in the original**: `SBORD` has one caller
+      and `MonsterWalk` (`0x4e8b`) is not it, `CheckBorder`'s callers are all the knight's,
+      and `ControlBlackKnight` jumps into `MonsterWalk` at `0x4c10` so a computer knight is
+      not bordered either. Nothing clamps a column after the step is added, for anybody:
+      `CheckBorder`'s write-back (`0x40ed`, `0x40fb`) is taken off the probe *before* the
+      add, and the four movement sites that write a column (`MonsterWalk` `0x4eeb`,
+      `DemonMove` `0x5004`, `MudmenMove` `0x53fb`, `MudmenAppear` `0x5492`) all add without
+      a bound. `TroggTABLE` seats creatures at columns -50 and 360 and they walk in from
+      there. Running the creatures through the knight's gate, and clamping the script
+      write-back, were both ours; they are **gone**, and they were what froze the spear
+      trogg at the arena wall. The full account is in `docs/REVERSING.md`.
       **Now right.** Row 200 is the foot of the screen and the original fights over the
       whole of it. This engine used to draw its own status strip over the bottom thirty two
       rows, which is why only two of the three standing places were usable and why a

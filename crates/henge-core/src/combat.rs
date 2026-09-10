@@ -835,11 +835,11 @@ impl Fighter {
     /// away, and each axis is then added only if its own bit is still there.
     /// Returns whether anything moved, and which directions were refused.
     ///
-    /// The original runs this on the knight and on nobody else: `SBORD` has one
-    /// caller and `MonsterWalk` is not it, so in the DOS game a creature walks
-    /// through the tree line as happily as our knight used to. Running every
-    /// fighter through the same gate is ours, and it is the only sense in which
-    /// this is not a transcription.
+    /// The original runs the border half of this on the person's own knight
+    /// and on nobody else: `CheckBorder` (0x40d0) and `SBORD` (0x4552) have
+    /// one caller each and it is `ControlKnight` (0x3fb3, 0x3fc1). A creature
+    /// walks through the tree line, and off the edge of the arena, as happily
+    /// as ours used to not. See the block below it for the whole argument.
     fn walk(
         &mut self,
         def: &ActorDef,
@@ -886,9 +886,33 @@ impl Fighter {
             box_right: br,
             box_bottom: bb,
         };
-        let ok = field.allow(&mut probe, wanted);
-        // `CheckBorder` writes the column back before anything is added to it.
-        self.x = probe.x;
+        // **The borders are the person's knight's alone.** `MonsterWalk`
+        // (0x4e8b) is the whole of a creature's gate: `NextWalk`, then
+        // `TASKWALKCOLLIDE` at 0x4e9e, then `and [si+0x26], ax` and, if
+        // nothing survived, the walk cycle reset and the stance (0x4eaa to
+        // 0x4eb1). It calls neither `CheckBorder` (0x40d0) nor `SBORD`
+        // (0x4552). `ControlBlackKnight` jumps into that same routine
+        // (0x4c10), so a computer knight is not gated either. Only
+        // `ControlKnight` asks the borders, at 0x3fb3 and 0x3fc1.
+        //
+        // Running every fighter through them was ours, and it is what stuck
+        // the spear trogg: he backs away when the knight closes (`TrackBack`,
+        // 0x5763), runs out of arena, is refused every direction, and the
+        // `!moved` arm above drops him into his stance to stand there. The
+        // seats settle it beyond argument: `TroggTABLE` puts one creature at
+        // x -50 and another at 360, and a creature the borders held could
+        // never walk in from either.
+        let person =
+            def.controller == "knight" && self.brain.flags & crate::monster::flag::DRIVEN == 0;
+        let ok = if person {
+            let ok = field.allow(&mut probe, wanted);
+            // `CheckBorder` writes the column back before anything is added
+            // to it, which it only does for the knight it gates.
+            self.x = probe.x;
+            ok
+        } else {
+            wanted
+        };
         let mut moved = false;
         if ok & (dir::UP | dir::DOWN) != 0 {
             self.y += dy;
@@ -898,18 +922,23 @@ impl Fighter {
             self.x += dx;
             moved = true;
         }
-        // `CheckBorder` (0x40d0) holds the column inside `X_LOW`..`X_HIGH` as
-        // well as inside the arena's own rectangles, and `run_task` below
-        // clamps every fighter to the same pair when the script's position is
-        // carried back out. An arena whose border rectangle reaches past 320
-        // let a step land outside them, and the clamp then pulled it back on
-        // the next script frame: a creature seated off the right edge walked
-        // two pixels out and ten back for the rest of the fight instead of
-        // standing. The two gates answer the same question, so they use the
-        // same limits.
-        let (cx, cy) = GLOBAL.clamp(self.x, self.y);
-        self.x = cx;
-        self.y = cy;
+        // **Nothing is clamped after the add.** `ControlKnight` adds its step
+        // at 0x3fdc, 0x3feb, 0x3ffa and 0x4009 and then falls straight out;
+        // `MonsterWalk` adds at 0x4eeb and 0x4ef1 and jumps to 0x2d52.
+        // `CheckBorder`'s own write-back (0x40ed, 0x40fb) is the whole of the
+        // knight's bound, and it is taken *before* the add, off the probe, by
+        // `field.allow` above. Exactly two routines in the image bound an
+        // actor's column at all -- `CheckBorder` and `KnightON` (0x5289, on
+        // arrival) -- and the four movement sites that write one
+        // (`MonsterWalk` 0x4eeb, `DemonMove` 0x5004, `MudmenMove` 0x53fb,
+        // `MudmenAppear` 0x5492) all `add` without a bound.
+        //
+        // Our clamp here was the other half of the spear trogg's freeze: it
+        // pinned him at column 10 while he was still asking to retreat, so he
+        // played his walk on the spot and the script frame carried him back.
+        // Note too that `CheckBorder` writes back only the column, never the
+        // depth: the two depth tests at 0x4100 and 0x410a clear direction
+        // bits and nothing more.
         (moved, wanted & !ok)
     }
 
@@ -1096,12 +1125,19 @@ impl Fighter {
                 self.facing = if flipped & 2 != 0 { -1 } else { 1 };
             }
             self.effects = frame.effects;
-            // Whatever the script moved, the fighter moved.
-            let (nx, ny) = GLOBAL.clamp(task.x - ox, task.y - oy);
-            self.x = nx;
-            self.y = ny;
-            task.x = nx + ox;
-            task.y = ny + oy;
+            // Whatever the script moved, the fighter moved -- unbounded. The
+            // task VM never writes an actor's column in the original: of the
+            // ten sites that write `[si+2]` as a coordinate, none sits in the
+            // VM's range, and a scripted lunge moves the *task*, whose anchor
+            // the controller owns. So there is nothing here to clamp against,
+            // and clamping it was ours. It is what pulled a fighter who had
+            // walked past the edge back two pixels every script frame, the
+            // visible half of the spear trogg standing and twitching at the
+            // arena wall. `CheckBorder` (0x40d0) is the only bound on the
+            // person's knight and it is applied in `walk` above, before the
+            // add, off the probe.
+            self.x = task.x - ox;
+            self.y = task.y - oy;
         }
 
         // **No state test.** `TaskCol_MainLoop` (0x9f26) walks the task's
@@ -1832,20 +1868,88 @@ pub(crate) mod tests {
         }])
     }
 
-    /// The step gate and the write-back agree about the edge.
+    /// A creature is bounded by nothing but the other fighters.
     ///
-    /// `CheckBorder` (0x40d0) holds the column inside `X_LOW`..`X_HIGH`, and
-    /// `run_task` clamps to the same pair when the script's position is
-    /// carried out. Four of the shipped arena headers name a rectangle that
-    /// reaches past 320, and while the two gates disagreed a fighter walking
-    /// into that strip stepped two pixels out on every tick and was pulled
-    /// ten back on every script frame, which is a creature seated off the
-    /// right edge jittering there for the rest of the fight rather than
-    /// standing at the edge.
+    /// `MonsterWalk` (0x4e8b) is the whole of a creature's gate: `NextWalk`,
+    /// `TASKWALKCOLLIDE` at 0x4e9e, `and [si+0x26], ax`, then `add [si+2], ax`
+    /// and `add [si+6], ax` at 0x4eeb and 0x4ef1 and out. No `CheckBorder`
+    /// (0x40d0), no `SBORD` (0x4552), no clamp. `TroggTABLE` seats creatures
+    /// at columns -50 and 360 and they have to be able to walk in from there.
+    ///
+    /// Gating every fighter on the borders, and clamping the write-back, was
+    /// ours, and between them they froze the spear trogg: he retreats when the
+    /// knight closes (`TrackBack`, 0x5763), ran out of the gate's idea of the
+    /// arena, was refused every direction, and the `!moved` arm dropped him
+    /// into his stance to stand there for the rest of the fight.
     #[test]
-    fn a_step_never_lands_outside_the_bounds_the_task_is_clamped_to() {
+    fn a_creature_walks_past_the_edge_because_nothing_in_the_original_stops_him() {
         let d = scripted_def();
-        // A border that reaches well past `X_HIGH`, as `wa3` and its kin do.
+        assert_ne!(d.controller, "knight", "this def is a creature's");
+        let mut f = Fighter::new("a", &d, 318, 100, 1);
+        for _ in 0..8 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 1,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+        }
+        assert!(
+            f.x > crate::arena::limit::X_HIGH,
+            "walked clean past 320, not held at it: {}",
+            f.x
+        );
+        // And the task the blit reads went with him, so no script frame pulls
+        // him back. This is the jitter the old clamp caused.
+        let ox = d.origin[0] as i32;
+        assert_eq!(f.task.as_ref().map(|t| t.x - ox), Some(f.x));
+    }
+
+    /// The spear trogg's freeze, as the person reported it: "the spear man
+    /// just stands there stuck not attacking, especially when we close the
+    /// distance a bit".
+    ///
+    /// Inside `back_off` (0x78, 120) `MonsterTrack`'s `TrackBack` (0x5763)
+    /// hands him a step away from the knight. Once that carried him out of the
+    /// borders' idea of the arena our gate refused every direction, `moved`
+    /// came back false, and the arm at 0x4eaa's translation put him in his
+    /// stance, where he stayed. Nothing in `MonsterWalk` can refuse him, so he
+    /// keeps walking and keeps his walk state.
+    #[test]
+    fn a_retreating_creature_at_the_edge_keeps_walking_instead_of_freezing() {
+        let d = scripted_def();
+        let mut f = Fighter::new("a", &d, crate::arena::limit::X_LOW, 100, 1);
+        for _ in 0..6 {
+            f.step(
+                &d,
+                Intent {
+                    dx: -1,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+            assert_eq!(f.state, State::Walk, "he never drops into his stance");
+        }
+        assert!(
+            f.x < crate::arena::limit::X_LOW,
+            "and he is past the old wall: {}",
+            f.x
+        );
+    }
+
+    /// The person's own knight is the one `CheckBorder` holds, and it holds
+    /// him by writing the probe's limit into his column *before* the step is
+    /// added (0x40ed, 0x40fb), not by clamping afterwards.
+    #[test]
+    fn the_persons_knight_is_held_at_the_edge_by_checkborder_alone() {
+        let mut d = scripted_def();
+        d.controller = "knight".into();
+        // A border that reaches well past `X_HIGH`, as `wa3` and its kin do,
+        // so that only `CheckBorder`'s own limit can be what stops him.
         let wide = Field::new(vec![crate::arena::Border {
             left: 0,
             right: 400,
@@ -1865,8 +1969,6 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(f.x, crate::arena::limit::X_HIGH, "held at the edge");
-        // And the task the blit reads is at the same column, so nothing is
-        // pulled back on the next script frame.
         let ox = d.origin[0] as i32;
         assert_eq!(f.task.as_ref().map(|t| t.x - ox), Some(f.x));
     }
