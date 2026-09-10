@@ -34,3 +34,7 @@ __pycache__/
 /research/
 privateGithub
 privateGithub.pub
+
+# Scratch: tarballs used to move work onto this machine, and git
+# lock files that could not be deleted in place. Never part of the repo.
+/_to_delete/
