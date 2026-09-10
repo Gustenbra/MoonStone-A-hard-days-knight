@@ -1156,19 +1156,29 @@ impl Fighter {
                 self.facing = if flipped & 2 != 0 { -1 } else { 1 };
             }
             self.effects = frame.effects;
-            // Whatever the script moved, the fighter moved -- unbounded. The
-            // task VM never writes an actor's column in the original: of the
-            // ten sites that write `[si+2]` as a coordinate, none sits in the
-            // VM's range, and a scripted lunge moves the *task*, whose anchor
-            // the controller owns. So there is nothing here to clamp against,
-            // and clamping it was ours. It is what pulled a fighter who had
-            // walked past the edge back two pixels every script frame, the
-            // visible half of the spear trogg standing and twitching at the
-            // arena wall. `CheckBorder` (0x40d0) is the only bound on the
-            // person's knight and it is applied in `walk` above, before the
-            // add, off the probe.
+            // Whatever the script moved, the fighter moved -- unbounded, and
+            // the height with it. This is `perdone` (0x99c0), which runs at
+            // the end of every frame and copies the task straight back into
+            // the record:
+            //
+            //   099c0  mov ax, [di+4]; mov [bx+2], ax    ; column
+            //   099c6  mov ax, [di+6]; mov [bx+4], ax    ; HEIGHT
+            //   099cc  mov ax, [di+8]; mov [bx+6], ax    ; depth
+            //   099d2  mov al, [di+0x14]; mov [bx+8], al ; facing
+            //
+            // Not one of those is clamped, which is why nothing is clamped
+            // here. (An earlier note claimed the task VM writes no actor
+            // column at all; it does, at 0x99c3, and the scan that missed it
+            // was looking for `[si+2]` where this is `mov [bx+2], ax`. The
+            // conclusion happened to be right and the reason was wrong.)
+            //
+            // The height matters as much as the other two: `TASKJUMP` is an
+            // arc in `+6`, and without carrying it back a tossed knight is
+            // lifted only for as long as his own script is running.
             self.x = task.x - ox;
             self.y = task.y - oy;
+            // 099c6: the task's `+6` into the record's `+4`.
+            self.brain.height = task.z;
         }
 
         // **No state test.** `TaskCol_MainLoop` (0x9f26) walks the task's
@@ -2543,6 +2553,144 @@ pub(crate) mod tests {
         // 0x02, the mudman, keeps its own rule, which is the blow's.
         assert_eq!(down(0x02, Some(Attack::Swing)), "decap");
         assert_eq!(down(0x02, Some(Attack::Chop)), "collapse");
+    }
+
+    /// `TASKJUMP` lifts a fighter into the air, not into the distance.
+    ///
+    /// `JumpingUp` (0x9d37) is `sub word ptr [di+6], ax`, `JumpingFall`
+    /// (0x9d51) the `add`, and `perdone` (0x99c6) copies the task's `+6` into
+    /// the record's `+4`, the height. The depth is `+8` and goes to the
+    /// record's `+6` two instructions later.
+    ///
+    /// Ours moved the depth. `Beast_BackToss` is the one script in the game
+    /// that uses `TASKJUMP`, so the whole of it showed up the moment the
+    /// beast's toss was built: the knight went from depth 144 to 54 in a
+    /// tick, over the tree line, and came down standing on the stone circle.
+    #[test]
+    fn a_scripted_jump_moves_the_height_and_leaves_the_depth_alone() {
+        use crate::taskvm::{Instr, Script};
+        let mut d = scripted_def();
+        d.animation.insert(
+            "toss".into(),
+            Script::new(vec![
+                Instr::Jump {
+                    arg: 64,
+                    ticks: 7,
+                    flags: 0,
+                    y_speed: 2,
+                    y_limit: 16,
+                    x_speed: 0,
+                    x_limit: 0,
+                },
+                Instr::EndFrame {
+                    end: crate::taskvm::End::Next,
+                },
+                Instr::Jump {
+                    arg: 64,
+                    ticks: 7,
+                    // 2 is the falling half, which is the one that used to
+                    // carry him up the screen.
+                    flags: 2,
+                    y_speed: 2,
+                    y_limit: 16,
+                    x_speed: 0,
+                    x_limit: 0,
+                },
+                Instr::EndFrame {
+                    end: crate::taskvm::End::Stop,
+                },
+            ]),
+        );
+        let mut f = Fighter::new("k", &d, 160, 144, 1);
+        f.enter_on(State::Hurt, "toss".into());
+        for _ in 0..60 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 0,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+            assert_eq!(f.y, 144, "099cc: the depth is `+8` and the arc is not it");
+        }
+    }
+
+    /// The tree line holds, in every arena the game ships, from every
+    /// starting depth, for the person's own knight.
+    ///
+    /// `SBORD` (0x4552) refuses `up` to anyone whose anchor plus `0x2f` has
+    /// reached a rectangle's bottom in that rectangle's own columns, and
+    /// `CheckBorder` (0x40d0) holds the anchor between depths 30 and 155 on
+    /// top of it. Neither writes the depth back -- the two tests at 0x4100
+    /// and 0x410a clear direction bits and nothing more -- so the whole of
+    /// the bound is the bit that never gets added.
+    ///
+    /// This reads the shipped arenas rather than a fixture, because the
+    /// header the knight walks under is the thing being tested and four of
+    /// the fifty six carry more than one rectangle.
+    #[test]
+    fn the_tree_line_holds_the_knight_in_every_shipped_arena() {
+        let Ok(raw) = std::fs::read_to_string("../../packs/reference/data/arenas.json") else {
+            return;
+        };
+        let arenas: std::collections::BTreeMap<String, crate::content::ArenaData> =
+            serde_json::from_str(&raw).expect("the pack's arenas parse");
+        assert!(!arenas.is_empty());
+        let mut d = scripted_def();
+        d.controller = "knight".into();
+        d.walk_speed = crate::content::WalkSpeed {
+            right: vec![[25, 0], [3, 0], [23, 0], [4, 0]],
+            up: vec![[0, 2], [0, 9], [0, 2], [0, 9]],
+            down: vec![[0, 8], [0, 2], [0, 9], [0, 2]],
+        };
+        for (name, arena) in &arenas {
+            let field = arena.field();
+            let deepest = arena
+                .terrain
+                .borders
+                .iter()
+                .map(|b| b.bottom)
+                .max()
+                .unwrap_or(0);
+            for start_x in [20, 160, 300] {
+                let mut f = Fighter::new("k", &d, start_x, 190, 1);
+                for _ in 0..400 {
+                    f.step(
+                        &d,
+                        Intent {
+                            dx: 0,
+                            dy: -1,
+                            attack: false,
+                        },
+                        &field,
+                    );
+                }
+                assert!(
+                    f.y >= crate::arena::GLOBAL.top,
+                    "{name}: the knight walked to depth {} from column {start_x}, above \
+                     CheckBorder's own limit of {}",
+                    f.y,
+                    crate::arena::GLOBAL.top,
+                );
+                // And under whichever rectangle stands over him, if one does.
+                let over = arena
+                    .terrain
+                    .borders
+                    .iter()
+                    .any(|b| f.x >= b.left && f.x <= b.right);
+                if over {
+                    assert!(
+                        f.y + crate::arena::limit::FEET > deepest
+                            || f.y >= crate::arena::GLOBAL.top,
+                        "{name}: the knight is inside the tree line at {},{}",
+                        f.x,
+                        f.y,
+                    );
+                }
+            }
+        }
     }
 
     /// The spear trogg's attack window is ten pixels wide, and a flat speed

@@ -23,7 +23,6 @@
 //! (`TroggAttacks`) goes through [`rnd`], which is the original's own
 //! `_WIZARD:RND` transcribed, off a seed the bout carries.
 
-use crate::arena::Bounds;
 use crate::combat::{Attack, Fighter, State};
 use crate::content::ActorDef;
 use crate::jump::Plan;
@@ -1020,7 +1019,6 @@ pub struct Sight<'a> {
     pub me: &'a Fighter,
     pub foe: &'a Fighter,
     pub def: &'a ActorDef,
-    pub bounds: Bounds,
     /// The title screen's gore switch, on. `TroggAttack` reads it before it
     /// comes in for a fallen knight.
     pub gore: bool,
@@ -4011,12 +4009,6 @@ mod tests {
             me: &me,
             foe: &foe,
             def,
-            bounds: Bounds {
-                left: 0,
-                right: 319,
-                top: 10,
-                bottom: 114,
-            },
             gore: true,
             body: false,
             decapped: false,
@@ -4054,12 +4046,6 @@ mod tests {
             me: &me,
             foe: &foe,
             def,
-            bounds: Bounds {
-                left: 0,
-                right: 319,
-                top: 10,
-                bottom: 114,
-            },
             gore: true,
             body: false,
             decapped: false,
@@ -4095,12 +4081,6 @@ mod tests {
             me,
             foe,
             def,
-            bounds: Bounds {
-                left: 0,
-                right: 319,
-                top: 10,
-                bottom: 114,
-            },
             gore: true,
             body: false,
             decapped: false,
@@ -4263,12 +4243,6 @@ mod tests {
             me: &me,
             foe: &foe,
             def: &def,
-            bounds: Bounds {
-                left: 0,
-                right: 319,
-                top: 10,
-                bottom: 114,
-            },
             gore: true,
             body,
             decapped: false,
@@ -4431,12 +4405,6 @@ mod tests {
                 me,
                 foe,
                 def,
-                bounds: Bounds {
-                    left: 0,
-                    right: 319,
-                    top: 10,
-                    bottom: 114,
-                },
                 gore: true,
                 body: false,
                 decapped: false,
@@ -4773,12 +4741,6 @@ mod tests {
             me: &me,
             foe: &foe,
             def: &def,
-            bounds: Bounds {
-                left: 0,
-                right: 319,
-                top: 10,
-                bottom: 114,
-            },
             gore: true,
             body: false,
             decapped: false,
@@ -4826,12 +4788,6 @@ mod tests {
                 me: &walked,
                 foe: &foe,
                 def: &def,
-                bounds: Bounds {
-                    left: 0,
-                    right: 319,
-                    top: 10,
-                    bottom: 114,
-                },
                 gore: true,
                 body: false,
                 decapped: false,
@@ -5071,12 +5027,6 @@ mod tests {
             me: &me,
             foe: &foe,
             def,
-            bounds: Bounds {
-                left: 0,
-                right: 319,
-                top: 10,
-                bottom: 114,
-            },
             gore: true,
             body: false,
             decapped: false,
@@ -5387,12 +5337,6 @@ mod tests {
                 me: &me,
                 foe,
                 def: &def,
-                bounds: Bounds {
-                    left: 0,
-                    right: 319,
-                    top: 10,
-                    bottom: 114,
-                },
                 gore: true,
                 body: false,
                 decapped: false,

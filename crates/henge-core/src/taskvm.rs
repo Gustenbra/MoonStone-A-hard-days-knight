@@ -992,13 +992,28 @@ impl Task {
     /// The ballistic step a running `TASKJUMP` takes at each end of frame,
     /// transcribed from the routine at image 0x9ceb.
     ///
-    /// One script in the whole game uses `TASKJUMP` (`Beast_BackToss`), and two
-    /// branches of this are strange enough to be worth naming: the upward form
-    /// assigns the *speed* into the y position when the addition comes out
-    /// non-negative, and it then compares the low byte of the *position*
-    /// against the speed limit. Both are what the instructions say. They are
-    /// reproduced rather than corrected, because a guess at what was meant
-    /// would be a guess about behaviour nobody has observed.
+    /// **The arc is the height, not the depth.** `JumpingUp` (0x9d37) does
+    /// `sub word ptr [di+6], ax`, `JumpingFall` (0x9d51) does `add`, and
+    /// `JumpingYSet` (0x9d70) writes the same `[di+6]` -- and `perdone`
+    /// (0x99c6) copies the task's `+6` into the **record's `+4`**, which is
+    /// the height an actor is drawn lifted by. The depth is `+8`, and it
+    /// goes to the record's `+6` two instructions later (0x99cc).
+    ///
+    /// This engine keeps the depth in `Task::y` and the height in `Task::z`,
+    /// so the arc moves `z`. It used to move `y`, which threw a tossed
+    /// knight *into the distance* rather than into the air: the beast's toss
+    /// took him from depth 144 to 54 in a tick, over the tree line, and he
+    /// came down standing on the stone circle. A clamp on the write-back had
+    /// been hiding it by pinning him at the top of the walkable band.
+    ///
+    /// One script in the whole game uses `TASKJUMP` (`Beast_BackToss`), and
+    /// two branches of this are strange enough to be worth naming: the
+    /// upward form assigns the *speed* into the position when the addition
+    /// comes out non-negative (0x9d5a `jns` into 0x9d70), and it then
+    /// compares the low byte of the *position* against the speed limit. Both
+    /// are what the instructions say. They are reproduced rather than
+    /// corrected, because a guess at what was meant would be a guess about
+    /// behaviour nobody has observed.
     fn ballistic(&mut self) {
         let mut moved = false;
         let f = self.vm.jump_flags;
@@ -1006,20 +1021,20 @@ impl Task {
         if f & 0x02 != 0 {
             moved = true;
             let speed = self.vm.y_speed as i32;
-            let sum = self.y + speed;
+            let sum = self.z + speed;
             if sum >= 0 {
-                self.y = speed;
+                self.z = speed;
                 self.vm.jump_flags &= !0x02;
             } else {
-                self.y = sum;
-                if f & 0x20 == 0 && (self.y as u8) < self.vm.y_limit {
-                    self.vm.y_speed = ((self.y as u8) as u16).wrapping_mul(2) as u8;
+                self.z = sum;
+                if f & 0x20 == 0 && (self.z as u8) < self.vm.y_limit {
+                    self.vm.y_speed = ((self.z as u8) as u16).wrapping_mul(2) as u8;
                 }
             }
         } else if f & 0x01 != 0 {
             moved = true;
             let speed = self.vm.y_speed;
-            self.y -= speed as i32;
+            self.z -= speed as i32;
             if f & 0x20 == 0 && speed > self.vm.y_limit {
                 self.vm.y_speed = speed >> 1;
             }
