@@ -866,7 +866,10 @@ impl Fighter {
         } else if dy < 0 {
             wanted |= dir::UP;
         }
-        let (bl, bt, br, bb) = self.body(def);
+        // The frame's own box, as `TASKWALKCOLLIDE` reads it: see
+        // `drawn_body`. The authored rectangle is the fall-back for an actor
+        // with no parts to measure.
+        let (bl, bt, br, bb) = self.drawn_body(def).unwrap_or_else(|| self.body(def));
         // `TASKWALKCOLLIDE`, which `ControlKnight+217` (0x3f9d),
         // `MonsterWalk+19` (0x4e9e) and `MudmenMove+65` (0x53c0) all call
         // before `CheckBorder` and `SBORD`, and whose answer they `and` into

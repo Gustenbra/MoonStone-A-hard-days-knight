@@ -575,6 +575,20 @@ pub const WALK_SPEED_TABLES: &[WalkSpeedSource] = &[
         down: None,
         pairs: false,
     },
+    // **`BeastChargeOffsets` is a walk-speed table under another name**, and
+    // the scan that found the other six missed it because it looked for
+    // `*WALK*`. `BeastMove` (0x3072) indexes it exactly as `MudmenMoveR`
+    // indexes its own -- `ax = cycle * 2`, `bx = BeastChargeOffsets + ax`,
+    // `bx = [bx]` -- so it is x alone, two bytes an entry. The beast's depth
+    // is not in it and is not stepped at all: `SetBEASTZ` writes `+6` once
+    // per turn and nothing else touches it.
+    WalkSpeedSource {
+        controller: "beast",
+        right: Some("BeastChargeOffsets"),
+        up: None,
+        down: None,
+        pairs: false,
+    },
 ];
 
 /// The knight's, which `ControlBlackKnight` names separately even though the

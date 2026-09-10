@@ -684,10 +684,12 @@ const CREATURES: &[Creature] = &[
         // `BeastChargeOffsets` 33, 27, 17, 33: nearly thirty pixels a frame.
         // Its weapon parts are its own body, so it has to be allowed close:
         // three quarters of its width would keep it out of its own bite.
-        // **Ours**, as the ratman's. The beast charges from its own scripts
-        // and wraps at the screen edge (`BeastCharge` 0x2fec sets the column
-        // to 0x17c, `BeastChargeLeft` 0x2ffe to -50); no controller step.
-        reach: 40, speed: [24, 6], bounty: 30,
+        // Read by nobody now: `BeastChargeOffsets` (DS:0x773e) is the
+        // charge, and the depth is never stepped at all -- `SetBEASTZ`
+        // (0x301d, 0x303b) writes `+6` once per turn and `BeastMove` touches
+        // only `+2`. The 24 and 6 here were ours, from before the table was
+        // found.
+        reach: 40, speed: [0, 0], bounty: 30,
         seats: BEAST_SEATS, first_seat: 0,
         // `InitKnightvsBeast` (0x228d).
         wave: wave(1, 3, 0, true, false, LEV_BEAST),
@@ -1654,6 +1656,7 @@ impl Tables {
             // all three troggs have `*_WalkR1..3` and `*_WalkU1..4`, and the
             // black knight walks the knight's own `Knight_SwWalk*`.
             let id = match src.controller {
+                "beast" => "beast",
                 "trogg" => "trogg_axe",
                 "trogg_spear" => "trogg_spear",
                 "troll" => "troll",

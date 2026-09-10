@@ -2614,17 +2614,8 @@ fn beast(
     //   03009  mov byte ptr [di + 8], 1     ; and turned to face right
     //
     // **The edges are the literal ones, and the beast really is set down
-    // beyond them.** This used to test the arena's own bounds and leave the
-    // column alone, on the grounds that "this engine's walk gate keeps every
-    // fighter inside the field". That gate was ours and it is gone
-    // (`Fighter::walk`: `CheckBorder` and `SBORD` are the person's knight's
-    // alone, and nothing clamps a column after the step), so the reason for
-    // the deviation went with it and the literal fits.
-    //
-    // It matters to how the fight reads: the beast is meant to disappear off
-    // one side, wait out `SetBeastTimer`, and come back in at a fresh depth,
-    // which is thirty pixels of run-up beyond the screen at either end. Held
-    // at the edge it turned in full view instead.
+    // beyond them.** It disappears off one side and comes back in at a fresh
+    // depth, which is thirty pixels of run-up past the screen at either end.
     let leftward = *facing < 0;
     // 02fec and 02ffe.
     let turning = if leftward {
@@ -2637,32 +2628,77 @@ fn beast(
         at.0 = if leftward { -50 } else { 0x17c };
         // 02ff8 / 03009: the turn is a write to `+8`.
         *facing = if leftward { 1 } else { -1 };
-        // `SetBEASTZ`: every other pass is dead on his line, and the one
-        // between it is up to twenty eight rows off.
+        // `SetBEASTZ`, 0x300d, and **this is the only place the beast's depth
+        // is ever written**:
+        //
+        //   0300d  xor word ptr [BeastFLAGS], 1
+        //   03012  je  03022
+        //   03015  bx = [Opponent]; ax = [bx+6]
+        //   0301d  mov word ptr [di+6], ax        ; dead on his line
+        //   03020  jmp SetBeastTimer
+        //   03022  ax = [Opponent's +6]
+        //   0302c  call rnd; mov bx, ax
+        //   03032  and bx, 7; shl bx, 1; shl bx, 1  ; 0, 4, 8 .. 28
+        //   03039  add ax, bx
+        //   0303b  mov word ptr [di+6], ax        ; and off it
+        //
+        // Every other turn is dead on the knight's row and the one between is
+        // up to twenty eight rows deeper. Never nearer, and never adjusted
+        // again until the next turn.
         brain.flags ^= flag::ONLINE;
-        // `SetBeastTimer`: five to twenty frames off the edge.
-        *seed = rnd(*seed);
-        brain.timer = ((*seed & 0xf) | 5) as i32;
-        brain.walk = if brain.flags & flag::ONLINE != 0 {
-            0
+        at.1 = if brain.flags & flag::ONLINE != 0 {
+            s.foe.y
         } else {
             *seed = rnd(*seed);
-            (*seed & 7) as u32 * 4
+            s.foe.y + ((*seed & 7) as i32) * 4
         };
+        // `SetBeastTimer`, 0x303e, which it falls into:
+        //
+        //   0303e  call rnd; and ax, 0xf; or ax, 5
+        //   03047  mov byte ptr [di+0xb], al      ; five to fifteen
+        //   0304a  sub byte ptr [di+0xb], 1
+        //   0304e  je  BeastMove
+        //   03050  jmp 02d52                     ; stand still this frame
+        //
+        // **The timer is written, decremented once, and never read again.**
+        // `or ax, 5` cannot leave nought, so the decrement cannot reach it
+        // and the `je` at 0x304e is dead; nothing else in the image touches
+        // `+0xb` on a beast (`DecTimer` at 0x2a63 is a different routine and
+        // has no callers). So the beast stands still for exactly **one**
+        // frame at the edge and charges straight back.
+        //
+        // This engine used to hold it there for the five to twenty frames the
+        // number looks like, which is the shape of the code and not what it
+        // does. The roll still happens, because it is what the routine does
+        // and it moves the seed on.
+        *seed = rnd(*seed);
+        brain.timer = 0;
         return Act::Idle;
     }
-    if brain.timer > 0 {
-        brain.timer -= 1;
-        return Act::Idle;
-    }
-    // `BeastMove`, 0x307c: `test byte ptr [di + 8], 2; je; neg bx`, so the
-    // charge goes the way the record faces.
+    // `BeastMove`, 0x3053, the whole of it:
+    //
+    //   03053  add byte ptr [di+0xa], 1
+    //   03057  and byte ptr [di+0xa], 3        ; four frames, not eight
+    //   0305b  si = [di+0x1c]; [0x783a] = si[cycle]
+    //   0306b  ax = cycle * 2
+    //   03072  bx = BeastChargeOffsets + ax; bx = [bx]
+    //   0307c  test byte ptr [di+8], 2; je; neg bx
+    //   03084  add word ptr [di+2], bx
+    //   03087  jmp 02d52
+    //
+    // **The column, and nothing else.** The beast does not track: it charges
+    // dead straight across at whatever depth the last turn gave it, and the
+    // only thing that changes its depth is the next turn. Steering it at the
+    // knight every frame -- which is what this did -- is what had it milling
+    // around his feet instead of running past him.
+    //
+    // `BeastChargeOffsets` (DS:0x773e) is `[33, 27, 17, 33]`, four words, and
+    // it is a walk-speed table under another name: the sweep that found the
+    // other six looked for `*WALK*` and this is not called that.
     let dir = if *facing < 0 { -1 } else { 1 };
-    let want = s.foe.y + brain.walk as i32;
-    let dy = (want - s.me.y).signum();
     Act::Walk {
         dx: dir,
-        dy,
+        dy: 0,
         script: None,
     }
 }
@@ -4863,20 +4899,18 @@ mod tests {
         assert_eq!(act, Act::Idle);
         assert_eq!(at.0, 0x17c, "02ff3: set down at 380, off the screen");
         assert_eq!(facing, -1, "02ff8: it turned round, +8 is 3");
-        assert!((5..=20).contains(&b.timer), "and waits {} frames", b.timer);
-        let before = b.timer;
-        assert_eq!(
-            ask_facing(&def, &mut b, 0x17c, 40, 0, &mut facing),
-            Act::Idle
-        );
-        assert_eq!(b.timer, before - 1);
-        assert_eq!(facing, -1, "and keeps facing left while it waits");
-        // Off the edge and facing left, it charges left: `BeastMove+41`.
-        b.timer = 0;
+        // **It stands for exactly one frame, not for the five to fifteen the
+        // roll looks like.** `SetBeastTimer` (0x303e) writes `rnd & 0xf | 5`
+        // into `+0xb` and immediately does `sub byte ptr [di+0xb], 1; je
+        // BeastMove` -- and `or ax, 5` cannot leave nought, so the decrement
+        // cannot reach it and the `je` is dead. Nothing else in the image
+        // touches a beast's `+0xb`, so the number is written, stepped once,
+        // and never read. The next frame it is past the edge and charging.
         assert!(matches!(
             ask_facing(&def, &mut b, 0x17c, 40, 0, &mut facing),
             Act::Walk { dx: -1, .. }
         ));
+        assert_eq!(facing, -1, "and still facing the way it turned");
         // And the left edge is 0, where it is set down at -50: 0x2ffe.
         let mut b = Brain::default();
         let mut facing = -1;

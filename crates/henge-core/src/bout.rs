@@ -2275,7 +2275,12 @@ impl Bout {
                 .filter(|k| self.fighters[*k].alive() && !self.fighters[*k].hidden)
                 .map(|k| {
                     let f = &self.fighters[k];
-                    let (l, t, r, b) = f.body(def_of(&f.actor));
+                    // `TASKWALKCOLLIDE` reads `+0x22`/`+0x24`/`+0x4e`/`+0x50`,
+                    // which are `FindWidth`'s box over the parts being drawn
+                    // (0x9dbc, written by `perdone` at 0x99d8) -- the same
+                    // four fields the blow test reads. See `drawn_body`.
+                    let t_def = def_of(&f.actor);
+                    let (l, t, r, b) = f.drawn_body(t_def).unwrap_or_else(|| f.body(t_def));
                     Occupant {
                         x: f.x,
                         depth: f.y,
