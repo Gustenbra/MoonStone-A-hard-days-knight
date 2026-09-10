@@ -1240,6 +1240,18 @@ impl Fighter {
             let Some(r) = taskvm::place(p, bank, (task.x, task.y, task.z), task.mirror()) else {
                 continue;
             };
+            if std::env::var_os("HENGE_HIT_DEBUG").is_some() {
+                eprintln!(
+                    "  weapon part cel {} mirror {} placed x {}..{} y {}..{} line {:?}",
+                    p.cel,
+                    mirror,
+                    r.x,
+                    r.x + r.w as i32,
+                    r.y,
+                    r.y + r.h as i32,
+                    bank.hit_line(p.cel).map(|l| l.len())
+                );
+            }
             match bank.hit_line(p.cel) {
                 // 0a0da..0a10d, one sample of the blade at a time.
                 Some(points) => out.extend(points.iter().map(|[px, py]| {

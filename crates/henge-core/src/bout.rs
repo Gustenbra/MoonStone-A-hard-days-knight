@@ -2666,14 +2666,33 @@ impl Bout {
                     // A fighter with no parts drawn -- a frame-list actor, or
                     // one whose task has been killed -- falls back to the
                     // authored rectangle, which is `ActorDef::body`.
-                    let rects = self.fighters[target].body_rects(t_def);
-                    let hit = if rects.is_empty() {
-                        line_hits_body(&blow.line, self.fighters[target].body(t_def))
-                    } else {
-                        rects.iter().any(|r| line_hits_body(&blow.line, *r))
-                    };
+                    let mut rects = self.fighters[target].body_rects(t_def);
+                    // A frame with nothing flagged `BODY` at all -- a knight
+                    // being drawn inside somebody else's script, a frame-list
+                    // actor -- still has to be hittable. `FindWidth`'s box over
+                    // what is drawn comes first, and only an actor with no
+                    // parts at all falls back to the authored rectangle.
+                    if rects.is_empty() {
+                        let f = &self.fighters[target];
+                        rects.push(f.drawn_body(t_def).unwrap_or_else(|| f.body(t_def)));
+                    }
+                    let hit = rects.iter().any(|r| line_hits_body(&blow.line, *r));
                     if !hit {
                         continue;
+                    }
+                    if std::env::var_os("HENGE_HIT_DEBUG").is_some() {
+                        let xs: Vec<i32> = blow.line.iter().map(|p| p.0).collect();
+                        let ys: Vec<i32> = blow.line.iter().map(|p| p.1).collect();
+                        eprintln!(
+                            "HIT a={} t={} weapon x{:?}..{:?} y{:?}..{:?} body={:?}",
+                            self.fighters[attacker].actor,
+                            self.fighters[target].actor,
+                            xs.iter().min(),
+                            xs.iter().max(),
+                            ys.iter().min(),
+                            ys.iter().max(),
+                            rects
+                        );
                     }
                     connected = true;
                     // `CheckBlock`, for the blows that go through it.
