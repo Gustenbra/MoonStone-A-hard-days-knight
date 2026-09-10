@@ -67,6 +67,12 @@
 //! seven credit screens is held, because in the original that is however long a
 //! floppy takes; and the rounding of the intro's own frame rate onto this
 //! engine's tick.
+//!
+//! **The sequence opens on the moon.** The publisher's logo and the seven credit
+//! screens are cover for the opening's floppy loads, and this build was asked to
+//! start after them. They are the only steps left out of [`STEPS`]; what they
+//! held is recovered and kept beside it, and from the moon onwards the sequence
+//! is the original's step for step. See [`STEPS`].
 
 use serde::{Deserialize, Serialize};
 
@@ -267,8 +273,23 @@ pub const TICKS_PER_FRAME: u32 = 8;
 /// **Ours.** How long the logo and a credit screen are held. In the original
 /// each is up for exactly as long as the next file takes to come off a floppy,
 /// which is not a number that can be recovered or reproduced.
+///
+/// Neither is shown by the sequence below any more: this build opens on the
+/// moon. Both are kept because they are what the original holds those screens
+/// for, and [`LOGO_TICKS`] is still what a [`Backdrop::Logo`] step would run
+/// for if one were put back.
 pub const LOGO_TICKS: u32 = 130;
 pub const CREDIT_TICKS: u32 = 105;
+
+/// **Ours.** How long the opening card is held.
+///
+/// In the original the top of the panorama is on screen for the whole opening
+/// load: the publisher's card and then seven credit screens over the same view,
+/// one per file, which is eight holds of [`CREDIT_TICKS`] and about twelve
+/// seconds. With the credits out, nothing is loading behind it, so it is held
+/// for two of those instead: three seconds at 70.0863 Hz, long enough to read
+/// the wordmark and the copyright line before the pan starts.
+pub const OPENING_TICKS: u32 = CREDIT_TICKS * 2;
 
 /// The story card is held for 420 vertical retraces, which is the one wait in
 /// the intro measured in retraces rather than in scene frames. This engine's
@@ -284,13 +305,22 @@ pub const MESSAGE_TICKS: u32 = 420;
 /// then the story card. Which plate a scene shows is which of the eight screen
 /// slots it hands to the blitter, and the three `CopyPals3` does at `0x0095`
 /// are what moves `bg4`, `bg5a` and `bg3` into the slots the pan was using.
-// Hand-aligned: one scene per line where it fits, so the seven identical credit
-// steps read as seven rows differing only in which card they carry, and a scene's
-// cast is grouped the way the original's own tables group it.
+///
+/// **Two of the original's steps are deliberately left out, and they are the
+/// only departure in this table.** `0x0060` shows `MINDSCAP`, the publisher's
+/// logo, on its own screen before anything is loaded, and `0x0cb0` puts seven
+/// credit screens over the top of the panorama, one per file the opening loads
+/// (the wordmark is not on those: `0x0cb0` redraws the tile rows under the
+/// caption and does not blit it again, so it is painted over). Both are cover
+/// for floppy loads this build does not do, and the sequence was asked to open
+/// on the moon. Everything they held is still recovered and still here:
+/// [`Backdrop::Logo`], [`LOGO_TICKS`], [`CREDITS`] and [`CREDIT_TICKS`]. So the
+/// sequence below starts at the moon card, which is `0x007c`'s own screen, and
+/// from the pan onwards it is the original's, step for step.
+// Hand-aligned: a scene's cast is grouped the way the original's own tables
+// group it.
 #[rustfmt::skip]
 pub const STEPS: &[Step] = &[
-    // The publisher's logo, its own screen, before anything else is loaded.
-    Step { back: Backdrop::Logo, wordmark: false, lines: NO_LINES, cast: NO_CAST, frames: 0 },
     // The moon at the top of the panorama, with the wordmark and the card.
     Step {
         back: Backdrop::Pan { from: 0, to: 0 },
@@ -299,16 +329,6 @@ pub const STEPS: &[Step] = &[
         cast: NO_CAST,
         frames: 0,
     },
-    // Seven credit screens over the same view, one per file loaded. The
-    // wordmark is not on these: `0x0cb0` redraws the tile rows under the
-    // caption and does not blit it again, so it is painted over.
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[0], cast: NO_CAST, frames: 0 },
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[1], cast: NO_CAST, frames: 0 },
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[2], cast: NO_CAST, frames: 0 },
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[3], cast: NO_CAST, frames: 0 },
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[4], cast: NO_CAST, frames: 0 },
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[5], cast: NO_CAST, frames: 0 },
-    Step { back: Backdrop::Pan { from: 0, to: 0 }, wordmark: false, lines: CREDITS[6], cast: NO_CAST, frames: 0 },
     // The pan itself: down the whole panorama, on the recovered speed ramp.
     Step {
         back: Backdrop::Pan { from: 0, to: PAN_END },
@@ -422,7 +442,10 @@ pub fn step_ticks(n: usize) -> u32 {
         // sequence has none, and the check is here so a new one cannot.
         Backdrop::Plate(_) => TICKS_PER_FRAME,
         Backdrop::Message => MESSAGE_TICKS,
-        Backdrop::Pan { from, to } if from == to => CREDIT_TICKS,
+        // A pan that does not move is a card over the panorama. The credits
+        // were seven of those and are gone, so the only one left is the
+        // opening.
+        Backdrop::Pan { from, to } if from == to => OPENING_TICKS,
         Backdrop::Pan { from, to } => {
             let (mut at, mut ticks) = (from, 0);
             while at < to {
@@ -526,8 +549,75 @@ mod tests {
         assert_eq!(TICKS_PER_FRAME, 8);
         assert_eq!(LOGO_TICKS, 130);
         assert_eq!(CREDIT_TICKS, 105);
+        assert_eq!(OPENING_TICKS, 210);
         // `0x00b6`: `ax = 0x1a4`, four hundred and twenty retraces.
         assert_eq!(MESSAGE_TICKS, 420);
+    }
+
+    /// It opens on the moon: the top of the panorama, with the wordmark and the
+    /// publisher's card, and then it pans. No logo screen, and no credit card
+    /// anywhere in the sequence.
+    #[test]
+    fn it_opens_on_the_moon_and_shows_no_credits() {
+        let first = STEPS[0];
+        assert_eq!(first.back, Backdrop::Pan { from: 0, to: 0 });
+        assert!(first.wordmark, "the wordmark is over the moon");
+        assert_eq!(first.lines, PRESENTS);
+        assert_eq!(
+            STEPS[1].back,
+            Backdrop::Pan {
+                from: 0,
+                to: PAN_END
+            }
+        );
+
+        assert!(
+            !STEPS.iter().any(|s| s.back == Backdrop::Logo),
+            "the publisher's logo is not in the sequence"
+        );
+        for step in STEPS {
+            for c in CREDITS {
+                assert_ne!(step.lines, c, "a credit card is still in the sequence");
+            }
+        }
+        // One held card at the top of the panorama, and it is that opening one.
+        // The forest step stands still at the far end too, but it has frames of
+        // its own and is a scene, not a card.
+        let cards = STEPS
+            .iter()
+            .filter(|s| s.frames == 0)
+            .filter(|s| matches!(s.back, Backdrop::Pan { from, to } if from == to))
+            .count();
+        assert_eq!(cards, 1);
+        assert_eq!(step_ticks(0), OPENING_TICKS);
+    }
+
+    /// Every druid scene the original plays is still played, in its order. This
+    /// is what the cut must not touch.
+    #[test]
+    fn every_scene_from_the_pan_onwards_is_still_there() {
+        let backs: Vec<Backdrop> = STEPS[1..].iter().map(|s| s.back).collect();
+        assert_eq!(
+            backs,
+            vec![
+                Backdrop::Pan {
+                    from: 0,
+                    to: PAN_END
+                },
+                Backdrop::Pan {
+                    from: PAN_END,
+                    to: PAN_END
+                },
+                Backdrop::Plate("scene.bg2"),
+                Backdrop::Plate("scene.bg3"),
+                Backdrop::Plate("scene.bg4"),
+                Backdrop::Plate("scene.bg5a"),
+                Backdrop::Plate("scene.bg2a"),
+                Backdrop::Plate("scene.bg3"),
+                Backdrop::Plate("scene.bg5a"),
+                Backdrop::Message,
+            ]
+        );
     }
 
     #[test]
