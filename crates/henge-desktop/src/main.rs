@@ -1900,9 +1900,19 @@ impl App {
         // a scan of the image finds no other caller of either. Ungated, a
         // fight ran every colour cycle and the dying knight's own breathing
         // six times too fast.
-        if self
-            .tick
-            .is_multiple_of(u64::from(ticks_per_pass(self.mode)))
+        //
+        // And they are the calling loop's work, so a screen whose loop does
+        // not call them does not get them. `StatLOOP` (0xbe13) is
+        // `MovePointer`, the blit, the page flip, `HotGadget` and back to the
+        // top: it calls neither. So while a panel is up the original is not
+        // cycling anything, because it is running that loop and not the one
+        // underneath. Ours kept the map's cycle turning under the panel, and
+        // the arch's ivy is painted in the entries it rotates, which is what
+        // made the leaves flicker on the knight's own sheet.
+        if self.panel_now().is_none()
+            && self
+                .tick
+                .is_multiple_of(u64::from(ticks_per_pass(self.mode)))
         {
             self.knight_glow_tick();
             self.fx.tick_effects();
@@ -5333,6 +5343,31 @@ mod tests {
             tick_len_for(Mode::Map) * ticks_per_pass(Mode::Map),
             RETRACE_TICK
         );
+    }
+
+    /// `StatLOOP` (0xbe13) calls neither `COLCON` nor `KnightGlowOn`, so
+    /// nothing cycles while a panel is up: the original is running that loop
+    /// and not the one underneath. The arch's ivy is painted in the entries
+    /// the map's own cycle rotates, so leaving it turning under a panel is
+    /// what made the leaves flicker on the knight's sheet.
+    #[test]
+    fn nothing_cycles_while_a_panel_is_up() {
+        let Some(mut app) = quest_app() else { return };
+        app.mode = Mode::Map;
+        app.sheet = false;
+        assert!(app.panel_now().is_none(), "no panel: the map's own loop");
+        // The sheet is `StatLOOP`, and so is every page that opens over it.
+        app.sheet = true;
+        assert!(app.panel_now().is_some(), "0xbe13 runs instead of 0xa306");
+        app.sheet = false;
+        app.dragon_page = true;
+        assert!(
+            app.panel_now().is_some(),
+            "the dragon's hoard, StatTYPE 0xa"
+        );
+        app.dragon_page = false;
+        app.wyrm_picker = Some(1);
+        assert!(app.panel_now().is_some(), "the picker, StatTYPE 0xb");
     }
 
     /// The fade is not a `VBLQUE` entry, so splitting the effects off must
