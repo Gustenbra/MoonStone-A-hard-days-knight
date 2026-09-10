@@ -988,9 +988,17 @@ pub fn draw_interlude(
 /// The lobby, drawn over the title's own plate.
 ///
 /// **Ours**, like the screen it draws: see [`crate::online`]. It borrows the
-/// title's plate, the title's wordmark and the arrow out of `SEL.CEL`, so it
-/// looks like part of the game rather than like a dialog box bolted onto it, and
-/// it adds no artwork of its own.
+/// title's plate, the title's wordmark and the arrow out of `SEL.CEL`, and it
+/// stands on the title's own grid: the arrow at [`ARROW_X`], the labels at
+/// [`LABEL_X`] and the values at [`VALUE_X`], which are `ARX`, `OPT1a`'s x and
+/// `OPT1h`'s x. So the two screens line up column for column and this one adds
+/// no artwork of its own.
+///
+/// The page is one block, laid out from the top down rather than at fixed
+/// coordinates, because the pages are different heights: a lobby with four
+/// people in it is taller than an empty one, and a list of open games is taller
+/// than either. Everything is measured from [`LOBBY_TOP`] and the note always
+/// sits on the last line.
 pub fn draw_online(
     reg: &mut Registry,
     fb: &mut Framebuffer,
@@ -1001,45 +1009,72 @@ pub fn draw_online(
     show(reg, fb, TITLE_PLATE);
     sprite::draw(reg, fb, TITLE_BANK, LOGO, LOGO_AT.0, LOGO_AT.1, false);
     let Some(bold) = fonts.bold else { return };
+    let small = fonts.small.unwrap_or(bold);
 
-    // The roster first, above the rows, so the list a person is waiting on is
-    // the thing nearest the wordmark.
+    // A heading, so a person always knows which of the five pages they are on.
+    let heading = match screen.page {
+        Page::Menu => "Play Online",
+        Page::Create => "Open a game",
+        Page::Browse => "Open games",
+        Page::Join => "Join a game",
+        Page::Waiting => screen.roster.name.as_str(),
+    };
     let mut y = LOBBY_TOP;
-    if screen.page == Page::Browse {
-        bold.draw_own_centred(reg, fb, "Open games", y);
-    }
+    bold.draw_own_centred(reg, fb, heading, y);
+    y += LOBBY_HEAD;
+
+    // The roster, in its own block above the rows: who is here, whether they
+    // are ready, and what their line measured. No knight is shown, because the
+    // lobby does not settle that: every seat picks one on `ChooseKnight` once
+    // the game begins, the same screen a game at one keyboard uses. The round
+    // trip is in the small face because it is a measurement beside a name and
+    // not a thing to be chosen.
     if screen.page == Page::Waiting {
-        bold.draw_own_centred(reg, fb, &screen.roster.name, y);
-        y += LOBBY_STEP;
         for p in &screen.roster.players {
-            let mine = Some(p.seat) == screen.seat;
-            let knight = match p.knight {
-                Some(k) => KNIGHT_LETTER.get(k as usize).copied().unwrap_or("?"),
-                None => "-",
-            };
-            let mark = if p.ready { "*" } else { " " };
-            let you = if mine { ">" } else { " " };
-            // The measured round trip, when the host has one. A lobby is where
-            // somebody should find out the line is bad, not a minute into a
-            // fight.
-            let trip = match screen.trips.get(&p.seat) {
-                Some(ms) => format!(" {ms}ms"),
-                None => String::new(),
-            };
-            bold.draw_own(
-                reg,
-                fb,
-                &format!("{you}{} {knight} {mark}{trip}", p.name),
-                LOBBY_X,
-                y,
-            );
+            // The name in the bold face, because it is the thing being read,
+            // and everything else about that seat as one small line set against
+            // the right edge. Two draws, no columns to collide: a thirteen
+            // character name in the bold face is a hundred and sixty pixels of
+            // a three hundred and twenty pixel screen, so columns across it do
+            // not fit.
+            bold.draw_own(reg, fb, &p.name, LABEL_X, y);
+            // A tick beside the name the moment that seat says it is ready, so
+            // the thing a person is waiting to see sits where they are already
+            // looking rather than at the far edge of the line.
+            if p.ready {
+                let (cel, w, h) = tick_cel();
+                let after = LABEL_X + bold.width(reg, &p.name) + 4;
+                fb.blit(
+                    &cel,
+                    w,
+                    h,
+                    after,
+                    y + (bold.line_height - h as i32) / 2,
+                    false,
+                );
+            }
+            let mut about: Vec<String> = Vec::new();
+            if Some(p.seat) == screen.seat {
+                about.push("YOU".into());
+            }
+            // A lobby is where somebody should find out the line is bad, not a
+            // minute into a fight.
+            if let Some(ms) = screen.trips.get(&p.seat) {
+                about.push(format!("{ms}MS"));
+            }
+            if !about.is_empty() {
+                let line = about.join("  ");
+                let w = small.width(reg, &line);
+                small.draw_own(reg, fb, &line, ROSTER_RIGHT - w, y + 3);
+            }
             y += LOBBY_STEP;
         }
+        y += LOBBY_GAP;
     }
 
     // The rows of the page that is up, and the arrow against the one chosen.
     let rows = screen.rows();
-    let first = LOBBY_ROWS_TOP;
+    let first = y;
     let chosen = screen.row.min(rows.len().saturating_sub(1));
     sprite::draw(
         reg,
@@ -1052,69 +1087,193 @@ pub fn draw_online(
     );
     for (i, row) in rows.iter().enumerate() {
         let at = first + i as i32 * LOBBY_STEP;
-        // A game on the list is one line of its own: the name, the head count,
-        // a star if it wants a word, and a mark if the list server is carrying
-        // it because its host could not be reached directly.
+        if at > LOBBY_NOTE_Y - LOBBY_STEP {
+            break;
+        }
+        // A game on the list is a line of its own rather than a label and a
+        // value: the name on the left, and on the right how full it is, a star
+        // if it wants a word, and a tilde if the list server is carrying it
+        // because its host cannot be reached directly.
         if let Row::Game(n) = row {
             if let Some(g) = screen.games.get(*n) {
-                let carried = if g.relayed() { " ~" } else { "" };
-                bold.draw_own(
-                    reg,
-                    fb,
-                    &format!("{}{carried}", g.line()),
-                    LOBBY_LABEL_X,
-                    at,
-                );
+                bold.draw_own(reg, fb, &g.name, LABEL_X, at);
+                // Words rather than marks, for the same reason the roster uses
+                // them: the game's font has no star, no tilde and no slash, and
+                // draws what it does not know as a blank.
+                let mut about = vec![format!("{} OF {}", g.players, g.seats)];
+                if g.locked {
+                    about.push("LOCKED".into());
+                }
+                if g.relayed() {
+                    about.push("CARRIED".into());
+                }
+                let line = about.join("  ");
+                let w = small.width(reg, &line);
+                small.draw_own(reg, fb, &line, ROSTER_RIGHT - w, at + 3);
             }
             continue;
         }
+        bold.draw_own(reg, fb, row.label(), LABEL_X, at);
         let value = match row {
-            Row::LobbyName | Row::PlayerName | Row::Address => screen.shown(*row),
-            Row::Knight => match screen.knight {
-                Some(k) => KNIGHT_LETTER
-                    .get(k as usize)
-                    .copied()
-                    .unwrap_or("?")
-                    .to_string(),
-                None => "Any".to_string(),
-            },
+            Row::LobbyName | Row::PlayerName | Row::Address | Row::Password => screen.shown(*row),
             Row::Ready => (if screen.ready { GORE_ON } else { GORE_OFF }).to_string(),
             _ => String::new(),
         };
-        if value.is_empty() {
-            bold.draw_own(reg, fb, row.label(), LOBBY_LABEL_X, at);
-        } else {
-            bold.draw_own(reg, fb, row.label(), LOBBY_LABEL_X, at);
-            bold.draw_own(reg, fb, &value, LOBBY_VALUE_X, at);
+        if !value.is_empty() {
+            // A typed field can outgrow its column, so it is drawn in the small
+            // face when the bold one would run off the screen. An address is
+            // the case that needs it.
+            let w = bold.width(reg, &value);
+            if VALUE_X + w < henge_core::SCREEN_W as i32 - 4 {
+                bold.draw_own(reg, fb, &value, VALUE_X, at);
+            } else {
+                small.draw_own(reg, fb, &value, VALUE_X, at + 3);
+            }
         }
     }
 
-    // One line at the bottom: what the router said, who joined, what went
-    // wrong. The small font, because it is a sentence and not a label.
+    // One line at the bottom, always on the same line: what the router said,
+    // who joined, why the last attempt failed. The small face, because it is a
+    // sentence and not a label.
     let note = if screen.note.is_empty() {
         &screen.reachable
     } else {
         &screen.note
     };
     if !note.is_empty() {
-        match fonts.small {
-            Some(small) => small.draw_own_centred(reg, fb, note, LOBBY_NOTE_Y),
-            None => bold.draw_own_centred(reg, fb, note, LOBBY_NOTE_Y),
+        // Cut to what the screen holds. A note is written by whatever went
+        // wrong, and some of those sentences carry an address and an operating
+        // system's own words for a failure, which is wider than three hundred
+        // and twenty pixels.
+        let mut line = note.to_uppercase();
+        while small.width(reg, &line) > henge_core::SCREEN_W as i32 - 8 && line.chars().count() > 4
+        {
+            line.truncate(line.char_indices().nth_back(3).map_or(0, |(i, _)| i));
+            line.push_str("...");
         }
+        small.draw_own_centred(reg, fb, &line, LOBBY_NOTE_Y);
     }
 }
 
 /// The lobby's own layout. Ours, and the only numbers in this file that are not
-/// out of the image: they follow the title's column and step so the two screens
-/// sit in the same grid.
-const LOBBY_TOP: i32 = 62;
-const LOBBY_ROWS_TOP: i32 = 126;
-const LOBBY_STEP: i32 = 14;
-const LOBBY_X: i32 = 86;
-const LOBBY_LABEL_X: i32 = 86;
-const LOBBY_VALUE_X: i32 = 200;
+/// out of the image. The columns are the title's (`ARROW_X`, `LABEL_X`,
+/// `VALUE_X`); only the vertical rhythm is new, and it is chosen so that the
+/// tallest page, a four-seat lobby, still leaves the note its line.
+const LOBBY_TOP: i32 = 84;
+/// The drop from the heading to the first line under it.
+const LOBBY_HEAD: i32 = 18;
+/// One line, whether it is a roster entry or a row.
+const LOBBY_STEP: i32 = 13;
+/// The gap between the roster and the rows, so the two blocks read as two.
+const LOBBY_GAP: i32 = 8;
+/// Where the note sits, and the floor every other line is kept above.
 const LOBBY_NOTE_Y: i32 = 188;
+/// The right edge everything secondary is set against: what a seat is, and how
+/// full and how reachable a listed game is.
+const ROSTER_RIGHT: i32 = 300;
 
-/// Which knight a roster entry holds, in one character, because the roster has
-/// the width of a name and not of two. The four are `KnightTAB`'s own order.
-const KNIGHT_LETTER: [&str; 4] = ["G", "R", "J", "A"];
+/// The tick drawn beside a name that is ready.
+///
+/// **Ours**, and a cel rather than a letter because there is no letter for it:
+/// the bold and small faces carry A to Z, 0 to 9, space and `. , ! ?`, and
+/// `GFX:TextP` draws anything else as nothing at all, so `*`, `>` and `~` come
+/// out blank. The art is the face; the outline around it is worked out from the
+/// face at draw time, which is how the bold glyphs in `CH.PIV` are built too.
+const TICK_ART: [&str; TICK_H] = [
+    "........#",
+    ".......##",
+    "......##.",
+    "#....##..",
+    "##..##...",
+    ".####....",
+    "..##.....",
+];
+const TICK_W: usize = 9;
+const TICK_H: usize = 7;
+/// The bold face's own two inks out of `CH.PIV`: black at 5, the lightest face
+/// colour at 9. The tick is the same ink as the lettering it sits beside, not a
+/// colour of its own.
+const TICK_OUTLINE: u8 = 5;
+const TICK_FACE: u8 = 9;
+/// One pixel of outline on every side, so the cel is the art grown by one.
+const CEL_W: usize = TICK_W + 2;
+const CEL_H: usize = TICK_H + 2;
+
+/// Builds the tick: the art in [`TICK_FACE`], and every cell touching it in
+/// [`TICK_OUTLINE`].
+fn tick_cel() -> ([u8; CEL_W * CEL_H], usize, usize) {
+    let mut face = [0u8; CEL_W * CEL_H];
+    for (row, art) in TICK_ART.iter().enumerate() {
+        for (col, ink) in art.bytes().enumerate() {
+            if ink == b'#' {
+                face[(row + 1) * CEL_W + col + 1] = TICK_FACE;
+            }
+        }
+    }
+    let mut cel = face;
+    for y in 0..CEL_H as i32 {
+        for x in 0..CEL_W as i32 {
+            if face[y as usize * CEL_W + x as usize] != 0 {
+                continue;
+            }
+            let touches = (-1..=1).any(|dy| {
+                (-1..=1).any(|dx| {
+                    let (ny, nx) = (y + dy, x + dx);
+                    (0..CEL_H as i32).contains(&ny)
+                        && (0..CEL_W as i32).contains(&nx)
+                        && face[ny as usize * CEL_W + nx as usize] != 0
+                })
+            });
+            if touches {
+                cel[y as usize * CEL_W + x as usize] = TICK_OUTLINE;
+            }
+        }
+    }
+    (cel, CEL_W, CEL_H)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tick is drawn in the bold face's own two inks, and every face pixel
+    /// is surrounded, so it reads on the title plate rather than only against it.
+    #[test]
+    fn the_tick_is_the_face_inside_its_own_outline() {
+        let (cel, w, h) = tick_cel();
+        assert_eq!((w, h), (TICK_W + 2, TICK_H + 2));
+        assert!(cel.contains(&TICK_FACE), "it has a face");
+        assert!(cel.contains(&TICK_OUTLINE), "and an outline");
+        assert!(
+            cel.iter()
+                .all(|p| *p == 0 || *p == TICK_FACE || *p == TICK_OUTLINE),
+            "and nothing else: a third ink would not be the lettering's"
+        );
+        // The art sits one pixel in on every side, so no face pixel is on the
+        // edge and every one of them has eight neighbours inside the cel.
+        for y in 0..h {
+            for x in 0..w {
+                if cel[y * w + x] != TICK_FACE {
+                    continue;
+                }
+                assert!(
+                    y > 0 && y + 1 < h && x > 0 && x + 1 < w,
+                    "the face touches the edge at {x},{y} and would be drawn unoutlined"
+                );
+                for (dy, dx) in [
+                    (-1i32, -1i32),
+                    (-1, 0),
+                    (-1, 1),
+                    (0, -1),
+                    (0, 1),
+                    (1, -1),
+                    (1, 0),
+                    (1, 1),
+                ] {
+                    let n = cel[(y as i32 + dy) as usize * w + (x as i32 + dx) as usize];
+                    assert_ne!(n, 0, "a gap beside the face at {x},{y}");
+                }
+            }
+        }
+    }
+}

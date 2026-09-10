@@ -97,9 +97,6 @@ pub struct Player {
     pub seat: u8,
     /// What they called themselves, cut to [`PLAYER_NAME_MAX`].
     pub name: String,
-    /// Which knight they took, once they have, as a `KnightTAB` index.
-    #[serde(default)]
-    pub knight: Option<u8>,
     /// Sitting down and happy to start.
     #[serde(default)]
     pub ready: bool,
@@ -144,28 +141,15 @@ impl Lobby {
         self.players.len()
     }
 
-    /// Whether every knight taken is taken once. The select screen enforces this
-    /// too (`choose_knight`'s bitmask), but a lobby that let two people sit on
-    /// the same knight would reach the select screen already wrong.
-    pub fn knights_are_distinct(&self) -> bool {
-        let mut seen = [false; SEATS];
-        for p in &self.players {
-            let Some(k) = p.knight else { continue };
-            let k = k as usize;
-            if k >= SEATS || seen[k] {
-                return false;
-            }
-            seen[k] = true;
-        }
-        true
-    }
-
-    /// Whether the host may start: somebody is in it, everybody in it is ready,
-    /// and no two of them want the same knight.
+    /// Whether the host may start: somebody is in it and everybody in it is
+    /// ready.
+    ///
+    /// **Which knight each of them plays is not settled here.** That is
+    /// `ChooseKnight`'s screen, which the original already has and which this
+    /// game already draws; a lobby that chose knights would be a second, worse
+    /// copy of it. What the lobby answers is who is at the table.
     pub fn can_start(&self) -> bool {
-        !self.players.is_empty()
-            && self.players.iter().all(|p| p.ready)
-            && self.knights_are_distinct()
+        !self.players.is_empty() && self.players.iter().all(|p| p.ready)
     }
 }
 
@@ -204,24 +188,23 @@ pub enum Msg {
     Roster {
         lobby: Lobby,
     },
-    /// Guest to host: the knight I want and whether I am ready. The host is the
-    /// only thing that edits the roster, so a guest asks rather than tells.
+    /// Guest to host: I am ready, or I am not. The host is the only thing that
+    /// edits the roster, so a guest asks rather than tells.
     Seated {
-        knight: Option<u8>,
         ready: bool,
     },
     /// Host to everyone: the game begins. After this, nothing but input,
     /// checks and goodbyes.
     ///
-    /// `seats` is `NUM_PLAYERS`. `knights` is the `KnightTAB` index each seat
-    /// took, in seat order, and `names` what each typed, so every machine starts
-    /// the select screen already agreeing. `delay` is the input delay in ticks,
-    /// the host's choice for everyone; `check` is how often hashes are compared.
+    /// `seats` is `NUM_PLAYERS`, which is what every machine opens
+    /// `ChooseKnight` with. `delay` is the input delay in ticks, the host's
+    /// choice for everyone; `check` is how often fingerprints are compared.
+    ///
+    /// No knights and no names: the select screen settles those, in lockstep,
+    /// with every seat driving its own turn on it.
     Start {
         seats: u8,
         gore: bool,
-        knights: Vec<u8>,
-        names: Vec<String>,
         delay: u8,
         check: u32,
     },
@@ -323,7 +306,6 @@ mod tests {
             l.players.push(Player {
                 seat,
                 name: format!("p{seat}"),
-                knight: Some(seat),
                 ready: true,
             });
         }
@@ -332,23 +314,18 @@ mod tests {
         assert!(l.can_start());
     }
 
+    /// The lobby does not choose knights, so two people wanting the same one is
+    /// not a thing it can even represent. `ChooseKnight`'s own `choose_knight`
+    /// bitmask settles that on the select screen, as it always did.
     #[test]
-    fn two_people_cannot_sit_on_one_knight() {
-        let mut l = Lobby::new("x", false);
-        l.players.push(Player {
+    fn the_lobby_settles_who_is_here_and_nothing_about_knights() {
+        let json = serde_json::to_string(&Player {
             seat: 0,
-            name: "a".into(),
-            knight: Some(2),
+            name: "carl".into(),
             ready: true,
-        });
-        l.players.push(Player {
-            seat: 1,
-            name: "b".into(),
-            knight: Some(2),
-            ready: true,
-        });
-        assert!(!l.knights_are_distinct());
-        assert!(!l.can_start(), "and the host cannot start on it");
+        })
+        .unwrap();
+        assert!(!json.to_lowercase().contains("knight"));
     }
 
     #[test]
@@ -358,7 +335,6 @@ mod tests {
         l.players.push(Player {
             seat: 0,
             name: "a".into(),
-            knight: Some(0),
             ready: false,
         });
         assert!(!l.can_start());
@@ -390,7 +366,6 @@ mod tests {
         lobby.players.push(Player {
             seat: 0,
             name: "carl".into(),
-            knight: Some(0),
             ready: true,
         });
         let roster = serde_json::to_string(&lobby).unwrap();
@@ -414,8 +389,6 @@ mod tests {
         let m = Msg::Start {
             seats: 2,
             gore: true,
-            knights: vec![0, 3],
-            names: vec!["SIR GODBER".into(), "SIR ALAN".into()],
             delay: 6,
             check: 64,
         };

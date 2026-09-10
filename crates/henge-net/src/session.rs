@@ -292,14 +292,14 @@ mod tests {
         for turn in 0..600 {
             for e in host.poll() {
                 if let LobbyEvent::Joined { .. } = e {
-                    host.seat(Some(0), true);
+                    host.seat(true);
                 }
             }
             for e in guest.poll() {
                 match e {
                     LobbyEvent::Seated { seat: s } => {
                         seat = Some(s as usize);
-                        guest.seat_request(Some(1), true);
+                        guest.seat_request(true);
                     }
                     LobbyEvent::Start { seats, .. } => terms = Some(seats as usize),
                     _ => {}

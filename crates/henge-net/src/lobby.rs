@@ -29,12 +29,11 @@ pub enum Event {
     Seated { seat: u8 },
     /// A guest only: you are not in, and this is why.
     Refused { why: String },
-    /// The game begins, on exactly these terms.
+    /// The game begins, on exactly these terms. Which knight each seat plays is
+    /// settled after this, on `ChooseKnight`'s own screen, in lockstep.
     Start {
         seats: u8,
         gore: bool,
-        knights: Vec<u8>,
-        names: Vec<String>,
         delay: u8,
         check: u32,
     },
@@ -115,7 +114,6 @@ impl Host {
         lobby.players.push(Player {
             seat: 0,
             name: cut(player, PLAYER_NAME_MAX),
-            knight: None,
             ready: false,
         });
         Ok(Host {
@@ -300,7 +298,6 @@ impl Host {
                         self.lobby.players.push(Player {
                             seat: free,
                             name: name.clone(),
-                            knight: None,
                             ready: false,
                         });
                         self.lobby.players.sort_by_key(|p| p.seat);
@@ -311,29 +308,11 @@ impl Host {
                         out.push(Event::Joined { seat: free, name });
                         roster_changed = true;
                     }
-                    Msg::Seated { knight, ready } => {
+                    Msg::Seated { ready } => {
                         if *seat == SEAT_UNSEATED {
                             continue;
                         }
-                        // A knight somebody else has is refused here rather than
-                        // at the select screen, where it would already be too
-                        // late. Settled before the seat's own record is reached,
-                        // because answering it means reading the others.
-                        let free = match knight {
-                            None => true,
-                            Some(k) => {
-                                (k as usize) < SEATS
-                                    && !self
-                                        .lobby
-                                        .players
-                                        .iter()
-                                        .any(|o| o.seat != *seat && o.knight == Some(k))
-                            }
-                        };
                         if let Some(p) = self.lobby.players.iter_mut().find(|p| p.seat == *seat) {
-                            if free {
-                                p.knight = knight;
-                            }
                             p.ready = ready;
                             roster_changed = true;
                             out.push(Event::Roster);
@@ -458,18 +437,9 @@ impl Host {
         }
     }
 
-    /// The host's own knight and ready flag.
-    pub fn seat(&mut self, knight: Option<u8>, ready: bool) {
-        let taken = knight.is_some_and(|k| {
-            self.lobby
-                .players
-                .iter()
-                .any(|p| p.seat != 0 && p.knight == Some(k))
-        });
+    /// The host's own ready flag.
+    pub fn seat(&mut self, ready: bool) {
         if let Some(p) = self.lobby.players.iter_mut().find(|p| p.seat == 0) {
-            if !taken {
-                p.knight = knight;
-            }
             p.ready = ready;
         }
         self.broadcast(&Msg::Roster {
@@ -484,66 +454,33 @@ impl Host {
         });
     }
 
-    /// Begin. Every seat is given a knight it has not chosen for itself, lowest
-    /// free one first, so a lobby nobody bothered to choose in still starts.
+    /// Begin.
     ///
     /// Returns the terms, which are also what went out on the wire, or nothing
-    /// when the lobby is not startable.
+    /// when the lobby is not startable. Knights are not among them: every
+    /// machine opens `ChooseKnight` with the same seat count and settles that
+    /// there, which is the screen the original settles it on.
     pub fn start(&mut self, delay: u32, check: u32) -> Option<Event> {
         if self.started || !self.lobby.can_start() {
             return None;
         }
-        let mut knights: Vec<u8> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
-        let mut used = [false; SEATS];
-        for p in &self.lobby.players {
-            if let Some(k) = p.knight {
-                if (k as usize) < SEATS {
-                    used[k as usize] = true;
-                }
-            }
-        }
-        for p in &self.lobby.players {
-            let k = match p.knight {
-                Some(k) if (k as usize) < SEATS => k,
-                _ => {
-                    let free = (0..SEATS as u8).find(|k| !used[*k as usize])?;
-                    used[free as usize] = true;
-                    free
-                }
-            };
-            knights.push(k);
-            names.push(p.name.clone());
-        }
         self.started = true;
         self.lobby.started = true;
-        let ev = Event::Start {
-            seats: self.lobby.players() as u8,
-            gore: self.lobby.gore,
-            knights,
-            names,
-            delay: delay.min(u8::MAX as u32) as u8,
-            check,
-        };
-        if let Event::Start {
+        let seats = self.lobby.players() as u8;
+        let gore = self.lobby.gore;
+        let delay = delay.min(u8::MAX as u32) as u8;
+        self.broadcast(&Msg::Start {
             seats,
             gore,
-            knights,
-            names,
             delay,
             check,
-        } = &ev
-        {
-            self.broadcast(&Msg::Start {
-                seats: *seats,
-                gore: *gore,
-                knights: knights.clone(),
-                names: names.clone(),
-                delay: *delay,
-                check: *check,
-            });
-        }
-        Some(ev)
+        });
+        Some(Event::Start {
+            seats,
+            gore,
+            delay,
+            check,
+        })
     }
 
     /// A tick's input, to everybody.
@@ -645,8 +582,6 @@ impl Guest {
                 Msg::Start {
                     seats,
                     gore,
-                    knights,
-                    names,
                     delay,
                     check,
                 } => {
@@ -655,8 +590,6 @@ impl Guest {
                     out.push(Event::Start {
                         seats,
                         gore,
-                        knights,
-                        names,
                         delay,
                         check,
                     });
@@ -699,9 +632,9 @@ impl Guest {
         out
     }
 
-    /// Ask for a knight and say whether we are ready.
-    pub fn seat_request(&mut self, knight: Option<u8>, ready: bool) {
-        let _ = self.link.send(&Msg::Seated { knight, ready });
+    /// Say whether we are ready.
+    pub fn seat_request(&mut self, ready: bool) {
+        let _ = self.link.send(&Msg::Seated { ready });
         let _ = self.link.flush();
     }
 
@@ -820,34 +753,14 @@ mod tests {
     }
 
     #[test]
-    fn two_guests_cannot_take_the_same_knight() {
-        let mut host = Host::open("x", "carl", 0, false).unwrap();
-        let port = host.port();
-        let mut a = Guest::join(("127.0.0.1", port), "a", "").unwrap();
-        let mut b = Guest::join(("127.0.0.1", port), "b", "").unwrap();
-        settle(&mut host, &mut [&mut a, &mut b]);
-        a.seat_request(Some(2), true);
-        settle(&mut host, &mut [&mut a, &mut b]);
-        b.seat_request(Some(2), true);
-        settle(&mut host, &mut [&mut a, &mut b]);
-        assert_eq!(host.lobby.seated(1).unwrap().knight, Some(2));
-        assert_eq!(
-            host.lobby.seated(2).unwrap().knight,
-            None,
-            "the second ask for knight two is refused"
-        );
-        assert!(host.lobby.knights_are_distinct());
-    }
-
-    #[test]
     fn nothing_starts_until_everyone_is_ready_and_then_everyone_is_told() {
         let mut host = Host::open("x", "carl", 0, true).unwrap();
         let port = host.port();
         let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         settle(&mut host, &mut [&mut anna]);
-        host.seat(Some(0), true);
+        host.seat(true);
         assert_eq!(host.start(6, 64), None, "anna has not sat down");
-        anna.seat_request(Some(3), true);
+        anna.seat_request(true);
         settle(&mut host, &mut [&mut anna]);
         let started = host.start(6, 64).expect("the lobby is ready");
         assert_eq!(
@@ -855,8 +768,6 @@ mod tests {
             Event::Start {
                 seats: 2,
                 gore: true,
-                knights: vec![0, 3],
-                names: vec!["carl".into(), "anna".into()],
                 delay: 6,
                 check: 64,
             }
@@ -866,29 +777,11 @@ mod tests {
         assert!(anna.started);
     }
 
-    /// A lobby whose players never chose are given knights rather than refused,
-    /// because a game of four people all pressing ready is a game that should
-    /// start.
-    #[test]
-    fn a_seat_that_chose_nothing_is_given_the_lowest_free_knight() {
-        let mut host = Host::open("x", "carl", 0, false).unwrap();
-        let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
-        settle(&mut host, &mut [&mut anna]);
-        host.seat(Some(2), true);
-        anna.seat_request(None, true);
-        settle(&mut host, &mut [&mut anna]);
-        let Some(Event::Start { knights, .. }) = host.start(4, 64) else {
-            panic!("it should start");
-        };
-        assert_eq!(knights, vec![2, 0]);
-    }
-
     #[test]
     fn a_game_that_has_started_turns_a_latecomer_away() {
         let mut host = Host::open("x", "carl", 0, false).unwrap();
         let port = host.port();
-        host.seat(Some(0), true);
+        host.seat(true);
         host.start(4, 64).expect("one player is a lobby");
         let mut late = Guest::join(("127.0.0.1", port), "late", "").unwrap();
         let (_, g) = settle(&mut host, &mut [&mut late]);

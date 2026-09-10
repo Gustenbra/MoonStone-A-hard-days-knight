@@ -9,13 +9,20 @@
 //! characters is accepted. So a person who can work the knight select can work
 //! this without being told anything.
 //!
+//! **It settles who is here and nothing else.** Which knight a seat plays is
+//! `ChooseKnight`'s, after the game begins: pressing Begin opens the same select
+//! screen a game at one keyboard gets, and the four take their turns on it in
+//! lockstep. A knight row lived here for a while, which meant two screens for
+//! one choice and a screen of ours doing a job the image already has a screen
+//! for.
+//!
 //! It sits here rather than in `henge_core` because it is shell, and beside
 //! `shell.rs` rather than inside it because the recovered screens in there
 //! should stay recovered.
 
 use henge_core::shell::NAME_MAX;
 use henge_net::list::Listing;
-use henge_net::proto::{Lobby, LOBBY_NAME_MAX, SEATS};
+use henge_net::proto::{Lobby, LOBBY_NAME_MAX};
 
 /// Which page of the lobby is up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,8 +62,6 @@ pub enum Row {
     GoJoin,
     /// Dial the address.
     Dial,
-    /// Which knight this seat wants.
-    Knight,
     /// Sitting down.
     Ready,
     /// Begin. The host's row and nobody else's.
@@ -87,7 +92,6 @@ impl Row {
             Row::Host => "Open a game",
             Row::GoJoin => "Join a game",
             Row::Dial => "Join",
-            Row::Knight => "Knight",
             Row::Ready => "Ready",
             Row::Begin => "Begin",
             Row::Back => "Back",
@@ -119,8 +123,8 @@ pub enum Ask {
         you: String,
         password: String,
     },
-    /// Tell the host what this seat wants.
-    Seat { knight: Option<u8>, ready: bool },
+    /// Tell the host whether this seat is ready.
+    Seat { ready: bool },
     /// The host is starting.
     Begin,
     /// Out of the lobby, or off the screen entirely.
@@ -149,8 +153,6 @@ pub struct Online {
     /// Whether the list has been asked for since this page was opened, so an
     /// empty list can be told apart from one nobody has fetched.
     pub looked: bool,
-    /// This seat's knight, once chosen. Nothing means the host picks one.
-    pub knight: Option<u8>,
     pub ready: bool,
     /// The roster, as the host last said it. Empty until there is one.
     pub roster: Lobby,
@@ -183,7 +185,6 @@ impl Default for Online {
             password: String::new(),
             games: Vec::new(),
             looked: false,
-            knight: None,
             ready: false,
             roster: Lobby::default(),
             seat: None,
@@ -225,7 +226,7 @@ impl Online {
                 Row::Back,
             ],
             Page::Waiting => {
-                let mut rows = vec![Row::Knight, Row::Ready];
+                let mut rows = vec![Row::Ready];
                 if self.hosting {
                     rows.push(Row::Begin);
                 }
@@ -247,16 +248,25 @@ impl Online {
             Row::LobbyName => &self.game,
             Row::PlayerName => &self.you,
             Row::Address => &self.address,
-            // A password is not drawn. The screen is on somebody's monitor and
+            // A password is never drawn: the screen is on somebody's monitor and
             // there may well be somebody else in the room.
+            //
+            // Masked with `TypeName`'s own caret rather than a star, because the
+            // game's font has no star: `GFX:TextASCII` maps anything it does not
+            // know to the blank, and a mask of blanks is no mask at all. It maps
+            // 0x5c and 0x2f both to glyph 71, the stroke, so a row of those is
+            // something a person can actually see themselves typing.
+            //
+            // Once the typing is done it says only whether there is one. The
+            // length of a password is not a thing to put on a screen either.
             Row::Password => {
-                let hidden: String = "*".repeat(self.password.chars().count());
+                let n = self.password.chars().count();
                 return if self.typing && self.selected() == row {
-                    format!("{hidden}{}", henge_core::shell::CARET)
-                } else if hidden.is_empty() {
-                    "none".to_string()
+                    std::iter::repeat_n(henge_core::shell::CARET, n + 1).collect()
+                } else if n == 0 {
+                    "None".to_string()
                 } else {
-                    hidden
+                    "Set".to_string()
                 };
             }
             _ => return String::new(),
@@ -277,48 +287,11 @@ impl Online {
         self.row = (self.row as i32 + delta).clamp(0, last) as usize;
     }
 
-    /// Left and right. Only the knight row has anything to adjust.
-    ///
-    /// A knight somebody else has taken is stepped over, the way
-    /// `ChooseLoop` steps over one already spoken for, and the far left is
-    /// "whichever is free", which is what a player who does not care picks.
-    pub fn adjust(&mut self, delta: i32) -> Option<Ask> {
-        if self.typing || self.selected() != Row::Knight || delta == 0 {
-            return None;
-        }
-        let dir = delta.signum();
-        let mut at = match self.knight {
-            None => {
-                if dir < 0 {
-                    return None;
-                }
-                -1
-            }
-            Some(k) => k as i32,
-        };
-        loop {
-            at += dir;
-            if at < 0 {
-                self.knight = None;
-                return Some(self.seat_ask());
-            }
-            if at >= SEATS as i32 {
-                return None;
-            }
-            if self.free(at as u8) {
-                self.knight = Some(at as u8);
-                return Some(self.seat_ask());
-            }
-        }
-    }
-
-    /// Whether a knight is ours or unclaimed.
-    pub fn free(&self, knight: u8) -> bool {
-        !self
-            .roster
-            .players
-            .iter()
-            .any(|p| Some(p.seat) != self.seat && p.knight == Some(knight))
+    /// Left and right. Nothing on this screen adjusts: which knight a seat plays
+    /// is settled on `ChooseKnight`'s own screen after the game begins, not
+    /// here, and everything else is a row you take.
+    pub fn adjust(&mut self, _delta: i32) -> Option<Ask> {
+        None
     }
 
     /// Fire, or Enter. The one key that does things.
@@ -394,7 +367,6 @@ impl Online {
                     password: self.password.trim().to_string(),
                 })
             }
-            Row::Knight => None,
             Row::Ready => {
                 self.ready = !self.ready;
                 Some(self.seat_ask())
@@ -490,10 +462,7 @@ impl Online {
     }
 
     fn seat_ask(&self) -> Ask {
-        Ask::Seat {
-            knight: self.knight,
-            ready: self.ready,
-        }
+        Ask::Seat { ready: self.ready }
     }
 }
 
@@ -621,19 +590,28 @@ mod tests {
     }
 
     /// A password is never drawn. Somebody else may be in the room.
+    ///
+    /// The mask is `TypeName`'s caret and not a star because the font has no
+    /// star: `GFX:TextASCII` draws what it does not know as the blank, so a row
+    /// of stars would be a row of nothing. Once the typing is over the row says
+    /// only whether there is a word, because its length is not a thing to show
+    /// either.
     #[test]
-    fn a_password_is_shown_as_stars_and_never_as_itself() {
+    fn a_password_is_masked_and_never_shown_as_itself() {
         let mut o = creating();
         o.move_by(2);
         assert_eq!(o.selected(), Row::Password);
-        assert_eq!(o.shown(Row::Password), "none");
+        assert_eq!(o.shown(Row::Password), "None");
         o.take();
         for c in "portcullis".chars() {
             o.type_char(c);
         }
-        assert_eq!(o.shown(Row::Password), "**********\\");
+        let caret = henge_core::shell::CARET;
+        let masked = o.shown(Row::Password);
+        assert_eq!(masked.chars().count(), "portcullis".chars().count() + 1);
+        assert!(masked.chars().all(|c| c == caret), "{masked:?}");
         o.take();
-        assert_eq!(o.shown(Row::Password), "**********");
+        assert_eq!(o.shown(Row::Password), "Set");
         assert_eq!(
             o.password, "portcullis",
             "and it is still the word underneath"
@@ -746,75 +724,43 @@ mod tests {
         );
     }
 
-    /// The knight row steps over a knight somebody else has, and the far left is
-    /// "whichever is free".
+    /// The lobby says who is here and nothing about which knight they play: that
+    /// is `ChooseKnight`'s, after the game begins.
     #[test]
-    fn the_knight_row_steps_over_one_already_taken() {
+    fn the_lobby_has_no_knight_row() {
         let mut o = Online::new();
         o.sat_down(1, false);
         o.roster.players = vec![
             Player {
                 seat: 0,
                 name: "host".into(),
-                knight: Some(1),
                 ready: true,
             },
             Player {
                 seat: 1,
                 name: "me".into(),
-                knight: None,
                 ready: false,
             },
         ];
-        assert_eq!(o.selected(), Row::Knight);
-        assert_eq!(o.knight, None);
-        o.adjust(1);
-        assert_eq!(o.knight, Some(0));
-        o.adjust(1);
-        assert_eq!(o.knight, Some(2), "one is the host's");
-        o.adjust(1);
-        assert_eq!(o.knight, Some(3));
-        assert_eq!(o.adjust(1), None, "and there is no fifth knight");
-        assert_eq!(o.knight, Some(3));
-        // Back down past the first, and nobody in particular is wanted again.
-        o.adjust(-1);
-        assert_eq!(o.knight, Some(2));
-        o.adjust(-1);
-        assert_eq!(o.knight, Some(0));
-        assert_eq!(
-            o.adjust(-1),
-            Some(Ask::Seat {
-                knight: None,
-                ready: false
-            })
-        );
-        assert_eq!(o.knight, None);
+        assert_eq!(o.selected(), Row::Ready);
+        assert_eq!(o.adjust(1), None, "and there is nothing here to adjust");
+        assert_eq!(o.adjust(-1), None);
     }
 
     #[test]
     fn ready_is_a_switch_and_the_host_alone_can_begin() {
         let mut o = Online::new();
         o.sat_down(1, false);
-        assert_eq!(o.rows(), vec![Row::Knight, Row::Ready, Row::Back]);
-        o.move_by(1);
-        assert_eq!(
-            o.take(),
-            Some(Ask::Seat {
-                knight: None,
-                ready: true
-            })
-        );
+        assert_eq!(o.rows(), vec![Row::Ready, Row::Back]);
+        assert_eq!(o.take(), Some(Ask::Seat { ready: true }));
         assert!(o.ready);
         o.take();
         assert!(!o.ready, "and it switches back");
         // The host has one more row than a guest.
         let mut h = Online::new();
         h.sat_down(0, true);
-        assert_eq!(
-            h.rows(),
-            vec![Row::Knight, Row::Ready, Row::Begin, Row::Back]
-        );
-        h.move_by(2);
+        assert_eq!(h.rows(), vec![Row::Ready, Row::Begin, Row::Back]);
+        h.move_by(1);
         assert_eq!(h.take(), Some(Ask::Begin));
     }
 
@@ -823,7 +769,6 @@ mod tests {
         let mut o = Online::new();
         o.sat_down(2, false);
         o.ready = true;
-        o.knight = Some(3);
         o.move_by(9);
         assert_eq!(o.selected(), Row::Back);
         assert_eq!(o.take(), Some(Ask::Leave));
@@ -844,7 +789,6 @@ mod tests {
             Row::Host,
             Row::GoJoin,
             Row::Dial,
-            Row::Knight,
             Row::Ready,
             Row::Begin,
             Row::Back,

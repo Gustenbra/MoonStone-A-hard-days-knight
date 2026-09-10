@@ -305,8 +305,23 @@ every machine. Nothing in `henge-core` knows a peer exists and no recovered numb
 > An online game plays **one** quest. `Run` is `KnightTAB`'s record zero plus everything
 > that belongs to the game rather than to a knight, and `Run::rivals` is the other three
 > records in a leaner shape that only the computer's turn reads. So the run belongs to
-> seat zero's knight on every machine, the arena seats every person in the lobby as the
-> knight they chose in it, and `WHICH`'s turn on the map is seat zero's.
+> seat zero's knight on every machine, the arena seats every person in the game as the
+> knight they chose on `ChooseKnight`, and `WHICH`'s turn on the map is seat zero's.
+
+Two smaller consequences of the same split, both in `henge-desktop`:
+
+- **The lobby settles nothing about knights.** Pressing Begin opens `ChooseKnight`, the
+  same screen a game at one keyboard gets, inside the lockstep gate from its first tick;
+  the seats take their turns on it in `choose_player` order and `begin_quest` builds the
+  same run out of `choose_knight` on every machine. The lobby used to carry a knight row,
+  which meant two screens for one choice and a screen of ours where the image already has
+  one.
+- **Enter, backspace and the nine number keys have one slot between the four seats**,
+  because they are not controls and the original has no bindings table for them. They are
+  filled from seat zero's word on every machine, not from the seat at this keyboard: a slot
+  filled from "mine" holds a different word on each machine, and a machine would then leave
+  a message box on a different tick from its peers. `ChooseKnight` is the one screen where
+  every seat needs its own, and it reads them per seat instead.
 
 The original does not work that way. `NextWHICH` at 0xa434 walks `WHICH` 0 to 3 and takes
 whoever is alive; `0xa4a9`'s `cmp ax, [NUM_PLAYERS]` is what decides whether that turn is a

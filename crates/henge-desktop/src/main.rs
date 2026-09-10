@@ -363,10 +363,7 @@ fn prepare(app: &mut App, a: &[String]) {
         });
         // Sat down and ready: a host driven from the command line has nobody to
         // press the row for them.
-        app.online_ask(online::Ask::Seat {
-            knight: None,
-            ready: true,
-        });
+        app.online_ask(online::Ask::Seat { ready: true });
         if let Some(o) = app.online.as_mut() {
             o.ready = true;
         }
@@ -773,6 +770,15 @@ fn main() -> anyhow::Result<()> {
             // only drew once would tick a whole run of cycles and glows against
             // whatever palette happened to be up when it started.
             app.render();
+            // **Ours**: the same wait `--trace` takes, and for the same reason.
+            // A capture of a lobby has to let a peer actually knock, and one of
+            // a lockstep game has to let the other end speak; both have nothing
+            // to do until the wire says otherwise, and spinning the whole tick
+            // budget in a millisecond would photograph an empty room. Only a
+            // capture of an online screen ever reaches this.
+            if app.mode == Mode::Online || app.net.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         }
         if !args.iter().any(|a| a == "--fade") {
             app.settle_fade();
@@ -1258,6 +1264,15 @@ struct App {
     /// **Ours**: last tick's word for every seat, which is what turns a held
     /// word into a press. The original does the same with `BOUNCEBUTTON`.
     seat_was: [henge_net::SeatInput; henge_core::shell::SEATS],
+    /// **Ours**: this tick's presses for every seat, worked out in
+    /// [`App::apply_turn`] where last tick's word is still to hand.
+    ///
+    /// [`App::pressed`] holds the same edges for the four seats' five controls,
+    /// because [`slot_of`] gives all four a slot. The three keys that are not
+    /// controls have one slot between them, the one this keyboard writes, so a
+    /// screen whose turn belongs to a seat that is not this one cannot read them
+    /// there. `ChooseKnight` is that screen, and this is where it reads them.
+    seat_pressed: [SeatPress; henge_core::shell::SEATS],
     /// **Ours**: what this keyboard is actually doing, before the wire has had
     /// its say.
     ///
@@ -1273,6 +1288,9 @@ struct App {
     /// the lobby and all of them are ready. For a scripted host, which has
     /// nobody to press the row.
     auto_begin: Option<usize>,
+    /// **Ours**: whether [`App::select_auto`]'s key is down, so that a scripted
+    /// run presses and lets go rather than holding.
+    select_held: bool,
     /// **Ours**: whether a script is at the keyboard rather than a person.
     ///
     /// `--trace`, `--screenshot` and `--input` drive [`App::keys`] directly,
@@ -1648,14 +1666,32 @@ fn slot_of(seat: usize, a: input::Action) -> usize {
 /// would diverge, and the whole reason the wire carries held words rather than
 /// presses is that this function is the same function on every machine.
 ///
-/// `mine` says whether this is the seat at this keyboard, which is the only seat
-/// whose Enter, backspace and number keys are read: those are `ScanKEYS` and
-/// `DisplayStack`, and the original reads them from the one keyboard too.
+/// `shared` says whether this seat is the one that fills the slots the four
+/// seats have between them: Enter, backspace and the nine number keys, which are
+/// `ScanKEYS` and `DisplayStack` and which the original reads off its one
+/// keyboard. Every machine has to pass it for the same seat or the machines come
+/// apart, so [`App::apply_turn`] passes it for seat zero and says why.
+/// **Ours**: one seat's presses for one tick, for the keys that are not
+/// controls and so have no per-seat slot.
+///
+/// Left and right are here as well, because a screen reading this is reading one
+/// seat's whole word and should not have to take half of it from somewhere else.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct SeatPress {
+    left: bool,
+    right: bool,
+    /// Fire or Enter, which every menu in this build takes as the same press.
+    take: bool,
+    /// Backspace, which `ScanKEYS` tests before `ASCIIKEY` is ever called.
+    back: bool,
+    typed: Option<char>,
+}
+
 fn seat_slots(
     seat: usize,
     now: henge_net::SeatInput,
     was: henge_net::SeatInput,
-    mine: bool,
+    shared: bool,
 ) -> Vec<(usize, bool, bool)> {
     let mut out = Vec::with_capacity(16);
     for a in input::Action::ALL {
@@ -1666,7 +1702,7 @@ fn seat_slots(
         let on = now.pad & a.bit() != 0;
         out.push((slot, on, on && (was.pad & a.bit() == 0)));
     }
-    if mine {
+    if shared {
         out.push((ENTER_SLOT, now.take(), now.take() && !was.take()));
         out.push((BACKSPACE_SLOT, now.back(), now.back() && !was.back()));
         for n in 1..=9u8 {
@@ -1976,10 +2012,12 @@ impl App {
             opener: None,
             mapping: None,
             seat_was: [henge_net::SeatInput::default(); henge_core::shell::SEATS],
+            seat_pressed: [SeatPress::default(); henge_core::shell::SEATS],
             raw: [false; 256],
             raw_pressed: [false; 256],
             raw_typed: None,
             auto_begin: None,
+            select_held: false,
             driven: args_of().iter().any(|a| {
                 matches!(
                     a.as_str(),
@@ -2309,6 +2347,7 @@ impl App {
         // A scripted run pokes `keys` rather than pressing anything, so that is
         // where its word for the wire has to come from. See [`App::driven`].
         if self.driven {
+            self.select_auto();
             self.raw = self.keys;
             self.raw_pressed = self.pressed;
             self.raw_typed = self.typed;
@@ -3459,9 +3498,26 @@ impl App {
     /// or scancode 0x1c, Enter, as the end of it, scancode 0x0e as a backspace,
     /// and anything `ASCIIKEY` gives a character for as a character.
     fn select_tick(&mut self) {
-        let (left, right, take) = (self.pressed[2], self.pressed[3], self.takes());
-        let typed = self.typed.take();
-        let back = self.pressed[BACKSPACE_SLOT];
+        // Whose keys drive the screen. `choose_player` says which seat is
+        // choosing, and at one keyboard the answer is always this one: the four
+        // take their turns on the same keys. Across machines it is that seat's
+        // own word off the wire, which is the whole of what being online changes
+        // here. Everything below is the same code either way, so the screen
+        // cannot behave differently in a networked game.
+        let seat = self.select.as_ref().map(|s| s.state.seat).unwrap_or(0);
+        let (left, right, take, back, typed) = if self.net.is_some() {
+            let p = self.seat_pressed.get(seat).copied().unwrap_or_default();
+            self.typed = None;
+            (p.left, p.right, p.take, p.back, p.typed)
+        } else {
+            (
+                self.pressed[2],
+                self.pressed[3],
+                self.takes(),
+                self.pressed[BACKSPACE_SLOT],
+                self.typed.take(),
+            )
+        };
         let defaults: Vec<String> = self.knights.iter().map(|k| k.name.clone()).collect();
         let Some(select) = self.select.as_mut() else {
             self.mode = Mode::Title;
@@ -3524,6 +3580,15 @@ impl App {
             self.mode = Mode::Title;
             return;
         };
+        // A scripted run works the lobby through `--host`, `--join` and
+        // `--begin` and has no business on its rows: the wanderer `--trace`
+        // drives the map with presses whatever screen is up, and on a menu those
+        // presses are a person mashing the keyboard. So they are dropped here,
+        // and only here, because every other screen is what a trace is for.
+        if self.driven {
+            self.raw_pressed = [false; 256];
+            self.raw_typed = None;
+        }
         // The same five bits every other screen reads, off this keyboard rather
         // than off the wire: nothing in the lobby is in lockstep yet.
         let (up, down) = (self.raw_pressed[0], self.raw_pressed[1]);
@@ -3581,10 +3646,7 @@ impl App {
                     if let Some(o) = self.online.as_mut() {
                         o.ready = true;
                     }
-                    self.online_ask(online::Ask::Seat {
-                        knight: None,
-                        ready: true,
-                    });
+                    self.online_ask(online::Ask::Seat { ready: true });
                 }
             }
             return;
@@ -3597,6 +3659,30 @@ impl App {
             self.auto_begin = None;
             self.online_ask(online::Ask::Begin);
         }
+    }
+
+    /// `--trace` through `ChooseKnight`: the seat whose turn it is takes the
+    /// knight under the highlight and keeps its own name.
+    ///
+    /// **Ours, and only for a scripted run.** [`App::driven`] is set by `--trace`
+    /// and `--frames` and by nothing a person does. `ChooseKnight` is modal and a
+    /// script has no keyboard, so without this a headless online run would sit on
+    /// it forever and the lockstep path could not be driven end to end any more.
+    /// It presses this machine's own seat and no other, so the press goes onto
+    /// the wire like any other press and every machine still walks the same
+    /// turns.
+    fn select_auto(&mut self) {
+        if self.mode != Mode::Select || self.net.is_none() {
+            self.select_held = false;
+            return;
+        }
+        let mine = self.net.as_ref().map(|n| n.seat()).unwrap_or(0);
+        let turn = self.select.as_ref().map(|s| s.state.seat).unwrap_or(0);
+        // Down, then up. `ChooseFIRE` and `NameDone` are two presses of the one
+        // key, and a key that is never let go is one press.
+        self.select_held = !self.select_held && turn == mine;
+        self.keys[ENTER_SLOT] = self.select_held;
+        self.pressed[ENTER_SLOT] = self.select_held;
     }
 
     /// Act on what the lobby screen asked for.
@@ -3731,9 +3817,9 @@ impl App {
                     }
                 }
             }
-            online::Ask::Seat { knight, ready } => match self.lobby.as_mut() {
-                Some(Waiting::Host(h)) => h.seat(knight, ready),
-                Some(Waiting::Guest(g)) => g.seat_request(knight, ready),
+            online::Ask::Seat { ready } => match self.lobby.as_mut() {
+                Some(Waiting::Host(h)) => h.seat(ready),
+                Some(Waiting::Guest(g)) => g.seat_request(ready),
                 None => {}
             },
             online::Ask::Begin => {
@@ -3892,16 +3978,19 @@ impl App {
         self.mapping = Some(map);
     }
 
-    /// The game begins: the lobby's socket becomes a session, and every seat
-    /// takes the knight it chose.
+    /// The game begins: the lobby's socket becomes a session, and the four land
+    /// on `ChooseKnight`.
+    ///
+    /// **The lobby settles nothing about knights.** Pressing Begin does what the
+    /// title's own Start does: it opens `ChooseKnight`, the same screen a game at
+    /// one keyboard gets, and the seats take their turns on it in `choose_player`
+    /// order. The difference is only where the keys come from: the screen is
+    /// inside the lockstep gate from its first tick, so every machine walks the
+    /// same turns in the same order and [`App::begin_quest`] builds the same run
+    /// out of `choose_knight` on all of them.
     fn online_start(&mut self, ev: henge_net::Event, delay: u32) {
         let henge_net::Event::Start {
-            seats,
-            gore,
-            knights,
-            names,
-            check,
-            ..
+            seats, gore, check, ..
         } = ev
         else {
             return;
@@ -3921,60 +4010,16 @@ impl App {
         };
         self.net = Some(session);
         self.seat_was = [henge_net::SeatInput::default(); henge_core::shell::SEATS];
+        self.seat_pressed = [SeatPress::default(); henge_core::shell::SEATS];
         self.online = None;
-        // Nobody types a name at a select screen in an online game: they chose
-        // their knight in the lobby, so the quest starts from what the lobby
-        // settled. The title's own player count is overruled by the lobby's,
-        // which is what `Adjplayers` would have been told.
+        // The title's own player count is overruled by the lobby's, which is
+        // what `Adjplayers` would have been told, and it is what `choose_loop`
+        // counts down on the screen we are about to open.
         self.title.state.players = seats;
         self.title.state.gore = gore;
-        // **One world, and the same one on every machine.**
-        //
-        // The run this build keeps is one knight's: `Run` is `KnightTAB`'s
-        // record zero plus everything that belongs to the game rather than to a
-        // knight, and the other three records are `Run::rivals`, which the
-        // computer drives. So the quest a lockstep game plays is *the same
-        // quest* on all four machines: the run belongs to seat zero's knight,
-        // the arena seats every person in the lobby in the knight they chose,
-        // and the map's turn is `WHICH`'s, which is seat zero's while the
-        // records are split this way.
-        //
-        // This is the one place where being online is not simply the original
-        // with the input coming from further away, and it is deliberate rather
-        // than an oversight: four people each taking their own turn on the map
-        // needs the four records to be one kind of record, which is what
-        // `NextWHICH`'s `cmp ax, [NUM_PLAYERS]` (0xa4a9) is counting and what
-        // this build has not unified yet. See `docs/ROADMAP.md`.
-        //
-        // Deriving it from the lobby's own list rather than from `mine` is what
-        // makes every machine build the same run: a machine that started from
-        // its own seat's knight would be playing a different game from the
-        // first tick, and the fingerprint check says so within a tick of the
-        // start rather than an hour later.
-        let mine_knight = knights.first().copied().unwrap_or(0) as usize;
-        let mut roster: Vec<usize> = knights.iter().map(|k| *k as usize).collect();
-        for i in 0..henge_core::shell::SEATS {
-            if !roster.contains(&i) {
-                roster.push(i);
-            }
-        }
-        self.practice = false;
-        self.take_knight(mine_knight, roster);
-        // The name on the run is the one seat zero typed, for the same reason:
-        // it is that seat's knight the run belongs to, and a name that differed
-        // between machines would be a state that differed between machines.
-        if let Some(name) = names.first() {
-            if !name.is_empty() {
-                self.run.knight.name = name.clone();
-            }
-        }
         self.named.clear();
-        self.select = None;
-        self.mode = if self.map.is_some() {
-            Mode::Map
-        } else {
-            Mode::Combat
-        };
+        self.practice = false;
+        self.begin_select();
     }
 
     /// One tick of a game running across machines. Returns whether the
@@ -4054,15 +4099,43 @@ impl App {
     /// than sent, so two machines cannot disagree about whether one happened.
     /// That is `BOUNCEBUTTON`'s own rule.
     fn apply_turn(&mut self, turn: &henge_net::Turn) {
-        let mine = self.net.as_ref().map(|n| n.seat()).unwrap_or(0);
         for (seat, now) in turn.iter().enumerate() {
-            for (slot, held, pressed) in seat_slots(seat, *now, self.seat_was[seat], seat == mine) {
+            // Enter, backspace and the nine number keys have one slot between
+            // the four seats, because they are not controls and the original has
+            // no table for them. So they are written from **seat zero's** word
+            // and not from this machine's.
+            //
+            // That is not a shortcut, it is the only answer that keeps the
+            // machines together. A slot filled from `mine` would hold a
+            // different word on every machine, and every screen that reads one
+            // would then act on a different tick on each: a message box is
+            // dismissed by `WaitFIRE`, which is [`App::takes`], so one machine
+            // would still have the box up while another had walked on. It is
+            // also what the run already says: the quest belongs to seat zero's
+            // knight and the map's turn is `WHICH`'s, which is seat zero's, so
+            // seat zero is whose Enter closes a box on it. A screen where every
+            // seat needs its own is read out of [`App::seat_pressed`] instead,
+            // which is per seat and which `ChooseKnight` uses.
+            let shared = seat == 0;
+            for (slot, held, pressed) in seat_slots(seat, *now, self.seat_was[seat], shared) {
                 self.keys[slot] = held;
                 self.pressed[slot] = pressed;
             }
-            if seat == mine {
+            if shared {
                 self.typed = now.typed;
             }
+            // The same rising edges, kept per seat, for the keys that have one
+            // slot between the four of them. Worked out here because this is
+            // where last tick's word is still to hand.
+            let was = self.seat_was[seat];
+            let edge = |a: input::Action| now.pad & a.bit() != 0 && was.pad & a.bit() == 0;
+            self.seat_pressed[seat] = SeatPress {
+                left: edge(input::Action::Left),
+                right: edge(input::Action::Right),
+                take: edge(input::Action::Fire) || (now.take() && !was.take()),
+                back: now.back() && !was.back(),
+                typed: now.typed,
+            };
         }
         self.seat_was = *turn;
     }
@@ -6719,30 +6792,30 @@ mod tests {
         }
     }
 
-    /// Enter, backspace and the number keys are read for one seat only: the one
-    /// at this keyboard. A peer holding Enter must not work this machine's menus.
+    /// Enter, backspace and the number keys land in one slot each for all four
+    /// seats, so exactly one seat fills them and the other three do not.
     #[test]
-    fn the_keyboard_half_is_only_read_for_the_seat_at_this_keyboard() {
+    fn the_keyboard_half_is_filled_by_one_seat_and_no_other() {
         let typing = henge_net::SeatInput {
             keys: henge_net::key::TAKE | henge_net::key::BACK,
             number: Some(4),
             typed: Some('Q'),
             ..henge_net::SeatInput::default()
         };
-        let theirs = seat_slots(1, typing, henge_net::SeatInput::default(), false);
+        let other = seat_slots(1, typing, henge_net::SeatInput::default(), false);
         for slot in [ENTER_SLOT, BACKSPACE_SLOT, NUMBER_SLOT + 3] {
             assert!(
-                !theirs.iter().any(|(s, _, _)| *s == slot),
-                "slot {slot} came off somebody else's keyboard"
+                !other.iter().any(|(s, _, _)| *s == slot),
+                "slot {slot} was filled by a seat that does not fill it"
             );
         }
-        let mine = seat_slots(1, typing, henge_net::SeatInput::default(), true);
+        let shared = seat_slots(1, typing, henge_net::SeatInput::default(), true);
         assert_eq!(
-            mine.iter().find(|(s, _, _)| *s == ENTER_SLOT),
+            shared.iter().find(|(s, _, _)| *s == ENTER_SLOT),
             Some(&(ENTER_SLOT, true, true))
         );
         assert_eq!(
-            mine.iter().find(|(s, _, _)| *s == NUMBER_SLOT + 3),
+            shared.iter().find(|(s, _, _)| *s == NUMBER_SLOT + 3),
             Some(&(NUMBER_SLOT + 3, true, true))
         );
     }
