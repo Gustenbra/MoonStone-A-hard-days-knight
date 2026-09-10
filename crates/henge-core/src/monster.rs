@@ -1063,7 +1063,7 @@ pub fn decide(
         Controller::Ratman => ratman(s, brain, facing, shared),
         Controller::Mudman => mudman(s, brain, facing),
         Controller::Balok => balok(s, brain, facing, shared),
-        Controller::Beast => beast(s, brain, seed, facing),
+        Controller::Beast => beast(s, brain, seed, facing, at),
         Controller::Demon => demon(s, brain, facing, shared),
         Controller::Dragon => dragon(s, brain, facing, shared, at),
         Controller::Claw => claw(s, shared),
@@ -2526,7 +2526,13 @@ fn balok_release(s: &Sight, shared: &mut Shared) -> Act {
 /// `ControlBeast`, `BeastCharge`, `SetBEASTZ` and `SetBeastTimer`: it does not
 /// track at all. It runs from one side of the arena to the other, turns round
 /// off the edge, waits, picks a depth and comes back.
-fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act {
+fn beast(
+    s: &Sight,
+    brain: &mut Brain,
+    seed: &mut u16,
+    facing: &mut i32,
+    at: &mut (i32, i32),
+) -> Act {
     // `BeastCharge`, 0x2fe6: the facing is the record's own `+8`, read to
     // choose which edge to test and written when the edge is reached.
     //
@@ -2543,13 +2549,28 @@ fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act 
     //   03004  mov word ptr [di + 2], 0xffce ; set down at -50
     //   03009  mov byte ptr [di + 8], 1     ; and turned to face right
     //
-    // The edges here are the arena's own bounds rather than 340 and 0, and
-    // the beast is not set down beyond them, because this engine's walk gate
-    // keeps every fighter inside the field; see `Fighter::walk`.
+    // **The edges are the literal ones, and the beast really is set down
+    // beyond them.** This used to test the arena's own bounds and leave the
+    // column alone, on the grounds that "this engine's walk gate keeps every
+    // fighter inside the field". That gate was ours and it is gone
+    // (`Fighter::walk`: `CheckBorder` and `SBORD` are the person's knight's
+    // alone, and nothing clamps a column after the step), so the reason for
+    // the deviation went with it and the literal fits.
+    //
+    // It matters to how the fight reads: the beast is meant to disappear off
+    // one side, wait out `SetBeastTimer`, and come back in at a fresh depth,
+    // which is thirty pixels of run-up beyond the screen at either end. Held
+    // at the edge it turned in full view instead.
     let leftward = *facing < 0;
-    let (l, r) = (s.bounds.left, s.bounds.right);
-    let turning = if leftward { s.me.x <= l } else { s.me.x >= r };
+    // 02fec and 02ffe.
+    let turning = if leftward {
+        s.me.x < 0
+    } else {
+        s.me.x >= 0x154
+    };
     if turning {
+        // 02ff3 / 03004: set down past the edge, facing back in.
+        at.0 = if leftward { -50 } else { 0x17c };
         // 02ff8 / 03009: the turn is a write to `+8`.
         *facing = if leftward { 1 } else { -1 };
         // `SetBEASTZ`: every other pass is dead on his line, and the one
@@ -3922,6 +3943,50 @@ mod tests {
         )
     }
 
+    /// The same, handing back `+2` and `+6` as the controller left them:
+    /// `TrackKnight` (0x3c51) and `BeastCharge` (0x2ff3) both write the
+    /// record's own position where they stand.
+    fn ask_at(
+        def: &ActorDef,
+        brain: &mut Brain,
+        me_x: i32,
+        foe_x: i32,
+        dy: i32,
+        facing: &mut i32,
+    ) -> (Act, (i32, i32)) {
+        let me = at(me_x, 50);
+        let foe = at(foe_x, 50 + dy);
+        let s = Sight {
+            me: &me,
+            foe: &foe,
+            def,
+            bounds: Bounds {
+                left: 0,
+                right: 319,
+                top: 10,
+                bottom: 114,
+            },
+            gore: true,
+            body: false,
+            decapped: false,
+            progression: 0,
+            perch: None,
+            foe_blow: 0,
+            head_health: None,
+        };
+        let mut seed = 0x2f1du16;
+        let mut here = (me.x, me.y);
+        let act = decide(
+            &s,
+            brain,
+            &mut seed,
+            facing,
+            &mut crate::monster::Shared::default(),
+            &mut here,
+        );
+        (act, here)
+    }
+
     /// The same, keeping the fight's own shared words and, for the ratman, a
     /// tree to leap into: what the two creatures with a repertoire need.
     fn ask_shared(
@@ -4730,23 +4795,45 @@ mod tests {
             facing, 1,
             "and `BeastCharge` leaves +8 alone short of the edge"
         );
-        // At the right edge it turns and waits: `BeastCharge+18` writes 3
-        // into `+8`, and nothing else about it changes.
+        // Short of 0x154 it does not turn, even past the right-hand edge of
+        // the screen: the literal is 340, not 319, and it was only ever 319
+        // here because a border gate of ours held the beast inside the arena.
         let mut b = Brain::default();
         let mut facing = 1;
-        assert_eq!(ask_facing(&def, &mut b, 319, 40, 0, &mut facing), Act::Idle);
-        assert_eq!(facing, -1, "it turned round: +8 is 3");
+        assert!(matches!(
+            ask_facing(&def, &mut b, 330, 40, 0, &mut facing),
+            Act::Walk { dx: 1, .. }
+        ));
+        assert_eq!(facing, 1, "still charging at 330");
+        // At 0x154 it turns, is set down at 0x17c, and waits: `BeastCharge`
+        // 0x2fec writes the column at 0x2ff3 and `+8` at 0x2ff8.
+        let mut b = Brain::default();
+        let mut facing = 1;
+        let (act, at) = ask_at(&def, &mut b, 0x154, 40, 0, &mut facing);
+        assert_eq!(act, Act::Idle);
+        assert_eq!(at.0, 0x17c, "02ff3: set down at 380, off the screen");
+        assert_eq!(facing, -1, "02ff8: it turned round, +8 is 3");
         assert!((5..=20).contains(&b.timer), "and waits {} frames", b.timer);
         let before = b.timer;
-        assert_eq!(ask_facing(&def, &mut b, 319, 40, 0, &mut facing), Act::Idle);
+        assert_eq!(
+            ask_facing(&def, &mut b, 0x17c, 40, 0, &mut facing),
+            Act::Idle
+        );
         assert_eq!(b.timer, before - 1);
         assert_eq!(facing, -1, "and keeps facing left while it waits");
         // Off the edge and facing left, it charges left: `BeastMove+41`.
         b.timer = 0;
         assert!(matches!(
-            ask_facing(&def, &mut b, 319, 40, 0, &mut facing),
+            ask_facing(&def, &mut b, 0x17c, 40, 0, &mut facing),
             Act::Walk { dx: -1, .. }
         ));
+        // And the left edge is 0, where it is set down at -50: 0x2ffe.
+        let mut b = Brain::default();
+        let mut facing = -1;
+        let (act, at) = ask_at(&def, &mut b, -1, 40, 0, &mut facing);
+        assert_eq!(act, Act::Idle);
+        assert_eq!(at.0, -50, "03004");
+        assert_eq!(facing, 1, "03009");
     }
 
     /// `DemonAttack`: the slap inside a hundred, the zap out to a hundred and
