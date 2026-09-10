@@ -458,12 +458,16 @@ lets a status panel print health the way the original does, as `have/most`.
 
 | Original | What it is | Status |
 |---|---|---|
-| the wait at image `0x5a24` (`WAITVSYNC`, `WAITVBS`) | the frame | done, recovered: it **is** the engine's tick |
-| `Install_Timer`, `Remove_Timer`, `Times3`, the handler at `0x5934` | the 8253 timer | done, recovered: audio only |
+| the wait at image `0x5a24` (`WAITVSYNC`, `WAITVBS`) | the frame | done, recovered: it is the tick of **every loop but the fight** |
+| `0x96e1` / `0x96f1`, the `0:046c` deadline | the fight's frame | done, recovered: two BIOS ticks, 109.849 ms |
+| `Install_Timer`, `Remove_Timer`, `Times3`, the handler at `0x5934` | the 8253 timer | done, recovered: 54.6204 Hz, the rate the fight is measured in |
 
-**The game's frame is one vertical retrace, and nothing else paces it.** The wait is the
-unnamed public routine at image `0x5a24`, in the gap between `AdjustJoy` (`0x59f8`) and the
-start of `GFX` (`0x5a6e`):
+**The game has two clocks, and `Combat` is on the one that is not the retrace.** Most loops
+are paced by a vertical retrace; the fight is paced by a deadline two ticks of the BIOS
+counter at `0000:046c` ahead, which is 109.849 ms a frame. Both are below.
+
+**The retrace.** The wait is the unnamed public routine at image `0x5a24`, in the gap
+between `AdjustJoy` (`0x59f8`) and the start of `GFX` (`0x5a6e`):
 
 ```text
 5a24  ba da 03   mov dx, 0x3da        ; VGA input status 1
@@ -478,11 +482,17 @@ start of `GFX` (`0x5a6e`):
 5a33  c3         ret
 ```
 
-Eight places call it, and the four that matter are main loops, once a pass: `Combat` at
-`0x0354` (the loop is `0x0351` to `0x0374`, eleven calls and a jump back), `MapLOOP` at
-`0x0a306`, `ScanKEYS` at `0x0145a` and `FindLandscape` at `0x0afed`. The other four are
-`ShakeScreen` (`0x0496b`), `KnightWonGame` (`0x01117`), `FightDemon` (`0x01031`) and the
-palette fade-out loop (`0x05bb0`), which is why a fade is sixteen steps at one a frame.
+Ten places call it. Two are main loops waiting on it once a pass: `MapLOOP` at `0x0a306`
+and `ChooseLoop` at `0x015a0`, the knight select. One is `0x0afeb` itself — `mov cx, ax;
+call 0x5a24; loop` — which waits `ax` retraces and is the game's other pacing helper;
+`ScanKEYS` opens each pass with `ax = 5` through it (`0x01431`) and `HengeLOOP` closes each
+pass with `ax = 3` (`0x0b40c`). `Combat` calls it at `0x0354`, but inside a much longer
+budget of its own (below), so it never dominates there. The rest are one-shots:
+`ShakeScreen` (`0x0496b`), the palette fade loops (`0x05b3c`, `0x05bb0`, which is why a fade
+is sixteen steps at one a frame), and `KnightWonGame` (`0x01117`) and `FightDemon`
+(`0x01031`) — both of which load `ax` first (`0x14` and `0x0a`) and then call the
+single-retrace wait instead of `0x0afeb`, leaving the count dead. Those two look like a
+slip; see the note at the end of this section.
 
 **So the rate is the video mode's refresh rate, and the mode's timing is the BIOS's.** The
 image never writes the Miscellaneous Output register at `0x3c2`, and the only CRTC writes
@@ -492,18 +502,49 @@ timing: 25.175 MHz over 800 dots is 31468.75 lines a second, over 449 lines is
 **70.0863 frames a second**. That is the figure `henge_core::intro` already quoted for the
 story card's 420-retrace wait.
 
-The engine's tick is therefore 14,268,123 ns, in `henge-desktop`'s event loop. **It used to
-be sixty**, which ran every recovered cooldown, script duration and fade about fourteen
-percent slow, since all of them are counted in frames.
+So the retrace tick is 14,268,123 ns, `henge-desktop`'s `RETRACE_TICK`, and it paces the
+intro, the ending, the map, the select, the stone circle and every screen whose loop makes
+no wait at all. **It used to be sixty**, which ran every recovered retrace count about
+fourteen percent slow.
 
-**The 54.62 Hz timer is a different clock and drives only sound.** `Install_Timer` at
-`0x584f` programs counter 0 with `out 0x43, 0x36` and a divisor of `0x5555`, which is
-1193182 / 21845 = 54.62 Hz, and hooks int 8 to a handler at `0x5934`. The handler does
-exactly three things: `mov ah, 1; int 60h` to tick the music driver, the same with `int 61h`
-to tick the sound effects unless the card is 3, and `Times3`, a counter reloaded with 3, so
-every third tick it chains the original int 8 and DOS keeps its 18.2 Hz time. It touches no
-game state. `henge_audio::music` carries that rate inside the score, so the tunes are
-unaffected by the game's clock.
+**The fight's frame is two BIOS ticks, and it is the timer that says how long that is.**
+`MOON:Combat` at `0x351` opens with `call 0x96e1` and closes with `call 0x96f1` at `0x36c`,
+with the whole loop body between them. `0x96e1` is `sub ax, ax; mov es, ax; mov ax,
+es:[0x46c]; inc ax; inc ax; mov [0xc2f6], ax` — the BIOS tick counter plus two, stored as a
+deadline — and `0x96f1` spins `jb` on the same counter until it arrives. Those two routines
+have one caller each and both are in `Combat`.
+
+`Install_Timer` at `0x584f` is what makes the BIOS counter's rate knowable. It saves the old
+int 8 vector into `[0x7c1b]`/`[0x7c1d]` (`0x5865`, `0x586c`), points the vector at its own
+handler (`0x5874`, entry `0x5928`), and programs counter 0 with `mov al, 0x36; out 0x43, al`
+and divisor `0x5555` (`0x58b9`..`0x58c4`): 1193182 / 21845 = **54.6204 Hz**. The handler
+ticks the music driver (`mov ah, 1; int 60h`), then the sound effects the same way unless the
+card is 3, and then at `0x5945` decrements `Times3` at `[0x7c19]`; only when that reaches
+zero does it reload it with 3 and `lcall [0x7c1b]` at `0x5951`, chaining the original int 8.
+**So it chains every third tick and `0000:046c` keeps its standard 18.2068 Hz.**
+
+Two of those is 2 / 18.2068 = **109.849 ms, 9.1034 frames a second**, which is exactly **six
+ticks of the 54.6204 Hz timer** — and six is what `DELAY` (`DS:0x91c`) is set to. A byte scan
+for `mov word [0x091c], 6` finds thirteen writes (the eleven `InitKnightvs*` routines,
+`InitGameStart+0xda` and `InitPractice+0x41`) and no read anywhere, because the loop
+hardcodes the same duration as the two BIOS ticks. `DELAY` is
+`henge_core::content::ActorDef::script_ticks`, and the timer tick is `henge-desktop`'s
+`TIMER_TICK`.
+
+It used to say the 54.62 Hz timer drove only sound and never the game, and the step it
+missed was the `lcall [0x7c1b]` chain at `0x5951`. With the fight on the retrace instead, a
+combat frame was 6 x 14.268 = 85.61 ms against the original's 109.849, so **everything in a
+fight ran 1.2832x too fast**. `henge_audio::music` carries the 54.6204 Hz rate inside the
+score independently of the game's clock, so the tunes were never affected either way.
+
+**Three loops have no wait of any kind.** `TavernLoop` (`0xb137`), `StatLOOP` (`0xbe13`),
+`DonateLoop` (`0xbbe6`), `WDLOOP` (`0xd7a`), `HWLOOP` (`0xe35`) and `DoOptions`/`OptionKeys`
+(`0x1241`/`0x1282`) blit, page-flip and go round again as fast as the machine manages: the
+blit at `0x5a72` is a bare `rep movsb` and the page flip at `0x5a3e` only programs CRTC
+index 0x0c. There is no rate to recover for them. The engine leaves them on the retrace,
+which is the rate every other non-combat loop does name, and says so rather than inventing
+one. Their pointer is rate-limited by its own acceleration table (`_STATUS:StatACEL`), which
+is presumably why they needed no frame wait.
 
 ## 2.7 Memory and DOS `done, not needed`
 

@@ -216,14 +216,24 @@ pub struct ActorDef {
     pub origin: [i16; 2],
     /// How many ticks one script frame lasts.
     ///
-    /// The original ran its task loop once per game frame, and this engine's tick
-    /// is that frame: one vertical retrace, 70.0863 a second. So the relation is
-    /// a count of frames and not a conversion of clocks.
-    /// For the knight it is derived rather than felt: `Knight_SwWalkOn` bakes
-    /// its own travel into its part offsets, and it covers about 47 pixels in
-    /// the four frames of one stride. At a walking speed of two pixels a tick
-    /// that is six ticks a frame, which is the number that makes his feet keep
-    /// up with the ground he is crossing.
+    /// The original steps its tasks once per pass of whichever loop is up
+    /// (`0x9702`), so this is a count of the ticks of that loop's own clock and
+    /// not a conversion between clocks. For a fight that clock is the programmed
+    /// 54.6204 Hz timer, because `Combat` at `0x351` holds every pass to a
+    /// deadline two ticks of the BIOS counter at `0000:046c` ahead — 109.849 ms,
+    /// which is six timer ticks. See `henge_desktop`'s `TIMER_TICK` for the
+    /// chain, and `RETRACE_TICK` for the loops that wait on vertical retraces
+    /// instead.
+    ///
+    /// So for everything that fights this is **six**, and six is recovered
+    /// rather than derived: thirteen sites write 6 into `DELAY` (`DS:0x91c`) —
+    /// the eleven `InitKnightvs*` routines, `InitGameStart` and `InitPractice` —
+    /// and nothing anywhere reads it back, because the loop hardcodes the same
+    /// duration as those two BIOS ticks.
+    ///
+    /// It used to say the tick was one vertical retrace at 70.0863 a second, and
+    /// to justify the six off the walk instead. That ran every fight 1.2832x
+    /// fast: 85.61 ms to a frame where the original spends 109.849.
     #[serde(default = "one_tick")]
     pub script_ticks: u32,
     /// The attacks this actor has, by the name of the attack kind

@@ -240,6 +240,15 @@ mod tests {
     use crate::taskvm::{End, Instr, Part, Script};
     use std::collections::BTreeMap;
 
+    /// Three **vertical retraces**, borrowed from `HengeLOOP` (0xb40c: `mov ax,
+    /// 3; call 0xafeb`), because `TavernLoop` at 0xb137 names no wait of its
+    /// own. It is a retrace count either way and not a count of the 54.6204 Hz
+    /// timer the fight is paced by, so the arena's clock must not move it.
+    #[test]
+    fn the_retrace_count_is_the_stone_circles() {
+        assert_eq!(TICKS_PER_FRAME, 3);
+    }
+
     fn part(cel: u8) -> Instr {
         Instr::Part(Part {
             table: 1,

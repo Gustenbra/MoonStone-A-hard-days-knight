@@ -1818,11 +1818,22 @@ fn actor_definitions(
         // `BKwon`: a knight put down is one point of experience.
         experience: 1,
         body: [-9, 0, 9, 50],
-        // One stride of `Knight_SwWalkOn` is four frames, and this is how
-        // many sub-ticks this engine holds each of them for. See
-        // `ActorDef::script_ticks`; the person's own per-frame speed is the
-        // walk-speed table cited above, not a multiple of a flat per-tick
-        // number.
+        // Six, because six is what the original writes. `InitKnightvsKnight+0x32`
+        // (0x208c) stores 6 into `DELAY` (DS:0x91c), and so do the other ten
+        // `InitKnightvs*` routines, `InitGameStart+0xda` (0x1ce7) and
+        // `InitPractice+0x41` (0x202f) — thirteen writes, no read anywhere in the
+        // image. `DELAY` is the length of
+        // one combat frame in ticks of the 54.6204 Hz timer the game programs:
+        // `Combat` at 0x351 holds each pass to two ticks of the BIOS counter at
+        // 0000:046c, which is 109.849 ms, which is six of those timer ticks. See
+        // `ActorDef::script_ticks` and `henge_desktop`'s `TIMER_TICK`.
+        //
+        // This used to be justified off the walk instead, which was the wrong
+        // way round: it read the stride's travel against a flat two pixels a
+        // tick and arrived at six that way. The person's own per-frame speed is
+        // the walk-speed table cited above, not a multiple of a flat per-tick
+        // number, so that derivation had nothing to stand on even before the
+        // clock under it turned out to be the retrace rather than the timer.
         script_ticks: 6,
         bank_table: 1,
         ..ActorDef::default()
@@ -2026,8 +2037,12 @@ fn creature_definition(
             "dragon" | "demon" => 2,
             _ => 1,
         },
-        // Six ticks a frame, as the knight: every `InitKnightvs*` routine also
-        // writes 6 into `DELAY`, though nothing in the image reads it back.
+        // Six ticks a frame, as the knight, and for the same reason: each of the
+        // eleven `InitKnightvs*` routines writes 6 into `DELAY` (DS:0x91c), which is one
+        // combat frame in ticks of the programmed 54.6204 Hz timer. Nothing
+        // reads `DELAY` back because `Combat` at 0x351 hardcodes the same
+        // duration as a deadline two BIOS ticks ahead. See
+        // `ActorDef::script_ticks`.
         script_ticks: 6,
         bank_table: table,
         // What the moon does to it: `SetRatmenTables` is the one routine

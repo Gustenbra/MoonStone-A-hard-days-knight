@@ -547,6 +547,20 @@ impl Ending {
 mod tests {
     use super::*;
 
+    /// As in [`crate::intro`]: these are counts of **vertical retraces** off
+    /// `0xfae`, not of the 54.6204 Hz timer `Combat` waits on, so moving the
+    /// arena onto the timer must leave every one of them where it is.
+    #[test]
+    fn the_retrace_counts_are_the_recovered_ones() {
+        assert_eq!(CEREMONY_TICKS, 130);
+        assert_eq!(TALE_BEFORE, 100);
+        assert_eq!(TALE_AFTER, 500);
+        assert_eq!(THE_END_TICKS, 100);
+        // `retraces` is the identity, because the engine's tick on every screen
+        // but the arena *is* one retrace.
+        assert_eq!(retraces(0x1f4), 0x1f4);
+    }
+
     #[test]
     fn every_scene_holds_for_a_while_and_names_something_to_draw() {
         for (n, s) in SCENES.iter().enumerate() {

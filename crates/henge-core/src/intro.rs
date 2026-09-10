@@ -516,6 +516,20 @@ impl Intro {
 mod tests {
     use super::*;
 
+    /// These are counts of **vertical retraces**, and the intro is one of the
+    /// two loops in the game that genuinely waits on them: `INTR.EXE` paces its
+    /// scenes with `0xfae` (`mov cx, ax; call 0xf9e; loop`), the retrace wait.
+    /// They are not counts of the 54.6204 Hz timer the fight is paced by, so
+    /// putting the arena on that clock must not move a single one of them.
+    #[test]
+    fn the_retrace_counts_are_the_recovered_ones() {
+        assert_eq!(TICKS_PER_FRAME, 8);
+        assert_eq!(LOGO_TICKS, 130);
+        assert_eq!(CREDIT_TICKS, 105);
+        // `0x00b6`: `ax = 0x1a4`, four hundred and twenty retraces.
+        assert_eq!(MESSAGE_TICKS, 420);
+    }
+
     #[test]
     fn every_step_holds_for_a_while_and_names_something_to_draw() {
         for (n, s) in STEPS.iter().enumerate() {
