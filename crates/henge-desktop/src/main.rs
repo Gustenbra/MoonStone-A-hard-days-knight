@@ -414,6 +414,16 @@ fn prepare(app: &mut App, a: &[String]) {
     if let Some((x, y)) = point_arg(a) {
         app.point_at(x, y);
     }
+    // `--pace <percent>`, ours: see [`App::pace`]. Out of range is clamped
+    // rather than refused, so a recipe cannot fail on it.
+    if let Some(p) = a
+        .iter()
+        .position(|s| s == "--pace")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        app.pace = p.clamp(PACE_MIN, PACE_MAX);
+    }
     app.sheet = a.iter().any(|s| s == "--sheet");
     if a.iter().any(|s| s == "--bloodless") {
         app.title.state.gore = false;
@@ -972,6 +982,19 @@ const RETRACE_TICK: std::time::Duration =
 /// off.
 const MAP_PASS_RETRACES: u32 = 2;
 
+/// A hundred percent: the recovered rate, and what [`App::pace`] starts at.
+const PACE_FULL: u32 = 100;
+
+/// The narrowest and widest the dial goes. Half speed is about where a busy
+/// fight on a 1991 machine would have landed; a quarter again over the
+/// recovered rate is as fast as it goes, and there is nothing in the original
+/// that argues for either bound, so they are round numbers.
+const PACE_MIN: u32 = 40;
+const PACE_MAX: u32 = 125;
+
+/// One step of the dial.
+const PACE_STEP: u32 = 5;
+
 fn tick_len_for(mode: Mode) -> std::time::Duration {
     match mode {
         Mode::Combat => TIMER_TICK,
@@ -1037,6 +1060,26 @@ struct App {
     /// lockstep peer that shook differently would still agree on the fight.
     shake_rows: i32,
     shake_rng: u32,
+    /// **Ours, and the only number in the pacing that is.** How fast the game
+    /// runs, as a percentage of the rate recovered in [`tick_len_for`]: a
+    /// hundred is the recovered rate exactly and is the default, and a smaller
+    /// number is slower.
+    ///
+    /// It exists because **the original's frame wait is a floor and not a
+    /// rate.** `Combat` (0x351) opens by putting a deadline two BIOS ticks
+    /// ahead (0x96e1) and closes by spinning until the counter reaches it
+    /// (0x96f1) -- `jb`, so a pass that has already overrun the deadline waits
+    /// for nothing at all and the frame simply runs long. On the hardware of
+    /// 1991 the compose blit, the sprite pile and the palette work regularly
+    /// did overrun it, so what anybody actually played was
+    /// `max(109.849 ms, whatever that machine took)`. The floor is in the
+    /// image and can be recovered; the overrun was the machine's and cannot.
+    ///
+    /// So this is a dial, not a discovery, and it is kept apart from the
+    /// recovered constants for that reason. It scales the wall clock only:
+    /// nothing in `henge_core` reads it, the tick counts are unchanged, and two
+    /// peers running it at different settings still agree on the fight.
+    pace: u32,
     keys: [bool; 256],
     /// Keys that went down this tick. A menu wants presses, not held keys, or
     /// one tap of Down would run the highlight off the bottom of the list.
@@ -1555,7 +1598,8 @@ impl App {
             println!("menus: move with the direction keys, take with fire.");
             println!("J on the title screen calibrates a stick, escape there quits.");
             println!("ours: 1/2 set how many are playing, C the sheet, F2 switches");
-            println!("map/arena, [ and ] change arena, , and . change the opponent, R restarts");
+            println!("map/arena, [ and ] change arena, , and . change the opponent, R restarts,");
+            println!("- and = slow the game down and speed it up (--pace <percent> too).");
         }
 
         let intro_cast = reg.read_data("data.intro").ok().map(std::rc::Rc::new);
@@ -1594,6 +1638,7 @@ impl App {
             shake_rows: 0,
             // Any seed: nothing reads the result back into the fight.
             shake_rng: 0x2f1d,
+            pace: PACE_FULL,
             keys: [false; 256],
             pressed: [false; 256],
             reg,
@@ -1713,6 +1758,24 @@ impl App {
         // player two pressing fire must not flip the screen out from under the
         // fight. This is also what keeps a rebinding safe.
         let is_control = !self.bindings.raised_by(&named).is_empty();
+        // The pace dial, which is ours and not the original's: see
+        // [`App::pace`]. Outside the world borrow because it belongs to every
+        // screen, not only to a fight.
+        if down && !is_control && matches!(code, KeyCode::Minus | KeyCode::Equal) {
+            let step = if code == KeyCode::Minus {
+                self.pace.saturating_sub(PACE_STEP)
+            } else {
+                self.pace + PACE_STEP
+            };
+            self.pace = step.clamp(PACE_MIN, PACE_MAX);
+            let ms = self.tick_len().as_secs_f64() * 1000.0 * ticks_per_pass(self.mode) as f64;
+            self.notice(format!(
+                "speed {}%  ({:.1} ms a frame, the original's is {:.1})",
+                self.pace,
+                ms,
+                ms * self.pace as f64 / PACE_FULL as f64
+            ));
+        }
         if down && !is_control {
             if let Some(world) = self.world.as_mut() {
                 match code {
@@ -1874,10 +1937,17 @@ impl App {
         // original's panel was the fastest loop in the game, not the
         // slowest, and halving the pointer under a sheet would be ours and
         // not the original's.
-        if self.panel_now().is_some() {
-            return RETRACE_TICK;
+        let base = if self.panel_now().is_some() {
+            RETRACE_TICK
+        } else {
+            tick_len_for(self.mode)
+        };
+        // [`App::pace`], which is ours: a hundred leaves the recovered tick
+        // exactly as it stands.
+        if self.pace == PACE_FULL {
+            return base;
         }
-        tick_len_for(self.mode)
+        base * PACE_FULL / self.pace.max(1)
     }
 
     /// One tick. A key press is an edge: it lasts exactly this tick and is
@@ -5434,6 +5504,43 @@ mod tests {
         // 9.1034 frames a second.
         let fps = 1.0 / frame.as_secs_f64();
         assert!((fps - 9.1034).abs() < 0.001, "the fight ran at {fps} fps");
+    }
+
+    /// The dial that exists because the original's wait is a **floor**, not a
+    /// rate: `0x96fe` is `jb`, so a pass that has already overrun its deadline
+    /// waits for nothing. See [`App::pace`].
+    ///
+    /// A hundred must leave every recovered tick alone to the nanosecond,
+    /// because everything above this is measured against them.
+    #[test]
+    fn the_pace_dial_is_ours_and_a_hundred_changes_nothing() {
+        let Some(mut app) = quest_app() else { return };
+        assert_eq!(app.pace, PACE_FULL, "it starts at the recovered rate");
+        for mode in [Mode::Combat, Mode::Map, Mode::Select, Mode::Title] {
+            app.mode = mode;
+            assert_eq!(
+                app.tick_len(),
+                tick_len_for(mode),
+                "{mode:?} at a hundred is the recovered tick untouched"
+            );
+        }
+        // Half speed is twice the wall clock a tick takes, and the tick counts
+        // themselves never move: `ticks_per_pass` is the image's six either way.
+        app.mode = Mode::Combat;
+        app.pace = 50;
+        assert_eq!(app.tick_len(), TIMER_TICK * 2);
+        assert_eq!(ticks_per_pass(Mode::Combat), 6);
+        // And it is bounded, so no key press can stop the game or run it away.
+        for _ in 0..200 {
+            app.key(KeyCode::Minus, true);
+            app.key(KeyCode::Minus, false);
+        }
+        assert_eq!(app.pace, PACE_MIN);
+        for _ in 0..200 {
+            app.key(KeyCode::Equal, true);
+            app.key(KeyCode::Equal, false);
+        }
+        assert_eq!(app.pace, PACE_MAX);
     }
 
     /// `COLCON` (0x4988) and `KnightGlowOn` (0x8f8) run once a loop pass. A
