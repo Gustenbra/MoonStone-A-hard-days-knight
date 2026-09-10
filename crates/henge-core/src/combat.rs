@@ -229,6 +229,29 @@ pub struct Fighter {
     pub max_health: i32,
     /// One connect per swing, however many frames carry a hit line.
     pub struck: bool,
+    /// The actor record's `+0xc`: **this fighter's blow landed on the pass
+    /// just gone.** One of the three things that make a controller run.
+    ///
+    /// Cleared for every actor at the top of the collision pass, which is the
+    /// routine at 0x2a2b that `Combat`'s own call at 0x366 opens with: the
+    /// dragon's record at DS:0x6e26, then twenty at 0x6f08 and four at 0x6c9e,
+    /// `+0xc` and `+0xe` zeroed on each. So it means "this pass", never "ever".
+    #[serde(default)]
+    pub hit_landed: bool,
+    /// The actor record's `+0xe`: **this fighter took a blow on the pass just
+    /// gone.** Cleared with [`Fighter::hit_landed`] and by the same routine.
+    #[serde(default)]
+    pub took_blow: bool,
+    /// The task's running byte, `task+1`, as `TASKHANDLE` (0x971d) reads it.
+    ///
+    /// `tasloop` clears it at 0x99b9 when a script's last hold runs out, and
+    /// nothing starts a script again but the controller. This engine steps the
+    /// script and hands the next one over in the same place, so the byte is
+    /// never observed clear from outside; this is that observation, taken at
+    /// the instant the original would have cleared it, and spent when the
+    /// controller runs.
+    #[serde(default)]
+    pub script_ended: bool,
     /// What this fighter's blow takes off, or zero for the bout's own figure.
     /// Copied from the definition so a caller fighting at another scale can
     /// move it with the health, the way it moves the bout's.
@@ -382,6 +405,9 @@ impl Fighter {
             health: def.health,
             max_health: def.health,
             struck: false,
+            hit_landed: false,
+            took_blow: false,
+            script_ended: false,
             damage: def.damage,
             task: None,
             record: TaskActor::with_health(def.health),
@@ -523,12 +549,35 @@ impl Fighter {
 
     /// Is this fighter's own controller due to run?
     ///
-    /// The original's task loop calls a controller when the actor has hit
-    /// something, been struck, or its animation has ended (`task+1` clear).
-    /// A one-frame stance clears that every frame, so a standing creature is
-    /// asked every frame and a swinging one only when the swing is over.
+    /// **Recovered, and it is three conditions and nothing else.**
+    /// `TASKHANDLE` (0x9702) is the whole of it, once a pass over the ten task
+    /// slots:
+    ///
+    /// ```text
+    /// 009709  cmp byte [di], 0;        je  next    ; an empty slot
+    /// 00970e  mov si, [di+0x16]                    ; its actor record
+    /// 009711  cmp word [si+0xc], 0;    jne run     ; it hit something
+    /// 009717  cmp word [si+0xe], 0;    jne run     ; it was struck
+    /// 00971d  cmp byte [di+1], 0;      jne next    ; its script is still running
+    /// run:
+    /// 009724  mov bx, [di+0x1a]; call [bx+CONTROLTABLE]
+    /// 00972c  cmp si, -1;  je next                 ; 0xffff: change nothing
+    /// 009731  or  si, si;  je  kill                ; 0: kill the task
+    /// 009735  [di+2] = si ... [di+1] = 1           ; the new script, running
+    /// ```
+    ///
+    /// `[di+1]` is the task's running byte, cleared at 0x99b9 when the hold
+    /// countdown reaches the end of a script.
+    ///
+    /// **There is no state machine in it.** This used to answer true for any
+    /// fighter that was not in a committed state, which let a controller
+    /// pre-empt a script that had not finished: the beast's turn at the screen
+    /// edge is `Beast_Drool1`, four frames each held three, and it was being
+    /// cut from twelve frames to one. The same short circuit inverted is a
+    /// creature stuck holding a frame for ever, because nothing else could ask
+    /// it to move on.
     pub fn ready(&self, def: &ActorDef) -> bool {
-        !self.state.is_committed() || self.animation_done(def)
+        self.animation_done(def) || self.script_ended || self.hit_landed || self.took_blow
     }
 
     pub fn sequence<'a>(&self, def: &'a ActorDef) -> Option<&'a Sequence> {
@@ -781,7 +830,11 @@ impl Fighter {
                 // cycle back and plays the stance instead, which is what
                 // makes a man held up by a tree stand still rather than
                 // walk on the spot.
-                if !moved {
+                // `MonsterWalk` (0x4ea8): every direction refused winds the
+                // cycle back to nought and plays the stance. Only for a mover
+                // that asked in the first place; a beast refused nothing, so a
+                // beast never stands.
+                if !moved && def.controller().walk_collides() {
                     self.enter(State::Idle);
                 }
             }
@@ -872,7 +925,9 @@ impl Fighter {
         // `MonsterWalk+19` (0x4e9e) and `MudmenMove+65` (0x53c0) all call
         // before `CheckBorder` and `SBORD`, and whose answer they `and` into
         // `+0x26` exactly as this does.
-        if !others.is_empty() {
+        // And only for the three movers that ask: see
+        // `Controller::walk_collides`.
+        if !others.is_empty() && def.controller().walk_collides() {
             let me = crate::arena::Occupant {
                 x: self.x,
                 depth: self.y,
@@ -1106,10 +1161,24 @@ impl Fighter {
                     step_now = true;
                     // The script ended. A state with more than one script
                     // is a cycle, and this is where the next one is handed
-                    // over, which is what `TASKHANDLE` does when it sees
-                    // `task+1` cleared. A death is not handed anything: it
-                    // ended, and a corpse that replays its fall is a corpse
-                    // that will not lie still.
+                    // over. A death is not handed anything: it ended, and a
+                    // corpse that replays its fall is a corpse that will not
+                    // lie still.
+                    //
+                    // **And the end is remembered.** In the original these
+                    // are two routines: `tasloop` (0x97ad) only steps scripts
+                    // and clears the task's running byte at 0x99b9 when one
+                    // ends, and `TASKHANDLE` (0x9702) is the only thing that
+                    // hands over a new one, which it does by asking the
+                    // controller. This engine does both here, so the running
+                    // byte is never once observed clear from outside and a
+                    // controller gated on it could never be reached. The flag
+                    // is that observation, taken at the instant the original
+                    // would have cleared the byte, and it is what
+                    // [`Fighter::ready`] reads.
+                    if !t.running && self.state != State::Dead {
+                        self.script_ended = true;
+                    }
                     if !t.running && self.state != State::Dead {
                         // `NextWalk` 0x4ef7: `add byte ptr [si+0xa], al`
                         // with `al` the `bp` `MoveBACK` chose, then
@@ -2422,6 +2491,64 @@ pub(crate) mod tests {
     /// `ControlKnight`'s `A1$` to `A4$` (0x3fd6 to 0x4012): a step straight
     /// up is drawn on `KnightWalSw+0x10`, straight down on `+0x20`, and any
     /// horizontal step on row 0 whatever else is held, since the horizontal
+    /// `TASKHANDLE` (0x9702) asks a controller on three conditions and no
+    /// others, and a state machine is not one of them.
+    #[test]
+    fn a_controller_is_asked_only_when_the_script_ended_or_a_blow_landed() {
+        let def = scripted_def();
+        let mut f = Fighter::new("k", &def, 100, 100, 1);
+        // A task part way through a script answers no, whatever state it is
+        // in. This used to answer yes for anything not committed, which is
+        // what cut the beast's twelve frame turn at the screen edge to one.
+        f.state = State::Idle;
+        f.task = Some(crate::taskvm::Task::new("stance", 0, 0, 1));
+        assert!(f.task.as_ref().unwrap().running);
+        assert!(!f.ready(&def), "a running script is not a question");
+        // 00971d: the running byte clear.
+        f.script_ended = true;
+        assert!(f.ready(&def));
+        f.script_ended = false;
+        assert!(!f.ready(&def));
+        // 009711: `+0xc`, it hit something.
+        f.hit_landed = true;
+        assert!(f.ready(&def));
+        f.hit_landed = false;
+        // 009717: `+0xe`, it was struck.
+        f.took_blow = true;
+        assert!(f.ready(&def));
+    }
+
+    /// `TASKWALKCOLLIDE` (0x9e06) has three callers in the whole image and
+    /// they are `ControlKnight`, `MonsterWalk` and `MudmenMove`. A beast is
+    /// moved by `BeastMove` (0x3053), which asks nobody, so it runs the knight
+    /// down instead of stopping against him.
+    #[test]
+    fn only_the_three_movers_that_ask_can_be_stopped_by_a_body() {
+        use crate::monster::Controller;
+        for c in [
+            Controller::Trogg,
+            Controller::TroggSpear,
+            Controller::Troll,
+            Controller::Mudman,
+            Controller::Knight,
+        ] {
+            assert!(
+                c.walk_collides(),
+                "{c:?} goes through MonsterWalk or its own"
+            );
+        }
+        for c in [
+            Controller::Beast,
+            Controller::Ratman,
+            Controller::Balok,
+            Controller::Demon,
+            Controller::Dragon,
+            Controller::Claw,
+        ] {
+            assert!(!c.walk_collides(), "{c:?} moves without asking");
+        }
+    }
+
     /// `TaskCol_MainLoop` (0x9f26) tests each of the victim's `BODY` parts on
     /// its own -- `mov si, [bx+0x20]` at 0x9f5a and `add si, 0xa` at 0x9f98,
     /// ten bytes an entry, walked until an all-zero one -- and never merges

@@ -1986,11 +1986,32 @@ impl Bout {
             // struggle out of a hold is the one thing it is allowed to say.
             f.alive() && (f.holder.is_some() || f.ready(def_of(&f.actor))) && f.brain.rest <= 0
         };
+        if std::env::var_os("HENGE_GATE_DEBUG").is_some() {
+            let f = &self.fighters[me];
+            eprintln!(
+                "gate {} free={} state={:?} running={:?} script={:?} rest={} hit={} took={} ended={}",
+                f.actor,
+                free,
+                f.state,
+                f.task.as_ref().map(|t| t.running),
+                f.task.as_ref().map(|t| t.pc.script.clone()),
+                f.brain.rest,
+                f.hit_landed,
+                f.took_blow,
+                f.script_ended
+            );
+        }
         if !free {
             let mut i = self.fighters[me].drive;
             i.attack = false;
             return i;
         }
+        // `TASKHANDLE` starts the task again at 0x9744 with whatever the
+        // controller named, so the running byte it just read as clear is spent
+        // by the reading. A controller that answers 0xffff leaves the task as
+        // it stands, which is a frame held, and this engine's `Act::Idle` is
+        // the same thing.
+        self.fighters[me].script_ended = false;
         let decapped = self.decapping(&def_of);
         // `CalcDamage` (0x2d67) with the opponent in `si`, taken before the
         // fighters are borrowed: what his own blow takes off.
@@ -2076,6 +2097,9 @@ impl Bout {
             }
             (act, Intent::default())
         };
+        if std::env::var_os("HENGE_GATE_DEBUG").is_some() {
+            eprintln!("  act {} -> {:?}", self.fighters[me].actor, act);
+        }
         let order = |state, script: String, attack| {
             Some(Order {
                 state,
@@ -2277,6 +2301,15 @@ impl Bout {
     {
         self.parries.clear();
         self.sounds.clear();
+        // The routine at 0x2a2b, which `Combat`'s collision call (0x366 into
+        // 0x9f1d) opens with: `+0xc` and `+0xe` zeroed on the dragon's record
+        // and on all twenty four of the others before a single box is tested.
+        // So the two flags mean "on the pass just gone" and the controllers,
+        // which ran earlier in this same pass, read the previous one's.
+        for f in &mut self.fighters {
+            f.hit_landed = false;
+            f.took_blow = false;
+        }
         let bloodless = self.bloodless;
 
         // A blow in the air this tick: who or what is swinging it, the shape,
@@ -2695,6 +2728,16 @@ impl Bout {
                         );
                     }
                     connected = true;
+                    // `TaskCol_MainLoop` (0x9f81): `mov [si+0xc], di` on the
+                    // striker and `mov [di+0xe], si` on the struck, the two
+                    // fields `TASKHANDLE` reads to decide whether a controller
+                    // runs. A thrown thing has a task of its own, so the
+                    // striker here is the missile and not the hand that threw
+                    // it; only a blow of a body marks its owner.
+                    if blow.missile.is_none() {
+                        self.fighters[attacker].hit_landed = true;
+                    }
+                    self.fighters[target].took_blow = true;
                     // `CheckBlock`, for the blows that go through it.
                     let a_facing = self.fighters[attacker].facing;
                     let checked = blow.missile.is_none() && a_def.blockable;
@@ -2868,6 +2911,10 @@ impl Bout {
                 let striker = a_def.record_kind;
                 if self.fighters[target].finish(t_def, blow.attack, own_kind, striker) {
                     connected = true;
+                    if blow.missile.is_none() {
+                        self.fighters[attacker].hit_landed = true;
+                    }
+                    self.fighters[target].took_blow = true;
                     let decapitating = blow.attack == Some(Attack::Swing) && !bloodless;
                     if blow.missile.is_none() && !decapitating {
                         self.fighters[attacker].recover(a_def);
@@ -2940,6 +2987,12 @@ impl Bout {
             }
             mix(f.holder.map_or(-1, |h| h as i64));
             mix(f.hidden as i64);
+            // The record's `+0xc` and `+0xe`. They decide whether a controller
+            // runs at all, so two peers that disagree about them disagree about
+            // the fight.
+            mix(f.hit_landed as i64);
+            mix(f.took_blow as i64);
+            mix(f.script_ended as i64);
             mix(f.talismans as i64);
             mix(f.drive.dx as i64);
             mix(f.drive.dy as i64);

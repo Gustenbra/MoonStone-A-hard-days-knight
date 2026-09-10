@@ -81,6 +81,36 @@ impl Controller {
         })
     }
 
+    /// Whether this creature's own mover asks `TASKWALKCOLLIDE` before it
+    /// steps, and so can be stopped by another body.
+    ///
+    /// **Recovered exhaustively.** A scan of every call in the image, with the
+    /// targets shift-corrected, finds `TASKWALKCOLLIDE` (0x9e06) called from
+    /// three places and no others: `ControlKnight+217` (0x3f9d),
+    /// `MonsterWalk+19` (0x4e9e) and `MudmenMove+65` (0x53c0). `MonsterWalk`
+    /// is what `TroggMove` (0x2e61), `ControlTroll` (0x5626, 0x562f, 0x563b)
+    /// and the computer knight's `M4$` (0x4c10) all jump to.
+    ///
+    /// Everything else moves without asking. `BeastMove` (0x3053) is nine
+    /// instructions that end `add word ptr [di+2], bx`, and a charging beast
+    /// runs the knight down rather than stopping against him -- which is what
+    /// `Beast_BackToss` is for. A leaping ratman, a jumping Balok and the
+    /// dragon are moved by their own arcs, and the demon writes its step
+    /// inline.
+    ///
+    /// This engine put every creature through the test, so a beast that
+    /// reached the knight stopped dead against him and stood there.
+    pub fn walk_collides(self) -> bool {
+        matches!(
+            self,
+            Controller::Trogg
+                | Controller::TroggSpear
+                | Controller::Troll
+                | Controller::Mudman
+                | Controller::Knight
+        )
+    }
+
     /// Whether a blow takes hit points off this creature at all.
     ///
     /// `ControlClaw` never calls `CalcDamage`: the dragon's two forelimbs are
