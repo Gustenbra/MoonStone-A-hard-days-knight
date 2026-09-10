@@ -443,23 +443,32 @@ impl Run {
     pub fn finished_fight(&mut self, health_left: i32, won: bool, purse: u32) -> bool {
         // `BKwon` adds one for a knight put down, which is what stood in
         // every seat before the bestiary.
-        self.finished_fight_worth(health_left, won, purse, 1)
+        // No bout to ask, so no bite: the callers that have one use
+        // `finished_fight_worth` directly.
+        self.finished_fight_worth(health_left, won, purse, 1, false)
     }
 
     /// As [`Run::finished_fight`], with what the fallen were worth in
     /// experience as well as coin. Both come off the actor definitions, so a
     /// dragon can be worth the original's two and a trogg whatever the pack
     /// says, without a table here.
+    /// `bitten` is the bout's `+0x60`: a ratman got its teeth in during the
+    /// fight (`RatmanStruck1+21`, 0x42a1). It is carried out rather than
+    /// cleared, because that byte is the knight record's and outlives the
+    /// bout -- `GiveBK` reads it on every new day.
     pub fn finished_fight_worth(
         &mut self,
         health_left: i32,
         won: bool,
         purse: u32,
         xp: u32,
+        bitten: bool,
     ) -> bool {
         if self.over {
             return false;
         }
+        // 042a1: caught, and only the healer takes it off again.
+        self.bitten |= bitten;
         self.fights += 1;
         // The end of `Combat` clears the backfire flag: a curse is one bout.
         self.cursed = false;
@@ -1906,7 +1915,7 @@ mod magic_tests {
         r.finished_fight(20, true, 0);
         r.finished_fight(20, true, 0);
         r.finished_fight(20, true, 0);
-        r.finished_fight_worth(20, true, 0, 2);
+        r.finished_fight_worth(20, true, 0, 2, false);
         assert_eq!(r.experience, 5, "three bouts at one and a dragon's two");
         assert!(r.can_level());
         assert!(r.spend_experience(Ability::Strength, &items));

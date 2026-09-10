@@ -199,6 +199,15 @@ pub struct Bout {
     /// are the renderer's, and are not rolled from this crate's seed.
     #[serde(default)]
     pub shake_count: u32,
+    /// `RatmanStruck1+21` (0x42a1): `mov byte ptr [di+0x60], 1`, the bite.
+    ///
+    /// `+0x60` is the knight record's own byte and it outlives the fight:
+    /// `GiveBK` reads it once a day and takes a life point off a knight who
+    /// carries it, and the healer is what clears it. So a ratman's bite is a
+    /// disease, not damage, and it was never being caught -- nothing in this
+    /// engine set the flag that `Run::bitten` has always read.
+    #[serde(default)]
+    pub bitten: bool,
     /// How many creatures this fight still owes, how many it holds at once, and
     /// what one of them is fielded with: `TotalMonsters`, `MaxMonsters`,
     /// `NumberInCombat` and `SIDE`. See [`crate::wave`].
@@ -261,6 +270,7 @@ impl Bout {
             decap: false,
             // `InitCombat+13` (0x33e): every fight opens with it clear.
             shake_count: 0,
+            bitten: false,
             wave: Wave::default(),
             arrivals: Arrivals::default(),
             progression: 0,
@@ -1386,6 +1396,55 @@ impl Bout {
             return;
         }
         self.hit_row(target, "Knight_SwSlapped", t_def);
+    }
+
+    /// `RatmanStruck1` (0x428c), which is `StruckTable`'s entry for kind
+    /// 0x12 and is the ratman's own two blows on the knight:
+    ///
+    /// ```text
+    /// 0428c  cmp word [si+0x28], 2          ; the bite
+    /// 04292  mov bx, [si+0x1a]; mov ax, [bx+2]
+    /// 04298  sub word [di+0x38], ax         ; RatmenDam[2], no CalcDamage
+    /// 0429b  mov word [0x783a], Ratman_KnightBit
+    /// 042a1  mov byte [di+0x60], 1          ; and he is bitten
+    /// 042a5  jmp 02d52
+    /// 042a8  cmp word [si+0x28], 4          ; the slash
+    /// 042ae  mov bx, [si+0x1a]; mov ax, [bx+4]
+    /// 042b7  mov word [0x783a], Ratman_KnightSlashed
+    /// 042c0  jmp MudmenStruck1              ; anything else: the generic one
+    /// ```
+    ///
+    /// Both scripts are the **knight's** to play -- `[0x783a]` is the current
+    /// actor's, and in `KnightGotStruck` that is the struck knight -- out of
+    /// the ratman's own bank table, exactly as the beast's toss is. Neither
+    /// was built: they are in the pack's script set and in nobody's
+    /// definition, so nothing could reach them and the knight took a ratman's
+    /// bite on his generic hurt row.
+    ///
+    /// The bite's real cost is `+0x60`, which outlives the bout.
+    fn ratman_struck_knight(
+        &mut self,
+        target: usize,
+        kind: Option<Attack>,
+        a_def: &ActorDef,
+        t_def: &ActorDef,
+    ) {
+        if t_def.controller() != Controller::Knight || a_def.controller() != Controller::Ratman {
+            return;
+        }
+        match kind {
+            // 0x2, `ControlRatCollide`'s bite.
+            Some(Attack::Lunge) => {
+                self.hit_row(target, "Ratman_KnightBit", t_def);
+                // 042a1, and it is not cleared at the end of the fight.
+                self.bitten = true;
+            }
+            // 0x4, the slash.
+            Some(Attack::Swing) => self.hit_row(target, "Ratman_KnightSlashed", t_def),
+            // 042c0: everything else falls into the generic handler, which is
+            // the corpse finisher and is `Fighter::finish`.
+            _ => {}
+        }
     }
 
     /// The rows an encounter's `InitKnightvs*` routine writes over the
@@ -2625,6 +2684,7 @@ impl Bout {
                     // club (`InitKnightvsTroll+16`, 0x26ba) and the demon's
                     // slap (`InitKnightvsDemon+40`, 0x2765).
                     self.beast_struck_knight(target, blow.attack, a_def, t_def);
+                    self.ratman_struck_knight(target, blow.attack, a_def, t_def);
                     self.troll_struck_knight(target, blow.attack, a_def, t_def);
                     self.demon_struck_knight(target, blow.attack, a_def, t_def);
                     self.dragon_struck(blow.missile.is_some(), blow.attack, a_def, t_def);
@@ -5148,6 +5208,52 @@ mod tests {
             Some(Attack::Chop),
             "02fb2: the walk order does not clear it",
         );
+    }
+
+    /// The ratman's two blows are the knight's own scripts to play, out of
+    /// the ratman's bank table, and the bite is a disease.
+    ///
+    /// `RatmanStruck1` (0x428c) writes `[0x783a]` twice -- `Ratman_KnightBit`
+    /// at 0x429b for kind 2 and `Ratman_KnightSlashed` at 0x42b7 for kind 4 --
+    /// and `[0x783a]` in `KnightGotStruck` is the struck knight's. Neither was
+    /// built: both scripts were in the pack and in nobody's definition. The
+    /// bite also sets `+0x60` (0x42a1), which `GiveBK` reads on every new day
+    /// and only the healer clears, and nothing in this engine was setting it.
+    #[test]
+    fn a_ratmans_bite_puts_the_knight_on_its_own_script_and_infects_him() {
+        let mut rat = def();
+        rat.controller = "ratman".into();
+        let mut knight = crate::combat::tests::depth_def();
+        for name in ["Ratman_KnightBit", "Ratman_KnightSlashed"] {
+            knight.animation.insert(name.into(), Default::default());
+        }
+        let mk = || {
+            Bout::new(
+                arena_field(),
+                vec![
+                    Fighter::new("r", &rat, 100, 100, 1),
+                    Fighter::new("k", &knight, 140, 100, -1),
+                ],
+            )
+        };
+        // 0x2, the bite.
+        let mut b = mk();
+        b.fighters[1].enter(State::Hurt);
+        b.ratman_struck_knight(1, Some(Attack::Lunge), &rat, &knight);
+        assert_eq!(b.fighters[1].script, "Ratman_KnightBit", "0429b");
+        assert!(b.bitten, "042a1: mov byte ptr [di+0x60], 1");
+        // 0x4, the slash, which carries no disease.
+        let mut b = mk();
+        b.fighters[1].enter(State::Hurt);
+        b.ratman_struck_knight(1, Some(Attack::Swing), &rat, &knight);
+        assert_eq!(b.fighters[1].script, "Ratman_KnightSlashed", "042b7");
+        assert!(!b.bitten, "only the bite bites");
+        // 042c0: anything else falls through to the generic handler.
+        let mut b = mk();
+        b.fighters[1].enter(State::Hurt);
+        b.ratman_struck_knight(1, Some(Attack::Chop), &rat, &knight);
+        assert_ne!(b.fighters[1].script, "Ratman_KnightBit");
+        assert!(!b.bitten);
     }
 }
 

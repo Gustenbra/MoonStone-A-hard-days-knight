@@ -1953,7 +1953,8 @@ impl Run {
         };
         // WhoLived, both records.
         let player_died = player_health <= 0;
-        self.finished_fight_worth(player_health, !player_died, 0, 0);
+        // A duel between knights: no ratman, so nothing to catch.
+        self.finished_fight_worth(player_health, !player_died, 0, 0, false);
         let rival_died = match self.rivals.get_mut(rival_index.wrapping_sub(1)) {
             Some(r) => {
                 r.health = rival_health;

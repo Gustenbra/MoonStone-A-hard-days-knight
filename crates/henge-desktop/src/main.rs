@@ -2533,11 +2533,29 @@ impl App {
                     raid = Some((usize::MAX, arena, family, guardian, count));
                 }
                 if let Some((lair, arena, family, guardian, count)) = raid {
-                    let here = self
-                        .visiting
-                        .as_ref()
-                        .map_or_else(String::new, |s| s.visit.place.clone());
-                    if self.begin_raid(lair, &arena, &family, &guardian, count, here) {
+                    let here = self.visiting.as_ref().map(|s| s.visit.place.clone());
+                    if let Some(w) = self.world.as_mut() {
+                        w.set_player_health(self.run.health_for_fight());
+                        w.set_player_daggers(self.run.knight.daggers);
+                        w.set_foe(&guardian);
+                        // Name the layout if the pack has it; fall back to the
+                        // family so a raid is never fought on no ground at all.
+                        if !w.set_arena(&arena) {
+                            let pick = self.run.next_arena(&family, w.rotation_len(&family));
+                            w.set_family(&family, pick);
+                        }
+                        // `AdjustLevel` (0x287e) takes a lair's own head count
+                        // out of the lair record and writes it over
+                        // `TotalMonsters`. How many of them stand in front of
+                        // you at once is `MaxMonsters`, which is the creature's
+                        // own and never this; the rest walk in as the ones
+                        // before them fall. See `henge_core::wave`.
+                        w.set_seats(self.title.state.players.max(1), 1);
+                        w.set_heads(Some(count.max(1) as i32));
+                        self.raiding = (lair != usize::MAX).then_some(lair);
+                        self.raid_place = here.unwrap_or_default();
+                        self.visiting = None;
+                        self.mode = Mode::Combat;
                         return;
                     }
                 }
@@ -2659,7 +2677,10 @@ impl App {
                             // worth. The run decides whether it is collected; a
                             // corpse collects nothing.
                             let xp = w.experience();
-                            self.run.finished_fight_worth(health, won, w.purse(), xp);
+                            // 042a1: a ratman's bite outlives the bout.
+                            let bitten = w.bout.bitten;
+                            self.run
+                                .finished_fight_worth(health, won, w.purse(), xp, bitten);
                         }
                         w.set_player_cursed(false);
                         // And what was thrown is gone: the sheet's daggers are
@@ -4332,53 +4353,6 @@ impl App {
         }
     }
 
-    /// The guardian's bout, stood up and walked into.
-    ///
-    /// `MOON` 0x0588 is the whole of it: `ClearCombat`, `InitLair`, which
-    /// colours the backdrop from the lair record's own landscape and lays out
-    /// its arena, and `InitCombat`. The map is only what is behind it until
-    /// the bout is done. `lair` is `usize::MAX` for the Valley's Guardian,
-    /// which is the same three calls with no lair record to come back to.
-    ///
-    /// `here` is the place the fight was entered from, which is where the
-    /// Valley's own outcome is spoken; a lair has no such screen and comes
-    /// back to its page instead. Answers whether the bout could be set up at
-    /// all: a pack whose arenas would not load has nowhere to fight.
-    fn begin_raid(
-        &mut self,
-        lair: usize,
-        arena: &str,
-        family: &str,
-        guardian: &str,
-        count: u32,
-        here: String,
-    ) -> bool {
-        let Some(w) = self.world.as_mut() else {
-            return false;
-        };
-        w.set_player_health(self.run.health_for_fight());
-        w.set_player_daggers(self.run.knight.daggers);
-        w.set_foe(guardian);
-        // Name the layout if the pack has it; fall back to the family so a
-        // raid is never fought on no ground at all.
-        if !w.set_arena(arena) {
-            let pick = self.run.next_arena(family, w.rotation_len(family));
-            w.set_family(family, pick);
-        }
-        // `AdjustLevel` (0x287e) takes a lair's own head count out of the lair
-        // record and writes it over `TotalMonsters`. How many of them stand in
-        // front of you at once is `MaxMonsters`, which is the creature's own
-        // and never this; the rest walk in as the ones before them fall. See
-        // `henge_core::wave`.
-        w.set_seats(self.title.state.players.max(1), 1);
-        w.set_heads(Some(count.max(1) as i32));
-        self.raiding = (lair != usize::MAX).then_some(lair);
-        self.raid_place = here;
-        self.visiting = None;
-        self.mode = Mode::Combat;
-        true
-    }
-
     /// Walk into a place and open its menu.
     ///
     /// A village has no menu and no picture: `_MAP:StackDecision` hands its kind
@@ -4406,43 +4380,6 @@ impl App {
             // (0x113e), which spends the rest of the day's distance.
             self.spend_day();
             return true;
-        }
-        // **A lair has no door, no backdrop of its own and no menu.**
-        // `_MAP:StackDecision` hands kind 2 straight to `MOON` 0x0574, which
-        // stores the lair record, takes the map's glows down and goes on to
-        // `ClearCombat`, `InitLair` and `InitCombat` there and then; a lair
-        // already beaten falls through to `LairGEM` and its page. Nothing on
-        // that path asks whether you meant it, because the paper's own
-        // `Enter Lair` was the asking. A screen offering `Enter Lair` and
-        // `Leave` over a backdrop asked the same question twice.
-        let raid = def.options.iter().find_map(|o| match &o.effect {
-            henge_core::place::Effect::Raid {
-                lair,
-                arena,
-                family,
-                guardian,
-                count,
-            } => Some((
-                *lair,
-                arena.clone(),
-                family.clone(),
-                guardian.clone(),
-                *count,
-            )),
-            _ => None,
-        });
-        if let Some((lair, arena, family, guardian, count)) = raid {
-            return match self.run.raid(lair) {
-                henge_core::lair::Raid::Guardian => {
-                    self.begin_raid(lair, &arena, &family, &guardian, count, id.to_string())
-                }
-                // `0x0586`'s other arm: the guardian is down already, so the
-                // floor goes up on `StatTYPE` 2 and nothing is fought.
-                henge_core::lair::Raid::Floor => {
-                    self.open_lair_page(lair, false);
-                    true
-                }
-            };
         }
         let home = def.pointer;
         match place::PlaceScene::open(&mut self.reg, def, id) {

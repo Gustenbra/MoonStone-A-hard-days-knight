@@ -187,6 +187,10 @@ const KNIGHT_SPAWNED: &[&str] = &[
     "Knight_SwOThrust",
     "Knight_SwDThrust",
     "Beast_BackToss",
+    // `RatmanStruck1` (0x429b, 0x42b7) hands the knight both of these out of
+    // the ratman's own table, the same way the beast's toss is handed him.
+    "Ratman_KnightBit",
+    "Ratman_KnightSlashed",
 ];
 
 /// The spray `AddBlood` starts, on bank table 4. Every part of it is gated.
