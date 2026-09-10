@@ -982,8 +982,21 @@ const RETRACE_TICK: std::time::Duration =
 /// off.
 const MAP_PASS_RETRACES: u32 = 2;
 
-/// A hundred percent: the recovered rate, and what [`App::pace`] starts at.
+/// A hundred percent: the rate recovered from the image, which is the floor
+/// `Combat` holds every pass to and nothing else.
 const PACE_FULL: u32 = 100;
+
+/// What the game actually opens at, and it is **not** [`PACE_FULL`].
+///
+/// Sixty percent of the recovered floor, which Carl set against his memory of
+/// playing the original. That is not a contradiction: the floor is the fastest
+/// the original could run and the overrun above it was the machine's, so a
+/// number below a hundred is what a real 1991 fight looked like and a hundred
+/// is only what the code permits at its quickest. See [`App::pace`].
+///
+/// At sixty a combat pass is 183.1 ms, 5.46 a second, against the floor's
+/// 109.849 ms and 9.10.
+const PACE_DEFAULT: u32 = 60;
 
 /// The narrowest and widest the dial goes. Half speed is about where a busy
 /// fight on a 1991 machine would have landed; a quarter again over the
@@ -1062,8 +1075,13 @@ struct App {
     shake_rng: u32,
     /// **Ours, and the only number in the pacing that is.** How fast the game
     /// runs, as a percentage of the rate recovered in [`tick_len_for`]: a
-    /// hundred is the recovered rate exactly and is the default, and a smaller
-    /// number is slower.
+    /// hundred is that rate exactly, and a smaller number is slower. It opens
+    /// at [`PACE_DEFAULT`], which is sixty.
+    ///
+    /// It is universal on purpose. Every loop's tick goes through here, so the
+    /// knight, the creatures, the animation, the colour cycling and the walk
+    /// across the map all move together and nothing drifts out of step with
+    /// anything else.
     ///
     /// It exists because **the original's frame wait is a floor and not a
     /// rate.** `Combat` (0x351) opens by putting a deadline two BIOS ticks
@@ -1599,7 +1617,8 @@ impl App {
             println!("J on the title screen calibrates a stick, escape there quits.");
             println!("ours: 1/2 set how many are playing, C the sheet, F2 switches");
             println!("map/arena, [ and ] change arena, , and . change the opponent, R restarts,");
-            println!("- and = slow the game down and speed it up (--pace <percent> too).");
+            println!("- and = slow the game down and speed it up (--pace <percent> too);");
+            println!("it opens at 60% of the rate the image says, which is a floor, not a rate.");
         }
 
         let intro_cast = reg.read_data("data.intro").ok().map(std::rc::Rc::new);
@@ -1638,7 +1657,7 @@ impl App {
             shake_rows: 0,
             // Any seed: nothing reads the result back into the fight.
             shake_rng: 0x2f1d,
-            pace: PACE_FULL,
+            pace: PACE_DEFAULT,
             keys: [false; 256],
             pressed: [false; 256],
             reg,
@@ -5515,7 +5534,17 @@ mod tests {
     #[test]
     fn the_pace_dial_is_ours_and_a_hundred_changes_nothing() {
         let Some(mut app) = quest_app() else { return };
-        assert_eq!(app.pace, PACE_FULL, "it starts at the recovered rate");
+        assert_eq!(
+            app.pace, PACE_DEFAULT,
+            "and it opens at sixty, not at the floor"
+        );
+        // Sixty percent: a combat pass is 183.1 ms rather than 109.849.
+        app.mode = Mode::Combat;
+        let pass = app.tick_len() * ticks_per_pass(Mode::Combat);
+        let ms = pass.as_secs_f64() * 1000.0;
+        assert!((ms - 183.08).abs() < 0.1, "a pass at sixty took {ms} ms");
+        // A hundred must leave every recovered tick alone to the nanosecond.
+        app.pace = PACE_FULL;
         for mode in [Mode::Combat, Mode::Map, Mode::Select, Mode::Title] {
             app.mode = mode;
             assert_eq!(
