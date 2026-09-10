@@ -1320,6 +1320,53 @@ impl Fighter {
         (l <= r && t <= b).then_some((l, t, r, b))
     }
 
+    /// The victim's hit area as `TaskCol_MainLoop` reads it: **a list of
+    /// rectangles, one per `BODY` part, tested one at a time.**
+    ///
+    /// ```text
+    /// TaskCol_MainLoop 09f2e  mov di, [bp+0x1e]     ; the striker's weapons
+    /// TaskCol_WeoponLoop
+    ///          09f32  ax = [di]; or ax, [di+2]; je NextTask   ; list ends on a zero entry
+    ///          09f5a  mov si, [bx+0x20]     ; the victim's BODY list
+    ///          09f5d  ax = [si]; or ax, [si+2]; je skip
+    ///          09f6a  call COLCHK           ; ONE weapon rect against ONE body rect
+    ///          09f98  add si, 0xa           ; and on to the next body rect
+    ///          09fa2  add di, 0xa           ; and the next weapon rect
+    /// ```
+    ///
+    /// Ten bytes an entry, walked until an all-zero one, on both sides. **The
+    /// original never merges them.** This engine did, and one bounding box
+    /// over every part a figure is drawn from is far too generous: a knight
+    /// ducking with his sword held high has a box that still reaches the
+    /// height his head was at, so a spear thrust through the empty air inside
+    /// it counted as a hit. That is why `Knight_SwEvade` -- which
+    /// `InitKnightvsTroggSpear` (0x21d8, 0x21dd) puts on the knight's block
+    /// *and* evade rows, so ducking is the whole answer to a spear -- never
+    /// ducked anything, and why a thrown dagger hit a knight in mid-thrust.
+    ///
+    /// `COLCHK` (0x9fcd) goes further still and looks each cel's hit area up
+    /// in a table (`FINDHA`/`FONDHA`, 0x9ff9), so the original is finer than
+    /// rectangles even here. This is the loop shape, not the innermost test.
+    pub fn body_rects(&self, def: &ActorDef) -> Vec<(i32, i32, i32, i32)> {
+        let Some(task) = self.task.as_ref() else {
+            return Vec::new();
+        };
+        if !task.active {
+            return Vec::new();
+        }
+        let mirror = task.mirror();
+        let at = (task.x, task.y, task.z);
+        task.shown
+            .iter()
+            .filter(|p| p.is(crate::taskvm::part_flags::BODY))
+            .filter_map(|part| {
+                let bank = def.bank(part.table, part.bank)?;
+                let p = crate::taskvm::place(part, bank, at, mirror)?;
+                Some((p.x, p.y, p.x + p.w as i32, p.y + p.h as i32))
+            })
+            .collect()
+    }
+
     pub fn body(&self, def: &ActorDef) -> (i32, i32, i32, i32) {
         let [x0, y0, x1, y1] = def.body;
         let (a, b) = (x0 as i32 * self.facing, x1 as i32 * self.facing);
@@ -2363,6 +2410,31 @@ pub(crate) mod tests {
     /// `ControlKnight`'s `A1$` to `A4$` (0x3fd6 to 0x4012): a step straight
     /// up is drawn on `KnightWalSw+0x10`, straight down on `+0x20`, and any
     /// horizontal step on row 0 whatever else is held, since the horizontal
+    /// `TaskCol_MainLoop` (0x9f26) tests each of the victim's `BODY` parts on
+    /// its own -- `mov si, [bx+0x20]` at 0x9f5a and `add si, 0xa` at 0x9f98,
+    /// ten bytes an entry, walked until an all-zero one -- and never merges
+    /// them. The difference is not cosmetic: a figure drawn from two parts
+    /// with air between them has a union that fills the gap in.
+    #[test]
+    fn a_blow_through_the_gap_between_two_body_parts_misses() {
+        // A high part and a low one, and a thrust straight through the air
+        // between them.
+        let high = (0, 0, 20, 10);
+        let low = (0, 40, 20, 50);
+        let union = (0, 0, 20, 50);
+        let thrust = vec![(-5, 25), (30, 25)];
+        assert!(
+            line_hits_body(&thrust, union),
+            "the union is what used to swallow the gap"
+        );
+        assert!(!line_hits_body(&thrust, high));
+        assert!(!line_hits_body(&thrust, low));
+        // And a thrust at the height of either part still lands on it.
+        let at_the_head = vec![(-5, 5), (30, 5)];
+        assert!(line_hits_body(&at_the_head, high));
+        assert!(!line_hits_body(&at_the_head, low));
+    }
+
     /// tests come last and overwrite the row. The frame counter is shared
     /// across the rows, so changing row does not restart the stride.
     #[test]

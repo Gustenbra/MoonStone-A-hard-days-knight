@@ -2655,15 +2655,24 @@ impl Bout {
                     continue;
                 }
                 if self.fighters[target].alive() {
-                    // `FindWidth` (0x9dbc) and `perdone` (0x99d8): the box is
-                    // the frame's own, measured over the parts being drawn,
-                    // and only an actor with no parts falls back to the
-                    // authored rectangle. This is what lets a low thrust duck
-                    // a thrown dagger.
-                    let body = self.fighters[target]
-                        .drawn_body(t_def)
-                        .unwrap_or_else(|| self.fighters[target].body(t_def));
-                    if !line_hits_body(&blow.line, body) {
+                    // `TaskCol_MainLoop` (0x9f26) walks the victim's `BODY`
+                    // parts one rectangle at a time (`+0x20`, ten bytes an
+                    // entry, 0x9f5a and 0x9f98) and tests each on its own. It
+                    // never merges them, and merging them is what made a duck
+                    // useless here: one box over every part a figure is drawn
+                    // from still reaches the height the head was at, so a
+                    // spear through the empty air inside it counted.
+                    //
+                    // A fighter with no parts drawn -- a frame-list actor, or
+                    // one whose task has been killed -- falls back to the
+                    // authored rectangle, which is `ActorDef::body`.
+                    let rects = self.fighters[target].body_rects(t_def);
+                    let hit = if rects.is_empty() {
+                        line_hits_body(&blow.line, self.fighters[target].body(t_def))
+                    } else {
+                        rects.iter().any(|r| line_hits_body(&blow.line, *r))
+                    };
+                    if !hit {
                         continue;
                     }
                     connected = true;
@@ -2746,6 +2755,18 @@ impl Bout {
                         fatal,
                     });
                     if t_def.bleeds {
+                        // The blood goes on whichever rectangle the blow
+                        // actually crossed, or on the union where nothing was
+                        // drawn to cross.
+                        let body = rects
+                            .iter()
+                            .copied()
+                            .find(|r| line_hits_body(&blow.line, *r))
+                            .unwrap_or_else(|| {
+                                self.fighters[target]
+                                    .drawn_body(t_def)
+                                    .unwrap_or_else(|| self.fighters[target].body(t_def))
+                            });
                         let at = strike_point(&blow.line, body);
                         let depth = self.fighters[target].y;
                         let actor = self.fighters[target].actor.clone();

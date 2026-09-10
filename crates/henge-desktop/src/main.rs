@@ -994,9 +994,9 @@ const PACE_FULL: u32 = 100;
 /// number below a hundred is what a real 1991 fight looked like and a hundred
 /// is only what the code permits at its quickest. See [`App::pace`].
 ///
-/// At sixty a combat pass is 183.1 ms, 5.46 a second, against the floor's
-/// 109.849 ms and 9.10.
-const PACE_DEFAULT: u32 = 60;
+/// At eighty a combat pass is 137.3 ms, 7.28 a second, against the floor's
+/// 109.849 ms and 9.10. It was sixty first, which Carl found too slow.
+const PACE_DEFAULT: u32 = 80;
 
 /// The narrowest and widest the dial goes. Half speed is about where a busy
 /// fight on a 1991 machine would have landed; a quarter again over the
@@ -1618,7 +1618,7 @@ impl App {
             println!("ours: 1/2 set how many are playing, C the sheet, F2 switches");
             println!("map/arena, [ and ] change arena, , and . change the opponent, R restarts,");
             println!("- and = slow the game down and speed it up (--pace <percent> too);");
-            println!("it opens at 60% of the rate the image says, which is a floor, not a rate.");
+            println!("it opens at 80% of the rate the image says, which is a floor, not a rate.");
         }
 
         let intro_cast = reg.read_data("data.intro").ok().map(std::rc::Rc::new);
@@ -5538,11 +5538,11 @@ mod tests {
             app.pace, PACE_DEFAULT,
             "and it opens at sixty, not at the floor"
         );
-        // Sixty percent: a combat pass is 183.1 ms rather than 109.849.
+        // Eighty percent: a combat pass is 137.3 ms rather than 109.849.
         app.mode = Mode::Combat;
         let pass = app.tick_len() * ticks_per_pass(Mode::Combat);
         let ms = pass.as_secs_f64() * 1000.0;
-        assert!((ms - 183.08).abs() < 0.1, "a pass at sixty took {ms} ms");
+        assert!((ms - 137.31).abs() < 0.1, "a pass at eighty took {ms} ms");
         // A hundred must leave every recovered tick alone to the nanosecond.
         app.pace = PACE_FULL;
         for mode in [Mode::Combat, Mode::Map, Mode::Select, Mode::Title] {
