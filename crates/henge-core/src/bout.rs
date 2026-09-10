@@ -2612,7 +2612,14 @@ impl Bout {
                     continue;
                 }
                 if self.fighters[target].alive() {
-                    let body = self.fighters[target].body(t_def);
+                    // `FindWidth` (0x9dbc) and `perdone` (0x99d8): the box is
+                    // the frame's own, measured over the parts being drawn,
+                    // and only an actor with no parts falls back to the
+                    // authored rectangle. This is what lets a low thrust duck
+                    // a thrown dagger.
+                    let body = self.fighters[target]
+                        .drawn_body(t_def)
+                        .unwrap_or_else(|| self.fighters[target].body(t_def));
                     if !line_hits_body(&blow.line, body) {
                         continue;
                     }

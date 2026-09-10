@@ -1263,6 +1263,62 @@ impl Fighter {
     }
 
     /// Body rectangle in world space: (left, top, right, bottom), screen axes.
+    /// The box this fighter is actually filling *this frame*, from the parts
+    /// being drawn.
+    ///
+    /// **`FindWidth`, image 0x9dbc.** `TaskPlace$` calls it as it places each
+    /// part, with the part's own left and top in `bx`/`cx` and its cel's width
+    /// and height in `dx`/`bp`, and it keeps four running values: min and max
+    /// on both axes. `perdone` (0x99d8) then writes them into the record at
+    /// `+0x22`, `+0x24`, `+0x4e` and `+0x50`, which is the box the collision
+    /// code reads. So **an actor's box is recomputed every frame out of the
+    /// pose it is drawn in**, and is not a property of the actor at all.
+    ///
+    /// ```text
+    /// 09881  test byte ptr [si+3], 0x40   ; the part's own flags
+    /// 09885  jne  09890                   ; NO_BOUNDS: not folded in
+    /// 09887  mov  dx, [di+0xe]            ; the cel's width
+    /// 0988a  mov  bp, [di+0x10]           ; and its height
+    /// 0988d  call FindWidth
+    /// ```
+    ///
+    /// That is why a thrust ducks a thrown dagger in the original: the knight
+    /// lunging low is a low box, and a knife at chest height crosses nothing.
+    /// Against the authored rectangle this used to hand out, the same knife
+    /// hit him standing, crouching or flat on his face.
+    ///
+    /// `None` when there is no task or nothing drawn, where the caller falls
+    /// back to [`ActorDef::body`] -- a frame-list actor has no parts to
+    /// measure, and neither has a fighter whose task has been killed.
+    pub fn drawn_body(&self, def: &ActorDef) -> Option<(i32, i32, i32, i32)> {
+        let task = self.task.as_ref()?;
+        if !task.active {
+            return None;
+        }
+        let mirror = task.mirror();
+        let at = (task.x, task.y, task.z);
+        let (mut l, mut t, mut r, mut b) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for part in &task.shown {
+            // 09881: the one exclusion, and it is the part's own flag.
+            if part.flags & crate::taskvm::part_flags::NO_BOUNDS != 0 {
+                continue;
+            }
+            let Some(bank) = def.bank(part.table, part.bank) else {
+                continue;
+            };
+            let Some(p) = crate::taskvm::place(part, bank, at, mirror) else {
+                continue;
+            };
+            // 09dd9 and 09de5: `bx` and `bx + dx`. 09def and 09dfb: `cx` and
+            // `cx + bp`.
+            l = l.min(p.x);
+            r = r.max(p.x + p.w as i32);
+            t = t.min(p.y);
+            b = b.max(p.y + p.h as i32);
+        }
+        (l <= r && t <= b).then_some((l, t, r, b))
+    }
+
     pub fn body(&self, def: &ActorDef) -> (i32, i32, i32, i32) {
         let [x0, y0, x1, y1] = def.body;
         let (a, b) = (x0 as i32 * self.facing, x1 as i32 * self.facing);
@@ -2691,6 +2747,60 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    /// A fighter's collision box is the frame's, not the actor's.
+    ///
+    /// `FindWidth` (0x9dbc) is called from `TaskPlace$` (0x988d) as each part
+    /// is placed, with that part's own left, top, width and height, and keeps
+    /// min and max on both axes; `perdone` (0x99d8) writes the four into the
+    /// record at `+0x22`, `+0x24`, `+0x4e`, `+0x50`. So the box follows the
+    /// pose. A part flagged `NO_BOUNDS` (0x40, tested at 0x9881) is left out.
+    #[test]
+    fn the_body_box_is_measured_off_the_frame_being_drawn() {
+        let d = scripted_def();
+        let mut high = Fighter::new("k", &d, 100, 100, 1);
+        high.enter_on(State::Idle, d.scripts_for("idle")[0].clone());
+        high.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: false,
+            },
+            &field(),
+        );
+        let Some(idle) = high.drawn_body(&d) else {
+            // A fixture with no drawable parts proves nothing either way.
+            return;
+        };
+        // The authored rectangle is a different shape from the drawn one, or
+        // there would be nothing to tell apart.
+        let authored = high.body(&d);
+        assert!(
+            idle != authored,
+            "the frame's box and the authored one should not be the same rectangle",
+        );
+        // And it moves with the fighter, because it is measured in his own
+        // placed parts rather than looked up.
+        let mut moved = Fighter::new("k", &d, 140, 100, 1);
+        moved.enter_on(State::Idle, d.scripts_for("idle")[0].clone());
+        moved.step(
+            &d,
+            Intent {
+                dx: 0,
+                dy: 0,
+                attack: false,
+            },
+            &field(),
+        );
+        let shifted = moved.drawn_body(&d).expect("the same fixture draws");
+        assert_eq!(
+            shifted.0 - idle.0,
+            40,
+            "forty pixels along, forty pixels over"
+        );
+        assert_eq!(shifted.1, idle.1, "and no deeper");
     }
 
     /// The spear trogg's attack window is ten pixels wide, and a flat speed
