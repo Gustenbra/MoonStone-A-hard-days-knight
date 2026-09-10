@@ -1,37 +1,36 @@
 # henge
 
-A modern engine reimplementation of *Moonstone: A Hard Days Knight* (Amiga 1991, DOS 1992) written in Rust.
+A modern, playable recreation of *Moonstone: A Hard Days Knight* (originally released for Amiga in 1991, DOS in 1992), rebuilt from scratch in Rust.
 
-> **Status:** Playable and actively in development. Combat, overworld travel, towns, and the main quest are functional.
+> **Status:** Playable and actively in development. Combat, traveling the overworld, towns, and the main quest all work today.
 
-**Design Philosophy:** Strict accuracy over guessing. Where the original executable defines a routine, it is disassembled and ported directly to Rust with memory addresses cited in comments. Nothing is invented.
+**Why it's accurate:** Instead of guessing how the original game behaved, this project reads the original game's code directly and rebuilds each part to match it exactly. Nothing is invented, if the original did something a certain way, henge does it the same way.
 
 ---
 
 ## Features
 
-* **Combat & Arenas:** 56 arenas across four terrain types with accurate depth sorting, terrain boundaries, up to 4 local/AI fighters, 8 directional attack types, blocks, evades, and blood/gore toggles.
-* **Overworld & World Map:** Travel as the original measures it: a day is the knight's stride times sixteen held frames (`_MAP:DistanceDONE`, `GoTheDistance`), slow ground and the map's edge both cost steps (`CheckSLOW`, `MapMovement`), every encounter spends the rest of the day (`EncounterAllDone`), the moon moves every fourth day, and the 24 lairs hold the keys and the loot. There are no random ambushes, because the original has none: every fight is something you stand on and enter.
-* **Locations & NPCs:** Highwood, Waterdeep, healers, stone circle, Math the Wizard, taverns (dice gambling), mystics, and merchants.
-* **Bestiary:** Full enemy roster (Troll, Troggs, Ratmen, Mudmen, Beast, Balok, Demon, Dragon) matching original AI scripts, attack ranges, and setup attributes.
-* **Text & Messages:** Every message chain is the executable's own ten-byte records (`{text, x, y, flags, next}`, walked as `GFX:TextPTop` at `0x7a8a` walks them), glyphs blit in their own indices exactly as `GFX:TextP` at `0x7aee` does, `INSTRUCTMESSAGE`'s red ramp is the six palette words at `0x8f3b`, and a box waits for fire (`WaitFIRE`, `0x8251`) or covers a load, whichever its caller does.
-* **Music & Sound:** MIDI notes extracted directly from the original DOS Roland drivers, played through a built-in wavetable synth alongside original SFX.
-* **Modern Enhancements:** Rebindable controls (keyboard & gamepads), headless CLI runner, deterministic state serialization, and cross-platform save/load.
+- **Combat & Arenas** – 56 different arenas across four terrain types, with up to 4 fighters (you and/or AI) battling it out using 8 directional attacks, blocks, evades, and toggleable blood/gore.
+- **Overworld & World Map** – Travel across the map exactly like the original: distance, time of day, and the moon's phase all behave the same way they did in 1991. There are no random ambushes, every fight in the game is one you walk into on purpose.
+- **Locations & NPCs** – Visit Highwood, Waterdeep, healers, a stone circle, Math the Wizard, taverns with dice gambling, mystics, and merchants.
+- **Bestiary** – The full original enemy roster (Troll, Troggs, Ratmen, Mudmen, Beast, Balok, Demon, Dragon), each behaving exactly like their original AI.
+- **Music & Sound** – Original music and sound effects, extracted directly from the DOS version and played through a modern synth.
+- **Modern Enhancements** – Rebindable controls (keyboard & gamepad), a headless mode for automation/testing, and cross-platform save/load.
 
 ---
 
-## Quickstart
+## Getting Started
 
-### Prerequisites
+### What you'll need
 
-* [Rust](https://rustup.rs)
-* Python 3 (`pip install unicorn` required for binary asset extraction)
-* Original game data files from *Moonstone* (DOS)
-* Linux only: `libudev-dev` (for gamepad support)
+- [Rust](https://rustup.rs) installed
+- Python 3, with the `unicorn` package (`pip install unicorn`) – used to extract assets from the original game files
+- A copy of the original *Moonstone* game files (DOS version)
+- Linux only: the `libudev-dev` package (needed for gamepad support)
 
-### Running the Game
+### Running the game
 
-Place your original game files adjacent to the repository, or pass the path directly:
+Place your original Moonstone game files next to this repository, or point directly to where they are:
 
 ```sh
 # Linux / macOS
@@ -39,3 +38,4 @@ Place your original game files adjacent to the repository, or pass the path dire
 
 # Windows
 play.bat --data "C:\path\to\Moonstone"
+```
