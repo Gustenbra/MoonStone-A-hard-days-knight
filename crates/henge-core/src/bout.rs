@@ -1677,11 +1677,7 @@ impl Bout {
         let mut shared = self.shared;
         crate::monster::track_knight(&self.fighters[foe], def, &mut shared, &mut facing, &mut at);
         self.shared = shared;
-        // Unclamped, for the reason given in `monster_intent`: `TrackKnight`
-        // carries its own column limits (0x3c31 `cmp bx, 0x64`, 0x3c44
-        // `cmp bx, 0x1e`) and its depth writes at 0x3c51 and 0x3c5a have none
-        // at all.
-        let (nx, ny) = (at.0, at.1);
+        let (nx, ny) = GLOBAL.clamp(at.0, at.1);
         let f = &mut self.fighters[me];
         f.facing = facing;
         f.x = nx;
@@ -1944,6 +1940,7 @@ impl Bout {
                 me: &self.fighters[me],
                 foe,
                 def,
+                bounds: GLOBAL,
                 gore,
                 body: foe.finishable(t_def),
                 decapped,
@@ -1986,21 +1983,18 @@ impl Bout {
             }
             self.fighters[me].brain = brain;
             self.fighters[me].facing = facing;
-            // **Nothing clamps what a controller wrote**, and this was the
-            // other half of the borders that used to hold every fighter.
-            // `MonsterWalk` (0x4e8b) adds its step at 0x4eeb and 0x4ef1 and
-            // jumps straight to `NOTEND`; the controllers that write `+2`
-            // themselves -- `TrackKnight` (0x3c36, 0x3c49), `BeastCharge`
-            // (0x2ff3, 0x3004), `MudmenAppear` (0x5492) -- write their own
-            // literals, and no common limit is applied to any of them on the
-            // way out. `CheckBorder` (0x40d0) is the person's knight's alone
-            // and `Fighter::walk` applies it there.
+            // **Not clamped.** A controller that writes `+2` or `+6` where it
+            // stands carries its own bound or none at all: `TrackKnight`
+            // (0x3c41) refuses to take the dragon's head left of thirty with
+            // its own `sub bx, 5; cmp bx, 0x1e; jle`, and `BeastCharge`
+            // (0x2ff3, 0x3004) deliberately sets the column *outside* the
+            // screen, to 0x17c and -50, so the beast runs off one side and
+            // comes back in at a fresh depth.
             //
-            // `at` starts as the fighter's own position, so this clamp did not
-            // bound what a controller wrote: it bounded every creature in the
-            // arena, once a frame. Letting them out of the walk gate and then
-            // pulling them back here is why they still stopped dead on the
-            // knight's own wall after the gate was fixed.
+            // Clamping here to `X_LOW`..`X_HIGH` was the last of the invented
+            // bounds, and it was eating the beast's turn: it reached 344,
+            // asked to be set down at 380, and was pulled back to 320 to turn
+            // round in full view.
             self.fighters[me].x = at.0;
             self.fighters[me].y = at.1;
             self.rng = seed;
@@ -2290,21 +2284,15 @@ impl Bout {
                             let f = &self.fighters[i];
                             (f.x, f.y, f.facing)
                         };
+                        let bounds = GLOBAL;
                         for t in 0..self.fighters.len() {
                             if t == i || !self.fighters[t].hidden {
                                 continue;
                             }
-                            // `KnightON`, 0x5289: the arrival column is held
-                            // inside 1..0x13f and the depth is not touched at
-                            // all, which is the only bound in the image on
-                            // anything but the walking knight.
-                            //
-                            //   05289  cmp bx, 0x140; jl 05292; mov bx, 0x13f
-                            //   05292  or  bx, bx;    jge 05299; mov bx, 1
-                            let nx = (x + 0x89 * facing).clamp(1, 0x13f);
+                            let (nx, ny) = bounds.clamp(x + 0x89 * facing, y);
                             let f = &mut self.fighters[t];
                             f.x = nx;
-                            f.y = y;
+                            f.y = ny;
                             f.facing = -facing;
                             f.hidden = false;
                         }
@@ -3631,6 +3619,7 @@ mod tests {
                 me: &b.fighters[0],
                 foe: &b.fighters[1],
                 def: &balok,
+                bounds: GLOBAL,
                 gore: true,
                 body: false,
                 decapped: false,
@@ -3672,90 +3661,6 @@ mod tests {
             b.fighters[0].script, "Knight_SwSlapped",
             "the grab has no row of its own"
         );
-    }
-
-    /// **A controller's write-back is not clamped, and creatures do not stop
-    /// on the knight's wall.**
-    ///
-    /// `CheckBorder` (0x40d0) has three callers and all three are the
-    /// knight's: `ControlKnight+0xef` and the two halves of `KnightSLAP`.
-    /// `MonsterWalk` (0x4e8b), which is a creature's whole gate, calls
-    /// `TASKWALKCOLLIDE` at 0x4e9e and then adds its step at 0x4eeb and
-    /// 0x4ef1 with nothing between. `TroggTABLE` seats one creature at -50
-    /// and another at 360, which a border at 320 could never let walk in.
-    ///
-    /// `Fighter::walk`'s gate is only half of it. This pass used to end
-    /// `x = GLOBAL.clamp(...)`, and `at` starts as the fighter's own
-    /// position, so every creature took the knight's wall one controller
-    /// pass after the gate had correctly let it out.
-    #[test]
-    fn a_creature_is_not_pulled_back_to_the_knights_wall() {
-        let mut trogg = def();
-        trogg.controller = "trogg".into();
-        trogg.approach = 100;
-        trogg.back_off = 90;
-        let knight = def();
-        let defs: BTreeMap<String, ActorDef> = [
-            ("t".to_string(), trogg.clone()),
-            ("k".to_string(), knight.clone()),
-        ]
-        .into_iter()
-        .collect();
-        // Out where `TroggTABLE`'s second seat stands one, and further.
-        let mut b = Bout::new(
-            arena_field(),
-            vec![
-                Fighter::new("t", &trogg, 380, 100, -1),
-                Fighter::new("k", &knight, 200, 100, 1),
-            ],
-        );
-        b.monster_intent(0, 1, |a| &defs[a], true);
-        assert_eq!(
-            b.fighters[0].x, 380,
-            "the seat's own column, not `CheckBorder`'s 320"
-        );
-        // And the same on the other side, where the first seat is.
-        let mut b = Bout::new(
-            arena_field(),
-            vec![
-                Fighter::new("t", &trogg, -50, 100, 1),
-                Fighter::new("k", &knight, 200, 100, -1),
-            ],
-        );
-        b.monster_intent(0, 1, |a| &defs[a], true);
-        assert_eq!(b.fighters[0].x, -50, "and not `CheckBorder`'s 10");
-    }
-
-    /// `BeastCharge` at its edge (0x2fec, 0x2ff3): the turn writes the
-    /// record's own column out to `0x17c`, and the bout writes what the
-    /// controller left. Clamped, the beast turned in full view at the edge of
-    /// the picture instead of running off it.
-    #[test]
-    fn the_beasts_turn_sets_it_down_off_the_board() {
-        let mut beast = def();
-        beast.controller = "beast".into();
-        beast.approach = 2;
-        beast.back_off = 1;
-        let knight = def();
-        let defs: BTreeMap<String, ActorDef> = [
-            ("b".to_string(), beast.clone()),
-            ("k".to_string(), knight.clone()),
-        ]
-        .into_iter()
-        .collect();
-        let mut b = Bout::new(
-            arena_field(),
-            vec![
-                Fighter::new("b", &beast, 0x154, 100, 1),
-                Fighter::new("k", &knight, 160, 100, -1),
-            ],
-        );
-        b.monster_intent(0, 1, |a| &defs[a], true);
-        assert_eq!(
-            b.fighters[0].x, 0x17c,
-            "02ff3: mov word ptr [di + 2], 0x17c"
-        );
-        assert_eq!(b.fighters[0].facing, -1, "02ff8: mov byte ptr [di + 8], 3");
     }
 
     /// A knight who has the scripts the five remaining `InitKnightvs*`
@@ -4106,6 +4011,7 @@ mod tests {
                 me: &me,
                 foe: &foe,
                 def: &me_def,
+                bounds: GLOBAL,
                 gore: true,
                 body: false,
                 decapped: false,
@@ -4424,6 +4330,7 @@ mod tests {
             me: &b.fighters[0],
             foe: &b.fighters[1],
             def: &balok,
+            bounds: GLOBAL,
             gore: true,
             body: false,
             decapped: false,
