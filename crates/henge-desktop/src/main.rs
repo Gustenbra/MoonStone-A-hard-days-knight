@@ -931,12 +931,42 @@ const RETRACE_TICK: std::time::Duration =
 
 /// Which clock a screen's loop is paced by. See [`App::tick_len`], which is
 /// where the per-loop evidence is written down.
+/// How many retraces one pass of `MapLOOP` (0xa306) actually took.
+///
+/// **This one is observed, not recovered, and it is the only number in this
+/// file that is.** Everything around it is in the image and this is not, so
+/// it is written down rather than folded into something that looks derived.
+///
+/// What the image does say, exhaustively: the map loop waits for exactly one
+/// retrace, at `0xa306`. Every call in its whole body, `0xa306` to `0xa4c0`,
+/// was scanned with the targets shift-corrected for both `0x5a24` and the
+/// multi-retrace helper `0xafeb`, and there is one hit and no other. Nothing
+/// in it counts, divides or defers. `MapEffects` (0xa508) is a one-time
+/// install, and `SHOW` (0xa1f0) draws the token and steps the tasks with no
+/// wait of its own. So the loop is specified at one pass per retrace.
+///
+/// But a retrace wait is a floor and not a rate. `0x5a72` blits the compose
+/// page with the VGA in write mode 1, sixteen thousand latched byte-moves,
+/// and on the hardware of the day that ate most or all of a 14.268 ms
+/// retrace on its own. Whenever the pass overran, `0x5a24` caught the *next*
+/// retrace and the whole loop, movement and colour cycling together, halved.
+/// A fast machine ran it at 70 and a slow one at 35 or worse, which is why
+/// there is no constant to find: the original's map speed was its hardware's,
+/// and it never existed as a number anybody wrote.
+///
+/// Two is what Carl reports the original looking like against this build,
+/// which had been running the specified 70. Change it if a measurement ever
+/// says otherwise; a five second capture of the original's map is enough,
+/// since the cycle on entries 0x15..0x17 has a recovered period of 12 passes
+/// and counting colour steps against video frames reads the divisor straight
+/// off.
+const MAP_PASS_RETRACES: u32 = 2;
+
 fn tick_len_for(mode: Mode) -> std::time::Duration {
     match mode {
         Mode::Combat => TIMER_TICK,
-        Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Map | Mode::Place => {
-            RETRACE_TICK
-        }
+        Mode::Map => RETRACE_TICK * MAP_PASS_RETRACES,
+        Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Place => RETRACE_TICK,
     }
 }
 
@@ -1815,6 +1845,15 @@ impl App {
     // rate-limited by its own acceleration table (`_STATUS:StatACEL`) and not by
     // a frame wait, which is presumably why they needed none.
     fn tick_len(&self) -> std::time::Duration {
+        // A panel up is `StatLOOP` (0xbe13) running in place of whatever is
+        // underneath, and that loop makes no wait at all. So a panel opened
+        // over the map does not inherit the map's own doubled pass: the
+        // original's panel was the fastest loop in the game, not the
+        // slowest, and halving the pointer under a sheet would be ours and
+        // not the original's.
+        if self.panel_now().is_some() {
+            return RETRACE_TICK;
+        }
         tick_len_for(self.mode)
     }
 
@@ -5339,9 +5378,11 @@ mod tests {
             tick_len_for(Mode::Combat) * ticks_per_pass(Mode::Combat),
             TIMER_TICK * 6
         );
+        // One tick of the map is one pass of it, and that pass is a whole
+        // number of retraces rather than one: [`MAP_PASS_RETRACES`].
         assert_eq!(
             tick_len_for(Mode::Map) * ticks_per_pass(Mode::Map),
-            RETRACE_TICK
+            RETRACE_TICK * MAP_PASS_RETRACES
         );
     }
 
@@ -5414,7 +5455,6 @@ mod tests {
             Mode::Ending,
             Mode::Title,
             Mode::Select,
-            Mode::Map,
             Mode::Place,
         ] {
             assert_eq!(
@@ -5423,5 +5463,12 @@ mod tests {
                 "{mode:?} was taken off the retrace"
             );
         }
+        // The map is on the retrace too, but a pass of it is more than one:
+        // see [`MAP_PASS_RETRACES`], the one observed number in this file.
+        assert_eq!(
+            tick_len_for(Mode::Map),
+            RETRACE_TICK * MAP_PASS_RETRACES,
+            "the map is a whole number of retraces and nothing else"
+        );
     }
 }
