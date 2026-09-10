@@ -1,61 +1,143 @@
 # Roadmap
 
-> For the exhaustive version, built around the 334 symbols left in the original
-> executable, see [COMPLETE.md](COMPLETE.md). This file is the working shortlist.
+> For the exhaustive version, built around the symbols left in the original executable,
+> see [COMPLETE.md](COMPLETE.md), and for the item-by-item record of what was recovered
+> and what was designed, [BUILD_ORDER.md](BUILD_ORDER.md). This file is the working
+> shortlist.
 
 Ordered by what the project is missing most, not by what is easiest.
 
-## Now
+## The rule this project is built to
 
-- [x] **N fighters instead of two.** Done. Combat resolution moved out of the renderer
-      and into `henge-core` as `Bout`, which holds a `Vec<Fighter>` and takes one
-      `Intent` each. Four-player local works; a network peer slots into the same seam.
-- [x] **Four knight colours.** Done, the way the original does it, which is by writing
-      palette entries and not by substituting pixels. The knight is painted in indices 6
-      to 8 and `ColourKnight` writes his three shades there at the start of every bout;
-      a second knight is the same figure painted in 9 to 11 (`HE1.OB`..`HE3.OB`) with
-      `Colour2ndKnight` writing his; each creature's block goes in from 9, the trogg's
-      by the ground it stands on. `henge_core::battle_palette` applies the recovered
-      tables in the original's order and `KnightGlowOn` breathes the knight's own
-      entries when he is nearly dead. The hue substitution that stood in for all this
-      for a long time is deleted. *Limitation, the original's own: two knights per
-      palette, so a browser brawl of three or four puts the extras in the second's
-      colours.* `BUILD_ORDER.md` item 78.
-- [x] **Audio.** Done. `henge-audio` splits deciding *what* to play from *where it comes
-      out*: cues are derived by watching the fight and are pure testable logic, while the
-      backend is behind a trait so a browser or a server swaps only that half. All 49
-      samples load. No audio device is a normal state, not a failure, so the game plays
-      silently rather than refusing to start.
-      *Next: more than four cues, and sounds carried on animation frames rather than
-      inferred from state changes.*
-- [x] **Text.** Done. The lookup table is `GFX:TextASCII` at image 107,446 and the
-      reading off the artwork agreed with it. The mapping lives in the pack as content, so
-      a replacement font is a data change. A glyph draws in its own indices through the
-      same blit as every other cel, because that is all `GFX:TextP` (0x7aee) does: the
-      silhouette, and the nearest-colour translation that replaced it, are both gone.
-      Every message chain is quoted from the image with its records' own coordinates
-      (`HengeInstruct` 0x129f9, `SCR_PRO` 0x12965, `VICTORY` 0x12a21, `NextDayMes`
-      0x1b19a among the last read), and what takes a box down is what its caller does
-      next: `WaitFIRE` at 0x8251 or a disk load. See `COMPLETE.md` 2.3 and 8.5.
+**Nothing is invented.** Every mechanic is recovered from `MAIN.EXE` by disassembly and
+translated literally into Rust, with the image address cited in a doc comment beside it.
+Where something genuinely is ours, it says so in the same breath. Where the original is
+odd, buggy or dead, it is reproduced odd, buggy or dead, and the bytes are quoted so
+nobody later "fixes" it.
 
-## Next
+That rule is why the combat feels right, and every time it has been bent the result was
+a bug a player noticed within a minute and a test never would. The three worst of those
+are written up in `REVERSING.md`, because they share a shape: **each was a rule henge
+applied more widely, or more often, than the original applies it.** One clock for two.
+One border gate for everyone. One step per tick instead of one per frame.
 
-- [ ] Title screen, character select, results
-- [x] Health persisting between fights, so dying costs something. Wounds carry, only
-      travelling mends them, and winning heals nothing: the same walking that repairs you
-      is the walking that finds trouble. Dying ends the run.
-- [x] Somewhere to go. Places live in the pack as data: a name, a backdrop, a map
-      position and a menu, so adding one is editing JSON. Only the healer does
-      anything yet, and what it charges is **days**, because days are the only
-      currency a run has and inventing money would be inventing an economy. An
-      option that is not built is listed and marked shut rather than left off,
-      since a live-looking option that silently does nothing is worse than a
-      closed door. Positions were read off the map art, not recovered: the
-      original's node graph is still inside `MAIN.EXE`.
-- [ ] Inventory, and something to spend a run's winnings on
-- [ ] Save and load
-- [ ] Web build (wasm), including running the bake client-side so no assets are ever served
-- [ ] Settle the arena family pairing question (see FORMATS.md)
+## Fully translated from the assembly
+
+This is what "done" means here: read out of the image, translated line for line, and
+pinned by a test that fails if it drifts.
+
+### The fight
+
+- [x] **The task VM.** `PerformCOMMAND` (0x97fb), `TaskComTable` (DS:0x9448), 19 opcodes,
+      242 scripts. Animations in the original are not frame lists, they are small
+      programs with jumps, loops, placement, flipping and collision hooks, and that is
+      why the combat reads as positional rather than as trading canned attacks.
+- [x] **Multi-part sprite composition.** The per-frame record is
+      `[u8 bank*4][u8 cel][i8 y][u8 flags][i16 x]`, and the bank tables belong to the
+      **encounter**, not the actor: one loader fills all four and `+0x18` only says which
+      one a task starts on. See `TASKVM.md`.
+- [x] **Both clocks.** The game has two and the engine was pacing everything off the
+      wrong one. A combat frame is two BIOS ticks, 109.849 ms, which is six ticks of the
+      54.6204 Hz timer the game programs and is `DELAY`'s own six; everything else runs on
+      the 70.0863 Hz retrace. Fights had been running 1.2832x too fast.
+- [x] **Movement, for every actor.** A controller runs once per displayed frame and moves
+      once, by an entry in its own walk-speed table. All six tables in the image are read
+      at bake time and checked against the binary: `TroggWALKR`/`U`/`D`, `TrollWALKR`,
+      `MudmenWALK`, `BKnightWALKR`/`U`/`D`, and the knight's own `K_Walk*`. Nothing moves
+      by a flat speed per tick, and the five creatures the original moves from their own
+      scripts still do.
+- [x] **The borders, and who they are for.** `CheckBorder` (0x40d0) and `SBORD` (0x4552)
+      are the person's own knight's alone. `MonsterWalk` (0x4e8b) calls neither and
+      nothing in the image clamps a column after a step is added, which is why
+      `TroggTABLE` can seat creatures at -50 and 360 and have them walk in.
+- [x] **Every creature's controller**, block for block: the three troggs, the troll, the
+      ratman, the mudmen, the beast, the Balok, the demon, the dragon and its two claws,
+      and the computer knight (`ControlBlackKnight` 0x4b79, including `BKBlock` and
+      `_evadechop`).
+- [x] **The blow.** `TASKWALKCOLLIDE` (0x9e06) and the weapon and body piles, `CalcDamage`,
+      the `*Att`, `*Hit`, `*Dam` and `*Blo` tables, and the per-encounter rows each
+      `InitKnightvs*` writes over them.
+- [x] **What a blow on a fallen body does**, which is the striker's business and not the
+      blow's: `KnightGotStruck` (0x4267) reads `mov si, [di+0xe]` before it jumps through
+      `StruckTable`, so an axe trogg always takes the head and a hammer trogg always
+      collapses him, whichever blow landed.
+- [x] **The knockback.** `KnightSLAP`/`KnightSLAPR`, `BalokSLAP` and `DemonWHIP` as one
+      eleven-word region, all eight writers of `SLAP` and all six of `SLAPY`, and the
+      demon's whip hand-off that drags the knight in rather than throwing him.
+- [x] **The screen shake.** `ShakeADD` (0x493f) through `COLCON` to `ShakeScreen`
+      (0x495b), with its two callers and the jump-height test that keeps a low hop quiet.
+- [x] **The colours.** Palette entries written, not pixels substituted: `ColourKnight`,
+      `Colour2ndKnight`, each creature's block by the ground it stands on, `COLCON`'s
+      cycles once per loop pass, and `KnightGlowOn` breathing a nearly-dead knight's own
+      indices.
+
+### Around it
+
+- [x] **N fighters instead of two.** `Bout` holds a `Vec<Fighter>` and takes one `Intent`
+      each. Four-player local works; a network peer slots into the same seam.
+- [x] **Audio.** Deciding *what* to play is separated from *where it comes out*, so a
+      browser or a server swaps only the backend. All 49 samples load, six tunes bake from
+      the `xTUNEn.BIN` drivers. No audio device is a normal state, not a failure.
+- [x] **Text.** `GFX:TextASCII` at image 107,446, and every message chain quoted from the
+      image with its records' own coordinates. A glyph draws in its own indices through
+      the same blit as every other cel, because that is all `GFX:TextP` (0x7aee) does.
+- [x] **Intro, title, character select, the map, the ending.** All four screens and the
+      win condition (`MOON:Henge`), with the intro's and ending's frame counts read off
+      `INTR.EXE`'s own `DelayFrames` call sites rather than chosen.
+- [x] **The overworld.** `MapIconsTABLE`, `ForestLairs`, `LairLocation`, `LairType`,
+      `TakeMagicTABLE`, the spawn tables, `lev_adjust`, `XPlevels`, `Moons`. Hand-sited
+      lairs had been a median 51 pixels out and every head count wrong.
+- [x] **The four player knights' real names**, which are `SIR_GODBER`, `SIR_RICHARD`,
+      `SIR_JEFFREY` and `SIR_EDWARD`; what had been shipping were the *computer* knights'.
+- [x] **Health persisting between fights.** Wounds carry, only travelling mends them, and
+      winning heals nothing: the same walking that repairs you is the walking that finds
+      trouble. Dying ends the run.
+- [x] **Somewhere to go.** Places are pack data, so adding one is editing JSON. An option
+      that is not built is listed and marked shut rather than left off, since a
+      live-looking option that silently does nothing is worse than a closed door.
+
+### Deliberately not built, because the original has not got it
+
+- [x] **Save and load.** There is no slot, no file and no routine anywhere in the 2,223
+      symbols; the only `*Save*` hit is `SaveTYPE`, a task VM opcode, and `MOON.CFG` is a
+      sound-card profile. So there is no menu item and nothing a player can reach writes
+      one. The serialisation survives, explicitly labelled, as the headless harness's way
+      of posing a run and as the determinism test's backbone.
+
+## Still to do
+
+Nothing below is a translation problem. The recovered mechanics that remain are small and
+named; the rest is deciding what the game is.
+
+### Recovered and not wired up
+
+- [ ] Tune 5 after Math's gift (`_bestow_done`).
+- [ ] `BuyMoonstone` and `SellMoonstone`. Recovered, but they are a trade between two
+      knights' records rather than a shop, so no counter in a one-knight run can reach
+      them. Blocked on multiplayer, not on reading.
+- [ ] The dragon's hoard take mechanic. The page draws; taking from it does not.
+- [ ] `Beast_BackToss`'s dead second row (`InitKnightvsBeast` 0x2288, kind 0xe) is
+      written and unreachable in the original too. Reproduced, and worth leaving alone.
+
+### Unrecovered, and probably unrecoverable
+
+- [ ] The frame rate of six loops — `TavernLoop`, `StatLOOP`, `DonateLoop`, the two
+      stalls, and the title's own — which make no wait of any kind. The image names no
+      rate for them, so they sit on the retrace with a `// TODO` saying exactly that
+      rather than a number nothing supports.
+- [ ] The overworld node graph. Map positions were read off the artwork by eye; the
+      original's graph is still inside `MAIN.EXE`.
+- [ ] The arena family pairing question (see `FORMATS.md`).
+
+### The game, rather than the disassembly
+
+- [ ] **Inventory, and something to spend a run's winnings on.** The one item on this
+      list that would change how the game *plays* rather than how faithful it is. Bounty
+      accumulates and buys nothing.
+- [ ] Web build (wasm), including running the bake client-side so no assets are ever
+      served.
+- [ ] The rest of `MI.C`: creature tokens for roaming enemies, crystals for whatever the
+      quest turns out to need, the ringed variants for the active player.
 
 ## The map's icon set
 
@@ -74,9 +156,6 @@ when drawn on the map and need no translation. That is worth knowing before reac
 the workaround below: check whether a sheet belongs to the palette you are drawing it over
 before assuming it does not.
 
-- [ ] Use the rest: creature tokens for roaming enemies, crystals for whatever the quest
-      turns out to need, the ringed variants for the active player
-
 ## Sheets do not record which palette they mean, and the original does not either
 
 A sheet's pixels are palette **indices**, and nothing in the manifest says which palette
@@ -87,20 +166,30 @@ that read as map dithering.
 
 The token turned out to belong to the map's palette after all. A `palette` field per
 sheet was then added and used to translate text by nearest colour, and it is gone again,
-with the recipe stepped: the original blits every cel, glyphs included, in its own indices through
-0x5d7f and chooses which screens it writes on, and the translation was wrong where it did
-anything, sending the small face's index 1 to the map palette's nearest purple instead
-of the white the original shows. Anything drawn over a palette it was not painted for is
-a wrong screen, not a missing table, and the fix is to draw what the original draws.
+with the recipe stepped: the original blits every cel, glyphs included, in its own indices
+through 0x5d7f and chooses which screens it writes on, and the translation was wrong where
+it did anything, sending the small face's index 1 to the map palette's nearest purple
+instead of the white the original shows. Anything drawn over a palette it was not painted
+for is a wrong screen, not a missing table, and the fix is to draw what the original draws.
 
-## Reverse engineering still open
+## Adding a creature
 
-- [x] **Multi-part sprite composition.** Decoded. The per-frame record is
-      `[u8 bank*4][u8 cel][i8 y][u8 flags][i16 x]`, and the 236 animation scripts are named
-      data in DGROUP. See `TASKVM.md`; verified by compositing knight and creature frames.
-- [x] Symbol name to address mapping in the debug info: 2,223 symbols with addresses,
-      recovered by `tools/symbolmap.py`, which is what made the above fall out
-- [ ] Overworld node graph, if we ever want the original's map rather than ours
+The pattern, because it has been got wrong twice and the symptom looked nothing like the
+cause both times. The long version is in `REVERSING.md`.
+
+1. **Walk script rows first.** Their length is the walk cycle: `NextWalk` (0x4ef7) masks
+   the cycle with 7 and skips any index whose script row word is zero.
+2. **One `[x, z]` walk-speed entry per row entry.** Where the original has a table, read
+   it at bake time from the symbol its mover names rather than typing the numbers.
+3. **Where an axis has no table**, use the controller's own literal, *per displayed frame*,
+   and cite the instruction that writes it.
+4. **Leave both empty** for anything that moves from its scripts.
+5. **Write the record kind** (`+0x35`). `StruckTable` is indexed by it, and a creature
+   whose kind is never written is a creature whose encounter rows can never be reached.
+
+Uneven table entries are not decoration. They are what lets a creature come to rest at
+distances a single stride would skip, and several of the range bands it has to land in are
+narrower than one stride.
 
 ---
 
@@ -150,16 +239,19 @@ costs nothing today and cannot be retrofitted cheaply.
    `henge-core`. No iteration over `HashMap` (use `BTreeMap`). No wall-clock time.
    *Currently true. Must stay true.*
 2. **Fixed tick, never delta-time.** The simulation advances in whole ticks or not at all.
-   *Currently true.*
+   *Currently true, and it survived the clock change: one accumulator and a tick length
+   looked up per pass, so what is left over on a change of clock is always less than one
+   tick of the clock just in use. The simulation never sees a fractional step.*
 3. **Input is a value, separated from state.** `Intent { dx, dy, attack }` is the entire
    input surface. A local keyboard, an AI, and a network packet are interchangeable.
    *Currently true. This is the network seam, and it already exists.*
 4. **All simulation state is serializable.** Needed for joining, resync and rollback
    snapshots. *Done, and tested: a bout serialized, restored and simulated onward keeps
    agreeing with the original.*
-5. **Randomness is explicit and seeded, never ambient.** `Overworld` already carries its
-   own seeded generator. Combat has no randomness at all, and any that gets added must
-   come from a seeded stream, not from the system.
+5. **Randomness is explicit and seeded, never ambient.** `Overworld` carries its own
+   seeded generator, and the fight's own rolls come from `Bout::rng`. The screen shake is
+   the one place a random number is drawn outside it, and it is drawn in the renderer,
+   where nothing reads the result back into the fight.
    *Currently true.*
 6. **The simulation performs no I/O and does no rendering.** `henge-core` depends only on
    serde. It compiles for a server, a browser and a headless test with no changes.
