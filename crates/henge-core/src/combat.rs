@@ -171,7 +171,7 @@ pub struct Intent {
 /// right held and once for left, looks this same table up by `[di+0xa]`
 /// (`Fighter::cycle` here) and negates it facing left; right and left are a
 /// sign flip of the one table, not two tables.
-const KNIGHT_WALK_R_VALUE: [i32; 4] = [25, 3, 23, 4];
+pub const KNIGHT_WALK_R_VALUE: [i32; 4] = [25, 3, 23, 4];
 
 /// `K_WalkUpValue` (`0x7808`): the z-speed walking up. `KnightWalkUp`
 /// (0x4067) looks this up and **always** negates it, unconditionally — a
@@ -748,41 +748,40 @@ impl Fighter {
         // bit survived. Nothing is clamped, and a refused direction leaves the
         // other three alone.
         if self.state == State::Walk {
-            // The knight's own `KnightWalkRight`/`Up`/`Down` table, but only
-            // for the fighter a real person drives: `ControlBlackKnight`
-            // never calls any of the three, calling the same plain movers
-            // (`MoveL`/`MoveR`/the generic up/down movers) any ordinary
-            // scripted creature does instead, so a rival or a computer's
-            // black knight — `flag::DRIVEN`, even sharing this same `knight`
-            // `ActorDef` — keeps the flat `def.speed_x`/`speed_y` below.
-            let is_person_knight =
-                def.controller == "knight" && self.brain.flags & crate::monster::flag::DRIVEN == 0;
-            if is_person_knight {
-                // Moving once a frame by the table entry, not once a
-                // sub-tick by a flat fraction of it: see `knight_walk_pulse`.
-                if let Some(idx) = self.knight_walk_pulse(def) {
-                    let step = knight_walk_step(intent, idx);
-                    let (moved, blocked) = self.walk(def, field, step, others);
-                    self.blocked = blocked;
-                    // `A4$`: a frame in which nothing moved winds the walk
-                    // cycle back and plays the stance instead, which is what
-                    // makes a man held up by a tree stand still rather than
-                    // walk on the spot.
-                    if !moved {
-                        self.enter(State::Idle);
-                    }
-                }
-                // A sub-tick that is not this frame's one pulse: the
-                // original has no such tick at all, so nothing here moves,
-                // is blocked, or falls back to idle on it.
-            } else {
-                let step = (intent.dx * def.speed_x, intent.dy * def.speed_y);
+            // **Everybody moves once a displayed frame, by a table.** A
+            // controller runs once per frame and moves once: `ControlKnight`
+            // through `KnightWalkRight`/`Up`/`Down` (0x4048, 0x4067, 0x4080)
+            // off `K_WalkRValue` and its two siblings, and every creature
+            // through `MoveL`/`MoveR`/`MoveU`/`MoveD` (0x4dd5, 0x4e09,
+            // 0x4e3d, 0x4e64), which index their caller's own table by the
+            // same walk cycle. `ControlBlackKnight` is not the exception it
+            // was read as: its `M0$`..`M3$` (0x4be6 to 0x4c0a) load
+            // `BKnightWALKR`/`U`/`D`, which hold the knight's own numbers.
+            //
+            // Nothing in the image moves by a flat step applied every tick,
+            // and applying one was what stuck the spear trogg a second time
+            // after the borders let him go: six sub-ticks of two pixels put
+            // him twelve pixels further along between one decision and the
+            // next, and his attack window (`SetTroggSpTables` 0x2220: inside
+            // approach 0x82, outside back off 0x78) is ten pixels wide. He
+            // stepped over it every time, in both directions, for ever. His
+            // own table is 0, 7 then 23, and those small steps are what land
+            // him inside it.
+            if let Some(idx) = self.walk_pulse(def) {
+                let step = self.walk_step(def, intent, idx);
                 let (moved, blocked) = self.walk(def, field, step, others);
                 self.blocked = blocked;
+                // `A4$`: a frame in which nothing moved winds the walk
+                // cycle back and plays the stance instead, which is what
+                // makes a man held up by a tree stand still rather than
+                // walk on the spot.
                 if !moved {
                     self.enter(State::Idle);
                 }
             }
+            // A sub-tick that is not this frame's one pulse: the original
+            // has no such tick at all, so nothing here moves, is blocked, or
+            // falls back to idle on it.
         } else {
             self.blocked = 0;
         }
@@ -966,7 +965,31 @@ impl Fighter {
     /// with the current script already finished) — never reading
     /// `self.cycle` as it stands once the walk is already under way, only
     /// what it is one tick away from becoming.
-    fn knight_walk_pulse(&self, def: &ActorDef) -> Option<usize> {
+    /// This frame's step, from whichever walk-speed table this fighter's own
+    /// mover reads.
+    ///
+    /// The person's knight is the one actor whose tables the image keeps as
+    /// three separate rows of words rather than as `(x, z)` pairs, because
+    /// `ControlKnight` reads them itself instead of going through the shared
+    /// movers; `knight_walk_step` is that reading. Everyone else, the black
+    /// knight included, indexes a pair table, and an actor with no table for
+    /// an axis falls back to `def.speed_x`/`def.speed_y` for it, which is the
+    /// flat literal its own controller writes -- the troll's `+/-5` depth
+    /// (`ControlTroll` 0x5620, 0x5635), the mudmen's `+/-2`
+    /// (`MudmenMoveU`/`MudmenMoveD` 0x5447, 0x5451), the demon's `+/-5` both
+    /// ways (`DemonMove` 0x4fe2 through 0x5001).
+    fn walk_step(&self, def: &ActorDef, intent: Intent, idx: usize) -> (i32, i32) {
+        let person =
+            def.controller == "knight" && self.brain.flags & crate::monster::flag::DRIVEN == 0;
+        if person {
+            knight_walk_step(intent, idx)
+        } else {
+            def.walk_speed
+                .step(intent.dx, intent.dy, idx, (def.speed_x, def.speed_y))
+        }
+    }
+
+    pub(crate) fn walk_pulse(&self, def: &ActorDef) -> Option<usize> {
         let names_len = def.walk_row(self.heading[0], self.heading[1]).len().max(1);
         match &self.task {
             // A fresh task, or a restart: `run_task` below plays `names[0]`
@@ -2449,15 +2472,95 @@ pub(crate) mod tests {
              idx, the same tick"
         );
     }
-
-    /// `ControlBlackKnight` (0x4b79) never calls `KnightWalkRight`/`Up`/
-    /// `Down` at all — it calls the same plain `MoveL`/`MoveR`/`MoveU`/
-    /// `MoveD` any ordinary scripted creature does — so a computer-driven
-    /// seat of this SAME `knight` `ActorDef` (`flag::DRIVEN`) must keep the
-    /// flat `def.speed_x`/`speed_y` every tick, table or no table.
+    /// The spear trogg's attack window is ten pixels wide, and a flat speed
+    /// stepped straight over it.
+    ///
+    /// `SetTroggSpTables` (0x2220) gives him approach 0x82 and back off 0x78,
+    /// so he lunges only while the gap is 121 to 130. `TroggWALKR` (DS:0x7746)
+    /// moves him 0, then 7, then 23, and those uneven steps are what put him
+    /// inside it. A flat two pixels a tick over six sub-ticks moved him twelve
+    /// a frame, from 118 to 130 and back for ever, and he never once stood
+    /// where attacking was an option. That, not the borders, is why he still
+    /// looked stuck after the border gate was lifted.
     #[test]
-    fn a_driven_knight_ignores_the_table_and_keeps_the_flat_speed() {
-        let d = person_knight_def(3);
+    fn the_troggs_table_lands_him_inside_his_attack_window_where_a_flat_speed_could_not() {
+        let mut d = scripted_def();
+        d.script_ticks = 6;
+        d.speed_x = 0;
+        d.speed_y = 0;
+        // `TroggWALKR`, as the baker reads it out of the image.
+        d.walk_speed = crate::content::WalkSpeed {
+            right: vec![[0, -1], [7, 1], [23, 0]],
+            ..crate::content::WalkSpeed::default()
+        };
+        let mut f = Fighter::new("t", &d, 0, 100, 1);
+        let mut inside = 0;
+        let mut seen = Vec::new();
+        // Walk in from 250 away and count the frames spent at a gap he could
+        // lunge from. The knight stands at 250, as the person's did on the
+        // video.
+        for _ in 0..240 {
+            f.step(
+                &d,
+                Intent {
+                    dx: 1,
+                    dy: 0,
+                    attack: false,
+                },
+                &field(),
+            );
+            let gap = 250 - f.x;
+            if seen.last().is_none_or(|g| *g != gap) {
+                seen.push(gap);
+            }
+            if (121..=130).contains(&gap) {
+                inside += 1;
+            }
+        }
+        assert!(
+            inside > 0,
+            "he never stood inside 121..=130; the gaps he stood at were {seen:?}"
+        );
+        // And the reason: his steps are uneven, so the positions he can stop
+        // at are not all congruent modulo one stride.
+        assert_eq!(
+            &seen[..4],
+            &[250, 243, 220, 213],
+            "0, then 7, then 23, once a frame each"
+        );
+        // Thirty pixels every three frames, but not ten every frame: the
+        // gaps he can stop at are `250 - k` for `k` in 0, 7, 30, 37, 60 ...,
+        // which is two residues modulo the stride rather than one. Twelve a
+        // frame gave him one, and 121..=130 held none of it.
+        assert!(seen.contains(&130), "and 130 is one of them: {seen:?}");
+    }
+
+    /// **A computer knight walks a table too, and it is the same table.**
+    ///
+    /// This test used to assert the opposite, on the reading that
+    /// `ControlBlackKnight` (0x4b79) "calls the same plain movers any
+    /// ordinary scripted creature does". It does call them, and they are not
+    /// plain: `MoveR` (0x4e0e..0x4e1e) indexes a table its caller chose by
+    /// the walk cycle times four, and `ControlBlackKnight`'s own `M0$`..`M3$`
+    /// choose `BKnightWALKU`, `BKnightWALKD` and `BKnightWALKR` (0x4be6,
+    /// 0x4bf2, 0x4bfe, 0x4c0a).
+    ///
+    /// `BKnightWALKR` (DS:0x7bb6) is `(25,0) (3,0) (23,0) (4,0)`, which is
+    /// `K_WalkRValue`'s `25 3 23 4` pair by pair, and its two siblings match
+    /// `K_WalkUpValue` and `K_WalkDownValue` the same way. So both seats of
+    /// the knight definition walk the same distances on the same frames; the
+    /// difference between them is only which routine reads the numbers.
+    #[test]
+    fn a_driven_knight_walks_the_black_knights_table_which_is_the_knights_own() {
+        let mut d = person_knight_def(3);
+        // `BKnightWALKR`/`U`/`D`, as the baker reads them out of the image.
+        d.walk_speed = crate::content::WalkSpeed {
+            right: vec![[25, 0], [3, 0], [23, 0], [4, 0]],
+            up: vec![[0, 2], [0, 9], [0, 2], [0, 9]],
+            down: vec![[0, 8], [0, 2], [0, 9], [0, 2]],
+        };
+        d.speed_x = 0;
+        d.speed_y = 0;
         let mut f = Fighter::new("k", &d, 100, 100, 1);
         f.brain.flags |= crate::monster::flag::DRIVEN;
         // A driven fighter has no joystick, so what puts it in `State::Walk`
@@ -2470,7 +2573,7 @@ pub(crate) mod tests {
             attack: None,
         });
         let mut xs = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..12 {
             f.step(
                 &d,
                 Intent {
@@ -2482,10 +2585,12 @@ pub(crate) mod tests {
             );
             xs.push(f.x);
         }
+        // Once a frame, three ticks to a frame here, by the table entry: the
+        // same 25, 3, 23, 4 the person's own knight walks.
         assert_eq!(
             xs,
-            [102, 104, 106, 108, 110, 112],
-            "def.speed_x (2) added every tick, not gated on script_ticks"
+            [125, 125, 125, 128, 128, 128, 151, 151, 151, 155, 155, 155],
+            "BKnightWALKR once a frame, not a flat speed every tick"
         );
     }
 

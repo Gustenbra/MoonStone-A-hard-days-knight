@@ -385,9 +385,17 @@ struct Creature {
 /// attack it plays and the kind it writes, the rows its branches name, the
 /// number its `*Struck1` handler takes off the knight, and the seats and the
 /// wave its `InitKnightvs*` sets up. Numbers marked ours: `reach`, which is
-/// the range the plain opponent swings at; `speed`, read off the `*WALKR`
-/// offset tables where the creature has one and chosen otherwise; and
-/// `bounty`, which the original keeps no table for.
+/// the range the plain opponent swings at, and `bounty`, which the original
+/// keeps no table for.
+///
+/// `speed` is **pixels per displayed frame, and only for an axis the
+/// creature has no walk-speed table for**. Where it has one (the troggs, the
+/// troll and the mudmen sideways) the table is read at bake time and this is
+/// not looked at; see `ActorDef::walk_speed` and `tables::WALK_SPEED_TABLES`.
+/// Where it has not, the number here is the literal its own controller
+/// writes, cited on the row, or -- for the four creatures the original moves
+/// from their scripts rather than by a controller step at all -- ours, marked
+/// as such.
 // Hand-aligned: the bestiary. Fields are grouped several to a line (identity, then
 // the numbers, then the seats) so one creature is a handful of lines and the whole
 // bestiary can be scanned and compared row against row. One field per line would
@@ -417,7 +425,10 @@ const CREATURES: &[Creature] = &[
         bleeds: true,
         damage: 7,
         // `TrollWALKR` steps 16, 26, 13, 26: twenty pixels a frame.
-        reach: 80, speed: [3, 1], bounty: 40,
+        // `TrollWALKR` (DS:0x7ba2) sideways, so only the depth is read here:
+        // `ControlTroll` writes `mov word [0x7bf7], 0xfffb` at 0x5620 and
+        // `5` at 0x5635 and jumps straight to `MonsterWalk`.
+        reach: 80, speed: [0, 5], bounty: 40,
         // `InitKnightvsTroll` (0x26f1) hands `InitTrogg` the trogg's own table,
         // and `InitTrogg`'s `xor [SIDE], 1` starts it on record one.
         seats: TROGG_SEATS, first_seat: 1,
@@ -442,7 +453,9 @@ const CREATURES: &[Creature] = &[
         bleeds: false,
         damage: 3,
         // `TroggWALKR` steps 0, 7, 23: ten pixels a frame.
-        reach: 70, speed: [2, 1], bounty: 15,
+        // Read by nobody: `TroggMove` (0x2e37, 0x2e43, 0x2e4f) has a table
+        // for all three axes -- `TroggWALKR`, `TroggWALKU`, `TroggWALKD`.
+        reach: 70, speed: [0, 0], bounty: 15,
         seats: TROGG_SEATS, first_seat: 0,
         // `InitKnightvsTroggAxe` (0x20b9): one at a time, three owed.
         wave: wave(1, 3, 0, true, false, LEV_TROGG_AXE),
@@ -458,7 +471,9 @@ const CREATURES: &[Creature] = &[
         blockable: true,
         bleeds: false,
         damage: 2,
-        reach: 60, speed: [2, 1], bounty: 15,
+        // Read by nobody: `TroggMove` (0x2e37, 0x2e43, 0x2e4f) has a table
+        // for all three axes -- `TroggWALKR`, `TroggWALKU`, `TroggWALKD`.
+        reach: 60, speed: [0, 0], bounty: 15,
         seats: TROGG_SEATS, first_seat: 0,
         // `InitKnightvsTroggHammer` (0x2145), the same numbers and its own row.
         wave: wave(1, 3, 0, true, false, LEV_TROGG_HAMMER),
@@ -479,7 +494,9 @@ const CREATURES: &[Creature] = &[
         // There is no `TroggDamSp`: `TroggSpearStruck1+19` (0x432e) is
         // `sub word ptr [di+0x38], 3`.
         damage: 3,
-        reach: 100, speed: [2, 1], bounty: 15,
+        // Read by nobody: `TroggMove` (0x2e37, 0x2e43, 0x2e4f) has a table
+        // for all three axes -- `TroggWALKR`, `TroggWALKU`, `TroggWALKD`.
+        reach: 100, speed: [0, 0], bounty: 15,
         seats: TROGG_SEATS, first_seat: 0,
         // `InitKnightvsTroggSpear` (0x21e2).
         wave: wave(1, 3, 0, true, false, LEV_TROGG_SPEAR),
@@ -529,7 +546,12 @@ const CREATURES: &[Creature] = &[
         blockable: false,
         bleeds: false,
         damage: 1,
-        reach: 24, speed: [3, 1], bounty: 5,
+        // **Ours.** The original never gives a ratman a controller step: it
+        // leaps (`RatmanLeap` 0x31e7 writes `+6` on an arc) and hangs off the
+        // knight. This is the old flat two-a-tick expressed on the right
+        // clock, six times a tick's worth once a frame, so nothing about the
+        // ratman changes with the cadence.
+        reach: 24, speed: [18, 6], bounty: 5,
         seats: RATMAN_SEATS, first_seat: 0,
         // `InitKnightvsRatmen` (0x2337): the one fight in the game that holds
         // two creatures at once, and two owed behind them.
@@ -557,7 +579,11 @@ const CREATURES: &[Creature] = &[
         damage: 2,
         // `MudmenWALK` steps (12, 12), (10, 14): it comes at you on a
         // diagonal, eleven across and thirteen deep a frame.
-        reach: 90, speed: [2, 2], bounty: 25,
+        // `MudmenWALK` (DS:0x7b8e) sideways -- and it is x alone, since
+        // `MudmenMoveR` shifts the cycle once (0x5420) where every other
+        // mover shifts twice. The depth is the flat `+/-2` of `MudmenMoveU`
+        // and `MudmenMoveD` (0x5447, 0x5451).
+        reach: 90, speed: [0, 2], bounty: 25,
         // `InitMudmen` (0x2655) is the other `SIDE` one: record one.
         seats: MUDMAN_SEATS, first_seat: 1,
         // `InitKnightvsMudmen` (0x2620): two owed, and `AdjustLevel` (0x2898)
@@ -607,8 +633,13 @@ const CREATURES: &[Creature] = &[
         blockable: false,
         bleeds: false,
         damage: 10,
-        // It moves five pixels a frame, which is one a tick.
-        reach: 65, speed: [1, 1], bounty: 100,
+        // Five pixels a frame, both ways, and no table: `DemonMove` writes
+        // the step as a literal, `mov ax, 5` / `mov ax, 0xfffb` for the
+        // column (0x4fe2, 0x4fed) and `mov bx, 0xfffb` / `mov bx, 5` for the
+        // depth (0x4ff6, 0x5001), then adds them at 0x5004 and 0x500a. The
+        // old note here had the number right and the clock wrong: it was
+        // being applied once a tick, so the demon walked six times as far.
+        reach: 65, speed: [5, 5], bounty: 100,
         // `InitKnightvsDemon` writes the record itself, 0x278d..0x27ab:
         // x 100, y 5, z 100, facing 1. It is the one creature that opens on
         // screen and in the middle of it.
@@ -649,7 +680,10 @@ const CREATURES: &[Creature] = &[
         // `BeastChargeOffsets` 33, 27, 17, 33: nearly thirty pixels a frame.
         // Its weapon parts are its own body, so it has to be allowed close:
         // three quarters of its width would keep it out of its own bite.
-        reach: 40, speed: [4, 1], bounty: 30,
+        // **Ours**, as the ratman's. The beast charges from its own scripts
+        // and wraps at the screen edge (`BeastCharge` 0x2fec sets the column
+        // to 0x17c, `BeastChargeLeft` 0x2ffe to -50); no controller step.
+        reach: 40, speed: [24, 6], bounty: 30,
         seats: BEAST_SEATS, first_seat: 0,
         // `InitKnightvsBeast` (0x228d).
         wave: wave(1, 3, 0, true, false, LEV_BEAST),
@@ -683,7 +717,9 @@ const CREATURES: &[Creature] = &[
         damage: 5,
         // Its uppercut lands from 41 to 74 pixels out, and its own width
         // keeps a knight sixty away, so it swings from just outside that.
-        reach: 70, speed: [2, 1], bounty: 80,
+        // **Ours**, as the ratman's: the Balok moves in jumps its own script
+        // draws (`BalokJumping` 0x3714 writes `+2` and `+6` outright).
+        reach: 70, speed: [12, 6], bounty: 80,
         seats: BALOK_SEATS, first_seat: 0,
         // `InitKnightvsBalok` (0x2591): two owed, `MaxMonsters` forced back to
         // one at 0x288a, and `InitBalok` (0x25cf) is the one `INITMO` with no
@@ -729,7 +765,9 @@ const CREATURES: &[Creature] = &[
         blockable: false,
         bleeds: true,
         damage: 20,
-        reach: 60, speed: [1, 1], bounty: 250,
+        // **Ours**, as the ratman's: the dragon flies, and `ContinueDragon`
+        // (0xa5f5) writes its column itself.
+        reach: 60, speed: [6, 6], bounty: 250,
         // `InitKnightvsDragon` 0x2476: the head at x 80, forty rows up, facing
         // right. Its `z` of 100 goes the way every other arrival's does.
         seats: &[[80, -40, 100, 1]], first_seat: 0,
@@ -1576,6 +1614,12 @@ struct Tables {
     plain: BTreeMap<String, ActorTables>,
     /// Under 0x2d and 0x31, keyed by the phase's own key.
     nights: BTreeMap<&'static str, BTreeMap<String, ActorTables>>,
+    /// The per-frame walk-speed tables each controller's own mover loads,
+    /// keyed by the controller name this pack uses. See
+    /// `tables::WALK_SPEED_TABLES`: the image has six such tables and twelve
+    /// instructions that load one, and nothing else in the game moves by a
+    /// controller step at all.
+    walk_speed: BTreeMap<String, [Vec<[i32; 2]>; 3]>,
 }
 
 impl Tables {
@@ -1584,11 +1628,43 @@ impl Tables {
         let mut t = Tables {
             plain: tables::all_actor_tables(img, syms, Phase::Gibbous.cel() as u16)?,
             nights: BTreeMap::new(),
+            walk_speed: BTreeMap::new(),
         };
         for phase in [Phase::Full, Phase::New] {
             t.nights.insert(
                 phase.key(),
                 tables::all_actor_tables(img, syms, phase.cel() as u16)?,
+            );
+        }
+        // The walk-speed tables belong to the controller, not to the record:
+        // `TroggMove` names `TroggWALKR` outright (0x2e4f) and all three
+        // troggs go through it. So they are read once, by controller, and
+        // cut to the length of that actor's own walk script rows, which is
+        // what `NextWalk`'s zero-skip makes the cycle.
+        for src in tables::WALK_SPEED_TABLES
+            .iter()
+            .chain(std::iter::once(&tables::BLACK_KNIGHT_WALK_SPEED))
+        {
+            // The record whose walk script rows measure this controller's
+            // cycle. Actors that share a controller share the rows' shape:
+            // all three troggs have `*_WalkR1..3` and `*_WalkU1..4`, and the
+            // black knight walks the knight's own `Knight_SwWalk*`.
+            let id = match src.controller {
+                "trogg" => "trogg_axe",
+                "trogg_spear" => "trogg_spear",
+                "troll" => "troll",
+                "mudman" => "mudmen",
+                "knight" => "knight",
+                other => anyhow::bail!("no record named for controller {other}"),
+            };
+            let rows = t
+                .plain
+                .get(id)
+                .map(|a| a.walk.clone())
+                .ok_or_else(|| anyhow::anyhow!("no walk script rows read for {id}"))?;
+            t.walk_speed.insert(
+                src.controller.to_string(),
+                tables::walk_speed(img, syms, src, &rows)?,
             );
         }
         Ok(t)
@@ -1790,20 +1866,31 @@ fn actor_definitions(
         sheet: "actor.knight".into(),
         name: "Knight".into(),
         health: 100,
-        // `MoveL`/`MoveR`/`MoveU`/`MoveD` (0x4dd5/0x4e09/0x4e39/0x4e64), the
-        // flat movers `ControlBlackKnight` (0x4b79) calls: this is the flat
-        // per-tick speed a computer-controlled seat of this SAME `ActorDef`
-        // still walks at (`flag::DRIVEN`, `crate::monster::bk_move`). It is
-        // no longer what the person's own seat walks by: `ControlKnight`
-        // (0x3ec4) calls `KnightWalkRight`/`Up`/`Down` (0x4048/0x4067/0x4080)
-        // instead, an unequal pixels-per-*frame* table
-        // (`henge_core::combat::KNIGHT_WALK_R_VALUE` and its two companions),
-        // applied once a displayed frame rather than flatly every tick —
-        // see `Fighter::knight_walk_pulse` and the `is_person_knight` branch
-        // in `Fighter::step_among`, gated on `def.controller == "knight"`
-        // and not `flag::DRIVEN`.
-        speed_x: 2,
-        speed_y: 1,
+        // **Read by nobody.** Both seats of this definition have a table.
+        // The person's is `K_WalkRValue` and its two siblings, which
+        // `ControlKnight` (0x3ec4) reads through `KnightWalkRight`/`Up`/`Down`
+        // (0x4048/0x4067/0x4080) and which `henge_core::combat` carries as
+        // `KNIGHT_WALK_R_VALUE`. A `flag::DRIVEN` seat's is `BKnightWALKR`/`U`/`D`,
+        // which `ControlBlackKnight`'s `M0$`..`M3$` (0x4be6, 0x4bf2, 0x4bfe,
+        // 0x4c0a) load before calling `MoveU`/`MoveD`/`MoveR`/`MoveL`, and
+        // which is `walk_speed` below.
+        //
+        // The two hold the same numbers -- `BKnightWALKR` is
+        // `(25,0) (3,0) (23,0) (4,0)` against `K_WalkRValue`'s `25 3 23 4` --
+        // so the earlier reading here, that a computer knight walks at a flat
+        // two a tick because `ControlBlackKnight` calls "the flat movers",
+        // was wrong twice over: those movers are not flat, and the black
+        // knight has tables of his own that say so.
+        speed_x: 0,
+        speed_y: 0,
+        walk_speed: {
+            let rows = tables.walk_speed.get("knight").cloned().unwrap_or_default();
+            henge_core::content::WalkSpeed {
+                right: rows[0].clone(),
+                up: rows[1].clone(),
+                down: rows[2].clone(),
+            }
+        },
         reach: 38,
         depth_tolerance: kt.plane.unwrap_or(0),
         attack_cooldown: 45,
@@ -2020,8 +2107,23 @@ fn creature_definition(
         name: c.name.into(),
         health: t.health.unwrap_or(0),
         damage: c.damage,
+        // Only read where this creature's controller has no table of that
+        // kind: the troll's and the mudmen's depth, and the demon's both
+        // ways. **Per displayed frame, not per tick** — see `walk_speed`.
         speed_x: c.speed[0],
         speed_y: c.speed[1],
+        walk_speed: {
+            let rows = recovered
+                .walk_speed
+                .get(c.controller)
+                .cloned()
+                .unwrap_or_default();
+            henge_core::content::WalkSpeed {
+                right: rows[0].clone(),
+                up: rows[1].clone(),
+                down: rows[2].clone(),
+            }
+        },
         reach: c.reach,
         depth_tolerance: t.plane.unwrap_or(0),
         attack_cooldown: 45,

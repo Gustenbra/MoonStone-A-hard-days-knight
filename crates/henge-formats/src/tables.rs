@@ -525,6 +525,154 @@ pub fn actor_tables(
     Ok(t)
 }
 
+/// Which walk-speed table a controller's own mover loads, and how it indexes
+/// it, for every controller in the image that has one.
+///
+/// The four entries are the whole of it. A scan of every `mov di, imm16`,
+/// `mov si, imm16` and `mov bx, imm16` in the image against the addresses of
+/// `TroggWALKR`/`U`/`D`, `TrollWALKR`, `MudmenWALK` and `BKnightWALKR`/`U`/`D`
+/// finds twelve loads, in `TroggMove` (0x2e37, 0x2e43, 0x2e4f, 0x2e5b),
+/// `ControlBlackKnight`'s `M0$`..`M3$` (0x4be6, 0x4bf2, 0x4bfe, 0x4c0a),
+/// `MudmenMoveR`/`MudmenMoveL` (0x5422, 0x5435) and `TrollMoveL`/`TrollMoveR`
+/// (0x5648, 0x5667), and nowhere else.
+///
+/// `stride` is the shift the mover does on the cycle before it indexes:
+/// `MoveL`/`MoveR`/`MoveU`/`MoveD` and the troll's own movers do `shl ax, 1`
+/// twice (0x4e11 and 0x4e13, 0x5644 and 0x5646), which is four bytes, an
+/// `(x, z)` pair. `MudmenMoveR` does it **once** (0x5420), which is two
+/// bytes: the mudmen's table is x steps alone, and their depth is the flat
+/// `+/-2` that `MudmenMoveU`/`MudmenMoveD` write (0x5447, 0x5451).
+pub const WALK_SPEED_TABLES: &[WalkSpeedSource] = &[
+    WalkSpeedSource {
+        controller: "trogg",
+        right: Some("TroggWALKR"),
+        up: Some("TroggWALKU"),
+        down: Some("TroggWALKD"),
+        pairs: true,
+    },
+    // The spear trogg shares `ControlTrogg`'s body and so `TroggMove`; only
+    // its `Set*Tables` routine and its `+0x35` differ.
+    WalkSpeedSource {
+        controller: "trogg_spear",
+        right: Some("TroggWALKR"),
+        up: Some("TroggWALKU"),
+        down: Some("TroggWALKD"),
+        pairs: true,
+    },
+    // `TrollWALKR` is the troll's only table: `ControlTroll` writes a flat
+    // `+/-5` depth at 0x5620 and 0x5635 and jumps straight to `MonsterWalk`.
+    WalkSpeedSource {
+        controller: "troll",
+        right: Some("TrollWALKR"),
+        up: None,
+        down: None,
+        pairs: true,
+    },
+    WalkSpeedSource {
+        controller: "mudman",
+        right: Some("MudmenWALK"),
+        up: None,
+        down: None,
+        pairs: false,
+    },
+];
+
+/// The knight's, which `ControlBlackKnight` names separately even though the
+/// numbers are the same. A `DRIVEN` seat of the knight definition is what
+/// reads these; the person's own seat reads `K_WalkRValue` and its two
+/// siblings, which `henge_core::combat` already carries.
+pub const BLACK_KNIGHT_WALK_SPEED: WalkSpeedSource = WalkSpeedSource {
+    controller: "knight",
+    right: Some("BKnightWALKR"),
+    up: Some("BKnightWALKU"),
+    down: Some("BKnightWALKD"),
+    pairs: true,
+};
+
+/// One controller's walk-speed tables, by the names the image gives them.
+#[derive(Clone, Copy, Debug)]
+pub struct WalkSpeedSource {
+    pub controller: &'static str,
+    pub right: Option<&'static str>,
+    pub up: Option<&'static str>,
+    pub down: Option<&'static str>,
+    /// Four bytes an entry, an `(x, z)` pair, rather than two bytes of x.
+    pub pairs: bool,
+}
+
+/// One walk-speed row, read at the symbol the mover names.
+///
+/// `len` is how many entries the cycle actually reaches, which is **not** a
+/// property of the table: `NextWalk` (0x4ef7) advances `[si+0xa]`, masks it
+/// with 7 and then skips any index whose *script* row word is zero, so the
+/// cycle is as long as the matching walk script row and the table is read at
+/// those indices. The tables are written longer than that — `TroggWALKR`'s
+/// twenty four bytes hold its three entries twice over — so reading them by
+/// their symbol gap would give a cycle the game never walks.
+fn walk_speed_row(
+    img: &[u8],
+    syms: &Symbols,
+    name: &str,
+    len: usize,
+    pairs: bool,
+) -> anyhow::Result<Vec<[i32; 2]>> {
+    let off = syms
+        .data_offset(name)
+        .ok_or_else(|| anyhow::anyhow!("no data symbol called {name}"))?;
+    let stride = if pairs { 4 } else { 2 };
+    let end = syms.next_datum(off).unwrap_or(u16::MAX) as u32;
+    let word = |at: u32| -> anyhow::Result<i32> {
+        let a = (DS_BASE + at) as usize;
+        let b = img
+            .get(a..a + 2)
+            .ok_or_else(|| anyhow::anyhow!("{name} runs off the end of the image"))?;
+        Ok(i16::from_le_bytes([b[0], b[1]]) as i32)
+    };
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let at = off as u32 + (i * stride) as u32;
+        anyhow::ensure!(
+            at + stride as u32 <= end,
+            "{name} has room for fewer than {len} entries before {}",
+            syms.datum(end as u16).unwrap_or("the next symbol"),
+        );
+        out.push(if pairs {
+            [word(at)?, word(at + 2)?]
+        } else {
+            [word(at)?, 0]
+        });
+    }
+    Ok(out)
+}
+
+/// Every walk-speed table one controller's mover loads, cut to the length its
+/// own walk script rows give it.
+///
+/// `rows` is [`ActorTables::walk`]: right, up, down. A creature whose up row
+/// is empty has no up table either, which is the troll and the mudmen, and
+/// their depth step is the flat literal their own controller writes.
+pub fn walk_speed(
+    img: &[u8],
+    syms: &Symbols,
+    src: &WalkSpeedSource,
+    rows: &[Vec<String>; 3],
+) -> anyhow::Result<[Vec<[i32; 2]>; 3]> {
+    let one = |name: Option<&'static str>, row: &Vec<String>| -> anyhow::Result<Vec<[i32; 2]>> {
+        match (name, row.len()) {
+            (Some(n), l) if l > 0 => walk_speed_row(img, syms, n, l, src.pairs),
+            _ => Ok(Vec::new()),
+        }
+    };
+    // The troll and the mudmen have one script row and one table, and it is
+    // the one they walk sideways on; `TrollMoveL`/`TrollMoveR` and
+    // `MudmenMoveR`/`MudmenMoveL` are their only table-reading movers.
+    Ok([
+        one(src.right, &rows[0])?,
+        one(src.up, &rows[1])?,
+        one(src.down, &rows[2])?,
+    ])
+}
+
 /// The `Set*Tables` routines that write a whole record, by the actor they
 /// set up.
 pub const RECORD_ROUTINES: &[(&str, &str)] = &[
@@ -707,5 +855,56 @@ mod tests {
             (Some(95), Some(90), Some(2))
         );
         assert!(d.hits.is_empty() && d.walk[0].is_empty());
+    }
+
+    /// The walk-speed tables, read at the symbols the movers name.
+    ///
+    /// Two of these are cross-checks rather than data: `BKnightWALKR` holds
+    /// `K_WalkRValue`'s own `25 3 23 4` as `(x, 0)` pairs, and its up and
+    /// down rows hold `K_WalkUpValue` and `K_WalkDownValue` the same way. The
+    /// person's knight and a computer's walk the same distances; only the
+    /// routine that reads the numbers differs. So if the pair layout here
+    /// were wrong, or the cycle length, these would not line up.
+    #[test]
+    fn the_walk_speed_tables_read_as_their_movers_index_them() {
+        let Some((img, syms)) = image() else { return };
+        let all = all_actor_tables(&img, &syms, 0x2e).unwrap();
+        let read =
+            |src: &WalkSpeedSource, id: &str| walk_speed(&img, &syms, src, &all[id].walk).unwrap();
+
+        // `TroggMove` (0x2e4f, 0x2e37, 0x2e43). Three entries sideways,
+        // because `TroggAxe_WalkR1..3` is three scripts and `NextWalk`'s
+        // zero-skip makes the cycle as long as the row.
+        let t = read(&WALK_SPEED_TABLES[0], "trogg_axe");
+        assert_eq!(t[0], [[0, -1], [7, 1], [23, 0]], "TroggWALKR");
+        assert_eq!(t[1], [[0, 10], [0, 3], [1, 7], [-1, 3]], "TroggWALKU");
+        assert_eq!(t[2], [[3, 10], [2, 4], [1, 4], [4, 2]], "TroggWALKD");
+        // The spear trogg shares `ControlTrogg`'s body and so the same table.
+        let sp = read(&WALK_SPEED_TABLES[1], "trogg_spear");
+        assert_eq!(sp[0], t[0], "TroggWALKR, for the spear too");
+
+        // `TrollMoveL`/`TrollMoveR` (0x5648, 0x5667), pairs, and the troll's
+        // depth is not a table: `ControlTroll` writes a flat -5 and 5.
+        let tr = read(&WALK_SPEED_TABLES[2], "troll");
+        assert_eq!(tr[0], [[16, 0], [26, 0], [13, 0], [26, 0]], "TrollWALKR");
+        assert!(tr[1].is_empty() && tr[2].is_empty(), "no up or down table");
+
+        // `MudmenMoveR` shifts the cycle **once** (0x5420) where every other
+        // mover shifts twice, so its entries are two bytes of x, not four of
+        // a pair, and the depth is `MudmenMoveU`/`MudmenMoveD`'s flat -2/2.
+        let m = read(&WALK_SPEED_TABLES[3], "mudmen");
+        assert_eq!(m[0], [[12, 0], [12, 0], [10, 0], [14, 0]], "MudmenWALK");
+        assert!(m[1].is_empty() && m[2].is_empty());
+
+        // And the cross-check.
+        let bk = read(&BLACK_KNIGHT_WALK_SPEED, "knight");
+        assert_eq!(bk[0], [[25, 0], [3, 0], [23, 0], [4, 0]], "= K_WalkRValue");
+        assert_eq!(bk[1], [[0, 2], [0, 9], [0, 2], [0, 9]], "= K_WalkUpValue");
+        assert_eq!(bk[2], [[0, 8], [0, 2], [0, 9], [0, 2]], "= K_WalkDownValue");
+        assert_eq!(
+            bk[0].iter().map(|p| p[0]).collect::<Vec<_>>(),
+            henge_core::combat::KNIGHT_WALK_R_VALUE.to_vec(),
+            "the two knights walk the same table under two names",
+        );
     }
 }

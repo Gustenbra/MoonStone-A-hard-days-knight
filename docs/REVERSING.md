@@ -1034,3 +1034,108 @@ not the arena.
 The bestiary is unblocked. All eight creatures are composed the same way, and their
 scripts are recovered along with the knight's, and the port now runs them: the animation
 sequences are the executable's own, not authored, which was build-order item 27.
+
+## How an actor moves, which is the pattern any new creature is built to
+
+Written down because it was got wrong twice, and because it is what any monster added
+later has to follow rather than being given an invented speed.
+
+### There is no such thing as a speed per tick
+
+A controller runs **once per displayed frame** and moves its actor **once**, by a number
+it looks up. Nothing in the image adds a fraction of a step on a sub-tick, and nothing
+holds a "pixels per tick" figure at all. A combat frame is `DELAY` = 6 ticks of the
+54.6204 Hz timer (109.849 ms; see the clock section), so an engine that applies a flat
+step every tick moves everybody six times too far between decisions — and, worse, makes
+every position a creature can stop at a multiple of one stride, which is how the spear
+trogg came to step over his own ten-pixel attack window in both directions for ever.
+
+### The four movers, and the table each caller chooses
+
+`MoveL` (0x4dd5), `MoveR` (0x4e09), `MoveU` (0x4e3d) and `MoveD` (0x4e64) are one routine
+four times:
+
+```text
+04e0e  mov al, byte ptr [si + 0xa]   ; the walk cycle
+04e11  shl ax, 1
+04e13  shl ax, 1                     ; times four: (x, z) pairs
+04e17  add di, ax                    ; di is the table the CALLER loaded
+04e19  mov ax, word ptr [di]         ; this frame's x
+04e1b  mov word ptr [0x7bf5], ax
+04e1e  mov ax, word ptr [di + 2]     ; and this frame's z
+04e21  mov word ptr [0x7bf7], ax
+```
+
+`MoveL` then negates the x (0x4df5) and `MoveU` the z (0x4e59), so a table is written
+rightward and downward and the other two directions are its mirror. `MonsterWalk`
+(0x4eeb, 0x4ef1) adds the pair once and is done.
+
+`di` never comes from the actor record. The caller names its table outright, and a scan
+of every `mov di/si/bx, imm16` in the image against the six table addresses finds
+**twelve** loads and no others:
+
+| caller | table | actors |
+|---|---|---|
+| `TroggMove` 0x2e37, 0x2e43, 0x2e4f, 0x2e5b | `TroggWALKU`, `TroggWALKD`, `TroggWALKR` | all three troggs |
+| `ControlBlackKnight`'s `M0$`..`M3$` 0x4be6, 0x4bf2, 0x4bfe, 0x4c0a | `BKnightWALKU`, `BKnightWALKD`, `BKnightWALKR` | a computer knight |
+| `MudmenMoveR`/`MudmenMoveL` 0x5422, 0x5435 | `MudmenWALK` | mudmen |
+| `TrollMoveL`/`TrollMoveR` 0x5648, 0x5667 | `TrollWALKR` | the troll |
+
+The person's own knight has the same thing under other names — `K_WalkRValue`,
+`K_WalkUpValue`, `K_WalkDownValue` (0x77fe, 0x7808, 0x7810) — because `ControlKnight`
+reads them itself, as three rows of plain words, instead of going through the movers.
+
+### The cross-check that proves the layout
+
+`BKnightWALKR` is `(25,0) (3,0) (23,0) (4,0)`; `K_WalkRValue` is `25 3 23 4`.
+`BKnightWALKU` is `(0,2) (0,9) (0,2) (0,9)`; `K_WalkUpValue` is `2 9 2 9`.
+`BKnightWALKD` is `(0,8) (0,2) (0,9) (0,2)`; `K_WalkDownValue` is `8 2 9 2`.
+
+The two knights walk the same distances on the same frames. If the pair layout, the
+stride or the cycle length were read wrong, these would not line up, and
+`tables::the_walk_speed_tables_read_as_their_movers_index_them` fails if they stop
+lining up.
+
+### How long a table is, which is not a property of the table
+
+`NextWalk` (0x4ef7) does `add byte ptr [si+0xa], al`, `and byte ptr [si+0xa], 7`, and
+then **skips any index whose walk *script* row word is zero** (0x4f0f). So the cycle is
+as long as the matching row of walk scripts, and the speed table is read at those
+indices and no others. The tables are written longer than they are walked —
+`TroggWALKR`'s twenty four bytes hold its three entries twice over — so measuring one by
+its symbol gap gives a cycle the game never walks. The row is what measures it:
+`TroggAxe_WalkR1..3` is three, `TroggAxe_WalkU1..4` is four.
+
+One exception, and it is a real one: **`MudmenMoveR` shifts the cycle once** (0x5420),
+not twice, so `MudmenWALK` is two bytes an entry — x alone. Its depth is the flat `±2`
+of `MudmenMoveU`/`MudmenMoveD` (0x5447, 0x5451).
+
+### What the rest of the bestiary does instead
+
+Five creatures have no controller step at all and move from their own scripts:
+
+* the **beast** charges, and wraps at the screen edge rather than stopping —
+  `BeastCharge` (0x2fec) sets the column to 0x17c when it passes 0x154, `BeastChargeLeft`
+  (0x2ffe) sets it to -50 when it passes 0;
+* the **ratman** leaps and hangs (`RatmanLeap` 0x31e7 writes `+6` on an arc);
+* the **Balok** jumps (`BalokJumping` 0x3714 writes `+2` and `+6` outright);
+* the **dragon** flies (`ContinueDragon` 0xa5f5);
+* the **demon** is the one that does have a step and no table: `DemonMove` writes it as a
+  literal, `mov ax, 5` / `mov ax, 0xfffb` for the column (0x4fe2, 0x4fed) and
+  `mov bx, 0xfffb` / `mov bx, 5` for the depth (0x4ff6, 0x5001), and adds them at 0x5004
+  and 0x500a. Five pixels a frame, both ways.
+
+### So: adding a creature
+
+1. Give it walk **script** rows first. Their length is its walk cycle.
+2. Give it a walk-speed table with one `[x, z]` entry per row entry, in
+   `ActorDef::walk_speed`. Where the original has one, read it at bake time from the
+   symbol its mover names (`tables::WALK_SPEED_TABLES`) rather than typing the numbers.
+3. Where an axis has no table, put the controller's own literal in `speed_x`/`speed_y`
+   — **per displayed frame**, not per tick — and cite the instruction that writes it.
+4. Leave both empty for anything that moves from its scripts.
+
+Uneven entries are not decoration. They are what lets a creature come to rest at
+distances a single stride would skip, and several of the range bands they have to land
+in are narrower than one stride.
+

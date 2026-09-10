@@ -109,6 +109,102 @@ impl Family {
 pub type Arenas = BTreeMap<String, ArenaData>;
 pub type Families = BTreeMap<String, Family>;
 
+/// One actor's per-frame walk step, as the image holds it: three rows of
+/// `[x, z]` pairs, indexed by the walk cycle.
+///
+/// The image has six of these tables and no more. `TroggWALKR`/`U`/`D`
+/// (DS:0x7746, 0x775e, 0x7772) are loaded by `TroggMove` (0x2e37, 0x2e43,
+/// 0x2e4f, 0x2e5b) and serve all three troggs; `BKnightWALKR`/`U`/`D`
+/// (0x7bb6, 0x7bca, 0x7bda) by `ControlBlackKnight`'s `M0$`..`M3$` (0x4be6,
+/// 0x4bf2, 0x4bfe, 0x4c0a); `TrollWALKR` (0x7ba2) by `TrollMoveL`/`TrollMoveR`
+/// (0x5648, 0x5667); and `MudmenWALK` (0x7b8e) by `MudmenMoveR`/`MudmenMoveL`
+/// (0x5422, 0x5435). A whole-image scan for every instruction that loads one
+/// of their addresses finds those twelve sites and nothing else.
+///
+/// The person's own knight has the same thing under different names,
+/// `K_WalkRValue`/`K_WalkUpValue`/`K_WalkDownValue` (0x77fe, 0x7808, 0x7810),
+/// which `ControlKnight` reads as three separate word tables rather than as
+/// pairs. `BKnightWALK*` is the proof that the two are the same mechanism:
+/// its rows are `(25,0) (3,0) (23,0) (4,0)`, `(0,2) (0,9) (0,2) (0,9)` and
+/// `(0,8) (0,2) (0,9) (0,2)` — the knight's own three tables, pair by pair.
+///
+/// Everything else moves from its own scripts, not from a controller step:
+/// the beast charges and wraps at the screen edge (`BeastCharge` 0x2fec,
+/// `BeastChargeLeft` 0x2ffe), the ratman leaps (`RatmanLeap` 0x31e7), the
+/// Balok jumps (`BalokJumping` 0x3714) and the dragon flies
+/// (`ContinueDragon` 0xa5f5).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WalkSpeed {
+    /// Walking sideways. `MoveL` (0x4df5) negates the x it read, so the table
+    /// is written rightward and the leftward walk is its mirror.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub right: Vec<[i32; 2]>,
+    /// Walking away from the viewer. `MoveU` (0x4e59) negates the z.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub up: Vec<[i32; 2]>,
+    /// And towards. `MoveD` does not negate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub down: Vec<[i32; 2]>,
+}
+
+impl WalkSpeed {
+    pub fn is_empty(&self) -> bool {
+        self.right.is_empty() && self.up.is_empty() && self.down.is_empty()
+    }
+
+    /// The step for one frame, given which way the actor is going and where
+    /// its walk cycle stands.
+    ///
+    /// The three rows are not alternatives: `TroggMove` (0x2e31 through
+    /// 0x2e5e) tests all four direction bits in turn and calls a mover for
+    /// each that is set, so a creature going up and right has both its up
+    /// pair and its right pair added, one after the other, in that order.
+    /// Each row is indexed modulo its own length, which is `NextWalk`'s mask
+    /// and zero-skip (0x4efc, 0x4f0f) expressed as data.
+    pub fn step(&self, dx: i32, dz: i32, cycle: usize, flat: (i32, i32)) -> (i32, i32) {
+        let pick = |row: &Vec<[i32; 2]>| -> Option<[i32; 2]> {
+            if row.is_empty() {
+                None
+            } else {
+                Some(row[cycle % row.len()])
+            }
+        };
+        let (mut x, mut z) = (0, 0);
+        // 02e31: `test byte ptr [si+0x26], 8` — up first.
+        if dz < 0 {
+            match pick(&self.up) {
+                // 04e59: `neg word ptr [0x7bf7]`.
+                Some([ax, az]) => {
+                    x += ax;
+                    z -= az;
+                }
+                None => z -= flat.1,
+            }
+        } else if dz > 0 {
+            // 02e3d: `test byte ptr [si+0x26], 4`.
+            match pick(&self.down) {
+                Some([ax, az]) => {
+                    x += ax;
+                    z += az;
+                }
+                None => z += flat.1,
+            }
+        }
+        // 02e49 and 02e55: right, then left, both off the same row.
+        if dx != 0 {
+            match pick(&self.right) {
+                // 04df5: `neg word ptr [0x7bf5]` is the whole of `MoveL`.
+                Some([ax, az]) => {
+                    x += ax * dx.signum();
+                    z += az;
+                }
+                None => x += flat.0 * dx.signum(),
+            }
+        }
+        (x, z)
+    }
+}
+
 /// Everything the simulation needs to know about one kind of fighter. All of it
 /// is data, so retuning the feel of the game is editing JSON, not editing Rust.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -124,10 +220,42 @@ pub struct ActorDef {
     /// its `*Dam` table in the original held.
     #[serde(default)]
     pub damage: i32,
-    /// Pixels per tick. Arenas are far wider than they are deep, so horizontal
-    /// movement is faster and vertical movement reads as depth.
+    /// Pixels per **displayed frame**, for the actors whose own step the image
+    /// does not hold a table for. See [`ActorDef::walk_speed`]: where there is
+    /// a table, these are not read.
     pub speed_x: i32,
     pub speed_y: i32,
+    /// The per-frame walk step, by walk-cycle index: the right row, the up row
+    /// and the down row, each entry `[x, z]`.
+    ///
+    /// **Nothing in the original moves by a flat speed applied every tick.** A
+    /// controller runs once per displayed frame and moves once, by the entry
+    /// its own walk cycle is on. `MoveL`/`MoveR` (0x4dd5, 0x4e09) and
+    /// `MoveU`/`MoveD` (0x4e3d, 0x4e64) all do the same four instructions:
+    ///
+    /// ```text
+    /// 04e0e  mov al, byte ptr [si + 0xa]   ; the walk cycle
+    /// 04e11  shl ax, 1
+    /// 04e13  shl ax, 1                     ; times four: (x, z) pairs
+    /// 04e17  add di, ax                    ; into the table the caller chose
+    /// 04e19  mov ax, word ptr [di]         ; this frame's x step
+    /// 04e1b  mov word ptr [0x7bf5], ax
+    /// 04e1e  mov ax, word ptr [di + 2]     ; and its z step
+    /// ```
+    ///
+    /// and `MonsterWalk` (0x4eeb, 0x4ef1) adds the pair once. The cycle is
+    /// `[si+0xa]`, which `NextWalk` (0x4ef7) advances and masks with 7,
+    /// skipping any index whose walk *script* row is zero — so the number of
+    /// entries a table has is the number of scripts in the matching row, and
+    /// [`ActorDef::sequences`] is what decides it, exactly as in the image.
+    ///
+    /// A row left empty means this actor has no table of that kind and falls
+    /// back to `speed_x`/`speed_y` for that axis, which is what the troll
+    /// (flat +/-5 depth, `ControlTroll` 0x5620 and 0x5635), the mudmen (flat
+    /// +/-2, `MudmenMoveU`/`MudmenMoveD` 0x5447 and 0x5451) and the demon
+    /// (flat +/-5 both ways, `DemonMove` 0x4fe2 through 0x5001) actually do.
+    #[serde(default)]
+    pub walk_speed: WalkSpeed,
     /// How far a strike lands, used by the opponent to judge spacing.
     pub reach: i32,
     /// How closely depth must line up before a strike can connect.
@@ -410,6 +538,7 @@ impl Default for ActorDef {
             damage: 0,
             speed_x: 0,
             speed_y: 0,
+            walk_speed: WalkSpeed::default(),
             reach: 0,
             depth_tolerance: 0,
             attack_cooldown: 0,
