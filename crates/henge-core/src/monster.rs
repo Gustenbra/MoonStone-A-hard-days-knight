@@ -302,15 +302,41 @@ pub struct Shared {
     /// `SLAP`, DS:`0x7832`: which way the slapped knight is flung, held as a
     /// facing byte — 1 right, 3 left, the same encoding as an actor's `+8`.
     ///
-    /// Three sites write it and no others: `ClawHit+9` (0x3b9f) and
-    /// `ClawStruck1+9` (0x43dc) both write 1, so a dragon's claw always bats
-    /// rightward whichever side of the knight it is on; and `ControlBalok`'s
-    /// uppercut branch (0x3623) writes the Balok's own `+8`, so that one
-    /// throws him the way the Balok is facing. `DemonSlap` (0x437f) turns its
-    /// victim and writes neither this nor `SLAPY`, so a demon's slap launches
-    /// nobody.
+    /// **Eight sites write it**, and every one of them is a striker that can
+    /// put the knight on `Knight_SwSlapped`:
+    ///
+    /// ```text
+    /// 03b9f  mov word [SLAP], 1        ; ClawHit
+    /// 043dc  mov byte [SLAP], 1        ; ClawStruck1
+    /// 0363c  mov [SLAP], al            ; ControlBalok's uppercut, al = [si+8]
+    /// 05697  mov [SLAP], al            ; TrollBunt
+    /// 0505c  mov [SLAP], al            ; DemonAttack's slap
+    /// 050a1  mov [SLAP], al            ; DemonAttack's whip
+    /// 050d0  mov [SLAP], al            ; DemonOWhipFollow
+    /// 0510b  mov [SLAP], al            ; DemonUWhipFollow
+    /// ```
+    ///
+    /// A dragon's claw always bats rightward whichever side of the knight it
+    /// is on; the Balok's uppercut, the troll's bunt and the demon's slap and
+    /// whip all write their own `+8`, so those throw him the way the striker
+    /// is facing.
+    ///
+    /// **`DemonSlap` (0x437f) is not one of the eight**, and an earlier note
+    /// here read that as the demon slapping nobody. That was wrong.
+    /// `DemonSlap` is the *struck* side of the blow and only turns the victim
+    /// ([`struck_facing`]); the direction and the table are written a frame
+    /// earlier by `DemonAttack` (0x5059..0x5062), on the controller's side,
+    /// exactly as `ControlBalok` and `TrollBunt` write theirs. And
+    /// `InitKnightvsDemon+40` (0x2765) puts `Knight_SwSlapped` on the knight's
+    /// kind-0x10 row, so a demon's slap does throw him.
     #[serde(default)]
     pub slap: i32,
+    /// `SLAPY`, DS:`0x782e`: the pointer `KnightSLAP` reads the throw's
+    /// distances through, held here as the index into [`BALOK_SLAP`] that the
+    /// pointer names. See [`slap_y`] for the two values it takes and
+    /// [`slap_entry`] for the read.
+    #[serde(default)]
+    pub slap_y: i32,
 }
 
 /// `DragonFLAGS`' four bits, by the numbers the code tests.
@@ -343,14 +369,26 @@ pub mod dragon_flag {
 /// rebound the other way, and at rest.
 ///
 /// **`SLAPY` (DS:`0x782e`), the pointer `KnightSLAP` reads the table
-/// through, is only ever assigned this one table.** Its three writers are
-/// `ClawHit+15` (0x3ba5), `ControlBalok`'s uppercut branch (0x3623) and
-/// nothing else; `InitSLAP` does not touch it and no other instruction in
-/// the image stores to `0x782e`. An indirection with one possible value
-/// carries no information, so it is not modelled as a field: this constant
-/// *is* `SLAPY`, and the sites that would have written it say so instead.
+/// through, takes two values, and both of them live inside these eleven
+/// words.** Six instructions in the image store to `0x782e`:
 ///
-/// **Seven of the eleven words are dead.** `Knight_SwSlapped` (DS:`0x1596`)
+/// ```text
+/// 0363f  mov word [SLAPY], BalokSLAP   ; ControlBalok's uppercut
+/// 03ba5  mov word [SLAPY], BalokSLAP   ; ClawHit
+/// 043e1  mov word [SLAPY], BalokSLAP   ; ClawStruck1
+/// 0505f  mov word [SLAPY], BalokSLAP   ; DemonAttack's slap
+/// 050a4  mov word [SLAPY], DemonWHIP   ; DemonAttack's whip
+/// 0569a  mov word [SLAPY], BalokSLAP   ; TrollBunt
+/// ```
+///
+/// `DemonWHIP` is DS:`0x7822`, which is `BalokSLAP + 10`: the same storage,
+/// five words in. So the whip reads -7, -3, -1, 0 where a slap reads 30, 25,
+/// 20, 20 — the whip drags the knight *towards* the demon, and a slap throws
+/// him away. `InitSLAP` does not touch the pointer and nothing else in the
+/// image stores to it, so [`Shared::slap_y`] is that index and [`slap_y`]
+/// holds the two values: it is a pointer into one table, not a choice of two.
+///
+/// **Three of the eleven words are dead.** `Knight_SwSlapped` (DS:`0x1596`)
 /// is the only script in the image that gosubs either routine, and it is two
 /// frames long:
 ///
@@ -373,12 +411,26 @@ pub mod dragon_flag {
 /// ```
 ///
 /// — and the end-of-frame handler (0x9947) puts that back into `task+2` for
-/// every held show. So `KnightSLAP` runs four times, `SLAPCNT` runs -1, 0, 1,
-/// 2, 3, and the shipped game only ever reads 30, 25, 20 and 20: ninety five
-/// pixels over four shows of two frames. The last of the steady run, the
-/// rebound and the rest were authored and never reached.
+/// every held show. So `KnightSLAP` runs four times and `SLAPCNT` runs -1, 0,
+/// 1, 2, 3 whichever word the pointer started on. A slap therefore reads
+/// words 0 to 3 — 30, 25, 20, 20, ninety five pixels over four shows of two
+/// frames — and the whip words 5 to 8, eleven pixels the other way. Word 4,
+/// the last of the steady run, and words 9 and 10, the tail of the rebound,
+/// were authored and never reached.
 #[rustfmt::skip]
 pub const BALOK_SLAP: [i32; 11] = [30, 25, 20, 20, 20, -7, -3, -1, 0, 0, 0];
+
+/// The two words of [`BALOK_SLAP`] that `SLAPY` is ever pointed at, as
+/// indices into it. The image's six stores to DS:`0x782e` name one or the
+/// other and nothing else; see the table's own note.
+pub mod slap_y {
+    /// `BalokSLAP` itself, DS:`0x7818`: the claw's, the Balok's uppercut's,
+    /// the troll's bunt's and the demon's slap's table.
+    pub const BALOK_SLAP: i32 = 0;
+    /// `DemonWHIP`, DS:`0x7822`, which is `BalokSLAP + 10` and so five words
+    /// in: `DemonAttack`'s whip branch (0x50a4) is its only writer.
+    pub const DEMON_WHIP: i32 = 5;
+}
 
 /// `[SLAPY + SLAPCNT*2]` as `KnightSLAP` reads it (0x4504..0x4512, and the
 /// same six instructions again at 0x4538..0x4546):
@@ -389,21 +441,24 @@ pub const BALOK_SLAP: [i32; 11] = [30, 25, 20, 20, 20, -7, -3, -1, 0, 0, 0];
 /// 0450d  push di; add di, ax; mov bx, [di]; pop di
 /// ```
 ///
-/// The read is unmasked and unchecked, as `progression_at`'s is.
+/// The read is unmasked and unchecked, as `progression_at`'s is. `base` is
+/// [`Shared::slap_y`], the word of [`BALOK_SLAP`] the pointer names.
 //
 // TODO: what the original reads past the table's eleventh word is known —
 // DS:`0x782e` is `SLAPY` (0x7818, the table's own address), `0x7830` is
 // `SLAPCNT` and `0x7832` is `SLAP`, so indices 11, 12 and 13 would throw a
 // knight 30744 pixels, then by the count, then by the direction — but no
 // shipped script can reach it: `Knight_SwSlapped` is the only caller of
-// `KnightSLAP` and runs it four times. Nothing is built for the overrun and the
-// step is skipped instead, because modelling it would mean giving `SLAPY` a
-// word value for the sake of an unreachable branch.
-pub fn slap_entry(cnt: i32) -> Option<i32> {
+// `KnightSLAP` and runs it four times, from word 0 for a slap and word 5 for
+// the whip. Nothing is built for the overrun and the step is skipped instead,
+// because modelling it would mean giving `SLAPY` and `SLAP` word values for
+// the sake of an unreachable branch.
+pub fn slap_entry(base: i32, cnt: i32) -> Option<i32> {
     if cnt < 0 {
         return None;
     }
-    BALOK_SLAP.get(cnt as usize).copied()
+    let at = usize::try_from(base.checked_add(cnt)?).ok()?;
+    BALOK_SLAP.get(at).copied()
 }
 
 /// The tail of `KnightSLAP` (0x4513) and of `KnightSLAPR` (0x4547): the
@@ -1004,12 +1059,12 @@ pub fn decide(
     match s.def.controller() {
         Controller::Trogg => trogg(s, brain, seed, false, facing),
         Controller::TroggSpear => trogg(s, brain, seed, true, facing),
-        Controller::Troll => troll(s, brain, facing),
+        Controller::Troll => troll(s, brain, facing, shared),
         Controller::Ratman => ratman(s, brain, facing, shared),
         Controller::Mudman => mudman(s, brain, facing),
         Controller::Balok => balok(s, brain, facing, shared),
         Controller::Beast => beast(s, brain, seed, facing),
-        Controller::Demon => demon(s, brain, facing),
+        Controller::Demon => demon(s, brain, facing, shared),
         Controller::Dragon => dragon(s, brain, facing, shared, at),
         Controller::Claw => claw(s, shared),
         Controller::Knight => black_knight(s, brain, seed, facing),
@@ -1504,7 +1559,30 @@ pub fn ratman_flips(same_kind: bool, busy: bool, victim_facing: i32, ratman_faci
 
 /// `ControlTroll` and `TrollAttack`: the club inside a hundred, the overhead
 /// chop from further out, and never two chops running.
-fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
+///
+/// ```text
+/// TrollAttack:
+/// 05678  call FindDistance
+/// 0567b  mov si, [0x77e8]
+/// 0567f  cmp ax, 0x64; jl TrollBunt
+/// 05684  cmp ax, 0x96; jl TrollChop
+/// TrollBunt:
+/// 05689  mov word [si+0x28], 4
+/// 0568e  mov word [0x783a], Troll_Bunt
+/// 05694  mov al, [si+8]
+/// 05697  mov [SLAP], al                ; the bunt throws him the troll's way
+/// 0569a  mov word [SLAPY], BalokSLAP
+/// TrollChop:
+/// 056a3  cmp word [si+0x28], 0x10; je TrollBunt
+/// 056a9  mov word [si+0x28], 0x10
+/// 056ae  mov word [0x783a], Troll_Chop
+/// ```
+///
+/// The bunt is the second striker in the game to write `SLAP` off its own
+/// `+8`, and `InitKnightvsTroll+16` (0x26ba) is what makes the write count:
+/// `Knight_SwSlapped` on the knight's kind-4 row, so the club throws him the
+/// way a claw or an uppercut does. See `Bout::troll_struck_knight`.
+fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) -> Act {
     // ControlTroll+53 (0x55f9): `call MonsterTrack`.
     let t = track(s.me, s.foe, s.def, facing);
     if t.walking {
@@ -1519,6 +1597,11 @@ fn troll(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         };
     }
     brain.phase = 0;
+    // 05694  mov al, [si+8]; 05697 mov [SLAP], al; 0569a mov [SLAPY], BalokSLAP.
+    // `+8` is what `MonsterTrack` left a few instructions ago, which is
+    // `*facing` here.
+    shared.slap = if *facing < 0 { 3 } else { 1 };
+    shared.slap_y = slap_y::BALOK_SLAP;
     Act::Attack {
         kind: Attack::Swing,
         spawn: None,
@@ -2222,12 +2305,13 @@ fn balok(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) ->
         // 03639  mov al, [si+8]; 0363c mov [SLAP], al
         // 0363f  mov word [SLAPY], BalokSLAP
         //
-        // The uppercut is the one striker that throws its victim the way it
-        // is itself facing rather than always rightward, and `+8` is what
-        // ControlBalok+80..107 set a dozen instructions ago. `SLAPY` is only
-        // ever [`BALOK_SLAP`], so that store has nothing to keep; see the
-        // table's own note.
+        // The uppercut throws its victim the way it is itself facing rather
+        // than always rightward as a claw does, and `+8` is what
+        // ControlBalok+80..107 set a dozen instructions ago. `SLAPY` gets the
+        // table's own first word, which is what a throw reads; see the
+        // table's note for the whip, which is the one store that does not.
         shared.slap = if *facing < 0 { 3 } else { 1 };
+        shared.slap_y = slap_y::BALOK_SLAP;
         return Act::Attack {
             kind: Attack::Swing,
             spawn: None,
@@ -2501,7 +2585,27 @@ fn beast(s: &Sight, brain: &mut Brain, seed: &mut u16, facing: &mut i32) -> Act 
 /// `ControlDemon` and `DemonAttack`: the slap inside a hundred, the zap out to
 /// a hundred and thirty, the whip out to a hundred and forty, and the whip's
 /// own four phase follow-through.
-fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
+///
+/// Two of those four branches write the throw's direction and table:
+///
+/// ```text
+/// 0504e  mov word [si+0x28], 0x10      ; the slap
+/// 05053  mov word [0x783a], Demon_Slap
+/// 05059  mov al, [si+8]
+/// 0505c  mov [SLAP], al
+/// 0505f  mov word [SLAPY], BalokSLAP
+/// ...
+/// 0508e  mov word [si+0x28], 2         ; the whip
+/// 05093  mov word [0x783a], Demon_Whip
+/// 0509e  mov al, [si+8]
+/// 050a1  mov [SLAP], al
+/// 050a4  mov word [SLAPY], DemonWHIP   ; five words in: the drag, not the throw
+/// ```
+///
+/// The zap (0x5072) writes neither. The slap's row over the knight's `*Hit`
+/// table is `InitKnightvsDemon+40` (0x2765), so `Knight_SwSlapped` reads the
+/// words this branch chose; see `Bout::demon_struck_knight`.
+fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32, shared: &mut Shared) -> Act {
     if brain.flags & flag::UNBORN != 0 {
         // `[di+0x10]` is `Demon_Evolve`, so the demon's first script is its
         // own materialisation, and its last frame calls `AddDemonWhirl`.
@@ -2580,6 +2684,10 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
         }
         brain.timer = 2;
         brain.cooldown = 9;
+        // 05059  mov al, [si+8]; 0505c mov [SLAP], al
+        // 0505f  mov word [SLAPY], BalokSLAP
+        shared.slap = if *facing < 0 { 3 } else { 1 };
+        shared.slap_y = slap_y::BALOK_SLAP;
         return Act::Attack {
             kind: Attack::Chop,
             spawn: None,
@@ -2595,6 +2703,18 @@ fn demon(s: &Sight, brain: &mut Brain, facing: &mut i32) -> Act {
     if d <= 140 {
         brain.cooldown = 5;
         brain.phase = 1;
+        // 0509e  mov al, [si+8]; 050a1 mov [SLAP], al
+        // 050a4  mov word [SLAPY], DemonWHIP
+        //
+        // The whip's own table, which is [`BALOK_SLAP`] five words in and so
+        // all negative: a caught knight is dragged towards the demon rather
+        // than thrown from it. `DemonOWhipFollow` (0x50de) and
+        // `DemonUWhipFollow` (0x5119) are what hand him `Knight_SwSlapped` to
+        // read it with, and that hand-off is not built: `Act::Strike` below
+        // leaves him on his own hurt row. The pointer is still written here
+        // because it is what the branch writes.
+        shared.slap = if *facing < 0 { 3 } else { 1 };
+        shared.slap_y = slap_y::DEMON_WHIP;
         return Act::Attack {
             kind: Attack::Lunge,
             spawn: None,

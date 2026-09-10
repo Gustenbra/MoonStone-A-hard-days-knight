@@ -133,7 +133,7 @@ exactly the opposite requirements.
 | | Overworld | Arena |
 |---|---|---|
 | Players | hundreds | 2 to 4 |
-| Tick rate | low, ~10 Hz | high, the game's own 70 Hz |
+| Tick rate | the map's own 70.0863 Hz retrace | the fight's own 54.6204 Hz timer |
 | Precision | none needed | frame-exact |
 | Model | authoritative server, area-of-interest, interpolation | instanced, deterministic, lockstep or rollback |
 

@@ -294,8 +294,26 @@ impl Effects {
         self.glows.iter().filter(|g| !g.done).count()
     }
 
-    /// One frame of `COLCON`, and one step of whichever fade is running.
+    /// One pass of `COLCON`, and one step of whichever fade is running.
+    ///
+    /// These are two different clocks in the original and the split below is
+    /// what lets a caller drive them apart. Anything that wants both at the
+    /// engine's own rate still calls this.
     pub fn tick(&mut self) {
+        self.tick_effects();
+        self.tick_fade();
+    }
+
+    /// `COLCON` (image 0x4988) walking `VBLQUE` (DS:`0x7b72`): every effect the
+    /// screen installed, stepped once.
+    ///
+    /// This is one pass of the loop that calls `COLCON`, which is **not** one
+    /// tick of this engine's clock everywhere. Its three callers in the whole
+    /// image are `Combat+6` (0x357), `MapLOOP+3` (0xa309) and `ChooseLoop+3`
+    /// (0x15a3). The last two pass once per retrace, which is one tick here;
+    /// a combat pass is six timer ticks, so the desktop gates this on
+    /// `ticks_per_pass` rather than calling it every tick.
+    pub fn tick_effects(&mut self) {
         for c in &mut self.cycles {
             c.count -= 1;
             if c.count == 0 {
@@ -323,6 +341,16 @@ impl Effects {
                 }
             }
         }
+    }
+
+    /// One step of whichever fade is running, which is **not** a `VBLQUE`
+    /// entry and so is not gated with the effects above.
+    ///
+    /// The original's fades run their own loop with their own retrace waits
+    /// rather than being stepped by `COLCON`, so a fight does not slow them
+    /// the way it slows a colour cycle. Keeping this on the engine's tick is
+    /// the nearest that shape gets in a shell that cannot block.
+    pub fn tick_fade(&mut self) {
         self.fade = self.fade.advance();
     }
 

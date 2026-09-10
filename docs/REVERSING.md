@@ -614,8 +614,9 @@ and the only instruction before the `jne` that sets flags is `add bx, ax` at 0x4
 zero, so the jump is always taken. A balok's slap does not turn the knight.
 
 `KnightSLAP+19` (`044e5`) sets the slapped knight's `+8` from DS:0x7832, the direction the
-slap goes. It is not built: the slap itself is not built, and `InitSLAP` and `KnightSLAP`
-are named in `taskvm.rs` as `TASKGOSUB` targets and no more.
+slap goes. It is built now, with the rest of the slap: `Bout::knight_slap` off the
+`InitSLAP` and `KnightSLAP` gosubs, which used to be named in `taskvm.rs` as `TASKGOSUB`
+targets and no more.
 
 ### The fight loop draws no readout, and it is short enough to say so exhaustively
 

@@ -736,36 +736,17 @@ fn main() -> anyhow::Result<()> {
     let mut surface = softbuffer::Surface::new(&context, window.clone())
         .map_err(|e| anyhow::anyhow!("no drawing surface: {e}"))?;
 
-    // One tick is one of the original's frames, and the original's frame is one
-    // vertical retrace.
-    //
-    // **Recovered.** The wait is the unnamed public routine at image `0x5a24`,
-    // between `AdjustJoy` and the start of `GFX`: `mov dx, 0x3da`, spin while
-    // bit 3 is set, then spin until it is set again, which is exactly one
-    // retrace. Every main loop calls it once a pass and nothing else paces
-    // them: `Combat` at `0x0354` (the loop runs `0x0351` to `0x0374`),
-    // `MapLOOP` at `0x0a306`, `ScanKEYS` at `0x0145a`, `FindLandscape` at
-    // `0x0afed`, `ShakeScreen` at `0x0496b`, `KnightWonGame` at `0x01117`,
-    // `FightDemon` at `0x01031`, and the palette fade loop at `0x05bb0`.
-    //
-    // So the rate is the video mode's refresh rate. The game never programs the
-    // CRTC's timing or the Miscellaneous Output register: the only CRTC write in
-    // the whole image is index 0x0c, the start address, at `0x5a34` and inside
-    // `ShakeScreen` at `0x4965`. It therefore runs at the BIOS timing for a
-    // 320x200 VGA mode, which is the 400 line timing: a 25.175 MHz dot clock
-    // over 800 dots is 31468.75 lines a second, over 449 lines is **70.0863
-    // frames a second**. That is the 70 Hz `henge_core::intro` already quotes.
-    //
-    // This used to be sixty, which ran every recovered frame count about
-    // fourteen percent slow. The music is a different clock and is not this one:
-    // `Install_Timer` at `0x584f` programs the 8253 with mode 3 and a divisor of
-    // 0x5555 and its handler at `0x5934` does nothing but `int 60h` and `int
-    // 61h` with `ah = 1`, so 54.62 Hz drives the tune and the sound effects and
-    // never the game. `henge_audio::music` keeps that rate in the score itself.
+    // The game does not have one clock, and which loop waits on which is
+    // recovered per loop in [`TIMER_TICK`] and [`RETRACE_TICK`]. A pass of the
+    // loop that is up costs a whole number of ticks of its own clock, so the
+    // length of a tick is looked up every pass from [`App::tick_len`].
     //
     // Time is accumulated and spent in whole ticks so the simulation never sees
-    // a fractional step, which is what keeps two machines agreeing on it.
-    const TICK: std::time::Duration = std::time::Duration::from_nanos(14_268_123);
+    // a fractional step, which is what keeps two machines agreeing on it. One
+    // accumulator is enough for that: what is left over on a change of clock is
+    // always less than one tick of the clock that was just in use, so the worst
+    // it can do is pay the first tick of the new clock early. It can never hand
+    // the simulation a part of a tick.
     let mut last = std::time::Instant::now();
     let mut owed = std::time::Duration::ZERO;
 
@@ -819,9 +800,10 @@ fn main() -> anyhow::Result<()> {
                 owed += now - last;
                 last = now;
                 // A stall (a dragged window, a sleeping laptop) must not be
-                // paid back as a burst of ticks; cap what can be owed.
-                if owed > TICK * 6 {
-                    owed = TICK * 6;
+                // paid back as a burst of ticks; cap what can be owed, in ticks
+                // of the clock the loop that is up runs on.
+                if owed > app.tick_len() * 6 {
+                    owed = app.tick_len() * 6;
                 }
                 // The sticks, once a frame and before the ticks they feed.
                 // The original reads them in its own frame loop and ORs them
@@ -829,13 +811,17 @@ fn main() -> anyhow::Result<()> {
                 pads.poll();
                 app.pads_tick(&pads);
                 let mut ticked = false;
-                while owed >= TICK {
+                // The clock is read again every pass because a tick can change
+                // which loop is up: walking into an arena moves the game off the
+                // retrace and onto the timer between one tick and the next.
+                while owed >= app.tick_len() {
+                    let tick = app.tick_len();
                     app.update();
-                    owed -= TICK;
+                    owed -= tick;
                     ticked = true;
                 }
                 elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    last + (TICK - owed),
+                    last + (app.tick_len() - owed),
                 ));
                 if !ticked {
                     return;
@@ -865,6 +851,110 @@ fn main() -> anyhow::Result<()> {
         }
     })?;
     Ok(())
+}
+
+/// One tick of the **programmed timer**, which is what paces the fight.
+///
+/// **Recovered.** `Combat` at image `0x351` opens with `call 0x96e1` and closes
+/// with `call 0x96f1` at `0x36c`, and the whole loop body sits between them.
+/// `0x96e1` is `sub ax, ax; mov es, ax; mov ax, es:[0x46c]; inc ax; inc ax; mov
+/// [0xc2f6], ax`: the BIOS tick counter at `0000:046c` plus two, stored as a
+/// deadline. `0x96f1` reads the same counter and spins `jb` until it has reached
+/// that deadline. So **one combat frame is two BIOS ticks**, and the retrace wait
+/// the loop also makes at `0x354` never dominates, being about 14 ms inside a
+/// much longer budget. These two routines are called from nowhere else in the
+/// image: one site each, both in `Combat`.
+///
+/// The rate of `0000:046c` is still the standard one, and that is the step this
+/// engine used to miss. `Install_Timer` at `0x584f` saves the old `int 8` vector
+/// into `[0x7c1b]`/`[0x7c1d]` (`0x5865`, `0x586c`), points the vector at its own
+/// handler (`0x5874`, entry `0x5928`), and programs the 8253 with `mov al, 0x36;
+/// out 0x43, al` and divisor `0x5555` at `0x58b9`..`0x58c4`. That interrupts at
+/// 1193182 / 21845 = **54.6204 Hz**. The handler calls the two drivers (`int
+/// 60h`, `int 61h`) and then at `0x5945` decrements `[0x7c19]`; only when that
+/// reaches zero does it reload it with 3 and `lcall [0x7c1b]` at `0x5951`,
+/// chaining to the original BIOS handler. So it chains **every third tick** and
+/// `0000:046c` keeps ticking at the usual **18.2068 Hz**.
+///
+/// A combat frame is therefore 2 / 18.2068 = **109.849 ms, 9.1034 frames a
+/// second**, which is exactly **six ticks of the 54.6204 Hz timer** — and six is
+/// the number every routine that sets a fight up writes into `DELAY`
+/// (`DS:0x91c`). A byte scan for `mov word [0x091c], 6` finds thirteen sites and
+/// nothing else touches the word at all: the eleven `InitKnightvs*` routines
+/// (`0x208c`, `0x20e2`, `0x216e`, `0x220b`, `0x22b6`, `0x2366`, `0x2525`,
+/// `0x25a3`, `0x261a`, `0x26e8`, `0x27b9`) plus `InitGameStart+0xda` (`0x1ce7`)
+/// and `InitPractice+0x41` (`0x202f`). **Nothing reads `DELAY` back** — the same
+/// scan finds no read — because the loop hardcodes the same duration as two BIOS
+/// ticks.
+/// It is `henge_core::content::ActorDef::script_ticks`.
+///
+/// This is derived rather than written out: the divisor over the 8253's input
+/// clock, in nanoseconds.
+const TIMER_TICK: std::time::Duration =
+    std::time::Duration::from_nanos(21_845 * 1_000_000_000 / 1_193_182);
+
+/// One tick of the **vertical retrace**, which is what paces everything else.
+///
+/// **Recovered.** The wait is the unnamed public routine at image `0x5a24`,
+/// between `AdjustJoy` and the start of `GFX`: `mov dx, 0x3da`, spin while bit 3
+/// is set, then spin until it is set again, which is exactly one retrace. The one
+/// other pacing helper in the image is at `0xafeb`: `mov cx, ax; call 0x5a24;
+/// loop`, which waits `ax` retraces. A byte scan for `mov dx, 0x3da` finds only
+/// three sites in the whole image — this one, `BlackScreen+7` and the fade at
+/// `0x5b6d` — so there is no third wait hiding anywhere.
+///
+/// Every loop that is not `Combat` waits on one of those two, or on nothing:
+///
+/// * `MapLOOP` (`0xa306`): one retrace, first call of the pass.
+/// * `ChooseLoop` (`0x15a0`), the knight select: one retrace, first call.
+/// * `ScanKEYS` (`0x142e`), name entry: `0xafeb` with `ax = 5`, five retraces.
+/// * `HengeLOOP` (`0xb3f6`), the stone circle: `0xafeb` with `ax = 3`.
+/// * `TavernLoop` (`0xb137`), `StatLOOP` (`0xbe13`), `DonateLoop` (`0xbbe6`),
+///   the two stall loops `WDLOOP` (`0xd7a`) and `HWLOOP` (`0xe35`), and
+///   `DoOptions`/`OptionKeys` (`0x1241`/`0x1282`), which is this shell's title:
+///   **no wait at all**. They blit, page-flip and spin as fast as the machine
+///   manages. See the TODO on [`App::tick_len`].
+///
+/// The rate is the video mode's refresh rate. The game never programs the CRTC's
+/// timing or the Miscellaneous Output register: the only CRTC write in the whole
+/// image is index 0x0c, the start address, at `0x5a34` and inside `ShakeScreen`
+/// at `0x4965`. It therefore runs at the BIOS timing for a 320x200 VGA mode,
+/// which is the 400 line timing: a 25.175 MHz dot clock over 800 dots is
+/// 31468.75 lines a second, over 449 lines is **70.0863 frames a second**. That
+/// is the 70 Hz `henge_core::intro`, `henge_core::ending` and
+/// `henge_core::dice` already quote, and their recovered counts are counts of
+/// *this* tick and are not rescaled by anything here.
+///
+/// Derived the same way: 449 lines of 800 dots over the dot clock.
+const RETRACE_TICK: std::time::Duration =
+    std::time::Duration::from_nanos(800 * 449 * 1_000_000_000 / 25_175_000);
+
+/// Which clock a screen's loop is paced by. See [`App::tick_len`], which is
+/// where the per-loop evidence is written down.
+fn tick_len_for(mode: Mode) -> std::time::Duration {
+    match mode {
+        Mode::Combat => TIMER_TICK,
+        Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Map | Mode::Place => {
+            RETRACE_TICK
+        }
+    }
+}
+
+/// How many ticks one pass of this mode's own loop takes.
+///
+/// A loop's per-pass work (`COLCON`, `KnightGlowOn`) happens once a pass and
+/// not once a tick, and the two are only the same thing where a pass is a
+/// single wait. In a fight a pass is `DELAY`'s six timer ticks, the 109.849 ms
+/// `Combat` (0x351) spends between its deadline at 0x96e1 and paying it at
+/// 0x96f1. Every other loop that does per-pass work waits one retrace, which
+/// is one tick here.
+const COMBAT_PASS_TICKS: u32 = 6;
+
+fn ticks_per_pass(mode: Mode) -> u32 {
+    match mode {
+        Mode::Combat => COMBAT_PASS_TICKS,
+        Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Map | Mode::Place => 1,
+    }
 }
 
 /// `MudmenGlowOn`: `COLOURGLOW(0x0e, 0x100, 2, 0)`. Palette entry fourteen
@@ -1703,6 +1793,31 @@ impl App {
         self.notice(state.prompt().join(" "));
     }
 
+    /// How long one tick of the loop that is up lasts.
+    ///
+    /// The original's loops do not share a clock, and each one's own wait says
+    /// which it is on: see [`TIMER_TICK`] and [`RETRACE_TICK`] for the wait each
+    /// of them makes and where it is.
+    ///
+    /// `Combat` (`0x351`) is the one loop that waits on a deadline in the BIOS
+    /// tick counter, so the arena and only the arena runs on the timer. The map
+    /// (`MapLOOP`), the knight select (`ChooseLoop`), the stone circle
+    /// (`HengeLOOP`), name entry (`ScanKEYS`) and the whole of `INTR.EXE`'s intro
+    /// and ending wait on vertical retraces, so they stay on the retrace.
+    ///
+    // TODO: `TavernLoop` (0xb137), `StatLOOP` (0xbe13), `DonateLoop` (0xbbe6),
+    // `WDLOOP` (0xd7a), `HWLOOP` (0xe35) and `DoOptions`/`OptionKeys`
+    // (0x1241/0x1282) make no wait of any kind: they blit, page-flip and go
+    // round again at whatever speed the machine manages, so the original has no
+    // rate here to recover. They are left on the retrace, which is the rate
+    // every other non-combat loop in the image does name, rather than given a
+    // number nothing in the image supports. The pointer on those screens is
+    // rate-limited by its own acceleration table (`_STATUS:StatACEL`) and not by
+    // a frame wait, which is presumably why they needed none.
+    fn tick_len(&self) -> std::time::Duration {
+        tick_len_for(self.mode)
+    }
+
     /// One tick. A key press is an edge: it lasts exactly this tick and is
     /// spent whether or not anything wanted it.
     fn update(&mut self) {
@@ -1777,11 +1892,26 @@ impl App {
             self.ending_glows = false;
             self.fx.set_fade(henge_assets::Fade::In(0));
         }
-        self.knight_glow_tick();
+        // `COLCON` (0x4988) and `KnightGlowOn` (0x8f8) are the calling loop's
+        // own per-pass work, not per-tick work, and in a fight a pass is six
+        // ticks rather than one. `Combat` (0x351) calls both, at 0x357 and
+        // 0x369; `MapLOOP+3` (0xa309) and `ChooseLoop+3` (0x15a3) call
+        // `COLCON` on a pass that is one retrace, which is one tick here, and
+        // a scan of the image finds no other caller of either. Ungated, a
+        // fight ran every colour cycle and the dying knight's own breathing
+        // six times too fast.
+        if self
+            .tick
+            .is_multiple_of(u64::from(ticks_per_pass(self.mode)))
+        {
+            self.knight_glow_tick();
+            self.fx.tick_effects();
+        }
         // `0x50d`, which the ceremony's own script gosubs part way through
         // itself rather than the scene routine installing it up front.
         self.moonstone_glow_tick();
-        self.fx.tick();
+        // Not `VBLQUE`'s, and so not gated with it: see `Effects::tick_fade`.
+        self.fx.tick_fade();
         // `FADEOUTDAY`, and the fade a message chain ends on. Both are screens
         // that go out when they are dismissed rather than being walked away
         // from, which is the only kind of fade out a shell with no loading time
@@ -5128,6 +5258,135 @@ mod tests {
             }
             app.rival_tick();
             assert!(frame < 9_999, "his turn never ended");
+        }
+    }
+
+    /// The two clocks, derived rather than written out.
+    ///
+    /// `Install_Timer` (0x584f) programs the 8253 with mode 0x36 and divisor
+    /// 0x5555, so a timer tick is 21845 / 1193182 of a second. The retrace is
+    /// the 320x200 VGA mode's 400-line timing: 449 lines of 800 dots at the
+    /// 25.175 MHz dot clock.
+    #[test]
+    fn the_two_clocks_are_the_rates_the_hardware_is_set_to() {
+        // 1193182 / 21845 = 54.6204 Hz.
+        let timer_hz = 1.0 / TIMER_TICK.as_secs_f64();
+        assert!(
+            (timer_hz - 54.6204).abs() < 0.001,
+            "the timer ticked at {timer_hz} Hz"
+        );
+        // 25175000 / (800 * 449) = 70.0863 Hz.
+        let retrace_hz = 1.0 / RETRACE_TICK.as_secs_f64();
+        assert!(
+            (retrace_hz - 70.0863).abs() < 0.001,
+            "the retrace came at {retrace_hz} Hz"
+        );
+        // And the one that used to be the only clock is unchanged to the
+        // nanosecond, because every recovered retrace count is against it.
+        assert_eq!(RETRACE_TICK, std::time::Duration::from_nanos(14_268_123));
+    }
+
+    /// `Combat` (0x351) waits for a deadline two ticks of the BIOS counter at
+    /// 0000:046c ahead, and `Install_Timer`'s handler chains to the BIOS one
+    /// every third tick (0x5945..0x5951), so that counter keeps its standard
+    /// 18.2068 Hz. Two of those is 109.849 ms, and `DELAY`'s six timer ticks is
+    /// the same duration.
+    #[test]
+    fn a_combat_frame_is_two_bios_ticks_and_delays_six_timer_ticks() {
+        // `DELAY` = 6, which is `ActorDef::script_ticks` for everything that
+        // fights.
+        let frame = TIMER_TICK * 6;
+        let ms = frame.as_secs_f64() * 1000.0;
+        assert!((ms - 109.849).abs() < 0.01, "a combat frame took {ms} ms");
+        // The same thing measured the other way: two ticks of 0000:046c, which
+        // is the 54.6204 Hz timer chained every third tick.
+        let bios_tick = TIMER_TICK * 3;
+        assert_eq!(frame, bios_tick * 2);
+        let bios_hz = 1.0 / bios_tick.as_secs_f64();
+        assert!(
+            (bios_hz - 18.2068).abs() < 0.001,
+            "0000:046c ticked at {bios_hz} Hz"
+        );
+        // 9.1034 frames a second.
+        let fps = 1.0 / frame.as_secs_f64();
+        assert!((fps - 9.1034).abs() < 0.001, "the fight ran at {fps} fps");
+    }
+
+    /// `COLCON` (0x4988) and `KnightGlowOn` (0x8f8) run once a loop pass. A
+    /// pass is one tick everywhere the loop waits one retrace, and six in a
+    /// fight, so the per-pass work must be gated on the same six `script_ticks`
+    /// and `DELAY` name and not on the tick.
+    #[test]
+    fn per_pass_work_is_gated_to_the_loops_own_pass() {
+        assert_eq!(ticks_per_pass(Mode::Combat), 6, "0x357 and 0x369, per pass");
+        // `MapLOOP+3` (0xa309) and `ChooseLoop+3` (0x15a3) call `COLCON` on a
+        // pass that is a single retrace, which is this engine's tick there.
+        for mode in [Mode::Map, Mode::Select] {
+            assert_eq!(ticks_per_pass(mode), 1, "{mode:?} passes once a retrace");
+        }
+        // A pass is the whole of a frame either way round.
+        assert_eq!(
+            tick_len_for(Mode::Combat) * ticks_per_pass(Mode::Combat),
+            TIMER_TICK * 6
+        );
+        assert_eq!(
+            tick_len_for(Mode::Map) * ticks_per_pass(Mode::Map),
+            RETRACE_TICK
+        );
+    }
+
+    /// The fade is not a `VBLQUE` entry, so splitting the effects off must
+    /// leave it stepping on its own: `tick_effects` alone never advances it,
+    /// and `tick` still does both for anything that wants the pair.
+    #[test]
+    fn the_fade_steps_apart_from_the_effects() {
+        let mut fx = henge_assets::Effects::new();
+        fx.set_fade(henge_assets::Fade::In(0));
+        let before = fx.fade();
+        fx.tick_effects();
+        assert_eq!(fx.fade(), before, "0x4988 does not step a fade");
+        fx.tick_fade();
+        assert_ne!(fx.fade(), before, "and this is the half that does");
+    }
+
+    /// One stride of `Knight_SwWalkOn` is four script frames and
+    /// `K_WalkRValue` (0x77fe) carries it 25 + 3 + 23 + 4 = 55 pixels. On the
+    /// retrace it took 342.435 ms, 160.6 pixels a second; on the clock `Combat`
+    /// actually waits on it takes 439.396, four of the 109.849 ms frames above,
+    /// which is 125.2 pixels a second.
+    #[test]
+    fn a_stride_lasts_four_combat_frames() {
+        const SCRIPT_TICKS: u32 = 6;
+        const FRAMES_PER_STRIDE: u32 = 4;
+        let stride = TIMER_TICK * SCRIPT_TICKS * FRAMES_PER_STRIDE;
+        let ms = stride.as_secs_f64() * 1000.0;
+        assert!((ms - 439.396).abs() < 0.01, "a stride took {ms} ms");
+        assert_eq!(stride, (TIMER_TICK * SCRIPT_TICKS) * FRAMES_PER_STRIDE);
+        // What it used to be, and the factor the fight was running fast by.
+        let was = RETRACE_TICK * SCRIPT_TICKS * FRAMES_PER_STRIDE;
+        let factor = stride.as_secs_f64() / was.as_secs_f64();
+        assert!((factor - 1.2832).abs() < 0.001, "it was {factor}x fast");
+    }
+
+    /// Which loop is on which clock. `Combat` (0x351) is the only loop in the
+    /// image that waits on the BIOS counter; everything else waits on a retrace
+    /// or on nothing.
+    #[test]
+    fn only_the_arena_runs_on_the_timer() {
+        assert_eq!(tick_len_for(Mode::Combat), TIMER_TICK);
+        for mode in [
+            Mode::Intro,
+            Mode::Ending,
+            Mode::Title,
+            Mode::Select,
+            Mode::Map,
+            Mode::Place,
+        ] {
+            assert_eq!(
+                tick_len_for(mode),
+                RETRACE_TICK,
+                "{mode:?} was taken off the retrace"
+            );
         }
     }
 }

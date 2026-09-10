@@ -397,11 +397,28 @@ fight at any other scale moves them by the same ratio it moves the knight's blow
         6. The knight: `ControlKnight` writes 1 at 0x3f77 when right is held and 3
            at 0x3f86 when left is, before `CheckBorder` and `SBORD` get to refuse
            the step, and nothing else in his controller writes it. `KnightSLAP`
-           (0x44e5) sets it to `SLAP` on a slap, which is a dragon's claw
-           (always 1, `ClawHit+9` 0x3b9f and `ClawStruck1+9` 0x43dc) or a
-           Balok's uppercut (the Balok's own `+8`, 0x3639). `DemonSlap`
-           (0x437f) turns its victim and writes neither `SLAP` nor `SLAPY`, so
-           a demon's slap throws nobody. **Built**, as `Bout::knight_slap`. `SetKnightCombat` (0x2962, the facing store at 0x297d)
+           (0x44e5) sets it to `SLAP` on a slap. Eight instructions write
+           `SLAP`, and every one of them belongs to a striker that can put the
+           knight on `Knight_SwSlapped`: a dragon's claw (always 1, `ClawHit+9`
+           0x3b9f and `ClawStruck1+9` 0x43dc), a Balok's uppercut (the Balok's
+           own `+8`, 0x363c), the troll's bunt (0x5697), the demon's slap
+           (0x505c) and the demon's whip (0x50a1, and again in the two follow
+           routines at 0x50d0 and 0x510b). An earlier note here read
+           `DemonSlap` (0x437f) writing neither `SLAP` nor `SLAPY` as a demon's
+           slap throwing nobody; **that was wrong**. `DemonSlap` is the struck
+           side of the blow and only turns its victim; the direction and the
+           table are written a frame earlier by `DemonAttack` (0x5059..0x5062),
+           on the controller's side, exactly as `ControlBalok` and `TrollBunt`
+           write theirs — and `InitKnightvsDemon+40` (0x2765) puts
+           `Knight_SwSlapped` on the knight's kind-0x10 row, so the slap does
+           throw him. `SLAPY` is a pointer and takes two values, both inside
+           `BalokSLAP`: five of its six writers name the table's first word and
+           `DemonAttack`'s whip branch (0x50a4) names `DemonWHIP`, which is
+           `BalokSLAP + 10` and so the negative tail — the whip drags the
+           knight towards the demon. **Built**, as `Bout::knight_slap`,
+           `monster::Shared::slap_y` and `monster::slap_y`; the whip's own
+           hand-off of `Knight_SwSlapped` (`DemonOWhipFollow` 0x50de,
+           `DemonUWhipFollow` 0x5119) is **not built**. `SetKnightCombat` (0x2962, the facing store at 0x297d)
            stands him at x 250, y 0, z 100, facing 3; the creatures come from the
            spawn tables `InitNewMO` (0x27ee) walks, eight bytes `[x][y][z][facing]`:
            `TroggTABLE` is (-50, 0, 100, 1), (360, 0, 150, 3), (340, 0, 50, 3),
@@ -601,15 +618,19 @@ the decapitation beside the bloodless collapse from the same fight.
       beast's charge 0x10; the mudman never writes one, and a swing stands in).
       Damage is the `*Dam` entry against the default attack's, so the chop is
       twice the swing (`CalcDamage` doubles it) and the rear thrust half; what
-      `CalcDamage` adds for strength and the sword is item 40's. Also read and
-      **not built**: the moment a blow lands the attacker is handed `+0x12`,
-      which is built (`Knight_SwRecover`; the creatures' is their stance, so a
-      swing that connects is cut short as the original cuts it); the encounter
-      overrides `InitKnightvs*` make to the knight's table (against the spear
-      trogg both guard slots become the evade, against the ratmen the block
-      becomes `Knight_SwOThrust` and the evade `Knight_SwDThrust`, which are the
-      two scripts not in the base table), which are item 37's business; and the
-      cursed knight's inverted joystick in `ControlKnight`, item 43's
+      `CalcDamage` adds for strength and the sword is item 40's. The moment a
+      blow lands the attacker is handed `+0x12`, which is built
+      (`Knight_SwRecover`; the creatures' is their stance, so a swing that
+      connects is cut short as the original cuts it), and the cursed knight's
+      inverted joystick in `ControlKnight` is item 43's. **The encounter
+      overrides are built too**: five `InitKnightvs*` routines rewrite rows of
+      the knight's own tables, and `Bout::init_knight_att` and the three
+      `*_struck_knight` helpers carry all five. The rows at `+0x16` turn out to
+      be `KnightAttSw` and not the block table (`SetKnightSwTables` 0x1f6a puts
+      `KnightBloSw` at `+0x1e`, which is what `CheckBlock` reads and what no
+      encounter touches), so the spear trogg's two evade rows and the ratmen's
+      `Knight_SwOThrust`/`Knight_SwDThrust` change what the knight is shown
+      doing on a guard and nothing about what it stops
 - [x] 47. **Blocking. Recovered**, from `CheckBlock`: the defender's block
       table (`KnightBloSw`, at `+0x1e`) is read at the attacker's kind and the
       entry has to equal what the defender is doing: a block stops a swing, an
@@ -683,7 +704,11 @@ the decapitation beside the bloodless collapse from the same fight.
       has the spear, and only the spear, take a dead player knight's task away
       and play `TroggSpear_Toss` with the gore on. `DrDropHead` and
       `DrDropClaws`, the dragon's, are built with 36. **Not built**: the screen
-      shake `ShakeADD` asks for
+      shake `ShakeADD` asks for. Where it goes is now known: `COLCON` (0x4988)
+      opens by counting `ShakeCOUNT` (DS:`0x78b8`) down and calling
+      `ShakeScreen` (0x495b) on the pass it reaches nought, and `ShakeScreen`
+      is fifteen retraces of CRTC index 0x0d against `rnd & 3` rows. So it
+      belongs beside the effects in `palette_tick`, on the same per-pass gate
 
 - [x] 50. **The computer knight. Recovered.** What was here was an invention:
       close the distance, swing, cool down twenty, one attack and no answer to
@@ -1640,22 +1665,36 @@ Any time. None of it blocks anything.
       hermit**, a second healer this project invented and stood in the southern woods, and
       the Flask of healing and Draught of life he and the merchants sold. Nothing on the
       map is sited by hand any more, and the baker has a test that says so
-- [x] 83. **The clock. Recovered: the frame is one vertical retrace, so the tick is
-      70.0863 Hz and not sixty.** The wait is the unnamed public routine at image `0x5a24`,
-      sitting in the gap between `AdjustJoy` (`0x59f8`) and the start of `GFX` (`0x5a6e`):
-      `mov dx, 0x3da`, spin while bit 3 is set, then spin until it is set again, which is
-      exactly one retrace. Eight places call it and four of them are main loops, once a
-      pass: `Combat` at `0x0354`, `MapLOOP` at `0x0a306`, `ScanKEYS` at `0x0145a` and
-      `FindLandscape` at `0x0afed`; the other four are `ShakeScreen` (`0x0496b`),
-      `KnightWonGame` (`0x01117`), `FightDemon` (`0x01031`) and the fade-out loop
-      (`0x05bb0`). Nothing else paces a loop.
-      So the rate is the video mode's. **The image never reprograms the timing**: there is
-      no write to the Miscellaneous Output register at `0x3c2` anywhere in it, and the only
-      CRTC writes are index 0x0c, the start address, at `0x5a34` and in `ShakeScreen` at
-      `0x4965`. A 320x200 VGA mode therefore runs at the BIOS 400-line timing, 25.175 MHz
-      over 800 dots over 449 lines, which is **70.0863 frames a second**, the same figure
-      `henge_core::intro` already quoted for the story card's 420 retraces. The engine's
-      tick is now 14,268,123 ns.
+- [x] 83. **The clocks. Recovered: there are two of them, and the fight is on the one that
+      is not the retrace.** The retrace wait is the unnamed public routine at image
+      `0x5a24`, sitting in the gap between `AdjustJoy` (`0x59f8`) and the start of `GFX`
+      (`0x5a6e`): `mov dx, 0x3da`, spin while bit 3 is set, then spin until it is set again,
+      which is exactly one retrace. `0x0afeb` is the other pacing helper, `mov cx, ax; call
+      0x5a24; loop`, which waits `ax` retraces. `MapLOOP` (`0x0a306`) and `ChooseLoop`
+      (`0x015a0`) wait one retrace a pass; `ScanKEYS` waits five through `0x0afeb`
+      (`0x01431`) and `HengeLOOP` three (`0x0b40c`); the rest of the call sites are
+      one-shots. So the rate is the video mode's. **The image never reprograms the timing**:
+      there is no write to the Miscellaneous Output register at `0x3c2` anywhere in it, and
+      the only CRTC writes are index 0x0c, the start address, at `0x5a34` and in
+      `ShakeScreen` at `0x4965`. A 320x200 VGA mode therefore runs at the BIOS 400-line
+      timing, 25.175 MHz over 800 dots over 449 lines, which is **70.0863 frames a second**,
+      the same figure `henge_core::intro` already quoted for the story card's 420 retraces.
+      That is `RETRACE_TICK`, 14,268,123 ns, and it paces every loop but the fight.
+      **`Combat` (`0x351`) is paced by the BIOS tick counter instead**, and this item used
+      to miss that. It opens `call 0x96e1`, which stores `0000:046c` plus two as a deadline,
+      and closes `call 0x96f1` at `0x36c`, which spins to it — one caller each, both in
+      `Combat` — so a combat frame is two BIOS ticks and the retrace wait it also makes at
+      `0x0354` is about 14 ms inside a much longer budget. `Install_Timer` (`0x584f`)
+      programs the 8253 with divisor `0x5555`, **54.6204 Hz**, and its handler chains the
+      original int 8 only every third tick (`dec [0x7c19]` at `0x5945`, `lcall [0x7c1b]` at
+      `0x5951`), so `0000:046c` keeps its standard **18.2068 Hz**. Two of those is
+      **109.849 ms, 9.1034 frames a second**, which is six ticks of 54.6204 Hz — and six is
+      what all thirteen writers of `DELAY` (`DS:0x91c`) put there, read by nothing. That is
+      `TIMER_TICK`, 18,308,187 ns, and `ActorDef::script_ticks` is `DELAY`. On the retrace a
+      combat frame was 85.61 ms, so **every fight ran 1.2832x too fast**. Six loops
+      (`TavernLoop`, `StatLOOP`, `DonateLoop`, `WDLOOP`, `HWLOOP`,
+      `DoOptions`/`OptionKeys`) make no wait at all and are left on the retrace with a TODO
+      saying so, because the original names no rate for them.
 - [x] 84. **The day is a distance, and nothing on the road is rolled.** The map loop
       from `PlayerKnight` (0xa355) to `DistanceDONE` (0xa4b2) calls nothing that rolls.
       `MapMovement` (0xa35d) does `inc word [0xcc98]` on every frame a direction is held,

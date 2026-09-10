@@ -458,12 +458,16 @@ lets a status panel print health the way the original does, as `have/most`.
 
 | Original | What it is | Status |
 |---|---|---|
-| the wait at image `0x5a24` (`WAITVSYNC`, `WAITVBS`) | the frame | done, recovered: it **is** the engine's tick |
-| `Install_Timer`, `Remove_Timer`, `Times3`, the handler at `0x5934` | the 8253 timer | done, recovered: audio only |
+| the wait at image `0x5a24` (`WAITVSYNC`, `WAITVBS`) | the frame | done, recovered: it is the tick of **every loop but the fight** |
+| `0x96e1` / `0x96f1`, the `0:046c` deadline | the fight's frame | done, recovered: two BIOS ticks, 109.849 ms |
+| `Install_Timer`, `Remove_Timer`, `Times3`, the handler at `0x5934` | the 8253 timer | done, recovered: 54.6204 Hz, the rate the fight is measured in |
 
-**The game's frame is one vertical retrace, and nothing else paces it.** The wait is the
-unnamed public routine at image `0x5a24`, in the gap between `AdjustJoy` (`0x59f8`) and the
-start of `GFX` (`0x5a6e`):
+**The game has two clocks, and `Combat` is on the one that is not the retrace.** Most loops
+are paced by a vertical retrace; the fight is paced by a deadline two ticks of the BIOS
+counter at `0000:046c` ahead, which is 109.849 ms a frame. Both are below.
+
+**The retrace.** The wait is the unnamed public routine at image `0x5a24`, in the gap
+between `AdjustJoy` (`0x59f8`) and the start of `GFX` (`0x5a6e`):
 
 ```text
 5a24  ba da 03   mov dx, 0x3da        ; VGA input status 1
@@ -478,11 +482,17 @@ start of `GFX` (`0x5a6e`):
 5a33  c3         ret
 ```
 
-Eight places call it, and the four that matter are main loops, once a pass: `Combat` at
-`0x0354` (the loop is `0x0351` to `0x0374`, eleven calls and a jump back), `MapLOOP` at
-`0x0a306`, `ScanKEYS` at `0x0145a` and `FindLandscape` at `0x0afed`. The other four are
-`ShakeScreen` (`0x0496b`), `KnightWonGame` (`0x01117`), `FightDemon` (`0x01031`) and the
-palette fade-out loop (`0x05bb0`), which is why a fade is sixteen steps at one a frame.
+Ten places call it. Two are main loops waiting on it once a pass: `MapLOOP` at `0x0a306`
+and `ChooseLoop` at `0x015a0`, the knight select. One is `0x0afeb` itself — `mov cx, ax;
+call 0x5a24; loop` — which waits `ax` retraces and is the game's other pacing helper;
+`ScanKEYS` opens each pass with `ax = 5` through it (`0x01431`) and `HengeLOOP` closes each
+pass with `ax = 3` (`0x0b40c`). `Combat` calls it at `0x0354`, but inside a much longer
+budget of its own (below), so it never dominates there. The rest are one-shots:
+`ShakeScreen` (`0x0496b`), the palette fade loops (`0x05b3c`, `0x05bb0`, which is why a fade
+is sixteen steps at one a frame), and `KnightWonGame` (`0x01117`) and `FightDemon`
+(`0x01031`) — both of which load `ax` first (`0x14` and `0x0a`) and then call the
+single-retrace wait instead of `0x0afeb`, leaving the count dead. Those two look like a
+slip; see the note at the end of this section.
 
 **So the rate is the video mode's refresh rate, and the mode's timing is the BIOS's.** The
 image never writes the Miscellaneous Output register at `0x3c2`, and the only CRTC writes
@@ -492,18 +502,49 @@ timing: 25.175 MHz over 800 dots is 31468.75 lines a second, over 449 lines is
 **70.0863 frames a second**. That is the figure `henge_core::intro` already quoted for the
 story card's 420-retrace wait.
 
-The engine's tick is therefore 14,268,123 ns, in `henge-desktop`'s event loop. **It used to
-be sixty**, which ran every recovered cooldown, script duration and fade about fourteen
-percent slow, since all of them are counted in frames.
+So the retrace tick is 14,268,123 ns, `henge-desktop`'s `RETRACE_TICK`, and it paces the
+intro, the ending, the map, the select, the stone circle and every screen whose loop makes
+no wait at all. **It used to be sixty**, which ran every recovered retrace count about
+fourteen percent slow.
 
-**The 54.62 Hz timer is a different clock and drives only sound.** `Install_Timer` at
-`0x584f` programs counter 0 with `out 0x43, 0x36` and a divisor of `0x5555`, which is
-1193182 / 21845 = 54.62 Hz, and hooks int 8 to a handler at `0x5934`. The handler does
-exactly three things: `mov ah, 1; int 60h` to tick the music driver, the same with `int 61h`
-to tick the sound effects unless the card is 3, and `Times3`, a counter reloaded with 3, so
-every third tick it chains the original int 8 and DOS keeps its 18.2 Hz time. It touches no
-game state. `henge_audio::music` carries that rate inside the score, so the tunes are
-unaffected by the game's clock.
+**The fight's frame is two BIOS ticks, and it is the timer that says how long that is.**
+`MOON:Combat` at `0x351` opens with `call 0x96e1` and closes with `call 0x96f1` at `0x36c`,
+with the whole loop body between them. `0x96e1` is `sub ax, ax; mov es, ax; mov ax,
+es:[0x46c]; inc ax; inc ax; mov [0xc2f6], ax` — the BIOS tick counter plus two, stored as a
+deadline — and `0x96f1` spins `jb` on the same counter until it arrives. Those two routines
+have one caller each and both are in `Combat`.
+
+`Install_Timer` at `0x584f` is what makes the BIOS counter's rate knowable. It saves the old
+int 8 vector into `[0x7c1b]`/`[0x7c1d]` (`0x5865`, `0x586c`), points the vector at its own
+handler (`0x5874`, entry `0x5928`), and programs counter 0 with `mov al, 0x36; out 0x43, al`
+and divisor `0x5555` (`0x58b9`..`0x58c4`): 1193182 / 21845 = **54.6204 Hz**. The handler
+ticks the music driver (`mov ah, 1; int 60h`), then the sound effects the same way unless the
+card is 3, and then at `0x5945` decrements `Times3` at `[0x7c19]`; only when that reaches
+zero does it reload it with 3 and `lcall [0x7c1b]` at `0x5951`, chaining the original int 8.
+**So it chains every third tick and `0000:046c` keeps its standard 18.2068 Hz.**
+
+Two of those is 2 / 18.2068 = **109.849 ms, 9.1034 frames a second**, which is exactly **six
+ticks of the 54.6204 Hz timer** — and six is what `DELAY` (`DS:0x91c`) is set to. A byte scan
+for `mov word [0x091c], 6` finds thirteen writes (the eleven `InitKnightvs*` routines,
+`InitGameStart+0xda` and `InitPractice+0x41`) and no read anywhere, because the loop
+hardcodes the same duration as the two BIOS ticks. `DELAY` is
+`henge_core::content::ActorDef::script_ticks`, and the timer tick is `henge-desktop`'s
+`TIMER_TICK`.
+
+It used to say the 54.62 Hz timer drove only sound and never the game, and the step it
+missed was the `lcall [0x7c1b]` chain at `0x5951`. With the fight on the retrace instead, a
+combat frame was 6 x 14.268 = 85.61 ms against the original's 109.849, so **everything in a
+fight ran 1.2832x too fast**. `henge_audio::music` carries the 54.6204 Hz rate inside the
+score independently of the game's clock, so the tunes were never affected either way.
+
+**Three loops have no wait of any kind.** `TavernLoop` (`0xb137`), `StatLOOP` (`0xbe13`),
+`DonateLoop` (`0xbbe6`), `WDLOOP` (`0xd7a`), `HWLOOP` (`0xe35`) and `DoOptions`/`OptionKeys`
+(`0x1241`/`0x1282`) blit, page-flip and go round again as fast as the machine manages: the
+blit at `0x5a72` is a bare `rep movsb` and the page flip at `0x5a3e` only programs CRTC
+index 0x0c. There is no rate to recover for them. The engine leaves them on the retrace,
+which is the rate every other non-combat loop does name, and says so rather than inventing
+one. Their pointer is rate-limited by its own acceleration table (`_STATUS:StatACEL`), which
+is presumably why they needed no frame wait.
 
 ## 2.7 Memory and DOS `done, not needed`
 
@@ -764,7 +805,7 @@ act on it are wired.
 | `Dragon_LiftHead1`, `Dragon_LowerHead1` | swap the stance itself by writing `Dragon_HighStance` or `Dragon_Stance` into `+0x10` (`TASKSAVE`, 0x4200 and 0x433c) | **done**: `monster::dragon_stance` reads the bit the same pass raises, which names the same script |
 | `DragonAttack` (0x39da), `DragonLowAttack` (0x3a51), `AddDragonFIRE` (0x3afc), `Dragon_Fire` | nothing for a fallen knight (0x39e3) or off his plane (0x39ec). Head up and `DDIS` over seventy, or bit 0x80 up whatever the distance: `Dragon_HighBreath`, kind 0x10, bit 0x40, and the fire as a task of kind 0x14 fifty five along, five rows deeper, at no height, facing right (0x3b0d..0x3b20); inside seventy, `Dragon_HighBite`, kind 2. Head down: `Dragon_LowBreath`, kind 4, whose own weapon parts cross the arena, and no fire task | **done**. The low breath used to start a fire task too; it does not |
 | `TrackKnight` (0x3be8) | `MonsterTrack` on the head's record, then `+8` forced to 1, five right if that stays under a hundred (0x3c31), five left if that stays over thirty (0x3c44), five up or down a row; and with bit 0x40 up the ranges are two and one for the call and put back after. **The restore is wrong in the original**: `DRN` and `DCL` (0x3c02, 0x3c08) both take `+0x52`, so `+0x54` comes back as sixty and stays there | **done**, as `monster::track_knight`, the spoiled back-off included (`Shared::dragon_ranges`). Also run by `TASKGOSUB` from inside both breaths, five times each (0x4448, 0x4130), which `Bout::track_knight` does |
-| `ControlClaw` (0x3b24), `DragonAlive` (0x3b6a), `ClawStruck` (0x3b8d), `ClawHit` (0x3b96), `CLAWS_DEAD` (0x3b61) | `Dragon_ClawSlap`, kind 0xa, at a standing knight on its plane at x 100 or under; the stance when struck, with no damage; `Dragon_ClawDead` once the head's hit points are gone (0x3b51); and its task killed once `DEAD_CLAWS` is `0xffff` | **done**, as `Act::Vanish` for the last. `ClawHit`'s `SLAP` words now feed `KnightSLAP` too (`Bout::knight_slap`, `monster::BALOK_SLAP`/`slap_move`): a claw bats the knight rightward along `BalokSLAP`'s own arc, the border gate alone deciding whether each frame lands, and `InitKnightvsBalok` (0x258c) puts the same throw on the Balok's uppercut off its own facing. Two things in the original are kept as found: the rightward clamp at 0x454f is a `jle` with a zero displacement (`7e 00`) and so clamps nothing, and only four of `BalokSLAP`'s eleven words are ever read, because `Knight_SwSlapped` holds two frames twice and calls `KnightSLAP` four times |
+| `ControlClaw` (0x3b24), `DragonAlive` (0x3b6a), `ClawStruck` (0x3b8d), `ClawHit` (0x3b96), `CLAWS_DEAD` (0x3b61) | `Dragon_ClawSlap`, kind 0xa, at a standing knight on its plane at x 100 or under; the stance when struck, with no damage; `Dragon_ClawDead` once the head's hit points are gone (0x3b51); and its task killed once `DEAD_CLAWS` is `0xffff` | **done**, as `Act::Vanish` for the last. `ClawHit`'s `SLAP` words now feed `KnightSLAP` too (`Bout::knight_slap`, `monster::BALOK_SLAP`/`slap_move`): a claw bats the knight rightward along `BalokSLAP`'s own arc, the border gate alone deciding whether each frame lands, and `InitKnightvsBalok` (0x258c) puts the same throw on the Balok's uppercut off its own facing — as do `InitKnightvsTroll` (0x26ba) on the troll's bunt and `InitKnightvsDemon` (0x2765) on the demon's slap, both of which write `SLAP` off their own `+8` (0x5697, 0x505c). An earlier line here had a demon's slap throwing nobody on the grounds that `DemonSlap` (0x437f) writes neither `SLAP` nor `SLAPY`; that was wrong — `DemonSlap` is the struck side and only turns him, and `DemonAttack` writes both a frame earlier. Two things in the original are kept as found: the rightward clamp at 0x454f is a `jle` with a zero displacement (`7e 00`) and so clamps nothing, and eight of `BalokSLAP`'s eleven words are ever read — words 0 to 3 for a throw and 5 to 8 for the demon's whip, whose `SLAPY` is `DemonWHIP` (0x50a4), the same storage ten bytes in — because `Knight_SwSlapped` holds two frames twice and calls `KnightSLAP` four times |
 | `DragonStruck` (0x3a73), `DragonHit2` (0x3ad5) | a knight's blow: bit 0x80, `CalcDamage`, `Dragon_Hit`, `AddBlood`; a knife: bit 0x80, `Dragon_Hit`, a flat three (0x3acf); anything else, nothing. The bite that touches him: see the repertoire above | **done**, `Bout::dragon_struck`, `dragon_blow`, `dragon_bites` |
 | `DragonStruck1` (0x43ad), `DragonFire1` (0x43c2), `ClawStruck1` (0x43d3), `TalismanWrym` (0x43f4), the rows `InitKnightvsDragon+9` (0x2441) writes | what the knight takes: twenty for the bite, thirty for either breath and the fire, ten for a claw, each through the talisman; the head's own blows put him on the head's row less one (0x43b3); the rows are `Knight_SwShoulderHit` for kind 2, `Knight_Burn` for 4 and 0x10 (whose `TASKDEAD` is `Knight_BurnDeath`), `Knight_SwSlapped` for 0xa. `DragonDam` is never read for a knight | **done**, `Bout::dragon_struck_knight`; the numbers are the dragon's `attacks` rows in the pack, and `Knight_Burn` and `Knight_SwSlapped` are in the knight's script set now |
 | `Dragon_Flight1`..`8`, `DrBuffer`, `DrAnim`, `DR_XADD`..`DR_WALK` (DS:0xcd50..0xcd5b), `TrackCNT` (0xccae), the flags at 0xccb0 and 0xccb2, `_MAP:InitDragon` (0xa571), `ContinueDragon` (0xa5b3), `DragonWander` (0xa66b), `DragonTRACK` (0xa691), `DragonDONE` (0xa6b1), `CheckEncounterDone+128` (0x816), `DragonEncounter` (0xa3e2), the routine at 0xcf6 and `_dragon_won` (0xd23) | the dragon over the map: see `henge_core::dragon` | **done**. `DR_YADD` is one in the load image and nothing writes it, so it tracks its target's row a pixel a frame; `DragonEncounter`'s first test, `cmp word [0xccb2], -1; js`, is never taken |

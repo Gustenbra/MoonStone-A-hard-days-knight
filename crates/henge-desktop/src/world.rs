@@ -820,6 +820,14 @@ impl World {
             let actors = &self.actors;
             self.bout.apply_actor_borders(|name| &actors[name]);
         }
+        // **The rows an `InitKnightvs*` writes over the knight's `*Att`
+        // table**, which is the global `KnightAttSw` every knight record's
+        // `+0x16` points at: the spear trogg's two, the beast's one and the
+        // ratmen's two. See `Bout::knight_att_rows`.
+        {
+            let actors = &self.actors;
+            self.bout.init_knight_att(|name| &actors[name]);
+        }
         // **The ratmen's tree.** `InitKnightvsRatmen+82` (0x236f) puts one
         // more actor in the arena beside the creatures, on `Rat_TreeBrush`,
         // at x `0xa0` with `y` = `HalfSCAPE - 0xc8` and `z` = `HalfSCAPE`, and
