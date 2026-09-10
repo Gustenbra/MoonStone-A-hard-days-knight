@@ -52,9 +52,25 @@
 //!
 //! [`wire`] is the framing, [`proto`] the messages, [`lobby`] the two state
 //! machines in front of a game, [`lockstep`] the scheduler that decides when a
-//! tick may run, [`session`] the two of them joined up, and [`portmap`] the
-//! router talk.
+//! tick may run, [`session`] the two of them joined up, [`portmap`] the router
+//! talk, and [`list`] the directory a game is found on when nobody wants to be
+//! told an address.
+//!
+//! ### Finding a game
+//!
+//! Everything above works with nothing but an address typed in by hand, and that
+//! is still the plainest way to play. [`list`] adds the other way: a small
+//! server, run by anybody, that hosts announce themselves to and browsers ask.
+//! It holds names and addresses and nothing else. It never sees a password, it
+//! holds no game state, it cannot join a game, and a game that found its peers
+//! without it plays exactly the same. Its one clever trick is honest rather than
+//! magic: an announcement arrives on a connection, so the server knows the
+//! host's real public address without believing any router, and it tries to
+//! connect *back* to say whether anybody outside the house can actually get in.
+//! A host that comes back unreachable is carried by the server instead, byte for
+//! byte, without the server ever parsing what it carries.
 
+pub mod list;
 pub mod lobby;
 pub mod lockstep;
 pub mod portmap;
@@ -62,6 +78,7 @@ pub mod proto;
 pub mod session;
 pub mod wire;
 
+pub use list::{browse, Directory, ListMsg, Listing, DEFAULT_LIST_PORT};
 pub use lobby::{Event, Guest, Host, JoinError};
 pub use lockstep::{Desync, Lockstep, Turn};
 pub use portmap::{Mapping, Opener, Reach};

@@ -14,6 +14,7 @@
 //! should stay recovered.
 
 use henge_core::shell::NAME_MAX;
+use henge_net::list::Listing;
 use henge_net::proto::{Lobby, LOBBY_NAME_MAX, SEATS};
 
 /// Which page of the lobby is up.
@@ -23,6 +24,8 @@ pub enum Page {
     Menu,
     /// Naming a game before opening it.
     Create,
+    /// The list of games somebody else has opened.
+    Browse,
     /// The address of a game to join.
     Join,
     /// In a lobby, waiting for the rest.
@@ -38,6 +41,14 @@ pub enum Row {
     PlayerName,
     /// Where the game is: an address and a port.
     Address,
+    /// The word this game wants, if it wants one.
+    Password,
+    /// Look at the list of open games.
+    GoBrowse,
+    /// Ask the list server again.
+    Again,
+    /// One game on the list.
+    Game(usize),
     /// Open the lobby, which is where the port is asked for.
     Host,
     /// Go to the joining page.
@@ -57,7 +68,10 @@ pub enum Row {
 impl Row {
     /// Whether fire on this row starts typing rather than doing something.
     pub fn is_text(self) -> bool {
-        matches!(self, Row::LobbyName | Row::PlayerName | Row::Address)
+        matches!(
+            self,
+            Row::LobbyName | Row::PlayerName | Row::Address | Row::Password
+        )
     }
 
     /// The label, which is also what the tests read so the two cannot drift.
@@ -66,6 +80,10 @@ impl Row {
             Row::LobbyName => "Game",
             Row::PlayerName => "You",
             Row::Address => "Address",
+            Row::Password => "Password",
+            Row::GoBrowse => "Open games",
+            Row::Again => "Look again",
+            Row::Game(_) => "",
             Row::Host => "Open a game",
             Row::GoJoin => "Join a game",
             Row::Dial => "Join",
@@ -81,10 +99,26 @@ impl Row {
 /// socket is the caller's, so this stays testable without one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
-    /// Open a lobby under this name, on this port.
-    Open { game: String, you: String },
+    /// Open a lobby under this name, and lock it if a word was given.
+    Open {
+        game: String,
+        you: String,
+        password: String,
+    },
     /// Dial this address as this person.
-    Dial { address: String, you: String },
+    Dial {
+        address: String,
+        you: String,
+        password: String,
+    },
+    /// Fetch the list of open games from the list server.
+    Look,
+    /// Join one of the games on the list, however it has to be reached.
+    Take {
+        game: Listing,
+        you: String,
+        password: String,
+    },
     /// Tell the host what this seat wants.
     Seat { knight: Option<u8>, ready: bool },
     /// The host is starting.
@@ -104,6 +138,17 @@ pub struct Online {
     pub game: String,
     pub you: String,
     pub address: String,
+    /// The word this game wants, or the one being offered to join with. Empty
+    /// means none, and a game with none lets anybody in.
+    ///
+    /// **It never reaches the list server**: the list carries only the fact that
+    /// a game wants one, and the host does the checking.
+    pub password: String,
+    /// The open games, as the list server last said them.
+    pub games: Vec<Listing>,
+    /// Whether the list has been asked for since this page was opened, so an
+    /// empty list can be told apart from one nobody has fetched.
+    pub looked: bool,
     /// This seat's knight, once chosen. Nothing means the host picks one.
     pub knight: Option<u8>,
     pub ready: bool,
@@ -118,6 +163,10 @@ pub struct Online {
     pub note: String,
     /// The address to read out to a friend, once the router has been asked.
     pub reachable: String,
+    /// What each seat's round trip measured, in milliseconds, once the host has
+    /// measured it. Drawn beside the name, because a lobby is where somebody
+    /// finds out the line is bad rather than a minute into a fight.
+    pub trips: std::collections::BTreeMap<u8, u32>,
 }
 
 impl Default for Online {
@@ -131,6 +180,9 @@ impl Default for Online {
             game: String::from("MOONSTONE"),
             you: String::from("KNIGHT"),
             address: String::new(),
+            password: String::new(),
+            games: Vec::new(),
+            looked: false,
             knight: None,
             ready: false,
             roster: Lobby::default(),
@@ -138,6 +190,7 @@ impl Default for Online {
             hosting: false,
             note: String::new(),
             reachable: String::new(),
+            trips: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -150,9 +203,27 @@ impl Online {
     /// The rows of the page that is up.
     pub fn rows(&self) -> Vec<Row> {
         match self.page {
-            Page::Menu => vec![Row::Host, Row::GoJoin, Row::Back],
-            Page::Create => vec![Row::LobbyName, Row::PlayerName, Row::Host, Row::Back],
-            Page::Join => vec![Row::Address, Row::PlayerName, Row::Dial, Row::Back],
+            Page::Menu => vec![Row::GoBrowse, Row::Host, Row::GoJoin, Row::Back],
+            Page::Create => vec![
+                Row::LobbyName,
+                Row::PlayerName,
+                Row::Password,
+                Row::Host,
+                Row::Back,
+            ],
+            Page::Browse => {
+                let mut rows: Vec<Row> = (0..self.games.len()).map(Row::Game).collect();
+                rows.push(Row::Again);
+                rows.push(Row::Back);
+                rows
+            }
+            Page::Join => vec![
+                Row::Address,
+                Row::PlayerName,
+                Row::Password,
+                Row::Dial,
+                Row::Back,
+            ],
             Page::Waiting => {
                 let mut rows = vec![Row::Knight, Row::Ready];
                 if self.hosting {
@@ -176,6 +247,18 @@ impl Online {
             Row::LobbyName => &self.game,
             Row::PlayerName => &self.you,
             Row::Address => &self.address,
+            // A password is not drawn. The screen is on somebody's monitor and
+            // there may well be somebody else in the room.
+            Row::Password => {
+                let hidden: String = "*".repeat(self.password.chars().count());
+                return if self.typing && self.selected() == row {
+                    format!("{hidden}{}", henge_core::shell::CARET)
+                } else if hidden.is_empty() {
+                    "none".to_string()
+                } else {
+                    hidden
+                };
+            }
             _ => return String::new(),
         };
         if self.typing && self.selected() == row {
@@ -258,6 +341,33 @@ impl Online {
             return None;
         }
         match row {
+            Row::GoBrowse => {
+                self.page = Page::Browse;
+                self.row = 0;
+                self.looked = false;
+                Some(Ask::Look)
+            }
+            Row::Again => {
+                self.row = 0;
+                Some(Ask::Look)
+            }
+            Row::Game(n) => {
+                let game = self.games.get(n)?.clone();
+                // A game that wants a word and has not been given one asks for
+                // it rather than being refused by the host a second later.
+                if game.locked && self.password.trim().is_empty() {
+                    self.note = "that game wants a password: set one below".into();
+                    self.page = Page::Join;
+                    self.row = 2;
+                    self.address = game.at.clone();
+                    return None;
+                }
+                Some(Ask::Take {
+                    game,
+                    you: self.you.clone(),
+                    password: self.password.trim().to_string(),
+                })
+            }
             Row::Host if self.page == Page::Menu => {
                 self.page = Page::Create;
                 self.row = 0;
@@ -271,6 +381,7 @@ impl Online {
             Row::Host => Some(Ask::Open {
                 game: self.game.clone(),
                 you: self.you.clone(),
+                password: self.password.trim().to_string(),
             }),
             Row::Dial => {
                 if self.address.trim().is_empty() {
@@ -280,6 +391,7 @@ impl Online {
                 Some(Ask::Dial {
                     address: self.address.trim().to_string(),
                     you: self.you.clone(),
+                    password: self.password.trim().to_string(),
                 })
             }
             Row::Knight => None,
@@ -297,7 +409,7 @@ impl Online {
                     None
                 }
             },
-            Row::LobbyName | Row::PlayerName | Row::Address => None,
+            Row::LobbyName | Row::PlayerName | Row::Address | Row::Password => None,
         }
     }
 
@@ -312,6 +424,7 @@ impl Online {
             Row::PlayerName => NAME_MAX,
             // Long enough for a dotted quad and a port, and for a name.
             Row::Address => 40,
+            Row::Password => 32,
             _ => return,
         };
         let field = self.field_mut(row);
@@ -337,8 +450,17 @@ impl Online {
         match row {
             Row::LobbyName => &mut self.game,
             Row::Address => &mut self.address,
+            Row::Password => &mut self.password,
             _ => &mut self.you,
         }
+    }
+
+    /// The list server has answered.
+    pub fn listed(&mut self, games: Vec<Listing>, note: &str) {
+        self.games = games;
+        self.looked = true;
+        self.row = 0;
+        self.note = note.to_string();
     }
 
     /// We are in a lobby now: the waiting page, with a seat.
@@ -362,6 +484,9 @@ impl Online {
         self.roster = Lobby::default();
         self.reachable = String::new();
         self.note = note.to_string();
+        self.games.clear();
+        self.looked = false;
+        self.trips.clear();
     }
 
     fn seat_ask(&self) -> Ask {
@@ -377,19 +502,40 @@ mod tests {
     use super::*;
     use henge_net::proto::Player;
 
-    #[test]
-    fn the_menu_goes_two_ways_and_back() {
+    /// Walk on to the create page, whichever row it starts on.
+    fn creating() -> Online {
         let mut o = Online::new();
-        assert_eq!(o.selected(), Row::Host);
-        assert_eq!(o.take(), None);
+        while o.selected() != Row::Host {
+            o.move_by(1);
+        }
+        o.take();
         assert_eq!(o.page, Page::Create);
-        // Out of the create page, back to the menu, and out of the menu to the
-        // title.
-        o.move_by(3);
+        o
+    }
+
+    #[test]
+    fn the_menu_goes_three_ways_and_back() {
+        let mut o = Online::new();
+        // Looking at what is open is the first thing offered, because it is what
+        // somebody who was told "we are playing tonight" wants.
+        assert_eq!(o.selected(), Row::GoBrowse);
+        assert_eq!(o.take(), Some(Ask::Look));
+        assert_eq!(o.page, Page::Browse);
+        o.move_by(9);
+        assert_eq!(o.selected(), Row::Back);
+        o.take();
+        assert_eq!(o.page, Page::Menu);
+
+        o.move_by(1);
+        assert_eq!(o.selected(), Row::Host);
+        o.take();
+        assert_eq!(o.page, Page::Create);
+        o.move_by(9);
         assert_eq!(o.selected(), Row::Back);
         assert_eq!(o.take(), None);
         assert_eq!(o.page, Page::Menu);
-        o.move_by(1);
+
+        o.move_by(2);
         assert_eq!(o.selected(), Row::GoJoin);
         o.take();
         assert_eq!(o.page, Page::Join);
@@ -400,12 +546,105 @@ mod tests {
         assert_eq!(o.take(), Some(Ask::Leave));
     }
 
+    /// The list, and taking a game off it.
+    #[test]
+    fn a_game_is_taken_straight_off_the_list() {
+        let mut o = Online::new();
+        assert_eq!(o.take(), Some(Ask::Look));
+        assert!(!o.looked, "nothing has answered yet");
+        // Nothing open: the two rows that are always there, and a line saying so.
+        o.listed(Vec::new(), "no games open");
+        assert!(o.looked);
+        assert_eq!(o.rows(), vec![Row::Again, Row::Back]);
+        assert_eq!(o.take(), Some(Ask::Look), "and it can be asked again");
+
+        let open = Listing {
+            id: "g1".into(),
+            name: "CARLS GAME".into(),
+            at: "203.0.113.7:19910".into(),
+            code: String::new(),
+            players: 1,
+            seats: 4,
+            locked: false,
+            version: "v".into(),
+        };
+        o.listed(vec![open.clone()], "1 open");
+        assert_eq!(o.rows(), vec![Row::Game(0), Row::Again, Row::Back]);
+        assert_eq!(
+            o.take(),
+            Some(Ask::Take {
+                game: open,
+                you: "KNIGHT".into(),
+                password: String::new()
+            })
+        );
+    }
+
+    /// A game that wants a word asks for it instead of being refused by its host
+    /// a second later.
+    #[test]
+    fn a_locked_game_asks_for_the_word_before_dialling() {
+        let mut o = Online::new();
+        let locked = Listing {
+            id: "g1".into(),
+            name: "LOCKED".into(),
+            at: "203.0.113.7:19910".into(),
+            code: String::new(),
+            players: 1,
+            seats: 4,
+            locked: true,
+            version: "v".into(),
+        };
+        o.take();
+        o.listed(vec![locked.clone()], "1 open");
+        assert_eq!(o.take(), None, "no word yet");
+        assert_eq!(o.page, Page::Join);
+        assert_eq!(o.selected(), Row::Password);
+        assert_eq!(o.address, "203.0.113.7:19910", "and it kept the address");
+        assert!(o.note.contains("password"));
+        // Given the word, the same game goes through.
+        o.take();
+        for c in "portcullis".chars() {
+            o.type_char(c);
+        }
+        o.take();
+        o.page = Page::Browse;
+        o.row = 0;
+        assert_eq!(
+            o.take(),
+            Some(Ask::Take {
+                game: locked,
+                you: "KNIGHT".into(),
+                password: "portcullis".into()
+            })
+        );
+    }
+
+    /// A password is never drawn. Somebody else may be in the room.
+    #[test]
+    fn a_password_is_shown_as_stars_and_never_as_itself() {
+        let mut o = creating();
+        o.move_by(2);
+        assert_eq!(o.selected(), Row::Password);
+        assert_eq!(o.shown(Row::Password), "none");
+        o.take();
+        for c in "portcullis".chars() {
+            o.type_char(c);
+        }
+        assert_eq!(o.shown(Row::Password), "**********\\");
+        o.take();
+        assert_eq!(o.shown(Row::Password), "**********");
+        assert_eq!(
+            o.password, "portcullis",
+            "and it is still the word underneath"
+        );
+    }
+
     /// A text row behaves like `TypeName`: fire starts it, fire ends it, and
     /// nothing else moves while it is running.
     #[test]
     fn a_name_is_typed_the_way_the_select_screen_types_one() {
-        let mut o = Online::new();
-        o.take(); // into the create page
+        let mut o = creating();
         assert_eq!(o.selected(), Row::LobbyName);
         o.take();
         assert!(o.typing);
@@ -428,8 +667,7 @@ mod tests {
 
     #[test]
     fn a_name_stops_at_the_length_of_its_field() {
-        let mut o = Online::new();
-        o.take();
+        let mut o = creating();
         o.take();
         for _ in 0..40 {
             o.backspace();
@@ -455,8 +693,7 @@ mod tests {
     /// as a blank.
     #[test]
     fn an_emptied_name_goes_back_to_its_default() {
-        let mut o = Online::new();
-        o.take();
+        let mut o = creating();
         o.move_by(1);
         o.take();
         for _ in 0..20 {
@@ -469,15 +706,15 @@ mod tests {
 
     #[test]
     fn opening_a_game_asks_for_it_by_name() {
-        let mut o = Online::new();
-        o.take();
-        o.move_by(2);
+        let mut o = creating();
+        o.move_by(3);
         assert_eq!(o.selected(), Row::Host);
         assert_eq!(
             o.take(),
             Some(Ask::Open {
                 game: "MOONSTONE".into(),
-                you: "KNIGHT".into()
+                you: "KNIGHT".into(),
+                password: String::new()
             })
         );
     }
@@ -485,24 +722,26 @@ mod tests {
     #[test]
     fn joining_needs_an_address_and_says_so() {
         let mut o = Online::new();
-        o.move_by(1);
-        o.take();
         o.move_by(2);
+        assert_eq!(o.selected(), Row::GoJoin);
+        o.take();
+        o.move_by(3);
         assert_eq!(o.selected(), Row::Dial);
         assert_eq!(o.take(), None, "nothing to dial");
         assert!(o.note.contains("address"));
-        o.move_by(-2);
+        o.move_by(-3);
         o.take();
         for c in " 10.0.0.4:19910 ".chars() {
             o.type_char(c);
         }
         o.take();
-        o.move_by(2);
+        o.move_by(3);
         assert_eq!(
             o.take(),
             Some(Ask::Dial {
                 address: "10.0.0.4:19910".into(),
-                you: "KNIGHT".into()
+                you: "KNIGHT".into(),
+                password: String::new()
             })
         );
     }
@@ -601,6 +840,7 @@ mod tests {
             Row::LobbyName,
             Row::PlayerName,
             Row::Address,
+            Row::Password,
             Row::Host,
             Row::GoJoin,
             Row::Dial,
@@ -612,7 +852,10 @@ mod tests {
             assert!(!row.label().is_empty(), "{row:?}");
             assert_eq!(
                 row.is_text(),
-                matches!(row, Row::LobbyName | Row::PlayerName | Row::Address)
+                matches!(
+                    row,
+                    Row::LobbyName | Row::PlayerName | Row::Address | Row::Password
+                )
             );
         }
     }

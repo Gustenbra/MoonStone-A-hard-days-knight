@@ -180,16 +180,36 @@ pub fn cut(s: &str, max: usize) -> String {
 pub enum Msg {
     /// Guest to host, first thing. The protocol is checked before anything else
     /// is believed.
-    Hello { protocol: u32, name: String },
+    ///
+    /// `password` is empty unless the host asked for one, and it goes **to the
+    /// host and to nobody else**: the list server carries only
+    /// [`Listing::locked`](crate::list::Listing::locked), the fact that there is
+    /// a word, so a directory cannot be made to hand out entry to a game.
+    Hello {
+        protocol: u32,
+        name: String,
+        #[serde(default)]
+        password: String,
+    },
     /// Host to guest: you are in, and this is your seat.
-    Welcome { seat: u8, lobby: Lobby },
+    Welcome {
+        seat: u8,
+        lobby: Lobby,
+    },
     /// Host to guest: no. `why` is shown to the person, so it is a sentence.
-    Refused { why: String },
+    Refused {
+        why: String,
+    },
     /// Host to everyone, whenever the lobby changes.
-    Roster { lobby: Lobby },
+    Roster {
+        lobby: Lobby,
+    },
     /// Guest to host: the knight I want and whether I am ready. The host is the
     /// only thing that edits the roster, so a guest asks rather than tells.
-    Seated { knight: Option<u8>, ready: bool },
+    Seated {
+        knight: Option<u8>,
+        ready: bool,
+    },
     /// Host to everyone: the game begins. After this, nothing but input,
     /// checks and goodbyes.
     ///
@@ -206,17 +226,43 @@ pub enum Msg {
         check: u32,
     },
     /// Guest to host: this seat's input for that tick.
-    Input { tick: u32, input: SeatInput },
+    Input {
+        tick: u32,
+        input: SeatInput,
+    },
     /// Host to everyone: every seat's input for that tick, in seat order. A tick
     /// is not sent until all of it is in, so receiving this is permission to run.
-    Turn { tick: u32, seats: Vec<SeatInput> },
+    Turn {
+        tick: u32,
+        seats: Vec<SeatInput>,
+    },
     /// Either way: my state's fingerprint at that tick.
-    Check { tick: u32, hash: u64 },
+    Check {
+        tick: u32,
+        hash: u64,
+    },
     /// Host to everyone: they differed, and the game is over as a fair one.
     /// `hashes` is seat order, so the log says which machine went its own way.
-    Desync { tick: u32, hashes: Vec<u64> },
+    Desync {
+        tick: u32,
+        hashes: Vec<u64>,
+    },
+    /// Host to guest, and the guest echoes it back unchanged.
+    ///
+    /// `at` is a number the host chose and only the host reads: no clock is
+    /// shared and none has to be. What comes back tells the host how long the
+    /// round trip took, which is what the input delay is chosen from. See
+    /// [`crate::lockstep::delay_for_rtt`].
+    Ping {
+        at: u64,
+    },
+    Pong {
+        at: u64,
+    },
     /// Leaving, politely. `why` is empty for an ordinary quit.
-    Bye { why: String },
+    Bye {
+        why: String,
+    },
 }
 
 impl Msg {
@@ -326,6 +372,41 @@ mod tests {
         // Thirteen characters, not thirteen bytes.
         let s = cut("ååååååååååååååå", PLAYER_NAME_MAX);
         assert_eq!(s.chars().count(), PLAYER_NAME_MAX);
+    }
+
+    /// The password rides on the hello and on nothing else, so it reaches the
+    /// host and no other part of this crate ever sees it.
+    #[test]
+    fn a_password_travels_on_the_hello_and_nowhere_else() {
+        let hello = Msg::Hello {
+            protocol: PROTOCOL,
+            name: "anna".into(),
+            password: "portcullis".into(),
+        };
+        let json = serde_json::to_string(&hello).unwrap();
+        assert_eq!(serde_json::from_str::<Msg>(&json).unwrap(), hello);
+        // A lobby is what everybody in it is told, and it does not carry one.
+        let mut lobby = Lobby::new("x", false);
+        lobby.players.push(Player {
+            seat: 0,
+            name: "carl".into(),
+            knight: Some(0),
+            ready: true,
+        });
+        let roster = serde_json::to_string(&lobby).unwrap();
+        assert!(!roster.to_lowercase().contains("portcullis"));
+        assert!(!roster.to_lowercase().contains("password"));
+        // And an older peer that sends no password at all is understood as
+        // sending an empty one rather than refused for the wrong reason.
+        let bare: Msg = serde_json::from_str(r#"{"Hello":{"protocol":1,"name":"anna"}}"#).unwrap();
+        assert_eq!(
+            bare,
+            Msg::Hello {
+                protocol: 1,
+                name: "anna".into(),
+                password: String::new()
+            }
+        );
     }
 
     #[test]

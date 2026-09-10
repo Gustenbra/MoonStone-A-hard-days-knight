@@ -110,6 +110,22 @@ const UI: &str = "bank.ki";
 /// `_STATUS:STAPAL`, twenty eight words, and `STAKNP`, the four after it.
 /// Amiga `0RGB` expanded the way every other palette in the game is, four bits
 /// a channel times seventeen.
+///
+/// **At image `0x0210f6`, and checked against it entry for entry.**
+/// `_STATUS:FiDisplay` (0xbf92) points `si` at `DS:0xed46` and hands it to the
+/// palette routines every time the sheet comes up, and again on every
+/// redisplay, so this is the whole screen's colour and not a suggestion.
+///
+/// It is worth knowing what it does to text, because it surprises people. The
+/// bold face draws every glyph in five indices, 5 for the outline and 9 to 12
+/// for the shaded face (see `henge_core::intro::CAPTION_INK`). Here those are
+/// `555555`, `884433`, `cc7755`, `ffbb88` and `555588`: a mid-grey ring and a
+/// brown-to-cream ramp that ends on a blue-grey, because on this screen 12
+/// belongs to the blue ramp at 12 to 15 rather than to the font. So a caption
+/// on the sheet is soft and shaded where the same caption over `MESSAGE.PIV` is
+/// hard and black-ringed. **That is the original, not a fault**, and the fix for
+/// anyone who dislikes it would be to write different entries here, which would
+/// be an invention.
 // Hand-aligned: four rows of eight, which is how the thirty-two entries are banked.
 #[rustfmt::skip]
 const STATUS_PALETTE: [u32; 32] = [

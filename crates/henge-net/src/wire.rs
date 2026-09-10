@@ -14,9 +14,17 @@
 //! **Nagle is off.** A lockstep tick is one small message whose whole purpose is
 //! to arrive now, and waiting for a second one to coalesce with it would add a
 //! tick of delay to every tick of the game.
+//!
+//! [`Link`] is generic over what it carries, because two different
+//! conversations use it: a game speaks [`crate::proto::Msg`] to its peers, and a
+//! host or a browser speaks [`crate::list::ListMsg`] to the list server. The
+//! framing, the buffering and the refusals are the same for both, and keeping
+//! them one type means there is one place where a socket can go wrong.
 
-use crate::proto::Msg;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::io::{ErrorKind, Read, Write};
+use std::marker::PhantomData;
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 
 /// The longest frame that will be read. A roster is a few hundred bytes and a
@@ -59,8 +67,8 @@ impl From<std::io::Error> for WireError {
     }
 }
 
-/// One connection, either way round.
-pub struct Link {
+/// One connection, either way round, carrying messages of one kind.
+pub struct Link<M = crate::proto::Msg> {
     sock: TcpStream,
     peer: SocketAddr,
     /// Bytes read but not yet a whole frame.
@@ -70,16 +78,26 @@ pub struct Link {
     /// How far into `outbox` the socket has taken.
     sent: usize,
     closed: bool,
+    carries: PhantomData<M>,
 }
 
-impl Link {
+impl<M: Serialize + DeserializeOwned> Link<M> {
     /// Dial a host. This one blocks, because there is nothing to do until it
     /// answers and a menu that says "connecting" is a menu that has already
     /// called this.
-    pub fn connect(addr: impl ToSocketAddrs) -> Result<Link, WireError> {
+    pub fn connect(addr: impl ToSocketAddrs) -> Result<Link<M>, WireError> {
+        Link::connect_within(addr, std::time::Duration::from_secs(8))
+    }
+
+    /// Dial with a patience of your own. The list server is asked with a short
+    /// one, because a menu that has stopped for eight seconds looks broken.
+    pub fn connect_within(
+        addr: impl ToSocketAddrs,
+        patience: std::time::Duration,
+    ) -> Result<Link<M>, WireError> {
         let mut last = None;
         for a in addr.to_socket_addrs()? {
-            match TcpStream::connect_timeout(&a, std::time::Duration::from_secs(8)) {
+            match TcpStream::connect_timeout(&a, patience) {
                 Ok(s) => return Link::wrap(s),
                 Err(e) => last = Some(e),
             }
@@ -90,7 +108,7 @@ impl Link {
     }
 
     /// Take over an accepted socket.
-    pub fn wrap(sock: TcpStream) -> Result<Link, WireError> {
+    pub fn wrap(sock: TcpStream) -> Result<Link<M>, WireError> {
         sock.set_nonblocking(true)?;
         // See the module note: a tick's message is not waiting for company.
         let _ = sock.set_nodelay(true);
@@ -102,11 +120,46 @@ impl Link {
             outbox: Vec::new(),
             sent: 0,
             closed: false,
+            carries: PhantomData,
         })
     }
 
     pub fn peer(&self) -> SocketAddr {
         self.peer
+    }
+
+    /// Hand this socket to a different conversation, keeping whatever bytes have
+    /// already arrived past the last whole frame.
+    ///
+    /// The relay needs this. A socket opens speaking [`crate::list::ListMsg`] to
+    /// arrange the introduction and then speaks the game's own
+    /// [`crate::proto::Msg`] for the rest of its life, and the frame that says so
+    /// can arrive in the same read as the first frame of the game. Dropping the
+    /// buffer here would lose that frame and the game would open with a hole in
+    /// it.
+    pub fn into_carrying<N>(self) -> Link<N> {
+        Link {
+            sock: self.sock,
+            peer: self.peer,
+            inbox: self.inbox,
+            outbox: self.outbox,
+            sent: self.sent,
+            closed: self.closed,
+            carries: PhantomData,
+        }
+    }
+
+    /// Give up the framing entirely: the socket, and whatever has already
+    /// arrived on it. What the relay itself does, because a relay reads bytes
+    /// and not messages: it must never need to understand what it is carrying.
+    pub fn into_raw(self) -> (TcpStream, Vec<u8>) {
+        (self.sock, self.inbox)
+    }
+
+    /// Whether anything is still waiting to go out, which is what a caller that
+    /// is about to hand the socket on needs to know.
+    pub fn idle(&self) -> bool {
+        self.sent >= self.outbox.len()
     }
 
     /// Whether the other end has gone, or we have given up on it.
@@ -117,7 +170,7 @@ impl Link {
     /// Queue a message. Nothing is written until [`Link::poll`] or
     /// [`Link::flush`], so a handful of messages built in one tick go out
     /// together.
-    pub fn send(&mut self, msg: &Msg) -> Result<(), WireError> {
+    pub fn send(&mut self, msg: &M) -> Result<(), WireError> {
         let body = serde_json::to_vec(msg).map_err(WireError::Garbled)?;
         if body.len() > MAX_FRAME {
             return Err(WireError::TooLong(body.len()));
@@ -164,7 +217,7 @@ impl Link {
     /// An error here is the end of the link: the caller drops it and tells the
     /// person. Messages read before the error are still returned, because the
     /// last thing a peer says before it goes is often [`Msg::Bye`].
-    pub fn poll(&mut self) -> (Vec<Msg>, Option<WireError>) {
+    pub fn poll(&mut self) -> (Vec<M>, Option<WireError>) {
         let mut out = Vec::new();
         let mut err = None;
         let mut chunk = [0u8; 8192];
@@ -213,7 +266,7 @@ impl Link {
                 break;
             }
             let body = &self.inbox[at + HEADER..at + HEADER + len];
-            match serde_json::from_slice::<Msg>(body) {
+            match serde_json::from_slice::<M>(body) {
                 Ok(m) => out.push(m),
                 Err(e) => {
                     self.closed = true;
@@ -260,7 +313,7 @@ impl Listener {
     }
 
     /// Whoever has knocked since last time.
-    pub fn accept(&self) -> Vec<Link> {
+    pub fn accept<M: Serialize + DeserializeOwned>(&self) -> Vec<Link<M>> {
         let mut out = Vec::new();
         loop {
             match self.sock.accept() {
@@ -282,12 +335,12 @@ impl Listener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{Lobby, SeatInput};
+    use crate::proto::{Lobby, Msg, SeatInput};
 
     /// Spin both ends until a message arrives or the patience runs out. A test
     /// must not block on a socket, and a non-blocking socket needs a turn of the
     /// crank: this is the game loop, compressed.
-    fn pump(a: &mut Link, b: &mut Link) -> Vec<Msg> {
+    fn pump(a: &mut Link<Msg>, b: &mut Link<Msg>) -> Vec<Msg> {
         for _ in 0..2000 {
             let (_, ea) = a.poll();
             assert!(ea.is_none(), "{:?}", ea);
@@ -301,7 +354,7 @@ mod tests {
         panic!("nothing arrived");
     }
 
-    fn pair() -> (Link, Link) {
+    fn pair() -> (Link<Msg>, Link<Msg>) {
         let door = Listener::open(0).expect("a port");
         let port = door.port();
         let mut guest = Link::connect(("127.0.0.1", port)).expect("to connect");
@@ -323,6 +376,7 @@ mod tests {
         let hello = Msg::Hello {
             protocol: crate::proto::PROTOCOL,
             name: "carl".into(),
+            password: String::new(),
         };
         guest.send(&hello).unwrap();
         assert_eq!(pump(&mut guest, &mut host), vec![hello]);

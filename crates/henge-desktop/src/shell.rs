@@ -1005,6 +1005,9 @@ pub fn draw_online(
     // The roster first, above the rows, so the list a person is waiting on is
     // the thing nearest the wordmark.
     let mut y = LOBBY_TOP;
+    if screen.page == Page::Browse {
+        bold.draw_own_centred(reg, fb, "Open games", y);
+    }
     if screen.page == Page::Waiting {
         bold.draw_own_centred(reg, fb, &screen.roster.name, y);
         y += LOBBY_STEP;
@@ -1016,10 +1019,17 @@ pub fn draw_online(
             };
             let mark = if p.ready { "*" } else { " " };
             let you = if mine { ">" } else { " " };
+            // The measured round trip, when the host has one. A lobby is where
+            // somebody should find out the line is bad, not a minute into a
+            // fight.
+            let trip = match screen.trips.get(&p.seat) {
+                Some(ms) => format!(" {ms}ms"),
+                None => String::new(),
+            };
             bold.draw_own(
                 reg,
                 fb,
-                &format!("{you}{} {knight} {mark}", p.name),
+                &format!("{you}{} {knight} {mark}{trip}", p.name),
                 LOBBY_X,
                 y,
             );
@@ -1042,6 +1052,22 @@ pub fn draw_online(
     );
     for (i, row) in rows.iter().enumerate() {
         let at = first + i as i32 * LOBBY_STEP;
+        // A game on the list is one line of its own: the name, the head count,
+        // a star if it wants a word, and a mark if the list server is carrying
+        // it because its host could not be reached directly.
+        if let Row::Game(n) = row {
+            if let Some(g) = screen.games.get(*n) {
+                let carried = if g.relayed() { " ~" } else { "" };
+                bold.draw_own(
+                    reg,
+                    fb,
+                    &format!("{}{carried}", g.line()),
+                    LOBBY_LABEL_X,
+                    at,
+                );
+            }
+            continue;
+        }
         let value = match row {
             Row::LobbyName | Row::PlayerName | Row::Address => screen.shown(*row),
             Row::Knight => match screen.knight {

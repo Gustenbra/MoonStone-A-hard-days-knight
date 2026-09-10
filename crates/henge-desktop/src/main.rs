@@ -356,7 +356,11 @@ fn prepare(app: &mut App, a: &[String]) {
         app.mode = Mode::Online;
         app.begin_online();
         let you = after_arg(a, "--name").unwrap_or_else(|| "HOST".into());
-        app.online_ask(online::Ask::Open { game: name, you });
+        app.online_ask(online::Ask::Open {
+            game: name,
+            you,
+            password: after_arg(a, "--password").unwrap_or_default(),
+        });
         // Sat down and ready: a host driven from the command line has nobody to
         // press the row for them.
         app.online_ask(online::Ask::Seat {
@@ -371,7 +375,11 @@ fn prepare(app: &mut App, a: &[String]) {
         app.mode = Mode::Online;
         app.begin_online();
         let you = after_arg(a, "--name").unwrap_or_else(|| "GUEST".into());
-        app.online_ask(online::Ask::Dial { address, you });
+        app.online_ask(online::Ask::Dial {
+            address,
+            you,
+            password: after_arg(a, "--password").unwrap_or_default(),
+        });
     }
     if a.iter().any(|x| x == "--begin") {
         let want = after_arg(a, "--players")
@@ -1067,9 +1075,19 @@ const PACE_FULL: u32 = 100;
 /// number below a hundred is what a real 1991 fight looked like and a hundred
 /// is only what the code permits at its quickest. See [`App::pace`].
 ///
-/// At eighty a combat pass is 137.3 ms, 7.28 a second, against the floor's
-/// 109.849 ms and 9.10. It was sixty first, which Carl found too slow.
-const PACE_DEFAULT: u32 = 80;
+/// **A hundred, which is the recovered rate and no dial at all.**
+///
+/// It was sixty, then eighty, both of them attempts to make the game feel right
+/// by slowing every clock in it at once. That was the wrong knob. The rate in
+/// [`tick_len_for`] comes out of the image and a fight that feels too quick at
+/// that rate is not evidence the rate is wrong: it is evidence that something
+/// the fight is made of moves too far in a pass, and that something is a
+/// recovered number too, so it can be found and fixed rather than covered over.
+///
+/// The dial stays, because a floor is not a rate (see [`App::pace`]) and because
+/// it is useful for looking at a fight in slow motion. It simply opens at the
+/// number the image says.
+const PACE_DEFAULT: u32 = 100;
 
 /// The narrowest and widest the dial goes. Half speed is about where a busy
 /// fight on a 1991 machine would have landed; a quarter again over the
@@ -1157,7 +1175,8 @@ struct App {
     /// **Ours, and the only number in the pacing that is.** How fast the game
     /// runs, as a percentage of the rate recovered in [`tick_len_for`]: a
     /// hundred is that rate exactly, and a smaller number is slower. It opens
-    /// at [`PACE_DEFAULT`], which is sixty.
+    /// at [`PACE_DEFAULT`], which is a hundred, so by default this changes
+    /// nothing at all.
     ///
     /// It is universal on purpose. Every loop's tick goes through here, so the
     /// knight, the creatures, the animation, the colour cycling and the walk
@@ -1430,6 +1449,12 @@ enum Mode {
 
 /// **Ours**: the socket a lobby is held open on before a game begins. Once it
 /// does, it becomes a `henge_net::Session` and this is empty again.
+///
+/// A host carries a listener, a roster and possibly a list-server connection and
+/// a guest carries one socket, so the two halves are nothing like the same size.
+/// There is one of these per running game, so boxing it would save a few hundred
+/// bytes once and cost a pointer chase every tick.
+#[allow(clippy::large_enum_variant)]
 enum Waiting {
     Host(henge_net::Host),
     Guest(henge_net::Guest),
@@ -1439,6 +1464,54 @@ enum Waiting {
 fn after_arg(a: &[String], flag: &str) -> Option<String> {
     let at = a.iter().position(|x| x == flag)?;
     a.get(at + 1).filter(|v| !v.starts_with("--")).cloned()
+}
+
+/// **Ours.** Where the game looks for a list server when nothing else says.
+///
+/// Ours in every sense: this is Fjord3D's own machine, an `e2-micro` in Google's
+/// `europe-north2` (Stockholm), which is the nearest region to the people
+/// playing. It holds the list of open games and carries the ones whose hosts
+/// cannot be reached directly, which behind Starlink's carrier NAT is all of
+/// them. See `docs/list-server.md`.
+///
+/// **The address is ephemeral**, which is what keeps it free while the machine
+/// is off: it survives a running machine indefinitely and changes when the
+/// machine is stopped and started again. When that happens, either put the new
+/// one in [`LIST_FILE`] or change this line; nothing else in the game knows the
+/// number.
+///
+/// Empty means there is no list server, and the browse page says so rather than
+/// pretending to look. It is only the default: [`list_server`] prefers
+/// `--list <address>` and then the one line in [`LIST_FILE`].
+const LIST_SERVER: &str = "34.51.244.53";
+
+/// A file beside the game holding one line: the list server's address. Written
+/// by hand, read at every look, and absent by default.
+const LIST_FILE: &str = "henge-list.txt";
+
+/// Where to look for open games: the flag, then the file, then [`LIST_SERVER`].
+fn list_server(a: &[String]) -> String {
+    if let Some(v) = after_arg(a, "--list") {
+        return v;
+    }
+    if let Ok(text) = std::fs::read_to_string(LIST_FILE) {
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .unwrap_or_default();
+        if !line.is_empty() {
+            return line.to_string();
+        }
+    }
+    LIST_SERVER.to_string()
+}
+
+/// What a build calls itself on the list, so a browser is not offered a game its
+/// own copy of the game cannot join. The crate version and the game protocol
+/// together: either changing is a reason not to sit down at the same table.
+fn build_name() -> String {
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), henge_net::PROTOCOL)
 }
 
 /// `--port <n>`: which port to host on. The default is `henge_net`'s own.
@@ -1828,7 +1901,7 @@ impl App {
             println!("ours: 1/2 set how many are playing, C the sheet, F2 switches");
             println!("map/arena, [ and ] change arena, , and . change the opponent, R restarts,");
             println!("- and = slow the game down and speed it up (--pace <percent> too);");
-            println!("it opens at 80% of the rate the image says, which is a floor, not a rate.");
+            println!("it opens at 100%, the rate the image says, which is a floor and not a rate.");
         }
 
         let intro_cast = reg.read_data("data.intro").ok().map(std::rc::Rc::new);
@@ -3529,18 +3602,37 @@ impl App {
     /// Act on what the lobby screen asked for.
     fn online_ask(&mut self, ask: online::Ask) {
         match ask {
-            online::Ask::Open { game, you } => {
+            online::Ask::Open {
+                game,
+                you,
+                password,
+            } => {
                 let port = online_port_arg(&args_of()).unwrap_or(henge_net::DEFAULT_PORT);
                 match henge_net::Host::open(&game, &you, port, self.title.state.gore) {
-                    Ok(host) => {
+                    Ok(mut host) => {
                         let port = host.port();
+                        host.lock(&password);
+                        // On the list, if there is one to be on. The server
+                        // answers with the address it saw us come from and
+                        // whether it could get back in, which is a better
+                        // answer than the router's own.
+                        let server = list_server(&args_of());
+                        let listed = if server.is_empty() {
+                            Some("no list server: friends will need your address".to_string())
+                        } else {
+                            match host.list_on(&server, &build_name()) {
+                                Ok(()) => None,
+                                Err(e) => Some(format!("not on the list ({server}): {e}")),
+                            }
+                        };
                         self.lobby = Some(Waiting::Host(host));
                         // The router, on its own thread: the lobby is drawable
                         // now and the address fills in when it answers.
                         self.opener = Some(henge_net::Opener::start(port));
                         if let Some(o) = self.online.as_mut() {
                             o.sat_down(0, true);
-                            o.note = format!("asking the router to open port {port}");
+                            o.note = listed
+                                .unwrap_or_else(|| format!("opening port {port} and listing it"));
                         }
                     }
                     Err(e) => {
@@ -3550,7 +3642,74 @@ impl App {
                     }
                 }
             }
-            online::Ask::Dial { address, you } => {
+            online::Ask::Look => {
+                let server = list_server(&args_of());
+                if server.is_empty() {
+                    if let Some(o) = self.online.as_mut() {
+                        o.listed(
+                            Vec::new(),
+                            &format!("no list server set: put one in {LIST_FILE}, or --list"),
+                        );
+                    }
+                    return;
+                }
+                // This one stops the game for as long as the answer takes, which
+                // is a second at worst. It happens because somebody pressed a
+                // key and is waiting for a list.
+                match henge_net::browse(&server, &build_name()) {
+                    Ok(games) => {
+                        let note = if games.is_empty() {
+                            format!("no games open on {server}")
+                        } else {
+                            format!("{} open on {server}", games.len())
+                        };
+                        if let Some(o) = self.online.as_mut() {
+                            o.listed(games, &note);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(o) = self.online.as_mut() {
+                            o.listed(Vec::new(), &format!("could not reach {server}: {e}"));
+                        }
+                    }
+                }
+            }
+            online::Ask::Take {
+                game,
+                you,
+                password,
+            } => {
+                // A game the list server is carrying is reached through the
+                // server; anything else is dialled directly. Either way what
+                // comes back is an ordinary game link and nothing downstream can
+                // tell the difference.
+                let joined = if game.relayed() {
+                    let server = list_server(&args_of());
+                    henge_net::list::reach(&server, &game.code)
+                        .map_err(henge_net::JoinError::from)
+                        .and_then(|link| henge_net::Guest::over(link, &you, &password))
+                } else {
+                    henge_net::Guest::join(game.at.as_str(), &you, &password)
+                };
+                match joined {
+                    Ok(guest) => {
+                        self.lobby = Some(Waiting::Guest(guest));
+                        if let Some(o) = self.online.as_mut() {
+                            o.note = format!("joining {}", game.name);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(o) = self.online.as_mut() {
+                            o.note = format!("could not join {}: {e}", game.name);
+                        }
+                    }
+                }
+            }
+            online::Ask::Dial {
+                address,
+                you,
+                password,
+            } => {
                 // A bare address means the usual port, because nobody wants to
                 // type a number they were never told.
                 let with_port = if address.contains(':') {
@@ -3558,7 +3717,7 @@ impl App {
                 } else {
                     format!("{address}:{}", henge_net::DEFAULT_PORT)
                 };
-                match henge_net::Guest::join(with_port.as_str(), &you) {
+                match henge_net::Guest::join(with_port.as_str(), &you, &password) {
                     Ok(guest) => {
                         self.lobby = Some(Waiting::Guest(guest));
                         if let Some(o) = self.online.as_mut() {
@@ -3578,11 +3737,15 @@ impl App {
                 None => {}
             },
             online::Ask::Begin => {
-                let delay =
-                    online_delay_arg(&args_of()).unwrap_or(henge_net::lockstep::delay_for_rtt(
-                        std::time::Duration::from_millis(80),
-                        tick_len_for(Mode::Map),
-                    ));
+                // The delay comes from what the lobby's round trips actually
+                // measured, not from an assumption about the line. With a relay
+                // in the path, which is every game when both ends are behind a
+                // carrier's NAT, the two are nothing like each other.
+                let delay = match (online_delay_arg(&args_of()), self.lobby.as_ref()) {
+                    (Some(given), _) => given,
+                    (None, Some(Waiting::Host(h))) => h.suggested_delay(tick_len_for(Mode::Map)),
+                    (None, _) => henge_net::lockstep::MIN_DELAY,
+                };
                 let terms = match self.lobby.as_mut() {
                     Some(Waiting::Host(h)) => h.start(delay, henge_net::lockstep::CHECK_EVERY),
                     _ => None,
@@ -3618,8 +3781,15 @@ impl App {
             Some(Waiting::Guest(g)) => Some(g.lobby.clone()),
             None => None,
         };
+        let trips: std::collections::BTreeMap<u8, u32> = match self.lobby.as_ref() {
+            Some(Waiting::Host(h)) => (0..henge_core::shell::SEATS as u8)
+                .filter_map(|s| h.trip(s).map(|ms| (s, ms)))
+                .collect(),
+            _ => std::collections::BTreeMap::new(),
+        };
         if let (Some(o), Some(r)) = (self.online.as_mut(), roster) {
             o.roster = r;
+            o.trips = trips;
         }
         let mut start = None;
         let mut delay = 0;
@@ -3667,6 +3837,11 @@ impl App {
                 }
                 // The roster has already been taken above, and a lobby has no
                 // ticks to run.
+                henge_net::Event::Note { text } => {
+                    if let Some(o) = self.online.as_mut() {
+                        o.note = text;
+                    }
+                }
                 henge_net::Event::Roster
                 | henge_net::Event::Input { .. }
                 | henge_net::Event::Turn { .. }
@@ -3688,8 +3863,18 @@ impl App {
             return;
         };
         self.opener = None;
+        // The list server's answer, if there is one, is a measurement and the
+        // router's is a claim. The measurement wins.
+        let measured = match self.lobby.as_ref() {
+            Some(Waiting::Host(h)) => h.address(),
+            _ => None,
+        };
         if let Some(o) = self.online.as_mut() {
-            o.reachable = map.address();
+            o.reachable = measured.clone().unwrap_or_else(|| map.address());
+            if measured.is_some() {
+                self.mapping = Some(map);
+                return;
+            }
             o.note = if map.how.opened() {
                 format!("friends can join at {}", map.address())
             } else if map.local.is_some() {
@@ -6310,14 +6495,20 @@ mod tests {
     #[test]
     fn the_pace_dial_is_ours_and_a_hundred_changes_nothing() {
         let Some(mut app) = quest_app() else { return };
-        assert_eq!(
-            app.pace, PACE_DEFAULT,
-            "and it opens at sixty, not at the floor"
-        );
-        // Eighty percent: a combat pass is 137.3 ms rather than 109.849.
+        assert_eq!(app.pace, PACE_DEFAULT);
+        // It opens on the recovered rate, so a combat pass out of the box is
+        // `Combat`'s own two BIOS ticks and nothing else.
         app.mode = Mode::Combat;
         let pass = app.tick_len() * ticks_per_pass(Mode::Combat);
         let ms = pass.as_secs_f64() * 1000.0;
+        assert!(
+            (ms - 109.849).abs() < 0.1,
+            "a pass out of the box took {ms} ms"
+        );
+        // Turned down, it is the wall clock that stretches and nothing else:
+        // half speed is twice the time and the same six ticks.
+        app.pace = 80;
+        let ms = (app.tick_len() * ticks_per_pass(Mode::Combat)).as_secs_f64() * 1000.0;
         assert!((ms - 137.31).abs() < 0.1, "a pass at eighty took {ms} ms");
         // A hundred must leave every recovered tick alone to the nanosecond.
         app.pace = PACE_FULL;
@@ -6335,6 +6526,9 @@ mod tests {
         app.pace = 50;
         assert_eq!(app.tick_len(), TIMER_TICK * 2);
         assert_eq!(ticks_per_pass(Mode::Combat), 6);
+        // And it opens on the recovered rate, so a game nobody has touched the
+        // dial on is running at exactly what the image says.
+        assert_eq!(PACE_DEFAULT, PACE_FULL, "the default is no dial at all");
         // And it is bounded, so no key press can stop the game or run it away.
         for _ in 0..200 {
             app.key(KeyCode::Minus, true);

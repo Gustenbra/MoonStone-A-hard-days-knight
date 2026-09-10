@@ -10,6 +10,7 @@
 //! authority over the *game* (there is none: see [`crate::lockstep`]) but an
 //! authority over who is sitting where, which somebody has to have.
 
+use crate::list::Directory;
 use crate::proto::{cut, Lobby, Msg, Player, SeatInput, PLAYER_NAME_MAX, PROTOCOL, SEATS};
 use crate::wire::{Link, Listener, WireError};
 
@@ -52,6 +53,9 @@ pub enum Event {
     /// The link is gone. On a guest this is the end of the game; on a host it is
     /// one seat emptying, and [`Event::Left`] comes with it.
     Lost { seat: u8, why: String },
+    /// Something worth showing the person that is nobody's fault: what the list
+    /// server said, what the router said.
+    Note { text: String },
 }
 
 /// What [`Host::open`] and [`Guest::join`] can come back with.
@@ -86,6 +90,20 @@ pub struct Host {
     guests: Vec<(u8, Link)>,
     /// Whether [`Host::start`] has been called.
     pub started: bool,
+    /// The list server, while this game is announced on one.
+    pub directory: Option<Directory>,
+    /// What each seat's round trip measured, in milliseconds, and when it was
+    /// last asked. The input delay is chosen from the worst of them.
+    trips: std::collections::BTreeMap<u8, u32>,
+    /// When this host started, so a ping carries a small number rather than a
+    /// wall clock, and no clock has to be shared with anybody.
+    began: std::time::Instant,
+    asked: std::time::Instant,
+    /// The word a guest has to say, when the host asked for one.
+    ///
+    /// **It never leaves this machine.** The list carries only the fact that
+    /// there is one, and the check happens here, on the hello.
+    password: String,
 }
 
 impl Host {
@@ -105,7 +123,76 @@ impl Host {
             lobby,
             guests: Vec::new(),
             started: false,
+            directory: None,
+            trips: std::collections::BTreeMap::new(),
+            began: std::time::Instant::now(),
+            asked: std::time::Instant::now(),
+            password: String::new(),
         })
+    }
+
+    /// The worst round trip measured so far, in milliseconds, or nothing while
+    /// nobody has answered yet.
+    pub fn worst_trip(&self) -> Option<u32> {
+        self.trips.values().copied().max()
+    }
+
+    /// What one seat's round trip measured.
+    pub fn trip(&self, seat: u8) -> Option<u32> {
+        self.trips.get(&seat).copied()
+    }
+
+    /// How many ticks of input delay this lobby's measurements ask for.
+    ///
+    /// The worst round trip in the lobby, because a game runs at the speed of
+    /// the peer furthest away. Nothing measured yet falls back to a guess, which
+    /// is the one number here that is not a measurement and is marked so.
+    pub fn suggested_delay(&self, tick: std::time::Duration) -> u32 {
+        // Ours, and a guess: what a domestic line to a nearby machine tends to
+        // be. Only used in the first moment of a lobby, before anybody has
+        // answered a ping.
+        const ASSUMED: std::time::Duration = std::time::Duration::from_millis(80);
+        let rtt = match self.worst_trip() {
+            Some(ms) => std::time::Duration::from_millis(ms as u64),
+            None => ASSUMED,
+        };
+        crate::lockstep::delay_for_rtt(rtt, tick)
+    }
+
+    /// Ask for a word before anybody may join. Empty means anybody may.
+    pub fn lock(&mut self, password: &str) {
+        self.password = password.trim().to_string();
+    }
+
+    /// Whether a word is wanted, which is all the list server is ever told.
+    pub fn locked(&self) -> bool {
+        !self.password.is_empty()
+    }
+
+    /// Put this game on a list server, so it can be found without an address
+    /// being read out.
+    ///
+    /// The server answers with the address it saw the announcement come from and
+    /// whether it could get back in, which is the only honest test of whether
+    /// friends can reach this machine. A host it could not reach is carried by
+    /// the server instead.
+    pub fn list_on(&mut self, server: &str, version: &str) -> Result<(), WireError> {
+        let d = Directory::announce(
+            server,
+            &self.lobby.name,
+            self.door.port(),
+            SEATS as u8,
+            self.locked(),
+            version,
+        )?;
+        self.directory = Some(d);
+        Ok(())
+    }
+
+    /// The address to read out to a friend, once the list server has said what
+    /// it is.
+    pub fn address(&self) -> Option<String> {
+        self.directory.as_ref().and_then(|d| d.address())
     }
 
     /// The port guests are to be told about.
@@ -121,6 +208,8 @@ impl Host {
     /// Accept, read, and answer. Call once a tick.
     pub fn poll(&mut self) -> Vec<Event> {
         let mut out = Vec::new();
+        // The list server first, because it can hand us a guest.
+        self.poll_directory(&mut out);
         // Anybody new. A lobby that has started or is full turns them away by
         // name rather than dropping the socket, so the person sees why.
         for mut link in self.door.accept() {
@@ -142,14 +231,30 @@ impl Host {
             // and a seat held by a stranger is a seat a friend cannot have.
             self.guests.push((SEAT_UNSEATED, link));
         }
+        // A ping, now and then, so the input delay is chosen from what the line
+        // actually does rather than from an assumption. Once a second is plenty:
+        // it is measuring a lobby, not a frame.
+        let now = self.began.elapsed().as_millis() as u64;
+        let asking = self.asked.elapsed() >= std::time::Duration::from_secs(1);
+        if asking {
+            self.asked = std::time::Instant::now();
+        }
         // Everything said to us.
         let mut lost: Vec<(usize, String)> = Vec::new();
         let mut roster_changed = false;
+        let mut trips: Vec<(u8, u32)> = Vec::new();
         for (i, (seat, link)) in self.guests.iter_mut().enumerate() {
+            if asking && *seat != SEAT_UNSEATED {
+                let _ = link.send(&Msg::Ping { at: now });
+            }
             let (msgs, err) = link.poll();
             for m in msgs {
                 match m {
-                    Msg::Hello { protocol, name } => {
+                    Msg::Hello {
+                        protocol,
+                        name,
+                        password,
+                    } => {
                         if protocol != PROTOCOL {
                             let _ = link.send(&Msg::Refused {
                                 why: format!(
@@ -165,6 +270,21 @@ impl Host {
                         }
                         if *seat != SEAT_UNSEATED {
                             lost.push((i, "said hello twice".into()));
+                            continue;
+                        }
+                        // The word, checked here and nowhere else. Compared
+                        // whole rather than by prefix, and a game with no word
+                        // ignores whatever was sent.
+                        if !self.password.is_empty() && password != self.password {
+                            let _ = link.send(&Msg::Refused {
+                                why: if password.is_empty() {
+                                    "that game wants a password".into()
+                                } else {
+                                    "that is not the password".into()
+                                },
+                            });
+                            let _ = link.flush();
+                            lost.push((i, "the wrong password".into()));
                             continue;
                         }
                         let Some(free) = self.lobby.free_seat() else {
@@ -237,6 +357,13 @@ impl Host {
                             });
                         }
                     }
+                    // The host's own ping, come back. Only the host reads the
+                    // number in it, so no clock is shared.
+                    Msg::Pong { at } => {
+                        if *seat != SEAT_UNSEATED {
+                            trips.push((*seat, now.saturating_sub(at) as u32));
+                        }
+                    }
                     Msg::Bye { why } => {
                         lost.push((i, if why.is_empty() { "left".into() } else { why }))
                     }
@@ -249,6 +376,11 @@ impl Host {
             if let Some(e) = err {
                 lost.push((i, e.to_string()));
             }
+        }
+        for (seat, ms) in trips {
+            // Kept as the latest rather than smoothed: a lobby is measured over
+            // seconds and the number is only read once, when the host starts.
+            self.trips.insert(seat, ms);
         }
         // Drop what was lost, highest index first so the rest keep their places.
         lost.sort_by_key(|l| std::cmp::Reverse(l.0));
@@ -267,6 +399,7 @@ impl Host {
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
             self.lobby.players.retain(|p| p.seat != seat);
+            self.trips.remove(&seat);
             out.push(Event::Left {
                 seat,
                 name: name.clone(),
@@ -283,6 +416,46 @@ impl Host {
             let _ = link.flush();
         }
         out
+    }
+
+    /// The list server: the refresh, whatever it has to say, and any guest it is
+    /// holding for us.
+    ///
+    /// A ticket is a guest waiting at the relay. Answering one means opening a
+    /// second connection to the server, which blocks for as long as that takes;
+    /// it happens once per person joining a lobby, so a frame is dropped when
+    /// somebody arrives and never otherwise.
+    fn poll_directory(&mut self, out: &mut Vec<Event>) {
+        let players = self.lobby.players() as u8;
+        let Some(d) = self.directory.as_mut() else {
+            return;
+        };
+        let tickets = d.poll(players);
+        for text in d.notes() {
+            out.push(Event::Note { text });
+        }
+        for ticket in tickets {
+            match self.directory.as_ref().unwrap().attach(&ticket) {
+                Ok(link) => {
+                    if self.started || self.lobby.free_seat().is_none() {
+                        let mut link = link;
+                        let _ = link.send(&Msg::Refused {
+                            why: if self.started {
+                                "that game has already started".into()
+                            } else {
+                                "that game is full".into()
+                            },
+                        });
+                        let _ = link.flush();
+                        continue;
+                    }
+                    self.guests.push((SEAT_UNSEATED, link));
+                }
+                Err(e) => out.push(Event::Note {
+                    text: format!("could not let somebody in through the list server: {e}"),
+                }),
+            }
+        }
     }
 
     /// The host's own knight and ready flag.
@@ -402,6 +575,11 @@ impl Host {
         self.broadcast(&Msg::Bye { why: why.into() });
         self.guests.clear();
         self.lobby.players.retain(|p| p.seat == 0);
+        // Off the list, so nobody tries to join a game that is over.
+        if let Some(d) = self.directory.as_mut() {
+            d.withdraw();
+        }
+        self.directory = None;
     }
 }
 
@@ -421,11 +599,24 @@ pub struct Guest {
 impl Guest {
     /// Dial a host and say hello. The hello is queued, not awaited: the answer
     /// arrives through [`Guest::poll`] like everything else.
-    pub fn join(addr: impl std::net::ToSocketAddrs, player: &str) -> Result<Guest, JoinError> {
-        let mut link = Link::connect(addr)?;
+    pub fn join(
+        addr: impl std::net::ToSocketAddrs,
+        player: &str,
+        password: &str,
+    ) -> Result<Guest, JoinError> {
+        Guest::over(Link::connect(addr)?, player, password)
+    }
+
+    /// Say hello over a link that is already open.
+    ///
+    /// What a game reached through the list server's relay uses: the socket was
+    /// opened to the server and introduced to the host, and from the hello on it
+    /// is an ordinary game link that nobody in the middle reads.
+    pub fn over(mut link: Link, player: &str, password: &str) -> Result<Guest, JoinError> {
         link.send(&Msg::Hello {
             protocol: PROTOCOL,
             name: cut(player, PLAYER_NAME_MAX),
+            password: password.trim().to_string(),
         })?;
         link.flush()?;
         Ok(Guest {
@@ -469,6 +660,13 @@ impl Guest {
                         delay,
                         check,
                     });
+                }
+                // Echoed at once and without comment: the host is timing the
+                // line, and a guest that thought about it would be timing its
+                // own thinking too.
+                Msg::Ping { at } => {
+                    let _ = self.link.send(&Msg::Pong { at });
+                    let _ = self.link.flush();
                 }
                 Msg::Turn { tick, seats } => out.push(Event::Turn { tick, seats }),
                 Msg::Check { tick, hash } => out.push(Event::Check {
@@ -552,7 +750,7 @@ mod tests {
     fn a_guest_joins_and_gets_the_next_seat() {
         let mut host = Host::open("Carl's game", "carl", 0, true).unwrap();
         let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         let (h, g) = settle(&mut host, &mut [&mut anna]);
         assert!(h.iter().any(|e| matches!(e, Event::Joined { seat: 1, .. })));
         assert!(g[0].contains(&Event::Seated { seat: 1 }));
@@ -567,7 +765,7 @@ mod tests {
         let mut host = Host::open("a game", "a host whose name is far too long", 0, false).unwrap();
         assert_eq!(host.lobby.players[0].name.chars().count(), PLAYER_NAME_MAX);
         let port = host.port();
-        let mut g = Guest::join(("127.0.0.1", port), "anna of the lakelands").unwrap();
+        let mut g = Guest::join(("127.0.0.1", port), "anna of the lakelands", "").unwrap();
         settle(&mut host, &mut [&mut g]);
         assert_eq!(host.lobby.players[1].name, "anna of the l");
     }
@@ -577,14 +775,14 @@ mod tests {
         let mut host = Host::open("full", "carl", 0, false).unwrap();
         let port = host.port();
         let mut three: Vec<Guest> = (0..3)
-            .map(|i| Guest::join(("127.0.0.1", port), &format!("g{i}")).unwrap())
+            .map(|i| Guest::join(("127.0.0.1", port), &format!("g{i}"), "").unwrap())
             .collect();
         {
             let mut refs: Vec<&mut Guest> = three.iter_mut().collect();
             settle(&mut host, &mut refs);
         }
         assert_eq!(host.lobby.players(), SEATS);
-        let mut late = Guest::join(("127.0.0.1", port), "late").unwrap();
+        let mut late = Guest::join(("127.0.0.1", port), "late", "").unwrap();
         let (_, g) = settle(&mut host, &mut [&mut late]);
         assert!(
             g[0].iter()
@@ -599,7 +797,7 @@ mod tests {
     fn a_guest_that_leaves_frees_its_seat() {
         let mut host = Host::open("x", "carl", 0, false).unwrap();
         let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         settle(&mut host, &mut [&mut anna]);
         assert_eq!(host.lobby.players(), 2);
         anna.close("");
@@ -625,8 +823,8 @@ mod tests {
     fn two_guests_cannot_take_the_same_knight() {
         let mut host = Host::open("x", "carl", 0, false).unwrap();
         let port = host.port();
-        let mut a = Guest::join(("127.0.0.1", port), "a").unwrap();
-        let mut b = Guest::join(("127.0.0.1", port), "b").unwrap();
+        let mut a = Guest::join(("127.0.0.1", port), "a", "").unwrap();
+        let mut b = Guest::join(("127.0.0.1", port), "b", "").unwrap();
         settle(&mut host, &mut [&mut a, &mut b]);
         a.seat_request(Some(2), true);
         settle(&mut host, &mut [&mut a, &mut b]);
@@ -645,7 +843,7 @@ mod tests {
     fn nothing_starts_until_everyone_is_ready_and_then_everyone_is_told() {
         let mut host = Host::open("x", "carl", 0, true).unwrap();
         let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         settle(&mut host, &mut [&mut anna]);
         host.seat(Some(0), true);
         assert_eq!(host.start(6, 64), None, "anna has not sat down");
@@ -675,7 +873,7 @@ mod tests {
     fn a_seat_that_chose_nothing_is_given_the_lowest_free_knight() {
         let mut host = Host::open("x", "carl", 0, false).unwrap();
         let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         settle(&mut host, &mut [&mut anna]);
         host.seat(Some(2), true);
         anna.seat_request(None, true);
@@ -692,7 +890,7 @@ mod tests {
         let port = host.port();
         host.seat(Some(0), true);
         host.start(4, 64).expect("one player is a lobby");
-        let mut late = Guest::join(("127.0.0.1", port), "late").unwrap();
+        let mut late = Guest::join(("127.0.0.1", port), "late", "").unwrap();
         let (_, g) = settle(&mut host, &mut [&mut late]);
         assert!(
             g[0].iter()
@@ -712,6 +910,7 @@ mod tests {
         link.send(&Msg::Hello {
             protocol: PROTOCOL + 99,
             name: "wrong".into(),
+            password: String::new(),
         })
         .unwrap();
         link.flush().unwrap();
@@ -734,7 +933,7 @@ mod tests {
     fn a_guests_input_arrives_as_its_own_seats() {
         let mut host = Host::open("x", "carl", 0, false).unwrap();
         let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         settle(&mut host, &mut [&mut anna]);
         anna.send_input(
             9,
@@ -760,11 +959,48 @@ mod tests {
         }));
     }
 
+    /// The line is measured rather than assumed, because with a relay in the
+    /// path an assumption is not even close.
+    #[test]
+    fn the_round_trip_is_measured_and_the_delay_follows_it() {
+        let mut host = Host::open("x", "carl", 0, false).unwrap();
+        let port = host.port();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
+        assert_eq!(host.worst_trip(), None, "nothing measured yet");
+        // The guess, while there is nothing better. Marked as a guess in the
+        // code and used for no more than the first second of a lobby.
+        let retrace = std::time::Duration::from_micros(14_268);
+        assert_eq!(host.suggested_delay(retrace), 6);
+        // A ping goes out once a second, so this waits for one.
+        let stop = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while std::time::Instant::now() < stop && host.trip(1).is_none() {
+            host.poll();
+            anna.poll();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let ms = host.trip(1).expect("a measurement");
+        // Over loopback this is a millisecond or two, so the delay it asks for
+        // is the floor.
+        assert!(ms < 500, "a loopback round trip of {ms}ms is not one");
+        assert_eq!(host.worst_trip(), Some(ms));
+        assert_eq!(host.suggested_delay(retrace), crate::lockstep::MIN_DELAY);
+        // And a seat that leaves takes its measurement with it, so a slow guest
+        // who has gone does not hold the delay up.
+        anna.close("");
+        drop(anna);
+        let stop = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < stop && host.trip(1).is_some() {
+            host.poll();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(host.trip(1), None);
+    }
+
     #[test]
     fn the_host_closing_reaches_the_guests_screen() {
         let mut host = Host::open("x", "carl", 0, false).unwrap();
         let port = host.port();
-        let mut anna = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut anna = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         settle(&mut host, &mut [&mut anna]);
         host.close("the host went to bed");
         let (_, g) = settle(&mut host, &mut [&mut anna]);

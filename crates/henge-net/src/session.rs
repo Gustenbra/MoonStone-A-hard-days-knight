@@ -22,6 +22,12 @@ use crate::lockstep::{Lockstep, Turn};
 use crate::proto::SeatInput;
 
 /// Which end of the wire this machine is.
+///
+/// A host carries a listener, a roster and possibly a list-server connection and
+/// a guest carries one socket, so the two halves are nothing like the same size.
+/// Boxing it would put a pointer chase on the hot path of every tick to save a
+/// few hundred bytes that exist once per game.
+#[allow(clippy::large_enum_variant)]
 pub enum Side {
     Host(Host),
     Guest(Guest),
@@ -111,6 +117,9 @@ impl Session {
                         self.end(why);
                     }
                 }
+                // Worth showing, and nothing to do about: the list server said
+                // something while a game was running.
+                Event::Note { text } => self.notes.push(text),
                 // Nothing in the lobby's half matters once a game is running,
                 // and a host that sends one says so in the log.
                 Event::Joined { .. }
@@ -277,7 +286,7 @@ mod tests {
     fn started(delay: u32, check: u32) -> (Session, Session) {
         let mut host = Host::open("two machines", "carl", 0, true).unwrap();
         let port = host.port();
-        let mut guest = Guest::join(("127.0.0.1", port), "anna").unwrap();
+        let mut guest = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
         let mut seat = None;
         let mut terms = None;
         for turn in 0..600 {
