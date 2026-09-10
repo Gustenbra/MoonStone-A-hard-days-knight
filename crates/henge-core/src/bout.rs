@@ -1037,41 +1037,28 @@ impl Bout {
         if self.fighters[target].health <= 0 {
             return false;
         }
+        // 04486 and 0448f are both `mov word [0x783a], <script>`, and
+        // `[0x783a]` is the *current* actor's next script. In
+        // `KnightGotStruck` that actor is the knight, which is what the note
+        // above already said: the impale is played by the beast and **the
+        // toss by the knight**, on his own task.
+        //
+        // It used to be built as a task of its own, launched beside him and
+        // owned by him, because the knight's definition had no way to reach
+        // the beast's bank table and `Beast_BackToss` opens `TASKCELBUF 2`.
+        // That is no longer true -- the four tables belong to the encounter
+        // now, not to the actor -- so the toss goes where the image puts it,
+        // and the spare task goes away. It was drawing a second tossed knight
+        // beside the real one, stuck at whatever depth it was launched at.
         let script = if same_way {
             "Beast_BackToss"
         } else {
             "Beast_ChestToss"
         };
-        if !a_def.animation.contains_key(script) || !a_def.animation.contains_key("Knight_SwStance")
-        {
+        if !t_def.animation.contains_key(script) {
             return false;
         }
-        let (x, y, facing) = {
-            let f = &self.fighters[target];
-            match f.task.as_ref() {
-                Some(t) => (t.x, t.y, t.facing),
-                None => (f.x, f.y + t_def.origin[1] as i32, 1),
-            }
-        };
-        let mut task = Task::new(script, x, y, facing);
-        task.table = a_def.bank_table;
-        let depth = self.fighters[target].y;
-        let m = Missile {
-            owner: target,
-            actor: self.fighters[attacker].actor.clone(),
-            task,
-            record: TaskActor::with_health(self.fighters[target].health),
-            depth,
-            attack: None,
-            flight: String::new(),
-            script_tick: 0,
-            spent: false,
-            follow: false,
-            until: "Knight_SwStance".into(),
-        };
-        self.fighters[target].hidden = true;
-        let scripts = a_def.animation.clone();
-        self.launch(m, &scripts);
+        self.hit_row(target, script, t_def);
         true
     }
 
@@ -3143,7 +3130,13 @@ mod tests {
         ] {
             beast.animation.insert(name.into(), Default::default());
         }
-        let knight = def();
+        // The toss is played by the knight's own task, so the scripts have to
+        // be reachable from *his* definition -- which is what
+        // `KNIGHT_SPAWNED` puts there in the pack.
+        let mut knight = def();
+        for name in ["Beast_BackToss", "Beast_ChestToss"] {
+            knight.animation.insert(name.into(), Default::default());
+        }
         let field = arena_field();
         let bout = || {
             Bout::new(
@@ -3154,21 +3147,24 @@ mod tests {
                 ],
             )
         };
-        // 0447e: facing each other is the chest, and he is thrown as a task of
-        // the beast's own so that the beast's bank tables can draw him.
+        // 0447e and 04486: facing each other is the chest, and `[0x783a]` in
+        // `KnightGotStruck` is the **knight's** next script, so it goes on
+        // his own task and not on a second one beside him. It used to be a
+        // task of its own, because his definition could not reach the beast's
+        // bank table; the tables belong to the encounter now.
         let mut b = bout();
         b.fighters[1].health = 5;
+        b.fighters[1].enter(State::Hurt);
         assert!(b.beast_tosses(0, 1, &beast, &knight));
-        assert_eq!(b.missiles.len(), 1);
-        assert_eq!(b.missiles[0].task.pc.script, "Beast_ChestToss");
-        assert_eq!(b.missiles[0].until, "Knight_SwStance");
-        assert!(b.fighters[1].hidden, "he is drawn inside the toss");
+        assert!(b.missiles.is_empty(), "no task of its own");
+        assert_eq!(b.fighters[1].script, "Beast_ChestToss");
         // 0448f: facing the same way is the back.
         let mut b = bout();
         b.fighters[1].health = 5;
         b.fighters[1].facing = 1;
+        b.fighters[1].enter(State::Hurt);
         assert!(b.beast_tosses(0, 1, &beast, &knight));
-        assert_eq!(b.missiles[0].task.pc.script, "Beast_BackToss");
+        assert_eq!(b.fighters[1].script, "Beast_BackToss");
         // 04434 and 0443a: nothing left and the gore on is the impale, which
         // the beast plays itself.
         let mut b = bout();
