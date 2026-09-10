@@ -2636,23 +2636,6 @@ impl Bout {
                     continue;
                 }
                 let own_kind = self.fighters[attacker].actor == self.fighters[target].actor;
-                // `StruckTable` (DS:0x7843) is indexed by the striker, and one
-                // of its entries, `TroggSpearStruck1` (0x431b), has no "he is
-                // already down" branch at all: a spear trogg's lunge is never
-                // a finisher. See [`crate::monster::finishes_a_corpse`].
-                if !crate::monster::finishes_a_corpse(a_def.controller()) {
-                    // 0432e  sub word [di+0x38], 3: three off a body with none
-                    // to give, which `Fighter::struck` declines, and then
-                    // `KnightSAnim` (0x44b9) at kind 2, which is the row the
-                    // corpse is already on. The blow still landed, so the
-                    // striker's own `+0xc` branch runs and it bounces off.
-                    connected = true;
-                    if blow.missile.is_none() {
-                        self.fighters[attacker].recover(a_def);
-                        self.hit_something(attacker, a_def);
-                    }
-                    break;
-                }
                 if self.fighters[target].finish(t_def, blow.attack, own_kind) {
                     connected = true;
                     let decapitating = blow.attack == Some(Attack::Swing) && !bloodless;
@@ -5393,79 +5376,6 @@ mod depth {
             );
             assert!(b.missiles.is_empty(), "and it killed itself");
         }
-    }
-
-    /// `KnightGotStruck` (0x4267) jumps through `StruckTable` at DS:0x7843 by
-    /// the **striker's** `+0x35`, and `TroggSpearStruck1` (0x431b) is the one
-    /// entry in that table with no `cmp word [di+0x38], 0` in it at all. So a
-    /// spear trogg's blow on a kneeling body is not a finisher: `TSH`
-    /// (0x432e) takes its flat three off a body with none to give and goes to
-    /// `KnightSAnim` (0x44b9), which hands the corpse the `+0x14` row it is
-    /// already on. Every other striker's entry — `KnightStruck1` (0x4498),
-    /// `KnightKnightStruck1` (0x4407), `TroggStruck1` (0x42c3) — has one.
-    ///
-    /// The spear trogg's only finisher is the toss, `TroggHit+0x3c` (0x2f89).
-    #[test]
-    fn a_spear_troggs_blow_on_a_kneeling_body_is_not_a_finisher() {
-        use crate::monster::finishes_a_corpse;
-        // 04498, 04407, 042c3: every other entry tests the hit points first.
-        for c in [
-            Controller::Knight,
-            Controller::Trogg,
-            Controller::Mudman,
-            Controller::Troll,
-            Controller::Demon,
-            Controller::Beast,
-        ] {
-            assert!(finishes_a_corpse(c), "{c:?} has an already-down branch");
-        }
-        // 0431b: `TroggSpearStruck1` opens on `call CheckBlock`.
-        assert!(!finishes_a_corpse(Controller::TroggSpear));
-
-        let knight = depth_def();
-        let mut spear = depth_def();
-        spear.controller = "trogg_spear".into();
-        let kneel = |striker: ActorDef| -> Bout {
-            let victim = knight.clone();
-            let pick = move |name: &str| -> &ActorDef {
-                match name {
-                    "s" => Box::leak(Box::new(striker.clone())),
-                    _ => Box::leak(Box::new(victim.clone())),
-                }
-            };
-            let mut b = Bout::new(
-                arena_field(),
-                vec![
-                    Fighter::new("s", &depth_def(), 100, 100, 1),
-                    Fighter::new("k", &depth_def(), 130, 100, -1),
-                ],
-            );
-            b.fighters[1].health = 1;
-            for _ in 0..40 {
-                b.step_with(&pick, &[swing(), Intent::default()]);
-            }
-            b
-        };
-
-        // An ordinary striker: the swing on the kneeling body takes the head.
-        let plain = kneel(depth_def());
-        assert_eq!(plain.fighters[1].state, State::Dead);
-        assert_eq!(plain.fighters[1].script, "decap", "04498: a swing, kind 4");
-
-        // The spear trogg, in the same fight, with the same blow.
-        let trogg = kneel(spear);
-        assert_eq!(trogg.fighters[1].state, State::Dead);
-        assert_ne!(
-            trogg.fighters[1].script, "decap",
-            "0431b: no already-down branch, so no head comes off"
-        );
-        assert_ne!(
-            trogg.fighters[1].script, "collapse",
-            "0431b: and no collapse either"
-        );
-        // The blow still landed, so the striker's own `+0xc` branch ran:
-        // `TroggHit` (0x2f55) writes ten into `+0x4a` and the stance.
-        assert_eq!(trogg.fighters[0].brain.cooldown, 0xa, "02f55");
     }
 
     /// A body with no `BODY` parts left cannot be struck, and a corpse is

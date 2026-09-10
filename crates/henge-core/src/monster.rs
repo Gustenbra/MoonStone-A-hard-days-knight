@@ -1415,88 +1415,11 @@ fn trogg_move(t: Track) -> Act {
 /// ```text
 /// 02f19  mov si, [di+0xe]          ; who struck it
 /// 02f1c  mov byte [di+0x4a], 0     ; the cooldown is forgotten
-/// 02f20  cmp byte [si+0x35], 6     ; a knight with a joystick
-/// 02f24  je  02f37                 ; -> CalcDamage
-/// 02f26  cmp byte [si+0x35], 0x1a  ; a thrown dagger
-/// 02f2a  jne 02f31
-/// 02f2c  mov ax, 3                 ; a flat three, no table
-/// 02f2f  jmp 02f3a
-/// 02f31  cmp byte [si+0x35], 0x10  ; a spear trogg
-/// 02f35  jne 02f4a                 ; anything else: no damage, no script
-/// 02f37  call CalcDamage
-/// 02f3a  sub word [di+0x38], ax
-/// 02f3d  mov ax, [si+0x28]         ; the striker's kind
-/// 02f40  mov si, [di+0x14]         ; this trogg's own *Hit row
-/// 02f43  add si, ax
-/// 02f45  mov ax, [si]
-/// 02f47  mov [0x783a], ax
 /// ```
-///
-/// `+0x35` 6 is `ControlKnight`, a knight a person is playing; 8 is
-/// `ControlBlackKnight`. So in the original a rival's or a computer knight's
-/// blow, and every other creature's, does **nothing at all** to a trogg: no
-/// hit points and no recoil, only the `+0x4a` zeroing above. That gate is
-/// read here and **not** reproduced, for the reason `ratman_struck`'s own
-/// 0x3468 gate is not: by the time this branch is reached the bout has
-/// already taken the damage off and chosen the row, and undoing it here
-/// would be a worse lie than leaving a gate out of a fight the player is
-/// always in. `TroggHitSp` itself is built — `SetMonsterAnims` (0x186b)
-/// fills all nine of its slots, and they are `ActorDef::hurt_by`.
 ///
 /// No `FaceKnight` here: a struck trogg keeps the facing it had.
 pub fn trogg_struck(brain: &mut Brain) {
     brain.cooldown = 0;
-}
-
-/// Can this striker's blow finish a knight who is already down?
-///
-/// `KnightGotStruck` (0x4267) jumps through `StruckTable` at DS:0x7843 by the
-/// **striker's** `+0x35`, and each entry decides for itself what a blow on a
-/// body with no hit points left is. Every entry but one opens with that test:
-///
-/// ```text
-/// KnightStruck1 / MudmenStruck1 (0x4498), kinds 2 and 0x1a:
-/// 04498  cmp word [di+0x38], 0
-/// 0449c  jg  044b3                 ; still standing: the ordinary blow
-/// 0449e  mov word [0x783a], 0x1328 ; Knight_SwCollapse
-/// 044a4  cmp word [si+0x28], 4     ; a swing
-/// 044a8  jne 044b0
-/// 044aa  mov word [0x783a], 0x1386 ; Knight_SwDeCap
-///
-/// KnightKnightStruck1 (0x4407), kinds 6 and 8:
-/// 04407  cmp word [di+0x38], 0
-/// 0440b  jg  04410
-/// 0440d  jmp TroggChopHead         ; any blow from a knight takes the head
-///
-/// TroggStruck1 (0x42c3), kinds 0xc and 0xe:
-/// 042c3  cmp word [di+0x38], 0
-/// 042c7  jle TroggFinishKnight
-/// TroggFinishKnight (0x42fc):
-/// 042fc  cmp byte [si+0x35], 0xc   ; the axe, and the axe only
-/// 04300  je  TroggChopHead         ; Knight_SwDeCap, whatever the blow was
-/// 04302  mov word [0x783a], 0x1328 ; Knight_SwCollapse
-///
-/// TroggSpearStruck1 (0x431b), kind 0x10:
-/// 0431b  call CheckBlock           ; no such test anywhere in it
-/// ```
-///
-/// So the spear trogg is the one striker in the game whose blow on a fallen
-/// knight is not a finisher. `TSH` (0x432e) takes its flat three off a body
-/// that has none to give and goes to `KnightSAnim` (0x44b9), which plays the
-/// knight's ordinary `+0x14` row at kind 2 — the row he is already on. The
-/// spear's finisher is the toss and nothing else: `TroggHit+0x3c` (0x2f89)
-/// with the gore on, which is [`crate::bout::Bout::trogg_spear_toss`].
-///
-/// TODO: `TroggFinishKnight`'s own 0x42fc test separates the axe trogg from
-/// the hammer trogg by the record's `+0x35` (0xc against 0xe), so in the
-/// original the axe always takes the head and the hammer always collapses
-/// him, whichever of their two blows landed. Both share `Controller::Trogg`
-/// and the pack carries no `+0x35`, so which of the pair is striking cannot
-/// be told apart here; they keep the `MudmenStruck1` rule (a swing takes the
-/// head) that [`crate::combat::Fighter::finish`] applies to everyone.
-pub fn finishes_a_corpse(striker: Controller) -> bool {
-    // 0431b: `TroggSpearStruck1` has no `cmp word [di+0x38], 0` at all.
-    striker != Controller::TroggSpear
 }
 
 /// `TroggHit`, 0x2f4d, the `+0xc` branch of `ControlTrogg`: the recovery
@@ -1506,34 +1429,10 @@ pub fn finishes_a_corpse(striker: Controller) -> bool {
 /// 02f4e  mov ax, [di+0x12]
 /// 02f51  mov [0x783a], ax          ; the recovery
 /// 02f55  mov byte [di+0x4a], 0xa
-/// 02f59  mov si, [di+0xc]          ; what it hit
-/// 02f5c  cmp byte [si+0x35], 6
-/// 02f60  jne 02f62
-/// 02f62  jmp TroggStart            ; not a player's knight: decide again now
-/// ...
-/// TroggDone (0x2f92):
-/// 02f92  cmp byte [di+0x35], 0x10  ; the spear, and only the spear
-/// 02f96  jne 02f9e
-/// 02f98  mov ax, [di+0x10]         ; stands rather than playing the recovery
-/// 02f9b  mov [0x783a], ax
 /// ```
 ///
-/// Neither of those two changes what a trogg does, and both were checked
-/// rather than assumed: every `Set*Tables` routine writes the **same** script
-/// into `+0x10` and `+0x12` — `TroggAxe_Stance` twice at 0x2118/0x211d,
-/// `TroggHammer_Stance` twice at 0x21a4/0x21a9, `TroggSpear_Stance` twice at
-/// 0x2237/0x223c — so the recovery a trogg is handed here, the stance
-/// `TroggDone` hands the spear, and the stance `ControlTrogg+6` (0x2de5) puts
-/// up before any branch runs are one and the same script. Re-deciding on the
-/// spot (0x2f62) can therefore only replace a one-frame stance with the order
-/// the controller was going to give on the next frame anyway, which is what
-/// [`crate::combat::Fighter::recover`] on the one-frame `recover` row leaves.
-/// `TroggDone`'s non-spear fall-through is the branch that matters to anyone:
-/// it leaves `[0x783a]` at the 0xffff written at 0x2f71, which is "carry on",
-/// and it is reached only with the knight already dead.
-///
-/// The rest of the tail (0x2f65 on) is the spear's toss of a corpse, which is
-/// [`crate::bout::Bout::trogg_spear_toss`]. No `FaceKnight` here either.
+/// What follows (0x2f59 on) only matters for the spear's toss of a corpse.
+/// No `FaceKnight` here either.
 pub fn trogg_hit(brain: &mut Brain) {
     brain.cooldown = 0xa;
 }

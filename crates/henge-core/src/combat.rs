@@ -1251,19 +1251,12 @@ impl Fighter {
     }
 
     /// A blow on a body that is already down: the corpse is given the
-    /// finish. `MudmenStruck1`/`KnightStruck1` (0x4498), which is the entry
-    /// `StruckTable` holds for a mudman and for a thrown dagger, decapitates
-    /// for a swing and collapses him for anything else;
-    /// `KnightKnightStruck1` (0x4407) decapitates for any blow, so a
-    /// knight's is any blow from the same kind of fighter. Whether the head
-    /// actually comes off is the script's own `TASKSKIP`, which the gore
-    /// switch decides.
-    ///
-    /// Which strikers reach here at all is the caller's business, because
-    /// `KnightGotStruck` (0x4267) dispatches on the striker and not every
-    /// entry has a finisher: see [`crate::monster::finishes_a_corpse`] for
-    /// the one that does not, and for the axe-against-hammer split inside
-    /// `TroggFinishKnight` (0x42fc) that this rule stands in for.
+    /// finish. `MudmenStruck1`, the path every creature's and a thrown
+    /// dagger's blow on a fallen knight takes, decapitates for a swing and
+    /// collapses him for anything else; `KnightKnightStruck1` decapitates
+    /// for any blow, so a knight's is any blow from the same kind of
+    /// fighter. Whether the head actually comes off is the script's own
+    /// `TASKSKIP`, which the gore switch decides.
     pub fn finish(&mut self, def: &ActorDef, by: Option<Attack>, by_own_kind: bool) -> bool {
         if !self.finishable(def) {
             return false;
