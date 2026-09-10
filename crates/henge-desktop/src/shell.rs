@@ -138,7 +138,7 @@ const ARROW_X: i32 = 50;
 /// blits `SEL.CEL` cel 0 at `ARX` with that as `cx`, so these four words are
 /// the arrow's y on the four rows. They were in the span of DGROUP the unpacker
 /// used to leave stale and are readable now.
-const ARROW_Y: [i32; 4] = [85, 110, 148, 168];
+const ARROW_Y: [i32; 5] = [85, 110, 148, 168, 184];
 
 /// The option list itself: `MOON:OPT1a`, six ten-byte text records chained
 /// through their last word, which `DisplaySelect` hands to the message walker
@@ -165,12 +165,29 @@ const ARROW_Y: [i32; 4] = [85, 110, 148, 168];
 /// or `TEXTON` before it walks the chain, which is the whole of how the two
 /// values on the right get there. Bit 1, which the left-hand four set, is not
 /// read anywhere in the walker.
-const ROW_LABEL: [&str; 4] = ["Players", "Gore", "Practice", "Select Knight"];
+const ROW_LABEL: [&str; 5] = [
+    "Players",
+    "Gore",
+    "Practice",
+    "Select Knight",
+    // Ours, the fifth row: see `henge_core::shell::Row::Online`.
+    "Play Online",
+];
 /// The labels are in `optmode` order, which is the order `Row::ALL` is in.
 const _: () = assert!(ROW_LABEL.len() == Row::ALL.len());
-const ROW_Y: [i32; 4] = [83, 108, 150, 170];
-/// Flag bit 0. The bottom two rows are centred and their `x` is ignored.
-const ROW_CENTRED: [bool; 4] = [false, false, true, true];
+/// **Four recovered and one ours.** `ARR` and the records give 83, 108, 150 and
+/// 170, and the arrow's own four are two above the top pair and two below the
+/// bottom pair. The fifth row follows the bottom pair's spacing, twenty pixels
+/// under `Select Knight`, and its arrow two above it like the rest of the lower
+/// half, as far down as a line of the bold face fits: its glyphs are twelve
+/// tall and the screen is two hundred, so 186 is the last row that is not cut
+/// off at the bottom.
+const ROW_Y: [i32; 5] = [83, 108, 150, 170, 186];
+/// Flag bit 0. The bottom rows are centred and their `x` is ignored.
+const ROW_CENTRED: [bool; 5] = [false, false, true, true, true];
+/// Which of the rows above came out of the image, for the test that says so.
+const ROWS_RECOVERED: usize = Row::RECOVERED;
+const _: () = assert!(ROWS_RECOVERED == 4);
 /// `OPT1a`/`OPT1b` `x`, and `OPT1h`/`GOREOPT` `x`: label column and value
 /// column.
 const LABEL_X: i32 = 86;
@@ -965,3 +982,113 @@ pub fn draw_interlude(
     }
     sprite::draw(reg, fb, MOON_BANK, phase.cel(), MOON_AT.0, MOON_AT.1, false);
 }
+
+// ------------------------------------------------------------------- the lobby
+
+/// The lobby, drawn over the title's own plate.
+///
+/// **Ours**, like the screen it draws: see [`crate::online`]. It borrows the
+/// title's plate, the title's wordmark and the arrow out of `SEL.CEL`, so it
+/// looks like part of the game rather than like a dialog box bolted onto it, and
+/// it adds no artwork of its own.
+pub fn draw_online(
+    reg: &mut Registry,
+    fb: &mut Framebuffer,
+    fonts: &Fonts,
+    screen: &crate::online::Online,
+) {
+    use crate::online::{Page, Row};
+    show(reg, fb, TITLE_PLATE);
+    sprite::draw(reg, fb, TITLE_BANK, LOGO, LOGO_AT.0, LOGO_AT.1, false);
+    let Some(bold) = fonts.bold else { return };
+
+    // The roster first, above the rows, so the list a person is waiting on is
+    // the thing nearest the wordmark.
+    let mut y = LOBBY_TOP;
+    if screen.page == Page::Waiting {
+        bold.draw_own_centred(reg, fb, &screen.roster.name, y);
+        y += LOBBY_STEP;
+        for p in &screen.roster.players {
+            let mine = Some(p.seat) == screen.seat;
+            let knight = match p.knight {
+                Some(k) => KNIGHT_LETTER.get(k as usize).copied().unwrap_or("?"),
+                None => "-",
+            };
+            let mark = if p.ready { "*" } else { " " };
+            let you = if mine { ">" } else { " " };
+            bold.draw_own(
+                reg,
+                fb,
+                &format!("{you}{} {knight} {mark}", p.name),
+                LOBBY_X,
+                y,
+            );
+            y += LOBBY_STEP;
+        }
+    }
+
+    // The rows of the page that is up, and the arrow against the one chosen.
+    let rows = screen.rows();
+    let first = LOBBY_ROWS_TOP;
+    let chosen = screen.row.min(rows.len().saturating_sub(1));
+    sprite::draw(
+        reg,
+        fb,
+        SEL,
+        ARROW,
+        ARROW_X,
+        first + chosen as i32 * LOBBY_STEP - 2,
+        false,
+    );
+    for (i, row) in rows.iter().enumerate() {
+        let at = first + i as i32 * LOBBY_STEP;
+        let value = match row {
+            Row::LobbyName | Row::PlayerName | Row::Address => screen.shown(*row),
+            Row::Knight => match screen.knight {
+                Some(k) => KNIGHT_LETTER
+                    .get(k as usize)
+                    .copied()
+                    .unwrap_or("?")
+                    .to_string(),
+                None => "Any".to_string(),
+            },
+            Row::Ready => (if screen.ready { GORE_ON } else { GORE_OFF }).to_string(),
+            _ => String::new(),
+        };
+        if value.is_empty() {
+            bold.draw_own(reg, fb, row.label(), LOBBY_LABEL_X, at);
+        } else {
+            bold.draw_own(reg, fb, row.label(), LOBBY_LABEL_X, at);
+            bold.draw_own(reg, fb, &value, LOBBY_VALUE_X, at);
+        }
+    }
+
+    // One line at the bottom: what the router said, who joined, what went
+    // wrong. The small font, because it is a sentence and not a label.
+    let note = if screen.note.is_empty() {
+        &screen.reachable
+    } else {
+        &screen.note
+    };
+    if !note.is_empty() {
+        match fonts.small {
+            Some(small) => small.draw_own_centred(reg, fb, note, LOBBY_NOTE_Y),
+            None => bold.draw_own_centred(reg, fb, note, LOBBY_NOTE_Y),
+        }
+    }
+}
+
+/// The lobby's own layout. Ours, and the only numbers in this file that are not
+/// out of the image: they follow the title's column and step so the two screens
+/// sit in the same grid.
+const LOBBY_TOP: i32 = 62;
+const LOBBY_ROWS_TOP: i32 = 126;
+const LOBBY_STEP: i32 = 14;
+const LOBBY_X: i32 = 86;
+const LOBBY_LABEL_X: i32 = 86;
+const LOBBY_VALUE_X: i32 = 200;
+const LOBBY_NOTE_Y: i32 = 188;
+
+/// Which knight a roster entry holds, in one character, because the roster has
+/// the width of a name and not of two. The four are `KnightTAB`'s own order.
+const KNIGHT_LETTER: [&str; 4] = ["G", "R", "J", "A"];

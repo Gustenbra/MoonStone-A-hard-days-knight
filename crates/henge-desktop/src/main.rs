@@ -6,6 +6,7 @@
 mod framebuffer;
 mod input;
 mod map;
+mod online;
 mod place;
 #[cfg(feature = "research")]
 mod research;
@@ -203,8 +204,12 @@ fn start_arg(a: &[String]) -> Option<Mode> {
         "select" => Some(Mode::Select),
         "map" => Some(Mode::Map),
         "arena" | "combat" => Some(Mode::Combat),
+        // Ours: the lobby, so it can be looked at without a friend.
+        "online" | "lobby" => Some(Mode::Online),
         other => {
-            eprintln!("no screen called {other}: try intro, ending, title, select, map or arena");
+            eprintln!(
+                "no screen called {other}: try intro, ending, title, select, map, arena or online"
+            );
             None
         }
     }
@@ -338,6 +343,41 @@ fn prepare(app: &mut App, a: &[String]) {
         if mode == Mode::Select {
             app.begin_select();
         }
+        if mode == Mode::Online {
+            app.begin_online();
+        }
+    }
+    // **Ours**: the lobby, skipped. `--host <name>` opens one and sits down in
+    // it, `--join <address>` dials one, and `--begin` starts a game as soon as
+    // the lobby will allow it. They exist so that a game can be got into from a
+    // shortcut or a script rather than through the menu, and so that the whole
+    // lockstep path can be driven by `--trace` with nobody at a keyboard.
+    if let Some(name) = after_arg(a, "--host") {
+        app.mode = Mode::Online;
+        app.begin_online();
+        let you = after_arg(a, "--name").unwrap_or_else(|| "HOST".into());
+        app.online_ask(online::Ask::Open { game: name, you });
+        // Sat down and ready: a host driven from the command line has nobody to
+        // press the row for them.
+        app.online_ask(online::Ask::Seat {
+            knight: None,
+            ready: true,
+        });
+        if let Some(o) = app.online.as_mut() {
+            o.ready = true;
+        }
+    }
+    if let Some(address) = after_arg(a, "--join") {
+        app.mode = Mode::Online;
+        app.begin_online();
+        let you = after_arg(a, "--name").unwrap_or_else(|| "GUEST".into());
+        app.online_ask(online::Ask::Dial { address, you });
+    }
+    if a.iter().any(|x| x == "--begin") {
+        let want = after_arg(a, "--players")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1);
+        app.auto_begin = Some(want.clamp(1, henge_core::shell::SEATS));
     }
     if let Some(hp) = hurt_arg(a) {
         app.run.health = hp;
@@ -477,6 +517,16 @@ fn main() -> anyhow::Result<()> {
                 app.pressed[6] = t % 23 == 0;
             }
             app.update();
+            // **Ours**: a trace runs flat out, which is right for a fight and
+            // wrong for anything that is waiting on a socket. A lobby with
+            // nobody in it yet, and a lockstep tick whose peers have not sent
+            // their word, both have nothing to do until the wire says
+            // otherwise, and spinning through the whole tick budget in a
+            // millisecond would mean a scripted host had exited before a
+            // scripted guest could knock. Only online runs ever reach this.
+            if app.mode == Mode::Online || app.net.is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             // A message box is modal, so the mode underneath it is not what is
             // on screen. Say which kind and what it says, or a trace would
             // report a town menu nobody can see.
@@ -495,6 +545,29 @@ fn main() -> anyhow::Result<()> {
                     ),
                     Mode::Title => format!("{t:>5}  TITLE"),
                     Mode::Select => format!("{t:>5}  SELECT"),
+                    // The lobby, as much of it as there is to say: who is in
+                    // it, whether they are ready, and the last thing that
+                    // happened, which is where a game that will not start says
+                    // why.
+                    Mode::Online => {
+                        let o = app.online.as_ref();
+                        let who: Vec<String> = o
+                            .map(|o| {
+                                o.roster
+                                    .players
+                                    .iter()
+                                    .map(|p| {
+                                        format!("{}{}", p.name, if p.ready { "*" } else { "" })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "{t:>5}  LOBBY   [{}]  {}",
+                            who.join(" "),
+                            o.map(|o| o.note.as_str()).unwrap_or("")
+                        )
+                    }
                     Mode::Map if app.map.is_none() => break,
                     Mode::Combat if app.world.is_none() => break,
                     Mode::Place if app.visiting.is_none() => break,
@@ -1013,6 +1086,8 @@ fn tick_len_for(mode: Mode) -> std::time::Duration {
         Mode::Combat => TIMER_TICK,
         Mode::Map => RETRACE_TICK * MAP_PASS_RETRACES,
         Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Place => RETRACE_TICK,
+        // The lobby is a menu, so it is on the rate every menu in the image is on.
+        Mode::Online => RETRACE_TICK,
     }
 }
 
@@ -1029,7 +1104,13 @@ const COMBAT_PASS_TICKS: u32 = 6;
 fn ticks_per_pass(mode: Mode) -> u32 {
     match mode {
         Mode::Combat => COMBAT_PASS_TICKS,
-        Mode::Intro | Mode::Ending | Mode::Title | Mode::Select | Mode::Map | Mode::Place => 1,
+        Mode::Intro
+        | Mode::Ending
+        | Mode::Title
+        | Mode::Select
+        | Mode::Map
+        | Mode::Place
+        | Mode::Online => 1,
     }
 }
 
@@ -1143,6 +1224,44 @@ struct App {
     /// `Fix_JoyStick`, when it is running.
     calibrating: Option<(usize, input::Calibrating)>,
     run: Run,
+    /// **Ours**: the lobby screen, while it is up. See [`online`].
+    online: Option<online::Online>,
+    /// **Ours**: the socket a lobby is held open on, before a game starts.
+    lobby: Option<Waiting>,
+    /// **Ours**: the game running across machines, once one is.
+    net: Option<henge_net::Session>,
+    /// **Ours**: the router being asked to open the port, while it is being
+    /// asked. It answers on a thread of its own because SSDP waits two seconds
+    /// and the lobby has to be drawable before then.
+    opener: Option<henge_net::Opener>,
+    /// **Ours**: the mapping the router gave, so it can be taken down again.
+    mapping: Option<henge_net::Mapping>,
+    /// **Ours**: last tick's word for every seat, which is what turns a held
+    /// word into a press. The original does the same with `BOUNCEBUTTON`.
+    seat_was: [henge_net::SeatInput; henge_core::shell::SEATS],
+    /// **Ours**: what this keyboard is actually doing, before the wire has had
+    /// its say.
+    ///
+    /// [`App::keys`] is what the simulation reads, and in a lockstep game it is
+    /// overwritten every tick with what came off the wire, including seat zero's
+    /// when somebody else is in seat zero. So it cannot also be the thing that
+    /// *goes* onto the wire: this is, and it is written by the key handler and by
+    /// the pads and by nothing else.
+    raw: [bool; 256],
+    raw_pressed: [bool; 256],
+    raw_typed: Option<char>,
+    /// **Ours**: `--begin` with `--players n`: start as soon as that many are in
+    /// the lobby and all of them are ready. For a scripted host, which has
+    /// nobody to press the row.
+    auto_begin: Option<usize>,
+    /// **Ours**: whether a script is at the keyboard rather than a person.
+    ///
+    /// `--trace`, `--screenshot` and `--input` drive [`App::keys`] directly,
+    /// because that is what the simulation reads and they were written long
+    /// before there was a wire. So in those runs, and only those, `keys` is
+    /// copied into [`App::raw`] at the top of the tick: the script's word is then
+    /// what goes onto the wire, and an online game can be driven headlessly.
+    driven: bool,
     /// Ticks since the run ended. Only a debounce: `WaitFIRE` at 0x8251 waits
     /// for a press and then for a release, so the press that ended the run
     /// cannot also clear the message it put up.
@@ -1304,6 +1423,35 @@ enum Mode {
     Map,
     Combat,
     Place,
+    /// Ours: the lobby, which is the only screen in the game that is not the
+    /// original's. See [`online`] and `henge_net`.
+    Online,
+}
+
+/// **Ours**: the socket a lobby is held open on before a game begins. Once it
+/// does, it becomes a `henge_net::Session` and this is empty again.
+enum Waiting {
+    Host(henge_net::Host),
+    Guest(henge_net::Guest),
+}
+
+/// The value after a flag, for the handful of arguments that take one.
+fn after_arg(a: &[String], flag: &str) -> Option<String> {
+    let at = a.iter().position(|x| x == flag)?;
+    a.get(at + 1).filter(|v| !v.starts_with("--")).cloned()
+}
+
+/// `--port <n>`: which port to host on. The default is `henge_net`'s own.
+fn online_port_arg(args: &[String]) -> Option<u16> {
+    let at = args.iter().position(|a| a == "--port")?;
+    args.get(at + 1)?.parse().ok()
+}
+
+/// `--delay <ticks>`: the input delay to start a game with, for testing one end
+/// of a bad line. Without it the host picks from a round trip it assumes.
+fn online_delay_arg(args: &[String]) -> Option<u32> {
+    let at = args.iter().position(|a| a == "--delay")?;
+    args.get(at + 1)?.parse().ok()
 }
 
 /// A token's `(x, y, colour or frame)`, as [`map::Marks`] draws one: `SHOW`
@@ -1399,9 +1547,71 @@ fn slot_of(seat: usize, a: input::Action) -> usize {
         (1, Left) => 9,
         (1, Right) => 10,
         (1, Fire) => 11,
+        // Seats two and three have no keys of their own: the original's third
+        // and fourth players are on the game port, and there is one keyboard.
+        // They are here because a lockstep game writes every seat's word into
+        // these slots, so all four need somewhere to land. They are clear of the
+        // ten above, of the nine number keys at [`NUMBER_SLOT`] and of
+        // [`CALIBRATE_SLOT`], so nothing a person can press reaches them.
+        (2, Up) => 30,
+        (2, Down) => 31,
+        (2, Left) => 32,
+        (2, Right) => 33,
+        (2, Fire) => 34,
+        (3, Up) => 35,
+        (3, Down) => 36,
+        (3, Left) => 37,
+        (3, Right) => 38,
+        (3, Fire) => 39,
         _ => 255,
     }
 }
+
+/// **Ours**: one seat's word turned into the slots the simulation reads, with
+/// every press worked out as a rising edge against the tick before.
+///
+/// Pure, and tested, because this is the one place a lockstep game can go wrong
+/// without the check noticing: two machines that derived presses differently
+/// would diverge, and the whole reason the wire carries held words rather than
+/// presses is that this function is the same function on every machine.
+///
+/// `mine` says whether this is the seat at this keyboard, which is the only seat
+/// whose Enter, backspace and number keys are read: those are `ScanKEYS` and
+/// `DisplayStack`, and the original reads them from the one keyboard too.
+fn seat_slots(
+    seat: usize,
+    now: henge_net::SeatInput,
+    was: henge_net::SeatInput,
+    mine: bool,
+) -> Vec<(usize, bool, bool)> {
+    let mut out = Vec::with_capacity(16);
+    for a in input::Action::ALL {
+        let slot = slot_of(seat, a);
+        if slot >= 256 {
+            continue;
+        }
+        let on = now.pad & a.bit() != 0;
+        out.push((slot, on, on && (was.pad & a.bit() == 0)));
+    }
+    if mine {
+        out.push((ENTER_SLOT, now.take(), now.take() && !was.take()));
+        out.push((BACKSPACE_SLOT, now.back(), now.back() && !was.back()));
+        for n in 1..=9u8 {
+            let on = now.number == Some(n);
+            out.push((
+                NUMBER_SLOT + n as usize - 1,
+                on,
+                on && was.number != Some(n),
+            ));
+        }
+    }
+    out
+}
+
+/// Enter. `ScanKEYS` tests scancode 0x1c as the end of a name, and every menu in
+/// this build takes it as well as fire; it is not a control, so it is not in the
+/// bindings table and has a slot of its own here.
+const ENTER_SLOT: usize = 12;
 
 /// The keys that are not controls, so are not in the bindings table.
 ///
@@ -1687,6 +1897,22 @@ impl App {
             bounce: [input::Debounce::default(); 2],
             calibrating: None,
             run: Run::new(100),
+            online: None,
+            lobby: None,
+            net: None,
+            opener: None,
+            mapping: None,
+            seat_was: [henge_net::SeatInput::default(); henge_core::shell::SEATS],
+            raw: [false; 256],
+            raw_pressed: [false; 256],
+            raw_typed: None,
+            auto_begin: None,
+            driven: args_of().iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "--trace" | "--screenshot" | "--input" | "--goto" | "--walk" | "--fight"
+                )
+            }),
             run_over_for: 0,
             typed: None,
             named: Vec::new(),
@@ -1739,7 +1965,7 @@ impl App {
     /// asks, so there is never a screen where one of them silently does
     /// nothing.
     fn takes(&self) -> bool {
-        self.pressed[6] || self.pressed[12]
+        self.pressed[6] || self.pressed[ENTER_SLOT]
     }
 
     fn key(&mut self, code: KeyCode, down: bool) {
@@ -1757,19 +1983,30 @@ impl App {
                 if down && !self.keys[s] {
                     self.pressed[s] = true;
                 }
+                if down && !self.raw[s] {
+                    self.raw_pressed[s] = true;
+                }
                 self.kb[s] = down;
                 self.keys[s] = self.kb[s] || self.pad_held[s];
+                self.raw[s] = self.keys[s];
             }
         }
         let i = key_index(code);
         if i < 256 && down && !self.keys[i] {
             self.pressed[i] = true;
         }
+        if i < 256 {
+            if down && !self.raw[i] {
+                self.raw_pressed[i] = true;
+            }
+            self.raw[i] = down;
+        }
         // `ASCIIKEY`, for `TypeName`. A key that the table has no character for
         // types nothing, and the screens that do not read letters never look.
         if down {
             if let Some(c) = typed_char(code) {
                 self.typed = Some(c);
+                self.raw_typed = Some(c);
             }
         }
         // A key the binding table claims is a control, and a control is never
@@ -1843,6 +2080,12 @@ impl App {
                                 Mode::Title
                             }
                             Mode::Title => Mode::Map,
+                            // And out of the lobby, which has a socket to close
+                            // on the way.
+                            Mode::Online => {
+                                self.leave_online("left the lobby");
+                                Mode::Title
+                            }
                         };
                     }
                     // The character sheet, over whatever is on screen.
@@ -1878,8 +2121,12 @@ impl App {
                 if on && !self.keys[s] {
                     self.pressed[s] = true;
                 }
+                if on && !self.raw[s] {
+                    self.raw_pressed[s] = true;
+                }
                 self.pad_held[s] = on;
                 self.keys[s] = self.kb[s] || on;
+                self.raw[s] = self.keys[s];
             }
             // `BOUNCEBUTTON`, kept ticking whether or not anything is asking,
             // so a press held from before a calibration started is not counted.
@@ -1981,14 +2228,36 @@ impl App {
         if self.shake > 0 {
             self.palette_tick();
             self.pressed = [false; 256];
+            self.raw_pressed = [false; 256];
             self.typed = None;
+            self.raw_typed = None;
+            return;
+        }
+        // A scripted run pokes `keys` rather than pressing anything, so that is
+        // where its word for the wire has to come from. See [`App::driven`].
+        if self.driven {
+            self.raw = self.keys;
+            self.raw_pressed = self.pressed;
+            self.raw_typed = self.typed;
+        }
+        // **Ours**: a game running across machines does not tick until every
+        // seat's word for this tick has arrived. See `henge_net::lockstep`.
+        // Nothing below this line knows the difference.
+        if self.net.is_some() && !self.net_step() {
+            self.palette_tick();
+            self.pressed = [false; 256];
+            self.raw_pressed = [false; 256];
+            self.typed = None;
+            self.raw_typed = None;
             return;
         }
         self.simulate();
         self.palette_tick();
         self.music_tick();
         self.pressed = [false; 256];
+        self.raw_pressed = [false; 256];
         self.typed = None;
+        self.raw_typed = None;
     }
 
     /// The name of the screen that is up. Compared frame to frame, so that
@@ -2027,6 +2296,9 @@ impl App {
                 Some(w) => format!("arena.{}", w.family()),
                 None => "arena".into(),
             },
+            // The lobby is drawn over the title's own plate, so it keeps the
+            // title's palette and does not fade when it opens.
+            Mode::Online => "title".into(),
         }
     }
 
@@ -2375,6 +2647,7 @@ impl App {
             Mode::Intro => self.intro_tick(),
             Mode::Ending => self.ending_tick(),
             Mode::Title => self.title_tick(),
+            Mode::Online => self.online_tick(),
             Mode::Select => self.select_tick(),
             Mode::Map => {
                 // A run that is over, won or lost. Both of the original's
@@ -3099,6 +3372,7 @@ impl App {
             match self.title.state.choose() {
                 Some(Start::Quest) => self.begin_select(),
                 Some(Start::Practice) => self.begin_practice(),
+                Some(Start::Online) => self.begin_online(),
                 None => {}
             }
         }
@@ -3155,6 +3429,497 @@ impl App {
         if select.state.done() {
             self.begin_quest();
         }
+    }
+
+    // ------------------------------------------------------------- online play
+    //
+    // **Ours, every line of it.** The original has no network code; see
+    // `henge_net`'s own note. What is here is the lobby screen's wiring and the
+    // one gate in [`App::update`] that stops a tick until every seat's word for
+    // it has arrived. The simulation below that gate is never told a peer
+    // exists, and no recovered number changes because of anything here.
+
+    /// The fifth row of the title, which is ours: open the lobby.
+    fn begin_online(&mut self) {
+        self.online = Some(online::Online::new());
+        self.mode = Mode::Online;
+    }
+
+    /// One tick of the lobby: the keys, then whatever the wire said.
+    fn online_tick(&mut self) {
+        let Some(mut screen) = self.online.take() else {
+            self.mode = Mode::Title;
+            return;
+        };
+        // The same five bits every other screen reads, off this keyboard rather
+        // than off the wire: nothing in the lobby is in lockstep yet.
+        let (up, down) = (self.raw_pressed[0], self.raw_pressed[1]);
+        let (left, right) = (self.raw_pressed[2], self.raw_pressed[3]);
+        let take = self.raw_pressed[6] || self.raw_pressed[ENTER_SLOT];
+        let back = self.raw_pressed[BACKSPACE_SLOT];
+        let typed = self.raw_typed.take();
+
+        let mut ask = None;
+        if up {
+            screen.move_by(-1);
+        }
+        if down {
+            screen.move_by(1);
+        }
+        if left {
+            ask = ask.or(screen.adjust(-1));
+        }
+        if right {
+            ask = ask.or(screen.adjust(1));
+        }
+        if back {
+            screen.backspace();
+        }
+        if let Some(c) = typed {
+            // The caret's own key ends the typing, so a character is only a
+            // character. `TypeName` reads Enter the same way.
+            screen.type_char(c);
+        }
+        if take {
+            ask = ask.or(screen.take());
+        }
+        self.online = Some(screen);
+        if let Some(ask) = ask {
+            self.online_ask(ask);
+        }
+        self.online_poll();
+        self.online_port();
+        self.online_auto();
+    }
+
+    /// `--begin`, and a scripted guest sitting itself down. Both exist so the
+    /// whole path can be driven with nobody at either keyboard; neither does
+    /// anything in a game a person is playing.
+    fn online_auto(&mut self) {
+        let Some(want) = self.auto_begin else {
+            // A guest started from `--join` says it is ready as soon as it has a
+            // seat, because a script has no row to press.
+            if self.driven {
+                let sat = self
+                    .online
+                    .as_ref()
+                    .is_some_and(|o| o.seat.is_some() && !o.ready);
+                if sat && matches!(self.lobby, Some(Waiting::Guest(_))) {
+                    if let Some(o) = self.online.as_mut() {
+                        o.ready = true;
+                    }
+                    self.online_ask(online::Ask::Seat {
+                        knight: None,
+                        ready: true,
+                    });
+                }
+            }
+            return;
+        };
+        let ready = match self.lobby.as_ref() {
+            Some(Waiting::Host(h)) => h.lobby.players() >= want && h.lobby.can_start(),
+            _ => false,
+        };
+        if ready {
+            self.auto_begin = None;
+            self.online_ask(online::Ask::Begin);
+        }
+    }
+
+    /// Act on what the lobby screen asked for.
+    fn online_ask(&mut self, ask: online::Ask) {
+        match ask {
+            online::Ask::Open { game, you } => {
+                let port = online_port_arg(&args_of()).unwrap_or(henge_net::DEFAULT_PORT);
+                match henge_net::Host::open(&game, &you, port, self.title.state.gore) {
+                    Ok(host) => {
+                        let port = host.port();
+                        self.lobby = Some(Waiting::Host(host));
+                        // The router, on its own thread: the lobby is drawable
+                        // now and the address fills in when it answers.
+                        self.opener = Some(henge_net::Opener::start(port));
+                        if let Some(o) = self.online.as_mut() {
+                            o.sat_down(0, true);
+                            o.note = format!("asking the router to open port {port}");
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(o) = self.online.as_mut() {
+                            o.note = format!("could not open a game: {e}");
+                        }
+                    }
+                }
+            }
+            online::Ask::Dial { address, you } => {
+                // A bare address means the usual port, because nobody wants to
+                // type a number they were never told.
+                let with_port = if address.contains(':') {
+                    address.clone()
+                } else {
+                    format!("{address}:{}", henge_net::DEFAULT_PORT)
+                };
+                match henge_net::Guest::join(with_port.as_str(), &you) {
+                    Ok(guest) => {
+                        self.lobby = Some(Waiting::Guest(guest));
+                        if let Some(o) = self.online.as_mut() {
+                            o.note = format!("joining {with_port}");
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(o) = self.online.as_mut() {
+                            o.note = format!("could not join {with_port}: {e}");
+                        }
+                    }
+                }
+            }
+            online::Ask::Seat { knight, ready } => match self.lobby.as_mut() {
+                Some(Waiting::Host(h)) => h.seat(knight, ready),
+                Some(Waiting::Guest(g)) => g.seat_request(knight, ready),
+                None => {}
+            },
+            online::Ask::Begin => {
+                let delay =
+                    online_delay_arg(&args_of()).unwrap_or(henge_net::lockstep::delay_for_rtt(
+                        std::time::Duration::from_millis(80),
+                        tick_len_for(Mode::Map),
+                    ));
+                let terms = match self.lobby.as_mut() {
+                    Some(Waiting::Host(h)) => h.start(delay, henge_net::lockstep::CHECK_EVERY),
+                    _ => None,
+                };
+                match terms {
+                    Some(ev) => self.online_start(ev, delay),
+                    None => {
+                        if let Some(o) = self.online.as_mut() {
+                            o.note = "everybody has to be ready first".into();
+                        }
+                    }
+                }
+            }
+            online::Ask::Leave => {
+                self.leave_online("left the lobby");
+                self.mode = Mode::Title;
+            }
+        }
+    }
+
+    /// Whatever the lobby's socket has to say.
+    fn online_poll(&mut self) {
+        let Some(side) = self.lobby.as_mut() else {
+            return;
+        };
+        let events = match side {
+            Waiting::Host(h) => h.poll(),
+            Waiting::Guest(g) => g.poll(),
+        };
+        // The roster as it stands now, which is the only copy a guest has.
+        let roster = match self.lobby.as_ref() {
+            Some(Waiting::Host(h)) => Some(h.lobby.clone()),
+            Some(Waiting::Guest(g)) => Some(g.lobby.clone()),
+            None => None,
+        };
+        if let (Some(o), Some(r)) = (self.online.as_mut(), roster) {
+            o.roster = r;
+        }
+        let mut start = None;
+        let mut delay = 0;
+        for e in events {
+            match e {
+                henge_net::Event::Seated { seat } => {
+                    if let Some(o) = self.online.as_mut() {
+                        o.sat_down(seat, false);
+                        o.note = format!("in seat {}", seat + 1);
+                    }
+                }
+                henge_net::Event::Refused { why } => {
+                    self.leave_online("");
+                    if let Some(o) = self.online.as_mut() {
+                        o.back_to_menu(&why);
+                    }
+                }
+                henge_net::Event::Joined { name, seat } => {
+                    if let Some(o) = self.online.as_mut() {
+                        o.note = format!("{name} took seat {}", seat + 1);
+                    }
+                }
+                henge_net::Event::Left { name, .. } => {
+                    if let Some(o) = self.online.as_mut() {
+                        o.note = format!("{name} left");
+                    }
+                }
+                henge_net::Event::Lost { why, .. } => {
+                    // A guest losing the host is out of the lobby; a host losing
+                    // one guest is not.
+                    if matches!(self.lobby, Some(Waiting::Guest(_))) {
+                        self.leave_online("");
+                        if let Some(o) = self.online.as_mut() {
+                            o.back_to_menu(&why);
+                        }
+                    } else if let Some(o) = self.online.as_mut() {
+                        o.note = why;
+                    }
+                }
+                ev @ henge_net::Event::Start { .. } => {
+                    if let henge_net::Event::Start { delay: d, .. } = &ev {
+                        delay = *d as u32;
+                    }
+                    start = Some(ev);
+                }
+                // The roster has already been taken above, and a lobby has no
+                // ticks to run.
+                henge_net::Event::Roster
+                | henge_net::Event::Input { .. }
+                | henge_net::Event::Turn { .. }
+                | henge_net::Event::Check { .. }
+                | henge_net::Event::Desync { .. } => {}
+            }
+        }
+        if let Some(ev) = start {
+            self.online_start(ev, delay);
+        }
+    }
+
+    /// The router's answer, once it has one.
+    fn online_port(&mut self) {
+        let Some(opener) = self.opener.as_mut() else {
+            return;
+        };
+        let Some(map) = opener.ready().cloned() else {
+            return;
+        };
+        self.opener = None;
+        if let Some(o) = self.online.as_mut() {
+            o.reachable = map.address();
+            o.note = if map.how.opened() {
+                format!("friends can join at {}", map.address())
+            } else if map.local.is_some() {
+                // Honest: the port may be open anyway, and saying it is when it
+                // is not is how somebody spends an evening wondering why.
+                format!(
+                    "the router would not open the port, so {} works on this network only ({})",
+                    map.address(),
+                    map.note
+                )
+            } else {
+                format!("no network to host on: {}", map.note)
+            };
+        }
+        self.mapping = Some(map);
+    }
+
+    /// The game begins: the lobby's socket becomes a session, and every seat
+    /// takes the knight it chose.
+    fn online_start(&mut self, ev: henge_net::Event, delay: u32) {
+        let henge_net::Event::Start {
+            seats,
+            gore,
+            knights,
+            names,
+            check,
+            ..
+        } = ev
+        else {
+            return;
+        };
+        let seats = (seats as usize).clamp(1, henge_core::shell::SEATS);
+        let delay = delay.max(henge_net::lockstep::MIN_DELAY);
+        let mine = self.online.as_ref().and_then(|o| o.seat).unwrap_or(0) as usize;
+        let session = match self.lobby.take() {
+            Some(Waiting::Host(h)) => Some(henge_net::Session::host(h, seats, delay, check)),
+            Some(Waiting::Guest(g)) => {
+                Some(henge_net::Session::guest(g, seats, mine, delay, check))
+            }
+            None => None,
+        };
+        let Some(session) = session else {
+            return;
+        };
+        self.net = Some(session);
+        self.seat_was = [henge_net::SeatInput::default(); henge_core::shell::SEATS];
+        self.online = None;
+        // Nobody types a name at a select screen in an online game: they chose
+        // their knight in the lobby, so the quest starts from what the lobby
+        // settled. The title's own player count is overruled by the lobby's,
+        // which is what `Adjplayers` would have been told.
+        self.title.state.players = seats;
+        self.title.state.gore = gore;
+        // **One world, and the same one on every machine.**
+        //
+        // The run this build keeps is one knight's: `Run` is `KnightTAB`'s
+        // record zero plus everything that belongs to the game rather than to a
+        // knight, and the other three records are `Run::rivals`, which the
+        // computer drives. So the quest a lockstep game plays is *the same
+        // quest* on all four machines: the run belongs to seat zero's knight,
+        // the arena seats every person in the lobby in the knight they chose,
+        // and the map's turn is `WHICH`'s, which is seat zero's while the
+        // records are split this way.
+        //
+        // This is the one place where being online is not simply the original
+        // with the input coming from further away, and it is deliberate rather
+        // than an oversight: four people each taking their own turn on the map
+        // needs the four records to be one kind of record, which is what
+        // `NextWHICH`'s `cmp ax, [NUM_PLAYERS]` (0xa4a9) is counting and what
+        // this build has not unified yet. See `docs/ROADMAP.md`.
+        //
+        // Deriving it from the lobby's own list rather than from `mine` is what
+        // makes every machine build the same run: a machine that started from
+        // its own seat's knight would be playing a different game from the
+        // first tick, and the fingerprint check says so within a tick of the
+        // start rather than an hour later.
+        let mine_knight = knights.first().copied().unwrap_or(0) as usize;
+        let mut roster: Vec<usize> = knights.iter().map(|k| *k as usize).collect();
+        for i in 0..henge_core::shell::SEATS {
+            if !roster.contains(&i) {
+                roster.push(i);
+            }
+        }
+        self.practice = false;
+        self.take_knight(mine_knight, roster);
+        // The name on the run is the one seat zero typed, for the same reason:
+        // it is that seat's knight the run belongs to, and a name that differed
+        // between machines would be a state that differed between machines.
+        if let Some(name) = names.first() {
+            if !name.is_empty() {
+                self.run.knight.name = name.clone();
+            }
+        }
+        self.named.clear();
+        self.select = None;
+        self.mode = if self.map.is_some() {
+            Mode::Map
+        } else {
+            Mode::Combat
+        };
+    }
+
+    /// One tick of a game running across machines. Returns whether the
+    /// simulation may run this tick.
+    fn net_step(&mut self) -> bool {
+        let local = self.local_input();
+        let Some(mut net) = self.net.take() else {
+            return true;
+        };
+        net.poll();
+        // The fingerprint is only wanted on the ticks a check falls on, and it
+        // walks the whole run, so it is not taken on the others.
+        let hashed = if net.step.check_due() {
+            self.net_hash()
+        } else {
+            0
+        };
+        let got = net.advance(local, &mut || hashed);
+        let notes = net.notes();
+        let over = net.over().map(str::to_string);
+        self.net = Some(net);
+        for note in notes {
+            println!("online: {note}");
+        }
+        if let Some(why) = over {
+            // The game stops being a shared one. It is not stopped dead: this
+            // machine keeps its own run, which is the least surprising thing to
+            // do to somebody halfway through a quest.
+            self.net = None;
+            self.mapping.take().inspect(|m| m.close());
+            self.notice(format!("the online game ended: {why}"));
+            return true;
+        }
+        match got {
+            Some((_, turn)) => {
+                self.apply_turn(&turn);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// This machine's own word for the tick it belongs to.
+    ///
+    /// Read off [`App::raw`] rather than [`App::keys`], because `keys` is what
+    /// the wire has already written and reading it back would send this machine
+    /// whatever the last tick said somebody else was holding.
+    fn local_input(&self) -> henge_net::SeatInput {
+        let mut pad = 0u8;
+        for a in input::Action::ALL {
+            let slot = slot_of(0, a);
+            if slot < 256 && self.raw[slot] {
+                pad |= a.bit();
+            }
+        }
+        let mut keys = 0u8;
+        // Enter, which every menu in this build takes as well as fire. Fire
+        // itself is already a bit of the pad.
+        if self.raw[ENTER_SLOT] {
+            keys |= henge_net::key::TAKE;
+        }
+        if self.raw[BACKSPACE_SLOT] {
+            keys |= henge_net::key::BACK;
+        }
+        let number = (1..=9u8).find(|n| self.raw[NUMBER_SLOT + *n as usize - 1]);
+        henge_net::SeatInput {
+            pad,
+            keys,
+            typed: self.raw_typed,
+            number,
+        }
+    }
+
+    /// Write a tick's words into the slots the simulation reads.
+    ///
+    /// A press is the rising edge against the tick before, computed here rather
+    /// than sent, so two machines cannot disagree about whether one happened.
+    /// That is `BOUNCEBUTTON`'s own rule.
+    fn apply_turn(&mut self, turn: &henge_net::Turn) {
+        let mine = self.net.as_ref().map(|n| n.seat()).unwrap_or(0);
+        for (seat, now) in turn.iter().enumerate() {
+            for (slot, held, pressed) in seat_slots(seat, *now, self.seat_was[seat], seat == mine) {
+                self.keys[slot] = held;
+                self.pressed[slot] = pressed;
+            }
+            if seat == mine {
+                self.typed = now.typed;
+            }
+        }
+        self.seat_was = *turn;
+    }
+
+    /// The fingerprint the machines compare: the whole run, where the traveller
+    /// is, and the bout if there is one.
+    ///
+    /// All three are the simulation's own, and all three are already proved to
+    /// round-trip: `Run::state_hash`, `Overworld::state_hash` and
+    /// `Bout::state_hash`.
+    fn net_hash(&self) -> u64 {
+        let mut h: u64 = self.run.state_hash();
+        for v in [
+            self.map.as_ref().map(|m| m.state.state_hash()).unwrap_or(0),
+            self.world
+                .as_ref()
+                .map(|w| w.bout.state_hash())
+                .unwrap_or(0),
+            self.mode as u64,
+        ] {
+            h ^= v;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h
+    }
+
+    /// Out of a lobby or a game: the socket, the router's mapping, and the
+    /// screen.
+    fn leave_online(&mut self, why: &str) {
+        match self.lobby.take() {
+            Some(Waiting::Host(mut h)) => h.close(why),
+            Some(Waiting::Guest(mut g)) => g.close(why),
+            None => {}
+        }
+        if let Some(mut net) = self.net.take() {
+            net.close(why);
+        }
+        self.opener = None;
+        if let Some(m) = self.mapping.take() {
+            m.close();
+        }
+        self.online = None;
     }
 
     fn begin_select(&mut self) {
@@ -4891,6 +5656,17 @@ impl App {
             self.title = title;
             return;
         }
+        if self.mode == Mode::Online {
+            if let Some(screen) = self.online.take() {
+                let fonts = shell::Fonts {
+                    bold: self.fonts.get("bold"),
+                    small: self.fonts.get("small"),
+                };
+                shell::draw_online(&mut self.reg, &mut self.fb, &fonts, &screen);
+                self.online = Some(screen);
+                return;
+            }
+        }
         if self.mode == Mode::Select {
             if let Some(select) = self.select.take() {
                 let fonts = shell::Fonts {
@@ -5681,5 +6457,142 @@ mod tests {
             RETRACE_TICK * MAP_PASS_RETRACES,
             "the map is a whole number of retraces and nothing else"
         );
+    }
+
+    // --------------------------------------------------------- online play
+
+    fn word(pad: u8) -> henge_net::SeatInput {
+        henge_net::SeatInput {
+            pad,
+            ..henge_net::SeatInput::default()
+        }
+    }
+
+    /// A held word stays held and a press lasts exactly the tick the word
+    /// arrived on. Two machines compute this from the same stream, which is why
+    /// the wire carries no press at all.
+    #[test]
+    fn a_press_is_the_rising_edge_of_a_held_word() {
+        let right = input::RIGHT;
+        let first = seat_slots(0, word(right), henge_net::SeatInput::default(), false);
+        let slot = slot_of(0, input::Action::Right);
+        assert_eq!(
+            first.iter().find(|(s, _, _)| *s == slot),
+            Some(&(slot, true, true)),
+            "held and pressed on the tick it arrived"
+        );
+        // Held on, and no longer a press.
+        let again = seat_slots(0, word(right), word(right), false);
+        assert_eq!(
+            again.iter().find(|(s, _, _)| *s == slot),
+            Some(&(slot, true, false))
+        );
+        // Let go: neither.
+        let gone = seat_slots(0, word(0), word(right), false);
+        assert_eq!(
+            gone.iter().find(|(s, _, _)| *s == slot),
+            Some(&(slot, false, false))
+        );
+        // And pressing again after letting go is a press again.
+        let retaken = seat_slots(0, word(right), word(0), false);
+        assert_eq!(
+            retaken.iter().find(|(s, _, _)| *s == slot),
+            Some(&(slot, true, true))
+        );
+    }
+
+    /// All four seats land somewhere, and no two of them land on the same slot or
+    /// on a slot anything else owns.
+    #[test]
+    fn every_seat_has_its_own_slots_and_they_collide_with_nothing() {
+        let mut seen: std::collections::BTreeMap<usize, (usize, input::Action)> =
+            std::collections::BTreeMap::new();
+        for seat in 0..henge_core::shell::SEATS {
+            for a in input::Action::ALL {
+                let slot = slot_of(seat, a);
+                assert!(slot < 256, "seat {seat} {a:?} has nowhere to land");
+                assert!(
+                    seen.insert(slot, (seat, a)).is_none(),
+                    "slot {slot} is claimed twice"
+                );
+            }
+        }
+        for taken in [ENTER_SLOT, BACKSPACE_SLOT, CALIBRATE_SLOT] {
+            assert!(!seen.contains_key(&taken), "slot {taken} is a seat's");
+        }
+        for n in 0..9 {
+            assert!(!seen.contains_key(&(NUMBER_SLOT + n)));
+        }
+    }
+
+    /// Enter, backspace and the number keys are read for one seat only: the one
+    /// at this keyboard. A peer holding Enter must not work this machine's menus.
+    #[test]
+    fn the_keyboard_half_is_only_read_for_the_seat_at_this_keyboard() {
+        let typing = henge_net::SeatInput {
+            keys: henge_net::key::TAKE | henge_net::key::BACK,
+            number: Some(4),
+            typed: Some('Q'),
+            ..henge_net::SeatInput::default()
+        };
+        let theirs = seat_slots(1, typing, henge_net::SeatInput::default(), false);
+        for slot in [ENTER_SLOT, BACKSPACE_SLOT, NUMBER_SLOT + 3] {
+            assert!(
+                !theirs.iter().any(|(s, _, _)| *s == slot),
+                "slot {slot} came off somebody else's keyboard"
+            );
+        }
+        let mine = seat_slots(1, typing, henge_net::SeatInput::default(), true);
+        assert_eq!(
+            mine.iter().find(|(s, _, _)| *s == ENTER_SLOT),
+            Some(&(ENTER_SLOT, true, true))
+        );
+        assert_eq!(
+            mine.iter().find(|(s, _, _)| *s == NUMBER_SLOT + 3),
+            Some(&(NUMBER_SLOT + 3, true, true))
+        );
+    }
+
+    /// A number held down types one number, and a different one types again.
+    #[test]
+    fn a_held_number_key_is_read_once() {
+        let three = henge_net::SeatInput {
+            number: Some(3),
+            ..henge_net::SeatInput::default()
+        };
+        let slot = NUMBER_SLOT + 2;
+        let first = seat_slots(0, three, henge_net::SeatInput::default(), true);
+        assert_eq!(
+            first.iter().find(|(s, _, _)| *s == slot),
+            Some(&(slot, true, true))
+        );
+        let held = seat_slots(0, three, three, true);
+        assert_eq!(
+            held.iter().find(|(s, _, _)| *s == slot),
+            Some(&(slot, true, false))
+        );
+    }
+
+    /// The port and delay arguments, which are the two knobs a bad line needs.
+    #[test]
+    fn the_online_arguments_are_read() {
+        let args: Vec<String> = ["henge", "--port", "25000", "--delay", "9"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(online_port_arg(&args), Some(25_000));
+        assert_eq!(online_delay_arg(&args), Some(9));
+        let none: Vec<String> = vec!["henge".into()];
+        assert_eq!(online_port_arg(&none), None);
+        assert_eq!(online_delay_arg(&none), None);
+    }
+
+    /// The fifth row of the title opens the lobby and starts nothing else.
+    #[test]
+    fn the_title_has_a_fifth_row_and_it_is_the_lobby() {
+        let mut t = henge_core::shell::Title::default();
+        t.move_by(9);
+        assert_eq!(t.selected(), henge_core::shell::Row::Online);
+        assert_eq!(t.choose(), Some(Start::Online));
     }
 }

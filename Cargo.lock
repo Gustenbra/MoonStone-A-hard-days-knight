@@ -737,6 +737,7 @@ dependencies = [
  "henge-audio",
  "henge-core",
  "henge-formats",
+ "henge-net",
  "png",
  "serde",
  "serde_json",
@@ -756,6 +757,15 @@ dependencies = [
  "serde",
  "serde_json",
  "walkdir",
+]
+
+[[package]]
+name = "henge-net"
+version = "0.1.0"
+dependencies = [
+ "henge-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

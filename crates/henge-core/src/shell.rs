@@ -10,6 +10,11 @@
 //! and four that left and right adjust, the second a gore switch, and the last
 //! two the two ways to start. Up and down clamp rather than wrap.
 //!
+//! **One row of the title is ours**, appended after the recovered four:
+//! [`Row::Online`], which opens the lobby. The original's list is four records
+//! long and `OptionKeys` clamps `optmode` to three, so a fifth row is an
+//! addition and is marked as one; nothing about the four above it changed.
+//!
 //! `ChooseKnight`, `ChooseRefresh`, `FindChosen` and `ChooseFIRE` give the
 //! select: a bitmask of the knights still free (`choose_knight`), a highlight
 //! (`Chosen`), and one pass per player (`choose_loop`). Left and right step over
@@ -42,10 +47,30 @@ pub enum Row {
     Practice,
     /// `StartMoonQuest`: the game.
     Quest,
+    /// **Ours, and the only row here that is.** The original's list is four
+    /// records long: `DoOptions` walks `OPT1a`'s chain, `ARR` at `DS:0x706` is
+    /// four words, and `OptionKeys` clamps `optmode` to three. There was nothing
+    /// to put on a fifth row in 1991, because the four joysticks were all in the
+    /// same room.
+    ///
+    /// Nothing about the recovered four changes: this is appended after them, it
+    /// starts nothing they start, and the player count above it still means
+    /// people at *this* keyboard. See `henge_net`.
+    Online,
 }
 
 impl Row {
-    pub const ALL: [Row; 4] = [Row::Players, Row::Gore, Row::Practice, Row::Quest];
+    pub const ALL: [Row; 5] = [
+        Row::Players,
+        Row::Gore,
+        Row::Practice,
+        Row::Quest,
+        Row::Online,
+    ];
+
+    /// The four the original has, for anything that wants to say which rows are
+    /// recovered and which is not.
+    pub const RECOVERED: usize = 4;
 }
 
 /// What taking an option asked for. Adjusting a setting asks for nothing.
@@ -53,6 +78,8 @@ impl Row {
 pub enum Start {
     Practice,
     Quest,
+    /// Ours: the lobby, and then a quest driven from more than one machine.
+    Online,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -105,6 +132,7 @@ impl Title {
         match self.selected() {
             Row::Practice => Some(Start::Practice),
             Row::Quest => Some(Start::Quest),
+            Row::Online => Some(Start::Online),
             Row::Gore => {
                 self.gore = !self.gore;
                 None
@@ -310,7 +338,7 @@ mod tests {
         t.move_by(-1);
         assert_eq!(t.selected(), Row::Players, "already at the top");
         t.move_by(9);
-        assert_eq!(t.selected(), Row::Quest, "and stops at the bottom");
+        assert_eq!(t.selected(), Row::Online, "and stops at the bottom");
     }
 
     #[test]
@@ -339,13 +367,37 @@ mod tests {
     }
 
     #[test]
-    fn only_the_last_two_rows_start_anything() {
+    fn only_the_last_three_rows_start_anything() {
         let mut t = Title::default();
         assert_eq!(t.choose(), None);
         t.move_by(2);
         assert_eq!(t.choose(), Some(Start::Practice));
         t.move_by(1);
         assert_eq!(t.choose(), Some(Start::Quest));
+        t.move_by(1);
+        assert_eq!(t.choose(), Some(Start::Online));
+    }
+
+    /// The four recovered rows are the first four and behave as they did: the
+    /// fifth is appended, and adding it moved nothing.
+    #[test]
+    fn the_recovered_rows_are_the_first_four_and_are_unchanged() {
+        assert_eq!(
+            &Row::ALL[..Row::RECOVERED],
+            &[Row::Players, Row::Gore, Row::Practice, Row::Quest]
+        );
+        assert_eq!(Row::ALL[Row::RECOVERED], Row::Online);
+        let mut t = Title::default();
+        // The row the original's `OptionKeys` clamps to is still reachable, and
+        // the one past it is ours.
+        t.move_by(Row::RECOVERED as i32 - 1);
+        assert_eq!(t.selected(), Row::Quest);
+        // Left and right do nothing on it, like the two rows above it.
+        t.move_by(1);
+        let (players, gore) = (t.players, t.gore);
+        t.adjust(1);
+        t.adjust(-1);
+        assert_eq!((t.players, t.gore), (players, gore));
     }
 
     #[test]

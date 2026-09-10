@@ -1,0 +1,14 @@
+[package]
+name = "henge-net"
+description = "Online play: a lobby, a framed TCP link, deterministic lockstep, and opening the host's port without the router's web page."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+henge-core = { path = "../henge-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -28,6 +28,7 @@ gilrs = ["dep:gilrs"]
 henge-core = { path = "../henge-core" }
 henge-assets = { path = "../henge-assets" }
 henge-audio = { path = "../henge-audio", default-features = false }
+henge-net = { path = "../henge-net" }
 henge-formats = { path = "../henge-formats", optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

@@ -278,10 +278,50 @@ costs nothing today and cannot be retrofitted cheaply.
 1. ~~`Vec<Fighter>` with pluggable input sources.~~ Done.
 2. ~~Serialization across simulation state, with a snapshot test.~~ Done.
 3. ~~A determinism test comparing state hashes across independent runs.~~ Done, and in CI.
-4. Local network play for one arena, deterministic lockstep, 2 to 4 players.
-5. Rollback on top of lockstep, once latency becomes the thing that hurts.
-6. The persistent overworld server, which is a separate program that shares `henge-core`
+4. ~~Network play, deterministic lockstep, 2 to 4 players.~~ Done: `henge-net`, and the
+   lobby on the title's fifth row. See **Where online play has got to** below.
+5. **The four knight records unified**, so each person takes their own turn on the map.
+   This is the one thing between what is built and the original's own four-player quest.
+6. Rollback on top of lockstep, once latency becomes the thing that hurts.
+7. The persistent overworld server, which is a separate program that shares `henge-core`
    and never needs to touch the arena code.
+
+## Where online play has got to
+
+**Built and proved.** `henge-net` is the whole of it: a framed TCP link, a lobby with a
+name and a roster, deterministic lockstep with an input delay, a rolling fingerprint
+check, and NAT-PMP and UPnP so the host's port opens without anybody visiting a router's
+web page. The title has a fifth row, `Play Online`, which is the only row in that list
+that is not out of the image. Two machines have been driven through a whole quest headless
+(`--host` / `--join` / `--begin`, and `--trace`) and agreed on every fingerprint for
+thousands of ticks, through the map, a town and a fight.
+
+What crosses the wire is one byte per seat per tick: the five bits `GetInputDevice` builds.
+A press is not sent at all, it is the rising edge of that byte, computed identically on
+every machine. Nothing in `henge-core` knows a peer exists and no recovered number changed.
+
+**The one thing that is ours and not the original's**, and the reason step 5 above exists:
+
+> An online game plays **one** quest. `Run` is `KnightTAB`'s record zero plus everything
+> that belongs to the game rather than to a knight, and `Run::rivals` is the other three
+> records in a leaner shape that only the computer's turn reads. So the run belongs to
+> seat zero's knight on every machine, the arena seats every person in the lobby as the
+> knight they chose in it, and `WHICH`'s turn on the map is seat zero's.
+
+The original does not work that way. `NextWHICH` at 0xa434 walks `WHICH` 0 to 3 and takes
+whoever is alive; `0xa4a9`'s `cmp ax, [NUM_PLAYERS]` is what decides whether that turn is a
+person's or the computer's, so seats below `NUM_PLAYERS` are people and the rest are not,
+and all four are the same 0x62-byte record.
+
+**The work is therefore to make our four the same record too.** The cheapest shape that
+keeps every existing caller working: `Run` stays the record whose turn it is, and gains a
+bench of the other three; `NextWHICH` swaps the outgoing knight's per-knight fields out and
+the incoming one's in. Every `self.run.gold` in the shell then keeps meaning "the knight
+whose turn it is", which is what it already means, and `Rival` grows the fields a person's
+seat needs that the computer's did not: the pack, the magic slot, the ward and curse flags,
+the wizard's grudge, and the sword. Once that is done, a lockstep game needs no new
+netcode at all: the input is already all four seats' and the fingerprint already covers the
+whole run.
 
 Steps 1 to 3 are worth doing regardless of whether networking ever happens: they make the
 game testable, reproducible, and debuggable. Nothing here is speculative work.
