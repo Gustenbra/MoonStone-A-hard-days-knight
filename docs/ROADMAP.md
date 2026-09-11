@@ -311,17 +311,26 @@ every machine. Nothing in `henge-core` knows a peer exists and no recovered numb
 Two smaller consequences of the same split, both in `henge-desktop`:
 
 - **The lobby settles nothing about knights.** Pressing Begin opens `ChooseKnight`, the
-  same screen a game at one keyboard gets, inside the lockstep gate from its first tick;
-  the seats take their turns on it in `choose_player` order and `begin_quest` builds the
-  same run out of `choose_knight` on every machine. The lobby used to carry a knight row,
-  which meant two screens for one choice and a screen of ours where the image already has
-  one.
-- **Enter, backspace and the nine number keys have one slot between the four seats**,
-  because they are not controls and the original has no bindings table for them. They are
-  filled from seat zero's word on every machine, not from the seat at this keyboard: a slot
-  filled from "mine" holds a different word on each machine, and a machine would then leave
-  a message box on a different tick from its peers. `ChooseKnight` is the one screen where
-  every seat needs its own, and it reads them per seat instead.
+  same screen a game at one keyboard gets, inside the lockstep gate from its first tick,
+  and `begin_quest` builds the same run out of `choose_knight` on every machine. The lobby
+  used to carry a knight row, which meant two screens for one choice and a screen of ours
+  where the image already has one.
+- **On that screen every seat still takes its turn.** `ChooseKnight` is a hot
+  seat: `choose_loop` counts the players down, `choose_player` says whose turn it
+  is, and `ChooseLoop` reads one input device, so one seat moves the frame and
+  the others wait. That is what a game across machines gets too, and the only
+  difference is where that seat's keys come from: its own word off the wire
+  rather than the one keyboard. Every method on `Select` that acts takes the seat
+  acting and does nothing unless it is that seat's turn, so a person pressing
+  keys out of turn is ignored on every machine alike. One line is drawn that
+  `ChooseRefresh` does not draw, and only in a game across machines: whose turn
+  it is. At one keyboard the four can see each other; on four machines the three
+  who are waiting have no way of knowing they are waiting, and a frame that will
+  not move reads as a game that has hung.
+
+  Everybody choosing at once was built first and taken out again. It worked, but
+  it is not the game: the original queues, and the queue is legible once the
+  screen says who it is waiting for.
 
 The original does not work that way. `NextWHICH` at 0xa434 walks `WHICH` 0 to 3 and takes
 whoever is alive; `0xa4a9`'s `cmp ax, [NUM_PLAYERS]` is what decides whether that turn is a

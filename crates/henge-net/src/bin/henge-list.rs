@@ -351,6 +351,13 @@ impl Server {
                 let _ = link.send(&ListMsg::Games { games });
                 let _ = link.flush();
             }
+            // One frame out, one frame back, and the socket is done with. It is
+            // how a player measures its own leg to this machine, which is the
+            // leg that matters when this machine is carrying their game.
+            ListMsg::Sound => {
+                let _ = link.send(&ListMsg::Sounded);
+                let _ = link.flush();
+            }
             ListMsg::Reach { code } => self.reach(link, &code),
             ListMsg::Attach { ticket } => self.attach(link, &ticket),
             ListMsg::Withdraw { id } => {

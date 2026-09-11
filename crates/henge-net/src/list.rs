@@ -149,6 +149,17 @@ pub enum ListMsg {
     Browse { protocol: u32, version: String },
     /// Server to browser.
     Games { games: Vec<Listing> },
+    /// Anybody to server, on a fresh connection: answer at once so I can time
+    /// how far away you are. The server says nothing but [`ListMsg::Sounded`]
+    /// and the socket is done with.
+    ///
+    /// **This is how a player's own leg to the relay is measured.** When the
+    /// server is carrying a game, every byte between two players goes out to it
+    /// and back, so what each machine contributes to the lag is its own round
+    /// trip to the server, and that is a thing only that machine can measure.
+    Sound,
+    /// Server to anybody: the answer to a [`ListMsg::Sound`], and nothing else.
+    Sounded,
     /// Server to anybody, with a sentence a person can act on.
     Refused { why: String },
 }
@@ -164,6 +175,45 @@ pub struct Announced {
     /// Whether the server, from outside the house, could open a connection to
     /// that address. The only honest answer to "can my friends reach me".
     pub reachable: bool,
+}
+
+/// How far this machine is from the list server, in milliseconds.
+///
+/// **Ours**, and it blocks, so it belongs on a thread: see [`crate::Later`],
+/// which is what the game runs it on. One connection, one frame out, one frame
+/// back, and the clock starts after the connection is made so that what comes
+/// back is one round trip and not the three a new socket costs.
+///
+/// An older server that does not know the message will close the socket instead
+/// of answering, which comes back as an error and means "no number", not "no
+/// game".
+pub fn sound(server: &str) -> Result<u32, WireError> {
+    let mut link: Link<ListMsg> = Link::connect_within(with_port(server), PATIENCE * 4)?;
+    let at = std::time::Instant::now();
+    link.send(&ListMsg::Sound)?;
+    link.flush()?;
+    let stop = at + PATIENCE * 8;
+    loop {
+        let (msgs, err) = link.poll();
+        for m in msgs {
+            if matches!(m, ListMsg::Sounded) {
+                return Ok(at.elapsed().as_millis() as u32);
+            }
+            if let ListMsg::Refused { why } = m {
+                return Err(WireError::Io(std::io::Error::other(why)));
+            }
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+        if std::time::Instant::now() >= stop {
+            return Err(WireError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the list server did not answer",
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 /// The host's side of the list: announce, refresh, withdraw.

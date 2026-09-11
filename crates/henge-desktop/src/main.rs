@@ -1105,6 +1105,18 @@ const PACE_MAX: u32 = 125;
 /// One step of the dial.
 const PACE_STEP: u32 = 5;
 
+/// **Ours**: where a notice sits, and how many lines it may take. The y is the
+/// one a one line notice has always used; a taller one is centred on it.
+const NOTICE_Y: i32 = 95;
+const NOTICE_LINES: usize = 4;
+const NOTICE_STEP: i32 = 12;
+
+/// **Ours**: how often a machine measures its own leg to the list server. Often
+/// enough that a line going bad shows up while somebody is still in the lobby,
+/// seldom enough that it is one small socket now and then. See
+/// [`App::online_sound`].
+const SOUND_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
 fn tick_len_for(mode: Mode) -> std::time::Duration {
     match mode {
         Mode::Combat => TIMER_TICK,
@@ -1261,6 +1273,16 @@ struct App {
     opener: Option<henge_net::Opener>,
     /// **Ours**: the mapping the router gave, so it can be taken down again.
     mapping: Option<henge_net::Mapping>,
+    /// **Ours**: this machine's own leg to the list server, while it is being
+    /// measured, and when it was last asked.
+    ///
+    /// The list server is the relay, so when a game is being carried every byte
+    /// between two players goes out to it and back. Each machine's own leg is
+    /// what it puts into that, and it is a thing only that machine can measure,
+    /// so each one measures its own and tells the host. On a thread, because
+    /// measuring means a socket to another country. See `henge_net::list::sound`.
+    sounding: Option<henge_net::Later<Result<u32, henge_net::WireError>>>,
+    sounded: std::time::Instant,
     /// **Ours**: the list of open games, while it is being fetched. On a thread
     /// of its own for the same reason the router is: a list server that is down
     /// takes seconds to say so and a frozen screen reads as a hung game.
@@ -1277,6 +1299,26 @@ struct App {
     /// screen whose turn belongs to a seat that is not this one cannot read them
     /// there. `ChooseKnight` is that screen, and this is where it reads them.
     seat_pressed: [SeatPress; henge_core::shell::SEATS],
+    /// **Ours**: what each seat calls itself, taken off the lobby's roster when
+    /// the game begins, for the line on `ChooseKnight` that says whose turn it
+    /// is. Empty in a game at one keyboard, where the people can see each other.
+    seat_names: Vec<String>,
+    /// **Ours**: the controls that were already down when the game began, which
+    /// are not sent until they have been let go. The pad bits and the key bits
+    /// of [`henge_net::SeatInput`], in that order.
+    ///
+    /// A key that was already down is **not a press**. The host reaches
+    /// `ChooseKnight` by pressing fire on the lobby's Begin row and that key is
+    /// still down when the game starts, so the rising edge landed on the select
+    /// screen and took the knight under the frame before the person had moved
+    /// it. The host arrived already typing a name over the blue knight while the
+    /// guest, who had pressed nothing, could choose freely.
+    ///
+    /// It masks what this machine *sends*, so every machine still derives the
+    /// same presses from the same words and nothing about the lockstep changes.
+    /// That is `BOUNCEBUTTON`'s own rule, which reads an edge and never a held
+    /// key, applied across the one seam where a screen hands over to another.
+    held_over: (u8, u8),
     /// **Ours**: what this keyboard is actually doing, before the wire has had
     /// its say.
     ///
@@ -2017,7 +2059,11 @@ impl App {
             mapping: None,
             seat_was: [henge_net::SeatInput::default(); henge_core::shell::SEATS],
             seat_pressed: [SeatPress::default(); henge_core::shell::SEATS],
+            seat_names: Vec::new(),
+            held_over: (0, 0),
             browsing: None,
+            sounding: None,
+            sounded: std::time::Instant::now(),
             raw: [false; 256],
             raw_pressed: [false; 256],
             raw_typed: None,
@@ -3503,65 +3549,76 @@ impl App {
     /// or scancode 0x1c, Enter, as the end of it, scancode 0x0e as a backspace,
     /// and anything `ASCIIKEY` gives a character for as a character.
     fn select_tick(&mut self) {
-        // Whose keys drive the screen. `choose_player` says which seat is
-        // choosing, and at one keyboard the answer is always this one: the four
-        // take their turns on the same keys. Across machines it is that seat's
-        // own word off the wire, which is the whole of what being online changes
-        // here. Everything below is the same code either way, so the screen
-        // cannot behave differently in a networked game.
-        let seat = self.select.as_ref().map(|s| s.state.seat).unwrap_or(0);
-        let (left, right, take, back, typed) = if self.net.is_some() {
-            let p = self.seat_pressed.get(seat).copied().unwrap_or_default();
-            self.typed = None;
-            (p.left, p.right, p.take, p.back, p.typed)
-        } else {
-            (
-                self.pressed[2],
-                self.pressed[3],
-                self.takes(),
-                self.pressed[BACKSPACE_SLOT],
-                self.typed.take(),
-            )
-        };
         let defaults: Vec<String> = self.knights.iter().map(|k| k.name.clone()).collect();
-        let Some(select) = self.select.as_mut() else {
+        let Some(mut select) = self.select.take() else {
             self.mode = Mode::Title;
             return;
         };
+        // Whose keys drive the screen. `ChooseKnight` is a hot seat:
+        // `choose_player` says whose turn it is, one seat acts and the rest
+        // wait, and `Select` itself ignores anybody else.
+        //
+        // At one keyboard the keys are this machine's own, because there is only
+        // one set of them. Across machines they are that seat's own word off the
+        // wire, which is the whole of what being online changes here: the same
+        // word reaches every machine, so every machine walks the same turns.
+        let seat = select.state.seat;
+        let p = if self.net.is_some() {
+            self.typed = None;
+            self.seat_pressed.get(seat).copied().unwrap_or_default()
+        } else {
+            SeatPress {
+                left: self.pressed[2],
+                right: self.pressed[3],
+                take: self.takes(),
+                back: self.pressed[BACKSPACE_SLOT],
+                typed: self.typed.take(),
+            }
+        };
+        self.act_on_select(&mut select, seat, p, &defaults);
+        let done = select.state.done();
+        self.select = Some(select);
+        if done {
+            self.begin_quest();
+        }
+    }
+
+    /// One seat's word, on the select screen. `ChooseLoop`'s body for that seat.
+    fn act_on_select(
+        &mut self,
+        select: &mut shell::SelectScene,
+        seat: usize,
+        p: SeatPress,
+        defaults: &[String],
+    ) {
         if select.state.typing.is_some() {
             // Fire or Enter is `NameDone`; everything else goes into the buffer.
-            if take {
-                if let Some((knight, name)) = select.state.name_done() {
+            if p.take {
+                if let Some((knight, name)) = select.state.name_done(seat) {
                     self.named.push((knight, name));
                 }
             } else if let Some(t) = select.state.typing.as_mut() {
-                if back {
+                if p.back {
                     t.backspace();
                 }
-                if let Some(c) = typed {
+                if let Some(c) = p.typed {
                     t.type_char(c);
                 }
             }
-            if select.state.done() {
-                self.begin_quest();
-            }
             return;
         }
-        if left {
-            select.state.move_by(-1);
+        if p.left {
+            select.state.move_by(seat, -1);
         }
-        if right {
-            select.state.move_by(1);
+        if p.right {
+            select.state.move_by(seat, 1);
         }
-        if take {
+        if p.take {
             let default = defaults
                 .get(select.state.cursor)
                 .cloned()
                 .unwrap_or_default();
-            select.state.take(&default);
-        }
-        if select.state.done() {
-            self.begin_quest();
+            select.state.take(seat, &default);
         }
     }
 
@@ -3632,6 +3689,7 @@ impl App {
         }
         self.online_poll();
         self.online_port();
+        self.online_sound();
         self.online_auto();
     }
 
@@ -3666,6 +3724,45 @@ impl App {
         }
     }
 
+    /// **Ours**: measure this machine's own leg to the list server, and say so.
+    ///
+    /// Every machine in the lobby does this for itself, host and guest alike,
+    /// because the leg to the relay is the one thing a machine can only measure
+    /// about itself. What comes back goes on the roster, so every screen shows
+    /// every player's distance to the server that is carrying the game.
+    fn online_sound(&mut self) {
+        if let Some(answer) = self.sounding.as_mut().and_then(|l| l.take()) {
+            self.sounding = None;
+            if let Ok(ms) = answer {
+                match self.lobby.as_mut() {
+                    Some(Waiting::Host(h)) => h.set_leg(ms),
+                    Some(Waiting::Guest(g)) => g.send_leg(ms),
+                    None => {}
+                }
+            }
+        }
+        if self.sounding.is_some() || self.lobby.is_none() {
+            return;
+        }
+        // Often enough that a bad line shows up while somebody is still reading
+        // the lobby, seldom enough that it is one small socket now and then.
+        let first = self
+            .online
+            .as_ref()
+            .is_some_and(|o| o.roster.players.iter().all(|p| p.ms.is_none()));
+        if !first && self.sounded.elapsed() < SOUND_EVERY {
+            return;
+        }
+        let server = list_server(&args_of());
+        if server.is_empty() {
+            return;
+        }
+        self.sounded = std::time::Instant::now();
+        self.sounding = Some(henge_net::Later::start(move || {
+            henge_net::list::sound(&server)
+        }));
+    }
+
     /// `--trace` through `ChooseKnight`: the seat whose turn it is takes the
     /// knight under the highlight and keeps its own name.
     ///
@@ -3682,10 +3779,10 @@ impl App {
             return;
         }
         let mine = self.net.as_ref().map(|n| n.seat()).unwrap_or(0);
-        let turn = self.select.as_ref().map(|s| s.state.seat).unwrap_or(0);
+        let acts = self.select.as_ref().is_some_and(|s| s.state.acts(mine));
         // Down, then up. `ChooseFIRE` and `NameDone` are two presses of the one
         // key, and a key that is never let go is one press.
-        self.select_held = !self.select_held && turn == mine;
+        self.select_held = !self.select_held && acts;
         self.keys[ENTER_SLOT] = self.select_held;
         self.pressed[ENTER_SLOT] = self.select_held;
     }
@@ -4023,9 +4120,22 @@ impl App {
         let Some(session) = session else {
             return;
         };
+        // Who is in which seat, for the line on `ChooseKnight` that says whose
+        // turn it is. Taken now because the lobby screen goes in a moment.
+        self.seat_names = (0..seats)
+            .map(|s| {
+                self.online
+                    .as_ref()
+                    .and_then(|o| o.roster.seated(s as u8).map(|p| p.name.clone()))
+                    .unwrap_or_default()
+            })
+            .collect();
         self.net = Some(session);
         self.seat_was = [henge_net::SeatInput::default(); henge_core::shell::SEATS];
         self.seat_pressed = [SeatPress::default(); henge_core::shell::SEATS];
+        // Whatever is down right now is the press that started the game, and it
+        // is not also a press inside it.
+        self.held_over = self.raw_word();
         self.online = None;
         // The title's own player count is overruled by the lobby's, which is
         // what `Adjplayers` would have been told, and it is what `choose_loop`
@@ -4034,7 +4144,47 @@ impl App {
         self.title.state.gore = gore;
         self.named.clear();
         self.practice = false;
+        // **Every machine starts a shared game from the same place.**
+        //
+        // The fingerprint is taken from the first tick, and the first ticks are
+        // spent on `ChooseKnight` before the quest has been built, so whatever
+        // each window happened to have lying around from before is what is being
+        // compared. A window that had fought a practice bout and one that had
+        // just opened disagreed on the very first check, and the arena was the
+        // part that differed: `AddCNT`, which is `arena::Arrivals`, is a word of
+        // BSS the original never resets, so the standing-depth rotation carries
+        // from bout to bout within one run of the program and this build carries
+        // it too.
+        //
+        // So the arena and the overworld are built again from the pack, which is
+        // what a program that has just started has. It costs a load, once, at
+        // the moment a game begins, and it is the only way two windows that have
+        // been used differently can agree on anything.
+        self.fresh_board();
+        self.take_knight(0, Self::roster_led_by(0));
         self.begin_select();
+    }
+
+    /// **Ours**: the arena and the overworld as a freshly started program has
+    /// them. See [`App::online_start`], which is the only caller and says why.
+    fn fresh_board(&mut self) {
+        if self.map.is_some() {
+            if let Ok(m) = map::MapScene::load(&mut self.reg) {
+                self.map = Some(m);
+            }
+        }
+        if self.world.is_some() {
+            if let Ok(w) = World::load(&self.reg) {
+                self.world = Some(w);
+            }
+        }
+        self.flight = None;
+        self.showing = None;
+        self.paper = false;
+        self.interlude = 0;
+        self.interlude_out = 0;
+        self.stones = None;
+        self.shake = 0;
     }
 
     /// One tick of a game running across machines. Returns whether the
@@ -4082,7 +4232,26 @@ impl App {
     /// Read off [`App::raw`] rather than [`App::keys`], because `keys` is what
     /// the wire has already written and reading it back would send this machine
     /// whatever the last tick said somebody else was holding.
-    fn local_input(&self) -> henge_net::SeatInput {
+    fn local_input(&mut self) -> henge_net::SeatInput {
+        let (mut pad, mut keys) = self.raw_word();
+        // A control that was down when the game began stays masked until it goes
+        // up, and then never again. See [`App::held_over`].
+        self.held_over.0 &= pad;
+        self.held_over.1 &= keys;
+        pad &= !self.held_over.0;
+        keys &= !self.held_over.1;
+        let number = (1..=9u8).find(|n| self.raw[NUMBER_SLOT + *n as usize - 1]);
+        henge_net::SeatInput {
+            pad,
+            keys,
+            typed: self.raw_typed,
+            number,
+        }
+    }
+
+    /// This keyboard's five control bits and its two key bits, before anything
+    /// is masked out of them.
+    fn raw_word(&self) -> (u8, u8) {
         let mut pad = 0u8;
         for a in input::Action::ALL {
             let slot = slot_of(0, a);
@@ -4099,13 +4268,7 @@ impl App {
         if self.raw[BACKSPACE_SLOT] {
             keys |= henge_net::key::BACK;
         }
-        let number = (1..=9u8).find(|n| self.raw[NUMBER_SLOT + *n as usize - 1]);
-        henge_net::SeatInput {
-            pad,
-            keys,
-            typed: self.raw_typed,
-            number,
-        }
+        (pad, keys)
     }
 
     /// Write a tick's words into the slots the simulation reads.
@@ -4190,6 +4353,7 @@ impl App {
         }
         self.opener = None;
         self.browsing = None;
+        self.sounding = None;
         if let Some(m) = self.mapping.take() {
             m.close();
         }
@@ -4611,10 +4775,36 @@ impl App {
     /// until fire clears it, so a one-line chain at y 95 is where a line goes.
     fn notice(&mut self, line: impl Into<String>) {
         use henge_core::message::{Kind, Line, Message, Until, FLAG_CENTRE};
+        // Broken to fit, and the block centred on the line a one line notice
+        // sits on. A notice is written by whatever happened, and some of them
+        // carry an address, a tick number and two fingerprints; one of those on
+        // a single `Line` ran off both edges of the screen.
+        let text = line.into();
+        let (fonts, reg) = (&self.fonts, &self.reg);
+        let face = fonts.get("bold").or_else(|| fonts.get("small"));
+        let lines = match face {
+            Some(f) => {
+                let mut width = |s: &str| f.width(reg, s);
+                shell::wrap_to(
+                    &text,
+                    NOTICE_LINES,
+                    henge_core::SCREEN_W as i32 - 16,
+                    &mut width,
+                )
+            }
+            None => vec![text.clone()],
+        };
+        let step = face.map(|f| f.line_height).unwrap_or(NOTICE_STEP);
+        let top = NOTICE_Y - (lines.len() as i32 - 1) * step / 2;
+        let lines = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| Line::new(l, 0, top + i as i32 * step, FLAG_CENTRE))
+            .collect();
         self.show_message(Message {
             kind: Kind::Occurrence,
             until: Until::Fire,
-            lines: vec![Line::new(&line.into(), 0, 95, FLAG_CENTRE)],
+            lines,
         });
     }
 
@@ -5947,7 +6137,8 @@ impl App {
                     bold: self.fonts.get("bold"),
                     small: self.fonts.get("small"),
                 };
-                select.render(&mut self.reg, &mut self.fb, &fonts);
+                let mine = self.net.as_ref().map(|n| n.seat());
+                select.render(&mut self.reg, &mut self.fb, &fonts, mine, &self.seat_names);
                 self.select = Some(select);
                 return;
             }
@@ -6208,6 +6399,207 @@ mod tests {
             app.mode = m;
             assert!(!app.quits_on_escape(), "{m:?}");
         }
+    }
+
+    /// Two machines on the select screen, driven by real key presses.
+    ///
+    /// The screen is `ChooseKnight`'s hot seat on both: seat zero chooses while
+    /// seat one waits, and a key pressed out of turn does nothing on either
+    /// machine. They must come away with two different knights, the same run and
+    /// the same fingerprint.
+    #[test]
+    fn two_machines_take_the_select_screen_in_turn() {
+        let (Some(mut host), Some(mut guest)) = (App::new().ok(), App::new().ok()) else {
+            return;
+        };
+        if host.knights.len() < 2 {
+            return; // no pack in this checkout, so there is nothing to choose
+        }
+        let mut h = henge_net::Host::open("t", "carl", 0, false).unwrap();
+        let port = h.port();
+        let mut g = henge_net::Guest::join(("127.0.0.1", port), "anna", "").unwrap();
+        for _ in 0..400 {
+            h.poll();
+            g.poll();
+            if g.seat == Some(1) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(g.seat, Some(1), "the guest sat down");
+        h.seat(true);
+        h.start(2, 64);
+        for _ in 0..200 {
+            h.poll();
+            g.poll();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        host.net = Some(henge_net::Session::host(h, 2, 2, 64));
+        guest.net = Some(henge_net::Session::guest(g, 2, 1, 2, 64));
+        for a in [&mut host, &mut guest] {
+            a.title.state.players = 2;
+            a.begin_select();
+            assert_eq!(a.mode, Mode::Select);
+        }
+
+        // The guest presses first and it does nothing: it is not its turn.
+        for _ in 0..30 {
+            guest.key(KeyCode::Enter, true);
+            host.update();
+            guest.update();
+            guest.key(KeyCode::Enter, false);
+            host.update();
+            guest.update();
+        }
+        assert!(
+            host.select
+                .as_ref()
+                .is_some_and(|s| s.state.typing.is_none() && s.state.seat == 0),
+            "a seat pressing out of turn changes nothing"
+        );
+
+        // Now each in turn: fire to open the name, fire again to finish it.
+        let mut ticks = 0;
+        let mut chosen = Vec::new();
+        while ticks < 4000 {
+            ticks += 1;
+            let turn = host.select.as_ref().map(|s| s.state.seat).unwrap_or(0);
+            let press = ticks % 30 == 0;
+            if press {
+                let a: &mut App = if turn == 0 { &mut host } else { &mut guest };
+                a.key(KeyCode::Enter, true);
+            }
+            host.update();
+            guest.update();
+            if press {
+                let a: &mut App = if turn == 0 { &mut host } else { &mut guest };
+                a.key(KeyCode::Enter, false);
+            }
+            if let Some(sel) = host.select.as_ref() {
+                if !sel.state.chosen().is_empty() {
+                    chosen = sel.state.chosen();
+                }
+            }
+            if host.mode != Mode::Select && guest.mode != Mode::Select {
+                break;
+            }
+        }
+        assert_ne!(host.mode, Mode::Select, "the host left the select screen");
+        assert_ne!(guest.mode, Mode::Select, "the guest left it too");
+        assert_eq!(host.run.knight.name, guest.run.knight.name);
+        assert_eq!(host.net_hash(), guest.net_hash());
+        assert_eq!(chosen.len(), 1, "seat zero chose first: {chosen:?}");
+        assert_eq!(chosen[0], 0, "the knight its frame opened on");
+    }
+
+    /// Two windows that have been used differently start a shared game from the
+    /// same state.
+    ///
+    /// The fingerprint is taken from the first tick, and the first ticks are on
+    /// `ChooseKnight`, before the quest has been built. So what is compared then
+    /// is whatever each window had lying around, and a window that had fought a
+    /// practice bout did not match one that had just opened: `AddCNT`, which is
+    /// `arena::Arrivals`, is a word of BSS the original never resets, so the
+    /// standing-depth rotation carries from bout to bout and this build carries
+    /// it too. Two people testing with two windows on one machine saw exactly
+    /// that, as "the machines stopped agreeing at tick 0".
+    #[test]
+    fn a_window_that_has_been_played_in_starts_a_game_the_same_as_a_fresh_one() {
+        let (Some(mut used), Some(mut fresh)) = (App::new().ok(), App::new().ok()) else {
+            return;
+        };
+        if used.knights.is_empty() || used.world.is_none() {
+            return; // no pack in this checkout
+        }
+        assert_eq!(
+            used.net_hash(),
+            fresh.net_hash(),
+            "two windows just opened are the same"
+        );
+        // One of them is played in: a practice bout, swung through, and then
+        // some walking on the map.
+        used.title.state.players = 1;
+        used.begin_practice();
+        for i in 0..300 {
+            used.keys[3] = i % 7 < 3;
+            used.keys[6] = i % 11 < 2;
+            used.update();
+        }
+        used.mode = Mode::Map;
+        for i in 0..200 {
+            used.keys[3] = i % 5 < 3;
+            used.keys[1] = i % 9 < 2;
+            used.update();
+        }
+        used.mode = Mode::Title;
+        assert_ne!(
+            used.net_hash(),
+            fresh.net_hash(),
+            "and now it is not the same window it was"
+        );
+
+        // What a game across machines does before it opens the select screen.
+        for a in [&mut used, &mut fresh] {
+            a.title.state.players = 2;
+            a.practice = false;
+            a.fresh_board();
+            a.take_knight(0, App::roster_led_by(0));
+            a.begin_select();
+        }
+        assert_eq!(
+            used.net_hash(),
+            fresh.net_hash(),
+            "a shared game has to start from the same place on both"
+        );
+    }
+
+    /// The key that started the game does not also choose a knight.
+    ///
+    /// The host reaches `ChooseKnight` by pressing fire on the lobby's Begin
+    /// row, and that key is still down on the first tick of the game. Compared
+    /// against a blank previous tick it looked like a press, so the host arrived
+    /// on the select screen already typing a name over whichever knight the
+    /// frame happened to be on, while the guest, who had pressed nothing, could
+    /// choose freely. See [`App::seat_first`].
+    #[test]
+    fn the_key_that_began_the_game_does_not_choose_a_knight() {
+        let Some(mut app) = App::new().ok() else {
+            return;
+        };
+        if app.knights.len() < 2 {
+            return; // no pack in this checkout
+        }
+        let mut h = henge_net::Host::open("t", "carl", 0, false).unwrap();
+        h.seat(true);
+        h.start(1, 64);
+        app.net = Some(henge_net::Session::host(h, 1, 1, 64));
+        app.title.state.players = 1;
+        // Fire, held from the lobby's Begin row before the game began.
+        app.key(KeyCode::Enter, true);
+        app.held_over = app.raw_word();
+        app.begin_select();
+        for _ in 0..40 {
+            app.update();
+        }
+        let select = app.select.as_ref().expect("still choosing");
+        assert!(
+            select.state.typing.is_none(),
+            "a held key took a knight on the first tick"
+        );
+        assert!(select.state.free(0), "and nothing has been claimed");
+        // Let go and press again, and now it is a press.
+        app.key(KeyCode::Enter, false);
+        app.update();
+        app.key(KeyCode::Enter, true);
+        for _ in 0..20 {
+            app.update();
+        }
+        assert!(
+            app.select
+                .as_ref()
+                .is_some_and(|s| s.state.typing.is_some()),
+            "a real press still chooses"
+        );
     }
 
     /// A quest's three seats, seated fresh, for the tests below. Not

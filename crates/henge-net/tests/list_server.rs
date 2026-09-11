@@ -465,3 +465,85 @@ fn a_refreshed_game_is_not_dropped_off_the_list() {
         "and its connection to the list server should still be open"
     );
 }
+
+/// Two different measurements, and both reach both screens.
+///
+/// `Player::ms` is one machine's own leg to the list server, which is also the
+/// relay: only that machine can measure it, so each one does and tells the host.
+/// `Lobby::between` is the whole path between two players, which only the host
+/// can measure, and is what the input delay is chosen off.
+#[test]
+fn the_roster_carries_each_leg_and_the_line_between() {
+    let server = Serving::start(&[]);
+    let mut host = Host::open("MEASURED", "carl", 0, false).unwrap();
+    let port = host.port();
+    assert_eq!(
+        host.lobby.seated(0).and_then(|p| p.ms),
+        None,
+        "nothing is claimed before anything is measured"
+    );
+    assert_eq!(host.lobby.between, None);
+
+    let mut guest = Guest::join(("127.0.0.1", port), "anna", "").unwrap();
+    until("the guest to sit down", || {
+        host.poll();
+        guest.poll();
+        guest.seat == Some(1)
+    });
+
+    // Each end measures its own distance to the server and says so, which is
+    // what the game does for itself once a lobby is up.
+    let mine = list::sound(&server.at()).expect("the host's own leg");
+    host.set_leg(mine);
+    let theirs = list::sound(&server.at()).expect("the guest's own leg");
+    guest.send_leg(theirs);
+
+    until(
+        "both legs and the line between to reach both screens",
+        || {
+            host.poll();
+            guest.poll();
+            let legs = |l: &henge_net::Lobby| {
+                (
+                    l.seated(0).and_then(|p| p.ms),
+                    l.seated(1).and_then(|p| p.ms),
+                    l.between,
+                )
+            };
+            let h = legs(&host.lobby);
+            // The line between takes a ping and its answer, so it lands about a
+            // second after the two legs do.
+            h.2.is_some()
+                && h == (Some(mine), Some(theirs), host.worst_trip())
+                && h == legs(&guest.lobby)
+        },
+    );
+    assert!(
+        host.lobby.between.is_some(),
+        "the host measured the line between the two of them"
+    );
+}
+
+/// A machine can measure how far it is from the list server, which is the leg
+/// that matters when the server is carrying the game.
+#[test]
+fn a_machine_can_sound_the_distance_to_the_server() {
+    let server = Serving::start(&[]);
+    // Twice, because the socket is opened and closed each time and a second one
+    // must work as well as the first.
+    for _ in 0..2 {
+        let ms = list::sound(&server.at()).expect("an answer");
+        assert!(ms < 2000, "a loopback round trip should be quick: {ms}ms");
+    }
+    // And it does not disturb anything else the server is doing.
+    let mut host = Host::open("STILL HERE", "carl", 0, false).unwrap();
+    host.list_on(&server.at(), "test");
+    until("the game to be listed", || {
+        host.poll();
+        list::browse(&server.at(), "test")
+            .unwrap_or_default()
+            .iter()
+            .any(|g| g.name == "STILL HERE")
+    });
+    list::sound(&server.at()).expect("an answer with a game on the list");
+}

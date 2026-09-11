@@ -208,6 +208,18 @@ impl Typing {
 }
 
 /// Choosing knights, one player at a time.
+///
+/// **`ChooseKnight` is a hot seat**: `choose_loop` counts the players down,
+/// `choose_player` says whose turn it is, and `ChooseLoop` reads one input
+/// device, so exactly one seat can move the frame or press fire and the others
+/// wait. That is what a game at one keyboard needs and it is what a game across
+/// machines gets too: the only difference is where that seat's keys come from.
+///
+/// Every method that acts takes the seat acting, and does nothing unless it is
+/// that seat's turn. At one keyboard the caller always passes
+/// [`Select::seat`]; across machines it passes the same thing and reads that
+/// seat's word off the wire, so a person pressing keys out of turn is ignored on
+/// every machine alike.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Select {
     /// How many will choose. `choose_loop`.
@@ -240,6 +252,12 @@ impl Select {
         self.free.get(knight).copied().unwrap_or(false)
     }
 
+    /// Whether this seat's keys do anything right now: it is a seat somebody is
+    /// in, and it is its turn.
+    pub fn acts(&self, seat: usize) -> bool {
+        seat < self.players && seat == self.seat && !self.done()
+    }
+
     /// Which knight a seat took, if it has chosen.
     pub fn taken_by(&self, seat: usize) -> Option<usize> {
         self.taken.get(seat).copied().flatten()
@@ -263,15 +281,15 @@ impl Select {
     /// Stops at the ends rather than wrapping, and leaves the highlight where it
     /// was when there is nothing further to land on. That is what `ChooseLoop`
     /// does, and wrapping would put a highlight on a knight nobody can have.
-    pub fn move_by(&mut self, delta: i32) {
+    pub fn move_by(&mut self, seat: usize, delta: i32) {
         for _ in 0..delta.unsigned_abs() {
-            self.step(delta.signum());
+            self.step(seat, delta.signum());
         }
     }
 
     /// One press of left or right.
-    fn step(&mut self, dir: i32) {
-        if dir == 0 || self.done() || self.typing.is_some() {
+    fn step(&mut self, seat: usize, dir: i32) {
+        if dir == 0 || !self.acts(seat) || self.typing.is_some() {
             return;
         }
         let mut at = self.cursor as i32;
@@ -291,12 +309,12 @@ impl Select {
     ///
     /// It does not finish the seat's turn. It writes the knight's name buffer
     /// into `NAMEy` and calls `TypeName`, so the knight is still free and still
-    /// framed and the name is now being typed over. `default` is what the
-    /// buffer holds, which is that knight's own name.
+    /// framed and the name is now being typed over. `default` is what the buffer
+    /// holds, which is that knight's own name.
     ///
     /// Returns the knight whose name is being typed.
-    pub fn take(&mut self, default: &str) -> Option<usize> {
-        if self.done() || self.typing.is_some() || !self.free[self.cursor] {
+    pub fn take(&mut self, seat: usize, default: &str) -> Option<usize> {
+        if !self.acts(seat) || self.typing.is_some() || !self.free[self.cursor] {
             return None;
         }
         let knight = self.cursor;
@@ -313,7 +331,10 @@ impl Select {
     /// own `sub word ptr [choose_loop], 1` and `FindChosen`.
     ///
     /// Returns the knight and the name that was typed.
-    pub fn name_done(&mut self) -> Option<(usize, String)> {
+    pub fn name_done(&mut self, seat: usize) -> Option<(usize, String)> {
+        if seat != self.seat {
+            return None;
+        }
         let typing = self.typing.take()?;
         let knight = typing.knight;
         self.free[knight] = false;
@@ -404,31 +425,41 @@ mod tests {
     fn one_player_takes_one_knight_and_the_screen_is_done() {
         let mut s = Select::new(1);
         assert!(!s.done());
-        s.move_by(2);
+        s.move_by(0, 2);
         assert_eq!(s.cursor, 2);
         // Fire starts the typing and leaves the seat where it is, which is
         // `ChooseFIRE` calling `TypeName` before it clears the knight's bit.
-        assert_eq!(s.take("SIR JEFFREY"), Some(2));
+        assert_eq!(s.take(0, "SIR JEFFREY"), Some(2));
         assert!(
             !s.done(),
             "the seat is still choosing while the name is typed"
         );
-        assert_eq!(s.take("SIR JEFFREY"), None, "and fire again does nothing");
-        assert_eq!(s.name_done(), Some((2, "SIR JEFFREY".into())));
+        assert_eq!(
+            s.take(0, "SIR JEFFREY"),
+            None,
+            "and fire again does nothing"
+        );
+        assert_eq!(s.name_done(0), Some((2, "SIR JEFFREY".into())));
         assert!(s.done());
         assert_eq!(s.chosen(), vec![2]);
-        assert_eq!(s.take("SIR JEFFREY"), None, "and nothing more can be taken");
+        assert_eq!(
+            s.take(0, "SIR JEFFREY"),
+            None,
+            "and nothing more can be taken"
+        );
     }
 
     /// `ChooseLoop`: the highlight steps over knights already spoken for.
     #[test]
     fn the_highlight_steps_over_a_knight_already_taken() {
         let mut s = Select::new(3);
-        s.move_by(1);
-        s.take("SIR RICHARD"); // knight 1 goes
-        s.name_done();
+        s.move_by(0, 1);
+        s.take(0, "SIR RICHARD"); // knight 1 goes
+        s.name_done(0);
+        // `FindChosen`: the next seat opens on the lowest knight still free.
+        assert_eq!(s.seat, 1);
         assert_eq!(s.cursor, 0, "the lowest still free");
-        s.move_by(1);
+        s.move_by(1, 1);
         assert_eq!(s.cursor, 2, "one is gone, so right lands on two");
     }
 
@@ -437,13 +468,13 @@ mod tests {
     #[test]
     fn the_knight_being_named_is_still_free_until_the_name_is_done() {
         let mut s = Select::new(2);
-        s.take("SIR GODBER");
+        s.take(0, "SIR GODBER");
         assert!(s.free(0), "still a bit set in choose_knight");
         assert_eq!(s.cursor, 0, "and still the one the frame is on");
         // And nothing moves: `TypeName` owns the input until Enter or fire.
-        s.move_by(2);
+        s.move_by(0, 2);
         assert_eq!(s.cursor, 0);
-        s.name_done();
+        s.name_done(0);
         assert!(!s.free(0));
     }
 
@@ -451,7 +482,7 @@ mod tests {
     #[test]
     fn a_name_is_typed_over_the_knights_own() {
         let mut s = Select::new(1);
-        s.take("SIR GODBER");
+        s.take(0, "SIR GODBER");
         let t = s.typing.as_mut().expect("TypeFLAG is set");
         // The caret sits past the whole default name, because the original's
         // buffer holds an underscore where its space goes and the scan for the
@@ -469,7 +500,7 @@ mod tests {
             assert!(t.type_char(c));
         }
         assert_eq!(t.shown(), "SIR ALAN\\");
-        assert_eq!(s.name_done(), Some((0, "SIR ALAN".into())));
+        assert_eq!(s.name_done(0), Some((0, "SIR ALAN".into())));
         assert!(s.typing.is_none(), "TypeFLAG is clear again");
     }
 
@@ -477,7 +508,7 @@ mod tests {
     #[test]
     fn a_name_stops_at_thirteen_characters() {
         let mut s = Select::new(1);
-        s.take("SIR GODBER");
+        s.take(0, "SIR GODBER");
         let t = s.typing.as_mut().unwrap();
         for c in "XYZ".chars() {
             assert!(t.type_char(c));
@@ -488,18 +519,18 @@ mod tests {
         assert_eq!(t.caret(), NAME_MAX);
         // A default longer than the field is cut to it rather than overflowing.
         let mut s = Select::new(1);
-        s.take("SIR CHRISTOPHER");
+        s.take(0, "SIR CHRISTOPHER");
         assert_eq!(s.typing.as_ref().unwrap().text, "SIR CHRISTOPH");
     }
 
     #[test]
     fn the_highlight_stops_at_the_ends_rather_than_wrapping() {
         let mut s = Select::new(2);
-        s.move_by(-1);
+        s.move_by(0, -1);
         assert_eq!(s.cursor, 0);
-        s.move_by(3);
+        s.move_by(0, 3);
         assert_eq!(s.cursor, 3);
-        s.move_by(1);
+        s.move_by(0, 1);
         assert_eq!(s.cursor, 3, "nothing beyond the last knight");
     }
 
@@ -509,13 +540,17 @@ mod tests {
     fn a_move_with_nowhere_to_go_changes_nothing() {
         let mut s = Select::new(4);
         for _ in 0..3 {
-            s.take("SIR GODBER");
-            s.name_done();
+            // Each of the three in turn, because the screen is a hot seat: only
+            // the seat `choose_player` names can act.
+            let seat = s.seat;
+            s.take(seat, "SIR GODBER");
+            s.name_done(seat);
         }
+        assert_eq!(s.seat, 3, "the last one is up");
         assert_eq!(s.cursor, 3);
-        s.move_by(-1);
+        s.move_by(3, -1);
         assert_eq!(s.cursor, 3, "the three below are taken");
-        s.move_by(1);
+        s.move_by(3, 1);
         assert_eq!(s.cursor, 3);
     }
 
@@ -524,20 +559,45 @@ mod tests {
         let mut s = Select::new(4);
         let mut picked = Vec::new();
         while !s.done() {
-            s.move_by(1);
-            picked.push(s.take("SIR GODBER").expect("a free knight to take"));
-            s.name_done();
+            let seat = s.seat;
+            s.move_by(seat, 1);
+            picked.push(s.take(seat, "SIR GODBER").expect("a free knight to take"));
+            s.name_done(seat);
         }
         picked.sort();
         assert_eq!(picked, vec![0, 1, 2, 3]);
         assert_eq!(s.chosen().len(), 4);
     }
 
+    /// A seat pressing keys when it is not its turn does nothing at all.
+    ///
+    /// `ChooseLoop` reads one input device, so at one keyboard this cannot even
+    /// arise. Across machines all four seats' keys are on the wire every tick,
+    /// and the three that are waiting must be ignored on every machine alike or
+    /// the screens come apart.
+    #[test]
+    fn a_seat_that_is_not_up_does_nothing() {
+        let mut s = Select::new(2);
+        assert!(s.acts(0));
+        assert!(!s.acts(1), "seat one waits its turn");
+        s.move_by(1, 3);
+        assert_eq!(s.cursor, 0, "its keys do not move the frame");
+        assert_eq!(s.take(1, "SIR RICHARD"), None, "nor take a knight");
+        assert_eq!(s.name_done(1), None, "nor finish one");
+        // Seat zero takes its turn, and then it is the other's.
+        s.take(0, "SIR GODBER");
+        s.name_done(0);
+        assert!(!s.acts(0), "and now seat zero is the one that waits");
+        assert!(s.acts(1));
+        s.move_by(1, 1);
+        assert_eq!(s.cursor, 2, "one is taken, so right lands on two");
+    }
+
     #[test]
     fn a_select_survives_serialization() {
         let mut s = Select::new(2);
-        s.move_by(1);
-        s.take("SIR RICHARD");
+        s.move_by(0, 1);
+        s.take(0, "SIR RICHARD");
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Select>(&json).unwrap(), s);
     }

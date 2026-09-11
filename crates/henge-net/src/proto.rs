@@ -8,10 +8,23 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped whenever the meaning of anything below changes. A peer that does not
+/// Bumped whenever the meaning of anything below changes, **and whenever the
+/// game itself would run differently from the same words**. A peer that does not
 /// match is turned away by name at [`Msg::Hello`] rather than left to desync
 /// twenty minutes into a quest.
-pub const PROTOCOL: u32 = 1;
+///
+/// Two builds of this game are only allowed at the same table if every word on
+/// the wire means the same thing to both of them, which includes what the
+/// simulation does with it. Two of the changes below the wire have already
+/// needed this: the select screen went from `ChooseKnight`'s hot seat to every
+/// seat choosing at once, and a control held over from the screen before stopped
+/// counting as a press. A machine on the older build and one on the newer walked
+/// different screens from the same input and disagreed on the very first check.
+///
+/// - 1: the first, and everything up to the lobby choosing knights.
+/// - 2: `Select::together` online, `App::held_over`, and the round trips on the
+///   roster.
+pub const PROTOCOL: u32 = 2;
 
 /// Four seats, because there are four knights. The same number as
 /// `henge_core::shell::SEATS`, and asserted equal to it in the tests.
@@ -100,15 +113,20 @@ pub struct Player {
     /// Sitting down and happy to start.
     #[serde(default)]
     pub ready: bool,
-    /// What this seat's round trip to the host last measured, in milliseconds,
-    /// or nothing for a seat nobody has measured yet. The host's own seat is
-    /// never measured: there is no line between it and itself.
+    /// **This seat's round trip to the list server**, in milliseconds, or
+    /// nothing until that machine has measured one.
     ///
-    /// **It rides on the roster so that every screen shows the same number.**
-    /// The host is the only machine that can measure anything, since it is the
-    /// only one every other machine has a line to, so a guest with nothing but
-    /// its own link would otherwise show one number or none while the host
-    /// showed all of them.
+    /// The list server is also the relay, and a game behind two carrier NATs is
+    /// always carried, so every byte between two players goes out to it and back
+    /// and each machine's own leg is what it contributes to the lag. That leg is
+    /// a thing only that machine can measure, so each one measures its own with
+    /// [`crate::list::sound`] and tells the host, which is what puts it here.
+    /// The host's own is measured the same way and by the same code.
+    ///
+    /// **It rides on the roster so that every screen shows every leg.** The
+    /// round trip between two players is a different number, is the host's to
+    /// measure, and is what the input delay is chosen off: see
+    /// [`crate::Host::worst_trip`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<u32>,
 }
@@ -123,6 +141,16 @@ pub struct Lobby {
     /// `GOREOPT`. The host's, because it is one world.
     #[serde(default)]
     pub gore: bool,
+    /// **The round trip between the two ends of the worst line in the game**, in
+    /// milliseconds, or nothing until one has been measured.
+    ///
+    /// A different number from [`Player::ms`], which is one machine's leg to the
+    /// relay. This one is the whole path between two players, is the host's to
+    /// measure because it is the only machine with a line to everybody, and is
+    /// what the input delay is chosen off, so it is the one that says how the
+    /// game will feel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub between: Option<u32>,
     /// Whether the host has started: a lobby that has is not joinable.
     #[serde(default)]
     pub started: bool,
@@ -134,6 +162,7 @@ impl Lobby {
             name: cut(name, LOBBY_NAME_MAX),
             players: Vec::new(),
             gore,
+            between: None,
             started: false,
         }
     }
@@ -203,6 +232,12 @@ pub enum Msg {
     /// edits the roster, so a guest asks rather than tells.
     Seated {
         ready: bool,
+    },
+    /// Guest to host: how far I am from the list server, in milliseconds. Only
+    /// this machine can measure its own leg to the relay, so it measures it and
+    /// says so; the host puts it on the roster. See [`Player::ms`].
+    Leg {
+        ms: u32,
     },
     /// Host to everyone: the game begins. After this, nothing but input,
     /// checks and goodbyes.

@@ -126,6 +126,9 @@ impl Host {
             seat: 0,
             name: cut(player, PLAYER_NAME_MAX),
             ready: false,
+            // Nothing to show until there is a line to measure. See
+            // `Player::ms`: what goes there is the game's round trip, the same
+            // on every seat, and a lobby with one person in it has no game.
             ms: None,
         });
         Ok(Host {
@@ -351,6 +354,19 @@ impl Host {
                             out.push(Event::Roster);
                         }
                     }
+                    // How far that guest is from the relay, which only that
+                    // machine can measure. See `Player::ms`.
+                    Msg::Leg { ms } => {
+                        if *seat == SEAT_UNSEATED {
+                            continue;
+                        }
+                        if let Some(p) = self.lobby.players.iter_mut().find(|p| p.seat == *seat) {
+                            if p.ms != Some(ms) {
+                                p.ms = Some(ms);
+                                roster_changed = true;
+                            }
+                        }
+                    }
                     Msg::Input { tick, input } => {
                         if *seat != SEAT_UNSEATED {
                             out.push(Event::Input {
@@ -393,16 +409,15 @@ impl Host {
             // Kept as the latest rather than smoothed: a lobby is measured over
             // seconds and the number is only read once, when the host starts.
             self.trips.insert(seat, ms);
-            // And onto the roster, so it reaches every screen. Only the host has
-            // a line to everybody, so a guest can measure nothing itself and
-            // would otherwise show one number where the host showed all of them.
-            if let Some(p) = self.lobby.players.iter_mut().find(|p| p.seat == seat) {
-                if p.ms != Some(ms) {
-                    p.ms = Some(ms);
-                    roster_changed = true;
-                }
-            }
         }
+        // The worst line in the game onto the roster, so both ends can see the
+        // number the input delay is chosen off. See `Lobby::between`.
+        let worst = self.worst_trip();
+        if self.lobby.between != worst {
+            self.lobby.between = worst;
+            roster_changed = true;
+        }
+
         // Drop what was lost, highest index first so the rest keep their places.
         lost.sort_by_key(|l| std::cmp::Reverse(l.0));
         lost.dedup_by_key(|(i, _)| *i);
@@ -516,6 +531,24 @@ impl Host {
                     text: format!("could not let somebody in through the list server: {e}"),
                 }),
             }
+        }
+    }
+
+    /// The host's own leg to the list server, measured the same way a guest
+    /// measures its own. See [`Player::ms`].
+    pub fn set_leg(&mut self, ms: u32) {
+        let Some(p) = self.lobby.players.iter_mut().find(|p| p.seat == 0) else {
+            return;
+        };
+        if p.ms == Some(ms) {
+            return;
+        }
+        p.ms = Some(ms);
+        self.broadcast(&Msg::Roster {
+            lobby: self.lobby.clone(),
+        });
+        for (_, link) in self.guests.iter_mut() {
+            let _ = link.flush();
         }
     }
 
@@ -724,6 +757,12 @@ impl Guest {
     /// Say whether we are ready.
     pub fn seat_request(&mut self, ready: bool) {
         let _ = self.link.send(&Msg::Seated { ready });
+        let _ = self.link.flush();
+    }
+
+    /// How far this machine is from the list server. See [`Player::ms`].
+    pub fn send_leg(&mut self, ms: u32) {
+        let _ = self.link.send(&Msg::Leg { ms });
         let _ = self.link.flush();
     }
 

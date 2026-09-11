@@ -319,6 +319,10 @@ const SELECT_HEADING_Y: i32 = 5;
 /// which on this screen is the bold one the heading is set in.
 const NAME_AT: (i32, i32) = (50, 50);
 
+/// **Ours**: where the whose-turn line goes, under the heading and above the
+/// name being typed, which are the original's own two lines at 5 and 50.
+const TURN_Y: i32 = 32;
+
 pub struct SelectScene {
     pub state: Select,
     /// `SelectPAL`, the screen's own thirty two, out of the pack.
@@ -342,7 +346,17 @@ impl SelectScene {
         }
     }
 
-    pub fn render(&self, reg: &mut Registry, fb: &mut Framebuffer, fonts: &Fonts) {
+    /// `mine` is the seat at this keyboard, when there is a game across machines,
+    /// and `who` is what each seat calls itself. Both are only for the line that
+    /// says whose turn it is, which is ours and is drawn only in such a game.
+    pub fn render(
+        &self,
+        reg: &mut Registry,
+        fb: &mut Framebuffer,
+        fonts: &Fonts,
+        mine: Option<usize>,
+        who: &[String],
+    ) {
         // `ChooseRefresh`'s own first act: `mov ax, 0xf02; out dx, ax` to the
         // sequencer's map mask and `rep stosw` of zero over 0x2000 words, which
         // is every plane of every pixel set to palette entry 0. There is no
@@ -361,7 +375,7 @@ impl SelectScene {
         // here, and `ChooseRefresh` draws none of them. It clears the screen,
         // walks `CRText`, blits the portraits still free, blits the frame on
         // the chosen one, and draws the name being typed if `TypeFLAG` is set.
-        // That is the whole routine: there is nothing else on this screen.
+        // That is the whole routine.
         for (i, &x) in PORTRAIT_X.iter().enumerate() {
             if self.state.free(i) {
                 // In its own pixels. `ChooseRefresh` puts the cel number in
@@ -391,6 +405,28 @@ impl SelectScene {
         // caret, which is what `Typing::shown` puts there.
         if let (Some(bold), Some(typing)) = (fonts.bold, self.state.typing.as_ref()) {
             bold.draw_own(reg, fb, &typing.shown(), NAME_AT.0, NAME_AT.1);
+        }
+
+        // **Ours, and only in a game across machines**: whose turn it is.
+        //
+        // `ChooseRefresh` draws nothing of the sort, and at one keyboard it does
+        // not need to: the four are in the same room and can see whose hands are
+        // on the keys. On four machines the three who are waiting have no way of
+        // knowing that they are waiting, and a frame that will not move reads as
+        // a game that has hung, which is exactly how it read.
+        if let (Some(small), Some(mine)) = (fonts.small.or(fonts.bold), mine) {
+            if !self.state.done() {
+                let seat = self.state.seat;
+                let line = if seat == mine {
+                    "YOUR TURN".to_string()
+                } else {
+                    match who.get(seat).filter(|n| !n.is_empty()) {
+                        Some(name) => format!("{} IS CHOOSING", name.to_uppercase()),
+                        None => format!("PLAYER {} IS CHOOSING", seat + 1),
+                    }
+                };
+                small.draw_own_centred(reg, fb, &line, TURN_Y);
+            }
         }
     }
 }
@@ -1014,21 +1050,71 @@ pub fn draw_online(
     // A heading, so a person always knows which of the five pages they are on.
     let heading = match screen.page {
         Page::Menu => "Play Online",
-        Page::Create => "Open a game",
-        Page::Browse => "Open games",
+        Page::Create => "Create game",
+        Page::Browse => "Lobby",
         Page::Join => "Join a game",
         Page::Waiting => screen.roster.name.as_str(),
     };
-    let mut y = LOBBY_TOP;
-    bold.draw_own_centred(reg, fb, heading, y);
-    y += LOBBY_HEAD;
+    // The note is wrapped before anything else is placed, because how many
+    // lines it takes is how much room the rows above it have. A two line note
+    // used to be drawn over the last row rather than under it.
+    let note = if screen.note.is_empty() {
+        &screen.reachable
+    } else {
+        &screen.note
+    };
+    let note_lines = if note.is_empty() {
+        Vec::new()
+    } else {
+        wrapped(reg, small, &note.to_uppercase(), LOBBY_NOTE_LINES)
+    };
+    let note_top = LOBBY_NOTE_Y - (note_lines.len().max(1) as i32 - 1) * LOBBY_NOTE_STEP;
+    // The floor every other line is kept above, with a pixel between the last of
+    // them and the note so a descender does not sit on it.
+    let floor = note_top - LOBBY_STEP - 2;
+
+    // Where the block starts. Normally the title's own y, but a lobby with four
+    // people in it and a note that took two lines is taller than the room under
+    // the wordmark, so it slides up rather than losing its last row. The heading
+    // goes with it, and neither ever reaches the wordmark.
+    let roster_lines = if screen.page == Page::Waiting {
+        screen.roster.players.len() as i32
+    } else {
+        0
+    };
+    let row_lines = screen.rows().len() as i32;
+    let lines = (roster_lines + row_lines - 1).max(0) * LOBBY_STEP;
+    // The gap between the roster and the rows is the first thing given up when
+    // the block is taller than the room: four people and a note that took two
+    // lines is six pixels more than there is, and a gap is worth less than the
+    // last row.
+    let mut gap = if roster_lines > 0 { LOBBY_GAP } else { 0 };
+    let short = LOBBY_MIN_TOP - (floor - lines - gap);
+    if short > 0 {
+        gap = (gap - short).max(0);
+    }
+    let mut y = (floor - lines - gap).clamp(LOBBY_MIN_TOP, LOBBY_TOP + LOBBY_HEAD);
+    bold.draw_own_centred(reg, fb, heading, y - LOBBY_HEAD);
+    // The round trip between the two ends of the worst line, beside the heading
+    // because it belongs to the game and not to any one seat, and because a line
+    // of its own is a line the rows need. Each seat's own number is a different
+    // measurement: that one is its leg to the relay, this is the whole path
+    // between two players, and it is what the input delay is chosen off.
+    if screen.page == Page::Waiting {
+        if let Some(ms) = screen.roster.between {
+            let line = format!("GAME  {ms}MS");
+            let w = small.width(reg, &line);
+            small.draw_own(reg, fb, &line, ROSTER_RIGHT - w, y - LOBBY_HEAD + 3);
+        }
+    }
 
     // The roster, in its own block above the rows: who is here, whether they
-    // are ready, and what their line measured. No knight is shown, because the
-    // lobby does not settle that: every seat picks one on `ChooseKnight` once
-    // the game begins, the same screen a game at one keyboard uses. The round
-    // trip is in the small face because it is a measurement beside a name and
-    // not a thing to be chosen.
+    // are ready, and how far each of them is from the list server, which is also
+    // the relay that carries a game neither end can host. No knight is shown,
+    // because the lobby does not settle that: every seat picks one on
+    // `ChooseKnight` once the game begins, the same screen a game at one
+    // keyboard uses. The measurements are in the small face because they are
+    // measurements beside a name and not things to be chosen.
     if screen.page == Page::Waiting {
         for p in &screen.roster.players {
             // The name in the bold face, because it is the thing being read,
@@ -1057,8 +1143,10 @@ pub fn draw_online(
             if Some(p.seat) == screen.seat {
                 about.push("YOU".into());
             }
-            // A lobby is where somebody should find out the line is bad, not a
-            // minute into a fight.
+            // How far that machine is from the relay, which is what it puts
+            // into everybody's lag while the relay is carrying the game. A lobby
+            // is where somebody should find out their line is bad, not a minute
+            // into a fight.
             if let Some(ms) = p.ms {
                 about.push(format!("{ms}MS"));
             }
@@ -1069,7 +1157,7 @@ pub fn draw_online(
             }
             y += LOBBY_STEP;
         }
-        y += LOBBY_GAP;
+        y += gap;
     }
 
     // The rows of the page that is up, and the arrow against the one chosen.
@@ -1087,7 +1175,7 @@ pub fn draw_online(
     );
     for (i, row) in rows.iter().enumerate() {
         let at = first + i as i32 * LOBBY_STEP;
-        if at > LOBBY_NOTE_Y - LOBBY_STEP {
+        if at > floor {
             break;
         }
         // A game on the list is a line of its own rather than a label and a
@@ -1132,27 +1220,76 @@ pub fn draw_online(
         }
     }
 
-    // One line at the bottom, always on the same line: what the router said,
-    // who joined, why the last attempt failed. The small face, because it is a
-    // sentence and not a label.
-    let note = if screen.note.is_empty() {
-        &screen.reachable
-    } else {
-        &screen.note
-    };
-    if !note.is_empty() {
-        // Cut to what the screen holds. A note is written by whatever went
-        // wrong, and some of those sentences carry an address and an operating
-        // system's own words for a failure, which is wider than three hundred
-        // and twenty pixels.
-        let mut line = note.to_uppercase();
-        while small.width(reg, &line) > henge_core::SCREEN_W as i32 - 8 && line.chars().count() > 4
-        {
-            line.truncate(line.char_indices().nth_back(3).map_or(0, |(i, _)| i));
-            line.push_str("...");
-        }
-        small.draw_own_centred(reg, fb, &line, LOBBY_NOTE_Y);
+    // The note, at the bottom, wrapped above. What the router said, who joined,
+    // why the last attempt failed. The small face, because it is a sentence and
+    // not a label.
+    for (i, line) in note_lines.iter().enumerate() {
+        small.draw_own_centred(reg, fb, line, note_top + i as i32 * LOBBY_NOTE_STEP);
     }
+}
+
+/// Break a sentence into at most `most` lines that fit the screen.
+///
+/// Public because the message boxes need it too: a notice is written by whatever
+/// happened and some of them are longer than three hundred and twenty pixels.
+///
+/// **Ours**, like the screen it is for. Broken on spaces, because the small face
+/// is proportional and a break in the middle of a word reads as a typing
+/// mistake; a single word too wide to fit is cut with a tail, which is the only
+/// case that can lose anything, and the notes that hit it are addresses.
+fn wrapped(reg: &mut Registry, font: &Font, text: &str, most: usize) -> Vec<String> {
+    // The measuring is handed over so the breaking itself can be tested without
+    // a font, which needs the whole asset pack behind it.
+    let mut width = |s: &str| font.width(reg, s);
+    wrap_to(text, most, SCREEN_W as i32 - 8, &mut width)
+}
+
+pub fn wrap_to(
+    text: &str,
+    most: usize,
+    room: i32,
+    width: &mut impl FnMut(&str) -> i32,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut dropped = false;
+    for word in text.split_whitespace() {
+        let mut wider = line.clone();
+        if !wider.is_empty() {
+            wider.push(' ');
+        }
+        wider.push_str(word);
+        // A word that will not fit even on a line of its own is kept anyway and
+        // cut at the end, because a cut address is still recognisable and a
+        // missing one is not.
+        if width(&wider) <= room || line.is_empty() {
+            line = wider;
+            continue;
+        }
+        if lines.len() + 1 == most {
+            // This is the last line there is room for, so the rest is lost.
+            dropped = true;
+            break;
+        }
+        lines.push(std::mem::take(&mut line));
+        line = word.to_string();
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    // A note that lost its tail says so, and so does a word wider than the
+    // screen. Both end the same way, and the tail is put on before the trimming
+    // so that the three characters it costs are counted.
+    if let Some(last) = lines.last_mut() {
+        if dropped {
+            last.push_str("...");
+        }
+        while width(last) > room && last.chars().count() > 4 {
+            last.truncate(last.char_indices().nth_back(3).map_or(0, |(i, _)| i));
+            last.push_str("...");
+        }
+    }
+    lines
 }
 
 /// The lobby's own layout. Ours, and the only numbers in this file that are not
@@ -1166,8 +1303,16 @@ const LOBBY_HEAD: i32 = 18;
 const LOBBY_STEP: i32 = 13;
 /// The gap between the roster and the rows, so the two blocks read as two.
 const LOBBY_GAP: i32 = 8;
-/// Where the note sits, and the floor every other line is kept above.
-const LOBBY_NOTE_Y: i32 = 188;
+/// As high as the block will ever go, which is clear of the wordmark: the
+/// wordmark is `SEL.CEL`'s 54 rows blitted at y 10, so it ends at 64.
+const LOBBY_MIN_TOP: i32 = 86;
+/// Where the note's last line sits, and the floor every other line is kept
+/// above.
+const LOBBY_NOTE_Y: i32 = 190;
+/// How many lines a note may take, and the step between them. Two, because that
+/// is what fits between the last row and the bottom of the screen.
+const LOBBY_NOTE_LINES: usize = 2;
+const LOBBY_NOTE_STEP: i32 = 8;
 /// The right edge everything secondary is set against: what a seat is, and how
 /// full and how reachable a listed game is.
 const ROSTER_RIGHT: i32 = 300;
@@ -1235,6 +1380,48 @@ fn tick_cel() -> ([u8; CEL_W * CEL_H], usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Six pixels a character, which is near enough the small face and is a
+    /// number a reader of the test can do in their head.
+    fn six(s: &str) -> i32 {
+        s.chars().count() as i32 * 6
+    }
+
+    /// A note is broken between words and keeps its whole meaning when it fits.
+    ///
+    /// The note that made this necessary is the one a game behind a router that
+    /// will not open a port gets, and it is the difference between a game that
+    /// works and one that does not, so losing its tail to a truncation was the
+    /// wrong answer.
+    #[test]
+    fn a_note_is_broken_between_words_and_not_through_them() {
+        let mut w = six;
+        let long =
+            "YOUR ROUTER WOULD NOT OPEN THE PORT, SO THE GAME IS BEING CARRIED BY THE LIST SERVER";
+        let lines = wrap_to(long, 2, 312, &mut w);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| six(l) <= 312), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.ends_with(' ') || l.starts_with(' ')));
+        // Nothing was lost: put back together it is the sentence that went in.
+        assert_eq!(lines.join(" "), long);
+        // A short one stays one line and is not padded out to two.
+        assert_eq!(wrap_to("IN SEAT 2", 2, 312, &mut w), vec!["IN SEAT 2"]);
+    }
+
+    /// What will not fit in the lines there are loses its tail and says so, and
+    /// so does a single word wider than the screen. Those are addresses, and an
+    /// address that is cut is still recognisable.
+    #[test]
+    fn a_note_too_long_for_its_lines_is_cut_with_a_tail() {
+        let mut w = six;
+        let lines = wrap_to("ONE TWO THREE FOUR FIVE SIX SEVEN", 1, 60, &mut w);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with("..."), "{lines:?}");
+        assert!(six(&lines[0]) <= 60);
+        let one = wrap_to("SUPERCALIFRAGILISTIC", 2, 60, &mut w);
+        assert!(one.last().unwrap().ends_with("..."), "{one:?}");
+        assert!(one.iter().all(|l| six(l) <= 60), "{one:?}");
+    }
 
     /// The tick is drawn in the bold face's own two inks, and every face pixel
     /// is surrounded, so it reads on the title plate rather than only against it.
